@@ -12,27 +12,22 @@ payload: false
 
 observation:
   policy:
-    - "command"
-    - "root_quat_w"
-    - "root_angvel_b"
-    - "projected_gravity_b"
-    - "joint_pos"
-    - "joint_vel"
-    - "prev_actions"
+    command:
+    root_quat_w:
+    root_angvel_b:
+    projected_gravity_b:
+    joint_pos: {noise_std: 0.0}
+    joint_vel: {noise_std: 0.0}
+    prev_actions: 
     # - "motor_params"
   priv:
-    - "joint_vel"
-    # - "joint_acc"
-    - "root_linvel_b"
-    - "feet_pos_b"
-    - "applied_torques"
-    # - "payload_mass"
-    # - "payload_inertia"
+    root_linvel_b:
+    feet_pos_b:
+    applied_torques:
 
 reward:
   linvel_exp: 1.0
   linvel_projection: 1.0
-  heading: 0.5
   base_height: 0.5
   linvel_z_l2: 4.0
   energy_l1: 0.0001
@@ -40,6 +35,10 @@ reward:
   stand: 0.5
   orientation: 0.5
   survival: 0.5
+
+termination:
+  crash:
+    body_names_expr: ["base", ".*thigh"]
 
 # reward: # orbit
 #   linvel_projection: 0.5
