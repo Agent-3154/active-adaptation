@@ -209,8 +209,8 @@
         <body name="waist_roll_link" pos="-0.0039635 0 0.035">
           <inertial pos="0 -0.000236 0.010111" quat="0.99979 0.020492 0 0" mass="0.047"
             diaginertia="7.515e-06 6.40206e-06 3.98394e-06" />
-          <!-- <joint name="waist_roll_joint" pos="0 0 0" axis="1 0 0" range="-0.52 0.52"
-            actuatorfrcrange="-50 50" class="torso_motor"/> -->
+          <joint name="waist_roll_joint" pos="0 0 0" axis="1 0 0" range="-0.01 0.01" limited="true"
+            actuatorfrcrange="-50 50" class="torso_motor"/>
           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1"
             mesh="waist_roll_link" />
           <body name="torso_link" pos="0 0 0.019">
@@ -218,8 +218,8 @@
               quat="0.999831 0.000376204 0.0179895 -0.00377704" mass="9.598"
               diaginertia="0.12407 0.111951 0.0325382" />
             <body name="torso_com_link" pos="0.00331658 0.000261533 0.179856"/>
-            <!-- <joint name="waist_pitch_joint" pos="0 0 0" axis="0 1 0" range="-0.52 0.52"
-              actuatorfrcrange="-50 50" class="torso_motor"/> -->
+            <joint name="waist_pitch_joint" pos="0 0 0" axis="0 1 0" range="-0.01 0.01" limited="true"
+              actuatorfrcrange="-50 50" class="torso_motor"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1"
               mesh="torso_link" />
             <geom type="mesh" rgba="0.7 0.7 0.7 1" mesh="torso_link" />
@@ -414,8 +414,8 @@
     <motor name="right_ankle_roll" joint="right_ankle_roll_joint" ctrlrange="-50 50" />
 
     <motor name="waist_yaw" joint="waist_yaw_joint" ctrlrange="-88 88" />
-    <!-- <motor name="waist_roll" joint="waist_roll_joint" ctrlrange="-50 50" />
-    <motor name="waist_pitch" joint="waist_pitch_joint" ctrlrange="-50 50" /> -->
+    <motor name="waist_roll" joint="waist_roll_joint" ctrlrange="-50 50" />
+    <motor name="waist_pitch" joint="waist_pitch_joint" ctrlrange="-50 50" />
 
     <motor name="left_shoulder_pitch" joint="left_shoulder_pitch_joint" ctrlrange="-25 25" />
     <motor name="left_shoulder_roll" joint="left_shoulder_roll_joint" ctrlrange="-25 25" />
