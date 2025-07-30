@@ -96,6 +96,76 @@ class RoomTerrainCfg(SubTerrainBaseCfg):
     function = room_terrain
 
 
+
+def double_prism(difficulty: float, cfg):
+    height_scale = cfg.height_range[0] + (cfg.height_range[1] - cfg.height_range[0]) * difficulty
+    sink = np.random.uniform(cfg.sink_range[0], cfg.sink_range[1])
+    sink = np.clip(sink, 0.0, height_scale)
+
+    meshes = []
+    prism_0 = trimesh.creation.extrude_triangulation(
+        vertices=np.array([[0., 0.], [0., 1.], [2., 0.]]),
+        faces=np.array([[0, 1, 2]]),
+        height=1,
+    )
+    # prism_0.apply_translation(np.array([-1., 0., 0.]))
+    prism_0.apply_transform(
+        trimesh.transformations.rotation_matrix(
+            angle=np.pi / 2,
+            direction=np.array([1, 0, 0])
+        )
+    )
+    prism_0.apply_translation([-0.5, -0.5, 0.])
+    meshes.append(prism_0)
+
+    prism_1 = trimesh.creation.extrude_triangulation(
+        vertices=np.array([[0., 0.], [0., -1.], [-2., 0.]]),
+        faces=np.array([[0, 1, 2]]),
+        height=1
+    )
+    # prism_1.apply_translation(np.array([1., 0., 0.]))
+    prism_1.apply_transform(
+        trimesh.transformations.rotation_matrix(
+            angle=-np.pi / 2,
+            direction=np.array([1, 0, 0])
+        )
+    )
+    prism_1.apply_translation([0.5, 0.5, 0.])
+    meshes.append(prism_1)
+
+    box_0 = trimesh.creation.box(
+        extents=(3.0, 1.0, 1.0),
+        transform=trimesh.transformations.translation_matrix([0.0, 0.0, 0.5]),
+    )
+    meshes.append(box_0)
+    box_1 = trimesh.creation.box(
+        extents=(1.0, 1.0, 1.0),
+        transform=trimesh.transformations.translation_matrix([1.0, 1.0, 0.5]),
+    )
+    meshes.append(box_1)
+    box_2 = trimesh.creation.box(
+        extents=(1.0, 1.0, 1.0),
+        transform=trimesh.transformations.translation_matrix([-1.0, -1.0, 0.5]),
+    )
+    meshes.append(box_2)
+
+    # Combine meshes
+    mesh: trimesh.Trimesh = trimesh.util.concatenate(meshes)
+    mesh.merge_vertices()
+    mesh.apply_translation([1.5, 1.5, -sink])
+    mesh.apply_scale(np.array([cfg.size[0] / 3, cfg.size[1] / 3, height_scale]))
+    origin = np.array([cfg.size[0] / 2, cfg.size[1] / 2, height_scale - sink])
+    return [mesh], origin
+
+
+@configclass
+class DoublePrismCfg(SubTerrainBaseCfg):
+    function = double_prism
+    size = (8.0, 8.0)
+    height_range = (1.0, 2.0)
+    sink_range = (0.1, 0.2)
+
+
 ROUGH_EASY = TerrainGeneratorCfg(
     seed=0,
     size=(9.0, 9.0),
@@ -116,15 +186,11 @@ ROUGH_EASY = TerrainGeneratorCfg(
         #     grid_height_range=(0.02, 0.05), 
         #     platform_width=2.0
         # ),
-        # "boxes": MeshBoxTerrainCfg(
-        #     proportion=0.20,
-        #     box_height_range=(0.1, 0.2),
-        #     platform_width=2.0,
-        #     double_box=True
-        # ),
-        "ramp": RampTerrainCfg(
+        "double_prism": DoublePrismCfg(
             proportion=0.20,
-            height_range=(0.2, 0.4),
+            size=(8.0, 8.0),
+            height_range=(1.0, 2.0),
+            sink_range=(0.1, 0.2),
         ),
         "rails": MeshRailsTerrainCfg(
             proportion=0.20,
@@ -138,13 +204,6 @@ ROUGH_EASY = TerrainGeneratorCfg(
             bar_width_range=(0.8, 1.0),
             bar_height_range=(1.0, 1.0),
             platform_width=4.0,
-            flat_patch_sampling={
-                "star": FlatPatchSamplingCfg(
-                    num_patches=5,
-                    patch_radius=0.5,
-                    max_height_diff=0.2,
-                )
-            }
         ),
         "room": RoomTerrainCfg(
             proportion=0.20,
@@ -156,6 +215,7 @@ ROUGH_EASY = TerrainGeneratorCfg(
         ),
     },
 )
+
 
 PLANE_TERRAIN_CFG = TerrainImporterCfg(
     prim_path="/World/ground",
