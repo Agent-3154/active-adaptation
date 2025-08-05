@@ -30,12 +30,14 @@ def reward_wrapper(func: Callable[[], torch.Tensor]):
 
 
 class joint_acc_l2(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
+    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*"):
         super().__init__(env, weight, enabled)
         self.asset: Articulation = self.env.scene["robot"]
+        self.joint_ids = self.asset.find_joints(joint_names)[0]
+        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
 
     def compute(self) -> torch.Tensor:
-        r = -self.asset.data.joint_acc.square().sum(dim=-1, keepdim=True)
+        r = -self.asset.data.joint_acc[:, self.joint_ids].square().sum(dim=-1, keepdim=True)
         if hasattr(self.asset.data, "linvel_exp"):
             return r * (0.5 + 0.5 * self.asset.data.linvel_exp)
         else:
@@ -1462,7 +1464,7 @@ class pitch_exp(Reward):
 class lin_vel_exp(Reward):
     def compute(self):
         error = self.env.command_manager.lin_vel_error_l2
-        return torch.exp( -error / 0.25) - 0.5 * error
+        return torch.exp( -error / 0.25) - 0.5 * error.sqrt()
 
 class ang_vel_x_exp(Reward):
     def compute(self):
@@ -1540,7 +1542,7 @@ class joint_torque_limits(Reward):
     def __init__(self, env, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
         self.asset: Articulation = self.env.scene["robot"]
-        self.soft_limits = self.asset.data.joint_effort_limits * 0.9
+        self.soft_limits = torch.abs(self.asset.data.joint_effort_limits * 0.9)
     
     def compute(self) -> torch.Tensor:
         violation_high = (self.asset.data.applied_torque - self.soft_limits).clamp_min(0.)

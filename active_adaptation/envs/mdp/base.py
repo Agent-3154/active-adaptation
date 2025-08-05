@@ -64,7 +64,7 @@ class Command(_RegistryMixin):
         if self.terrain_type == "generator":
             self._origins = self.env.scene.terrain.terrain_origins.reshape(-1, 3).clone()
 
-        if self.teleop:
+        if self.teleop and self.env.backend == "isaac":
             # acquire omniverse interfaces
             self._appwindow = omni.appwindow.get_default_app_window()
             self._input = carb.input.acquire_input_interface()

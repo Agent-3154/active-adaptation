@@ -15,9 +15,7 @@ from active_adaptation.utils.math import (
     MultiUniform
 )
 import active_adaptation.utils.symmetry as symmetry_utils
-
-from .base import Command
-# from ..observations import _initialize_warp_meshes, raycast_mesh
+from active_adaptation.envs.mdp.base import Command
 
 if TYPE_CHECKING:
     from active_adaptation.envs.base import _Env

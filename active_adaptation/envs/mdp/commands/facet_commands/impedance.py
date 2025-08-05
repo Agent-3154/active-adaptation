@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import einops
 
-from active_adaptation.envs.mdp.commands.base import Command
+from active_adaptation.envs.mdp.base import Command
 from active_adaptation.envs.mdp.commands.locomotion import Command2
 import isaaclab.utils.math as math_utils
 from active_adaptation.utils.math import (
