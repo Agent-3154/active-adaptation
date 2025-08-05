@@ -1,7 +1,7 @@
 from typing import Optional, Tuple
 import torch
 import einops
-from active_adaptation.envs.mdp.commands.base import Command
+from active_adaptation.envs.mdp.base import Command
 from active_adaptation.envs.mdp import observation, reward
 from active_adaptation.utils.math import (
     quat_rotate,

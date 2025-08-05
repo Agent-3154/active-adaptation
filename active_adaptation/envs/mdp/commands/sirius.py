@@ -13,12 +13,10 @@ from active_adaptation.utils.math import (
     clamp_norm
 )
 from active_adaptation.envs.mdp import reward, termination
-from active_adaptation.envs.mdp.base import Observation, Reward
+from active_adaptation.envs.mdp.base import Command, Observation, Reward
 from active_adaptation.utils.symmetry import SymmetryTransform
 if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
-
-from .base import Command
 
 
 JUMP_PREPARE_TIME = 0.4
@@ -134,6 +132,14 @@ class SiriusCommandManager(Command):
             else:
                 self.transition = torch.as_tensor(transitions)
             self.transition /= self.transition.sum(1, keepdim=True)
+        
+        if self.teleop:
+            try:
+                from active_adaptation.utils.gamepad import Gamepad
+                self.gamepad = Gamepad()
+            except Exception as e:
+                print(f"Failed to initialize gamepad: {e}")
+                self.gamepad = None
             
         if self.env.sim.has_gui() and self.env.backend == "isaac":
             from isaaclab.markers import RED_ARROW_X_MARKER_CFG, VisualizationMarkers
@@ -248,25 +254,35 @@ class SiriusCommandManager(Command):
         self._command[env_ids] = command
         self._cum_error[env_ids] = 0.
         self.target_base_height[env_ids] = 0.4
-
-    def update(self):
-        if self.teleop:
-            # print(self.key_pressed)
+    
+    def teleop_update(self):
+        # print(self.key_pressed)
+        if self.gamepad is not None:
+            self.gamepad.update()
+            self._command.mode[:] = self.CMD_WALK
+            self._command.des_contact[:] = torch.zeros(4, device=self.device)
+            self._command.cmd_lin_vel[:, 0] = self.gamepad.lxy[1] * 1.2
+            self._command.cmd_lin_vel[:, 1] = self.gamepad.lxy[0]
+            self._command.cmd_ang_vel[:, 2] = -self.gamepad.rxy[0]
+        else:
             self._command.mode[:] = self.CMD_WALK
             self._command.des_contact[:] = torch.zeros(4, device=self.device)
             self._command.cmd_lin_vel[:, 0] = self.key_pressed["W"] - self.key_pressed["S"]
             self._command.cmd_lin_vel[:, 1] = self.key_pressed["A"] - self.key_pressed["D"]
             self._command.cmd_ang_vel[:, 2] = self.key_pressed["LEFT"] - self.key_pressed["RIGHT"]
-            return
-        r, p, y = euler_from_quat(self.asset.data.root_quat_w).unbind(-1)
-        self.pitch_error_l2 = torch.square( wrap_to_pi(self._command.cmd_rpy[:, 1:2] - p.unsqueeze(1)) )
 
+    def update(self):
         quat_yaw = yaw_quat(self.asset.data.root_quat_w)
-        
         self._cmd_lin_vel_w = quat_rotate(quat_yaw, self._command.cmd_lin_vel)
         self.lin_vel_error_l2 = torch.square(
             self._cmd_lin_vel_w[:, :2] - self.asset.data.root_lin_vel_w[:, :2] ).sum(1, keepdim=True)
         
+        if self.teleop:
+            self.teleop_update()
+            return
+        r, p, y = euler_from_quat(self.asset.data.root_quat_w).unbind(-1)
+        self.pitch_error_l2 = torch.square( wrap_to_pi(self._command.cmd_rpy[:, 1:2] - p.unsqueeze(1)) )
+
         self.ang_vel_z_error_l2 = torch.square(
             self._command.cmd_ang_vel[:, 2:3] - self.asset.data.root_ang_vel_w[:, 2:3])
 

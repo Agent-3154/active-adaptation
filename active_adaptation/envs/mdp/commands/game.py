@@ -1,7 +1,6 @@
 import torch
 
-from active_adaptation.envs.mdp.base import Reward, Termination
-from active_adaptation.envs.mdp.commands.base import Command
+from active_adaptation.envs.mdp.base import Command, Reward, Termination
 from active_adaptation.utils.math import (
     quat_rotate_inverse,
     quat_rotate,

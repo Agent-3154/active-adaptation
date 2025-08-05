@@ -7,9 +7,9 @@ import argparse
 
 from omegaconf import OmegaConf
 from isaaclab.app import AppLauncher
-from scripts.play import main as play_main
-from scripts.eval import main as eval_main
-from scripts.play_mujoco import main as play_mujoco_main
+from play import main as play_main
+from eval import main as eval_main
+from play_mujoco import main as play_mujoco_main
 
 play = play_main.__wrapped__
 eval = eval_main.__wrapped__
