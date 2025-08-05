@@ -837,7 +837,7 @@ class spring_grf(Randomization):
 
 
 from active_adaptation.envs.mdp.utils.forces import ImpulseForce, ConstantForce
-class impulse(Randomization):
+class random_impulse(Randomization):
     def __init__(self, env):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]

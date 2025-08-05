@@ -50,6 +50,9 @@ from ..modules.distributions import IndependentNormal
 from ..modules.rnn import set_recurrent_mode, recurrent_mode
 from .common import *
 
+import active_adaptation
+import torch.distributed as distr
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 @dataclass
 class PPOConfig:
@@ -230,7 +233,32 @@ class PPOPolicy(ModBase):
         self.actor_student(fake_input)
         self.critic(fake_input)
         self.dynamics(fake_input)
+        
+        def init_(module):
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, 0.01)
+                nn.init.constant_(module.bias, 0.)
 
+        if self.cfg.orthogonal_init:
+            self.priv_encoder.apply(init_)
+            self.actor_teacher.apply(init_)
+            self.critic.apply(init_)
+            self.adapt_module.apply(init_)
+            self.dynamics.apply(init_)
+        
+        if active_adaptation.is_distributed():
+            if not self.cfg.phase == "train":
+                raise ValueError("Distributed training is only supported in train phase")
+            distr.init_process_group(
+                backend="nccl",
+                world_size=active_adaptation.get_world_size(),
+                rank=active_adaptation.get_local_rank()
+            )
+            self.priv_encoder = DDP(self.priv_encoder)
+            self.actor_teacher = DDP(self.actor_teacher)
+            self.critic = DDP(self.critic)
+            self.world_size = active_adaptation.get_world_size()
+        
         self.opt_teacher = torch.optim.AdamW(
             [
                 {"params": self.priv_encoder.parameters()},
@@ -251,18 +279,6 @@ class PPOPolicy(ModBase):
             lr=cfg.lr,
             # fused=True
         )
-        
-        def init_(module):
-            if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, 0.01)
-                nn.init.constant_(module.bias, 0.)
-
-        if self.cfg.orthogonal_init:
-            self.priv_encoder.apply(init_)
-            self.actor_teacher.apply(init_)
-            self.critic.apply(init_)
-            self.adapt_module.apply(init_)
-            self.dynamics.apply(init_)
         
         self.update_teacher = functools.partial(
             self._update, 
@@ -295,11 +311,11 @@ class PPOPolicy(ModBase):
     def get_rollout_policy(self, mode: str="train"):
         if self.cfg.phase == "train":
             policy = Seq(self.priv_encoder, self.actor_teacher)
+            out_keys = [ACTION_KEY, "action_log_prob"]
         else:
             policy = Seq(self.adapt_module, self.actor_student) 
-        # if self.cfg.compile:
-        #     policy = torch.compile(policy)
-        return policy
+            out_keys = [ACTION_KEY, "action_log_prob", ("next", "hx")]
+        return policy.select_out_keys(*out_keys)
 
     def train_op(self, tensordict: TensorDict):
         info = {}
@@ -338,6 +354,7 @@ class PPOPolicy(ModBase):
             adv[mode_1] = normalize(adv[mode_1], subtract_mean=True)
             adv[mode_2] = normalize(adv[mode_2], subtract_mean=True)
             adv[mode_3] = normalize(adv[mode_3], subtract_mean=True)
+        torch.clamp_(adv, -30., 30.) # to avoid extreme values
         tensordict = tensordict.select(*self.train_in_keys)
         
         for epoch in range(self.cfg.ppo_epochs):
@@ -517,6 +534,8 @@ class PPOPolicy(ModBase):
     def state_dict(self):
         state_dict = OrderedDict()
         for name, module in self.named_children():
+            if isinstance(module, DDP):
+                module = module.module
             state_dict[name] = module.state_dict()
         state_dict["last_phase"] = self.cfg.phase
         return state_dict
@@ -527,6 +546,8 @@ class PPOPolicy(ModBase):
         for name, module in self.named_children():
             _state_dict = state_dict.get(name, {})
             try:
+                if isinstance(module, DDP):
+                    module = module.module
                 module.load_state_dict(_state_dict, strict=strict)
                 succeed_keys.append(name)
             except Exception as e:
