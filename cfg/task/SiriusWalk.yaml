@@ -68,6 +68,7 @@ reward:
     sirius_base_height:  {weight: 1.0, enabled: true}
     contact_pattern:    {weight: 1.0, enabled: true}
     sirius_jump_landing: {weight: 1.0, enabled: true}
+    sirius_jump_turning: {weight: 1.0, enabled: true}
   reg:
     # no_drift:           {weight: 1.0, enabled: false}
     energy_l1:          {weight: 0.0001, enabled: true}
@@ -90,7 +91,7 @@ reward:
     feet_contact_count: {weight: 1.0, enabled: false, body_names: .*_FOOT}
 
 termination:
-  crash_leg(crash): {body_names_expr: [".*thigh"], t_thres: 0.03}
+  crash_leg(crash): {body_names_expr: [".*(thigh|calf)"], t_thres: 0.03}
   crash_body(crash): {body_names_expr: ["trunk", ".*hip"], t_thres: 0.03}
   # stand_error_exceeds: {}
 

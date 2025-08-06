@@ -26,6 +26,7 @@ class SiriusCommand(TensorClass):
     cmd_lin_vel: torch.Tensor # body frame
     cmd_ang_vel: torch.Tensor
     cmd_rpy: torch.Tensor
+    ref_rpy: torch.Tensor
     yaw_stiffness: torch.Tensor
 
     des_height: torch.Tensor # [N, 2], fore and hind hip height
@@ -59,6 +60,7 @@ class SiriusCommand(TensorClass):
             cmd_lin_vel=torch.zeros(size, 3, device=device),
             cmd_ang_vel=torch.zeros(size, 3, device=device),
             cmd_rpy=torch.zeros(size, 3, device=device),
+            ref_rpy=torch.zeros(size, 3, device=device),
             des_rpy=torch.zeros(size, 3, device=device),
             des_ang_vel=torch.zeros(size, 3, device=device),
             des_height=torch.zeros(size, 2, device=device),
@@ -310,13 +312,15 @@ class SiriusCommandManager(Command):
             self._command.des_height
         )
 
-        self._command.cmd_rpy[:, 1:3].add_(0.4 * wrap_to_pi(self._command.des_rpy[:, 1:3] - self._command.cmd_rpy[:, 1:3]))
+        # self._command.cmd_rpy[:, 1:3].add_(0.4 * wrap_to_pi(self._command.des_rpy[:, 1:3] - self._command.cmd_rpy[:, 1:3]))
+        self._command.cmd_rpy[:] = self._command.des_rpy
 
         self._command.cmd_ang_vel[:, 2:3] = torch.where(
             self._command.mode[:, None] == self.CMD_JUMP,
             self._command.des_ang_vel[:, 2:3] * self._command.in_air,
             (self._command.yaw_stiffness * cmd_yaw_diff).clamp(*self.ang_vel_z_range),
         )
+        self._command.ref_rpy[:, 2] += self.env.step_dt * self._command.cmd_ang_vel[:, 2]
 
         sample = (self.env.episode_length_buf-20) % 175 == 0
         sample |= self._command.phase.squeeze(1) > 1.0
@@ -381,8 +385,9 @@ class SiriusCommandManager(Command):
     def sample_command_jump(self, size):
         command = SiriusCommand.zero(size, self.device)
         command.cmd_lin_vel[:] = self._command.cmd_lin_vel * torch.tensor([1., 0., 0.], device=self.device)
-        target_yaw_change = torch.randint(-2, 3, (size,), device=self.device) * torch.pi / 3.
+        target_yaw_change = torch.randint(-2, 3, (size,), device=self.device) * torch.pi / 4.
         command.des_rpy[:, 2] = self.asset.data.heading_w + target_yaw_change
+        command.ref_rpy[:, 2] = self.asset.data.heading_w
         command.yaw_stiffness.uniform_(0.8, 1.2)
         command.duration.uniform_(1.0, 1.4)
         command.des_ang_vel[:, 2] = target_yaw_change / (command.duration.squeeze(1) - JUMP_PREPARE_TIME - JUMP_LANDING_TIME)
@@ -396,7 +401,7 @@ class SiriusCommandManager(Command):
             quat = quat_from_euler_xyz(
                 self._command.cmd_rpy[:, 0:1].squeeze(1),
                 self._command.cmd_rpy[:, 1:2].squeeze(1),
-                self._command.des_rpy[:, 2],
+                self._command.ref_rpy[:, 2],
             )
             self.frame_marker.visualize(
                 translations=self.asset.data.root_pos_w + torch.tensor([0.0, 0.0, 0.2], device=self.device),
@@ -406,7 +411,7 @@ class SiriusCommandManager(Command):
 
             self.env.debug_draw.vector(
                 self.asset.data.root_pos_w + torch.tensor([0., 0., 0.2], device=self.device),
-                quat_rotate(quat, self._command.cmd_lin_vel),
+                quat_rotate(self.asset.data.root_quat_w, self._command.cmd_lin_vel),
                 color=(1., 1., 1., 1.)
             )
 
@@ -617,5 +622,18 @@ class sirius_jump_landing(Reward[SiriusCommandManager]):
         landing_yaw = self.asset.data.heading_w
         desired_yaw = self.command_manager._command.des_rpy[:, 2]
         rew = - wrap_to_pi(desired_yaw - landing_yaw).abs()
-        return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
+        return rew.reshape(self.num_envs, 1), self.last_in_air.reshape(self.num_envs, 1)
+
+
+class sirius_jump_turning(Reward[SiriusCommandManager]):
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.asset = self.command_manager.asset
+
+    def compute(self) -> torch.Tensor:
+        in_air = self.command_manager._command.in_air
+        ref_yaw = self.command_manager._command.ref_rpy[:, 2]
+        yaw = self.asset.data.heading_w
+        rew = - wrap_to_pi(yaw - ref_yaw).abs()
+        return rew.reshape(self.num_envs, 1), in_air.reshape(self.num_envs, 1)
 
