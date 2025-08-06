@@ -42,7 +42,7 @@ class SiriusCommand(TensorClass):
         return self.time / self.duration
     
     @property
-    def is_jumping(self):
+    def in_air(self):
         return (
             (self.mode[:, None] == 2) 
             & (self.time > JUMP_PREPARE_TIME) 
@@ -269,10 +269,7 @@ class SiriusCommandManager(Command):
             self._command.cmd_lin_vel[:, 1] = self.key_pressed["A"] - self.key_pressed["D"]
             self._command.cmd_ang_vel[:, 2] = self.key_pressed["LEFT"] - self.key_pressed["RIGHT"]
 
-    def update(self):
-        quat_yaw = yaw_quat(self.asset.data.root_quat_w)
-        self._cmd_lin_vel_w = quat_rotate(quat_yaw, self._command.cmd_lin_vel)
-        
+    def update(self):        
         if self.teleop:
             self.teleop_update()
             return
@@ -290,11 +287,11 @@ class SiriusCommandManager(Command):
         self._command.time.add_(self.env.step_dt)
 
         # update jump command
-        is_jumping = self._command.is_jumping
+        in_air = self._command.in_air
         self._command.des_contact[:] = torch.where(
             self._command.mode[:, None] == self.CMD_JUMP,
             torch.where(
-                is_jumping,
+                in_air,
                 torch.tensor([-1., -1., -1., -1.], device=self.device),
                 torch.zeros(4, device=self.device),
             ),
@@ -302,7 +299,7 @@ class SiriusCommandManager(Command):
         )
         self._command.des_height[:] = torch.where(
             self._command.mode[:, None] == self.CMD_JUMP,
-            torch.where(is_jumping, 0.65, 0.45),
+            torch.where(in_air, 0.65, 0.45),
             self._command.des_height
         )
 
@@ -577,9 +574,11 @@ class ground_impact(Reward[SiriusCommandManager]):
 
 class lin_vel_exp(Reward[SiriusCommandManager]):
     def compute(self):
-        error = torch.square(
-            self.command_manager._command.cmd_lin_vel[:, :2] 
-            - self.command_manager.asset.data.root_lin_vel_w[:, :2]).sum(1, True)
+        quat_yaw = yaw_quat(self.command_manager.asset.data.root_quat_w)
+        cmd_lin_vel_b = self.command_manager._command.cmd_lin_vel
+        cmd_lin_vel_w = quat_rotate(quat_yaw, cmd_lin_vel_b)
+        lin_vel_w = self.command_manager.asset.data.root_lin_vel_w
+        error = torch.square(cmd_lin_vel_w[:, :2] - lin_vel_w[:, :2]).sum(1, True)
         return torch.exp( -error / 0.25) - 0.5 * error.sqrt()
 
 
