@@ -161,7 +161,6 @@ def double_prism(difficulty: float, cfg):
 @configclass
 class DoublePrismCfg(SubTerrainBaseCfg):
     function = double_prism
-    size = (8.0, 8.0)
     height_range = (1.0, 2.0)
     sink_range = (0.1, 0.2)
 
@@ -186,17 +185,18 @@ ROUGH_EASY = TerrainGeneratorCfg(
         #     grid_height_range=(0.02, 0.05), 
         #     platform_width=2.0
         # ),
-        "double_prism": DoublePrismCfg(
+        # "double_prism": DoublePrismCfg(
+        #     proportion=0.20,
+        #     size=(8.0, 8.0),
+        #     height_range=(1.0, 2.0),
+        #     sink_range=(0.1, 0.2),
+        # ),
+        "ring": MeshFloatingRingTerrainCfg(
             proportion=0.20,
-            size=(8.0, 8.0),
-            height_range=(1.0, 2.0),
-            sink_range=(0.1, 0.2),
-        ),
-        "rails": MeshRailsTerrainCfg(
-            proportion=0.20,
-            rail_height_range=(0.05, 0.25),
-            rail_thickness_range=(0.2, 0.4),
-            platform_width=2.0,
+            ring_width_range=(0.1, 0.25),
+            ring_height_range=(-0.5, 0.0),
+            ring_thickness=0.35,
+            platform_width=6.0,
         ),
         "star": MeshStarTerrainCfg(
             proportion=0.20,
