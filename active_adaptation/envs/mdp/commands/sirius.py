@@ -43,6 +43,9 @@ class SiriusCommand(TensorClass):
     
     @property
     def in_air(self):
+        """
+        shape: [N, 1]
+        """
         return (
             (self.mode[:, None] == 2) 
             & (self.time > JUMP_PREPARE_TIME) 
@@ -222,7 +225,7 @@ class SiriusCommandManager(Command):
         result = torch.cat([
             self._command.cmd_lin_vel[:, :2],
             self._command.cmd_ang_vel,
-            self._command.cmd_rpy[:, :2],
+            self._command.cmd_rpy,
             torch.where(jump_mode, self._command.time, torch.zeros_like(self._command.time)),
             torch.where(jump_mode, self._command.duration - self._command.time, torch.zeros_like(self._command.time)),
             torch.nn.functional.one_hot(self._command.mode, num_classes=4),
@@ -303,7 +306,8 @@ class SiriusCommandManager(Command):
             self._command.des_height
         )
 
-        self._command.cmd_rpy[:, 1:2].lerp_(self._command.des_rpy[:, 1:2], 0.4)
+        self._command.cmd_rpy[:, 1:3].add_(0.4 * wrap_to_pi(self._command.des_rpy[:, 1:3] - self._command.cmd_rpy[:, 1:3]))
+
         self._command.cmd_ang_vel[:, 2:3] = torch.where(
             self._command.mode[:, None] == self.CMD_JUMP,
             (self._command.yaw_stiffness * cmd_yaw_diff) * (self._command.mode[:, None] == self.CMD_JUMP),
@@ -429,7 +433,7 @@ class SiriusCommandManager(Command):
 
         elif self.env.sim.has_gui() and self.env.backend == "mujoco":
             from_ = self.asset.data.root_pos_w + torch.tensor([0., 0., 0.2])
-            self.arrow_marker_0.from_to(from_, from_ + self._cmd_lin_vel_w)
+            # self.arrow_marker_0.from_to(from_, from_ + self._cmd_lin_vel_w)
             self.arrow_marker_1.from_to(from_, from_ + self.asset.data.root_lin_vel_w)
 
 
@@ -588,4 +592,24 @@ class ang_vel_z_exp(Reward[SiriusCommandManager]):
             self.command_manager._command.cmd_ang_vel[:, 2:3] 
             - self.command_manager.asset.data.root_ang_vel_w[:, 2:3])
         return torch.exp( -error / 0.25) - 0.5 * error
+
+
+class sirius_jump_landing(Reward[SiriusCommandManager]):
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.asset = self.command_manager.asset
+        self.is_landing = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
+
+    def reset(self, env_ids: torch.Tensor):
+        self.is_landing[env_ids] = False
+    
+    def update(self):
+        self.is_landing = (self.last_in_air & ~self.command_manager._command.in_air)
+        self.last_in_air = self.command_manager._command.in_air
+
+    def compute(self) -> torch.Tensor:
+        landing_yaw = self.asset.data.heading_w
+        desired_yaw = self.command_manager._command.des_rpy[:, 2]
+        rew = - wrap_to_pi(desired_yaw - landing_yaw)
+        return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
 
