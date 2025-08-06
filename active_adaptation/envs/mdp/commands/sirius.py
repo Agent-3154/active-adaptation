@@ -102,8 +102,6 @@ class SiriusCommandManager(Command):
         
         self.pitch_error_l2 = torch.zeros(self.num_envs, 1, device=self.device)
         self.roll_error_l2 = torch.zeros(self.num_envs, 1, device=self.device)
-        self.lin_vel_error_l2 = torch.zeros(self.num_envs, 1, device=self.device)
-        self.ang_vel_z_error_l2 = torch.zeros(self.num_envs, 1, device=self.device)
         self.ang_vel_x_error_l2 = torch.zeros(self.num_envs, 1, device=self.device)
         
         self.front_height_error_l2 = torch.zeros(self.num_envs, 1, device=self.device)
@@ -274,8 +272,6 @@ class SiriusCommandManager(Command):
     def update(self):
         quat_yaw = yaw_quat(self.asset.data.root_quat_w)
         self._cmd_lin_vel_w = quat_rotate(quat_yaw, self._command.cmd_lin_vel)
-        self.lin_vel_error_l2 = torch.square(
-            self._cmd_lin_vel_w[:, :2] - self.asset.data.root_lin_vel_w[:, :2] ).sum(1, keepdim=True)
         
         if self.teleop:
             self.teleop_update()
@@ -283,18 +279,13 @@ class SiriusCommandManager(Command):
         r, p, y = euler_from_quat(self.asset.data.root_quat_w).unbind(-1)
         self.pitch_error_l2 = torch.square( wrap_to_pi(self._command.cmd_rpy[:, 1:2] - p.unsqueeze(1)) )
 
-        self.ang_vel_z_error_l2 = torch.square(
-            self._command.cmd_ang_vel[:, 2:3] - self.asset.data.root_ang_vel_w[:, 2:3])
-
         self.roll_error_l2 = (
             self.asset.data.projected_gravity_b[:, 0:1].square()
             + (self._command.cmd_rpy[:, 0:1].sin() + self.asset.data.projected_gravity_b[:, 1:2]).square()
             + (self._command.cmd_rpy[:, 0:1].cos() + self.asset.data.projected_gravity_b[:, 2:3]).square()
         )        
         
-        cmd_yaw_diff = (self._command.mode == self.CMD_WALK) \
-            .mul(wrap_to_pi(self._command.des_rpy[:, 2] - self.asset.data.heading_w)) \
-            .unsqueeze(1)
+        cmd_yaw_diff = wrap_to_pi(self._command.des_rpy[:, 2] - self.asset.data.heading_w).unsqueeze(1)
 
         self._command.time.add_(self.env.step_dt)
 
@@ -315,13 +306,12 @@ class SiriusCommandManager(Command):
             self._command.des_height
         )
 
-        # self._command.cmd_rpy[:, 0:1] = torch.where(
-        #     (self._command.mode == self.CMD_FLIP).reshape(-1, 1),
-        #     self._command.cmd_ang_vel[:, 0:1] * (self._command.time-self.jump_prepare_time).clamp_min(0.),
-        #     self._command.cmd_rpy[:, 0:1]
-        # )
         self._command.cmd_rpy[:, 1:2].lerp_(self._command.des_rpy[:, 1:2], 0.4)
-        self._command.cmd_ang_vel[:, 2:3] = (self._command.yaw_stiffness * cmd_yaw_diff).clamp(*self.ang_vel_z_range)
+        self._command.cmd_ang_vel[:, 2:3] = torch.where(
+            self._command.mode[:, None] == self.CMD_JUMP,
+            (self._command.yaw_stiffness * cmd_yaw_diff) * (self._command.mode[:, None] == self.CMD_JUMP),
+            (self._command.yaw_stiffness * cmd_yaw_diff).clamp(*self.ang_vel_z_range),
+        )
 
         sample = (self.env.episode_length_buf-20) % 175 == 0
         sample |= self._command.phase.squeeze(1) > 1.0
@@ -387,7 +377,9 @@ class SiriusCommandManager(Command):
     def sample_command_jump(self, size):
         command = SiriusCommand.zero(size, self.device)
         command.cmd_lin_vel[:] = clamp_norm(self._command.cmd_lin_vel * torch.tensor([1., 0., 0.], device=self.device), min=0.6)
-        command.des_rpy[:, 2] = self.asset.data.heading_w
+        target_yaw = self.asset.data.heading_w + torch.randint(-1, 2, (size,), device=self.device) * torch.pi / 2.
+        command.des_rpy[:, 2] = target_yaw
+        command.yaw_stiffness.uniform_(0.8, 1.2)
         command.duration.uniform_(0.9, 1.2)
         command.des_height[:] = 0.45
         command.mode[:] = self.CMD_JUMP
@@ -581,3 +573,20 @@ class ground_impact(Reward[SiriusCommandManager]):
             incoming_joint_force_b,
         )
         self.env.debug_draw.vector(body_pos_w, incoming_joint_force_w * 0.2, color=(1, 0, 0, 1))
+
+
+class lin_vel_exp(Reward[SiriusCommandManager]):
+    def compute(self):
+        error = torch.square(
+            self.command_manager._command.cmd_lin_vel[:, :2] 
+            - self.command_manager.asset.data.root_lin_vel_w[:, :2]).sum(1, True)
+        return torch.exp( -error / 0.25) - 0.5 * error.sqrt()
+
+
+class ang_vel_z_exp(Reward[SiriusCommandManager]):
+    def compute(self):
+        error = torch.square(
+            self.command_manager._command.cmd_ang_vel[:, 2:3] 
+            - self.command_manager.asset.data.root_ang_vel_w[:, 2:3])
+        return torch.exp( -error / 0.25) - 0.5 * error
+

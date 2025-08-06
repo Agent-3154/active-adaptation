@@ -14,36 +14,6 @@ if TYPE_CHECKING:
     from active_adaptation.envs.base import _Env
 
 
-def reward_func(func):
-    class RewFunc(Reward):
-        def compute(self):
-            return func(self.env)
-
-    return RewFunc
-
-
-def reward_wrapper(func: Callable[[], torch.Tensor]):
-    class RewardWrapper(Reward):
-        def compute(self):
-            return func()
-    return RewardWrapper
-
-
-class joint_acc_l2(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*"):
-        super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.joint_ids = self.asset.find_joints(joint_names)[0]
-        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-
-    def compute(self) -> torch.Tensor:
-        r = -self.asset.data.joint_acc[:, self.joint_ids].square().sum(dim=-1, keepdim=True)
-        if hasattr(self.asset.data, "linvel_exp"):
-            return r * (0.5 + 0.5 * self.asset.data.linvel_exp)
-        else:
-            return r
-
-
 class survival(Reward):
     def compute(self):
         return torch.ones(self.num_envs, 1, device=self.device)
@@ -85,96 +55,6 @@ class angvel_xy_l2(Reward):
         else:
             r = -self.angvel[:, :2].square().sum(-1)
         return r.reshape(self.num_envs, 1)
-
-
-class energy_l1(Reward):
-
-    decay: float = 0.99
-
-    def __init__(self, env, weight: float, enabled: bool = True, a={".*": 1.0}):
-        super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.joint_ids, _, self.a = string_utils.resolve_matching_names_values(
-            dict(a), self.asset.joint_names
-        )
-        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-        self.a = torch.tensor(self.a, device=self.device)
-
-        self.power = torch.zeros(self.num_envs, len(self.joint_ids), device=self.device)
-        self.energy = torch.zeros(
-            self.num_envs, len(self.joint_ids), device=self.device
-        )
-        self.count = torch.zeros(self.num_envs, 1, device=self.device)
-        self.asset.data.energy_ema = torch.zeros(
-            self.num_envs, len(self.joint_ids), device=self.device
-        )
-
-    def reset(self, env_ids):
-        self.energy[env_ids] = 0.0
-        self.count[env_ids] = 0.0
-
-    def update(self):
-        torques = self.asset.data.applied_torque[:, self.joint_ids]
-        joint_vel = self.asset.data.joint_vel[:, self.joint_ids]
-        self.power = (torques * joint_vel).abs()
-
-        self.energy.add_(self.power).mul_(self.decay)
-        self.count.add_(1.0).mul_(self.decay)
-        self.asset.data.energy_ema[:] = self.energy / self.count
-
-    def compute(self) -> torch.Tensor:
-        return -(self.power * self.a).sum(1, keepdim=True)
-
-
-class energy_l2(Reward):
-    """
-    Penalize the energy of the joints. This is less commonly used than energy_l1 because it is much
-    larger and therefore imposes a much stronger regularization.
-    """
-    def __init__(self, env, weight: float, enabled: bool = True, a={".*": 1.0}):
-        super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.joint_ids, _, self.a = string_utils.resolve_matching_names_values(
-            dict(a), self.asset.joint_names
-        )
-        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-        self.a = torch.tensor(self.a, device=self.device)
-
-    def update(self):
-        self.torques = self.asset.data.applied_torque[:, self.joint_ids]
-        self.joint_vel = self.asset.data.joint_vel[:, self.joint_ids]
-
-    def compute(self) -> torch.Tensor:
-        self.power_l2 = (self.torques * self.joint_vel).square()
-        return -(self.power_l2 * self.a).sum(1, keepdim=True)
-
-
-class energy_dist_lr(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.energy_ema: Articulation = self.asset.data.energy_ema
-        self.left_joint_ids = self.asset.find_joints("[F,R]L_.*_joint")[0]
-        self.right_joint_ids = self.asset.find_joints("[F,R]R_.*_joint")[0]
-
-    def compute(self) -> torch.Tensor:
-        energy_left = self.energy_ema[:, self.left_joint_ids]
-        energy_right = self.energy_ema[:, self.right_joint_ids]
-        return -(energy_left - energy_right).square().sum(1, keepdim=True)
-
-
-class energy_dist_fb(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.energy_ema: Articulation = self.asset.data.energy_ema
-        self.front_joint_ids = self.asset.find_joints("F[L,R]_.*_joint")[0]
-        self.rear_joint_ids = self.asset.find_joints("R[L,R]_.*_joint")[0]
-
-    def compute(self) -> torch.Tensor:
-        energy_front = self.energy_ema[:, self.front_joint_ids]
-        energy_rear = self.energy_ema[:, self.rear_joint_ids]
-        return -(energy_front - energy_rear).square().sum(1, keepdim=True)
 
 
 class joint_torques_l2(Reward):
@@ -1048,24 +928,6 @@ class stance_width(Reward):
         return -(self.target_width - width).clamp_min(0.0).sum(1, keepdim=True)
 
 
-class joint_vel_l2(Reward):
-    def __init__(self, env, joint_names: str, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.joint_ids, _ = self.asset.find_joints(joint_names)
-        self.joint_vel = torch.zeros(
-            self.num_envs, 2, len(self.joint_ids), device=self.device
-        )
-
-    def post_step(self, substep):
-        self.joint_vel[:, substep % 2] = self.asset.data.joint_vel[:, self.joint_ids]
-
-    def compute(self) -> torch.Tensor:
-        joint_vel = self.joint_vel.mean(1)
-        return -joint_vel.square().sum(1, True)
-
-
-
 class feet_swing_height(Reward):
     def __init__(self, env, target_height: float, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
@@ -1414,66 +1276,15 @@ def is_expr(expr):
         return all(isinstance(x, str) for x in expr)
 
 
-class joint_deviation_l1(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str=".*"):
-        super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
-        if is_expr(joint_names):
-            self.joint_ids = self.asset.find_joints(joint_names)[0]
-            self.joint_weights = None
-        else:
-            self.joint_ids, _, self.joint_weights = string_utils.resolve_matching_names_values(joint_names, self.asset.joint_names)
-            self.joint_weights = torch.tensor(self.joint_weights, device=self.device)
-            assert torch.all(self.joint_weights > 0)
-        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
-        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-    
-    def compute(self) -> torch.Tensor:
-        dev = self.asset.data.joint_pos[:, self.joint_ids] - self.default_joint_pos
-        if self.joint_weights is not None:
-            dev = dev * self.joint_weights
-        return - dev.abs().sum(1, True)
-
-
-class joint_deviation_l2(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str=".*"):
-        super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
-        if is_expr(joint_names):
-            self.joint_ids = self.asset.find_joints(joint_names)[0]
-            self.joint_weights = None
-        else:
-            self.joint_ids, _, self.joint_weights = string_utils.resolve_matching_names_values(joint_names, self.asset.joint_names)
-            self.joint_weights = torch.tensor(self.joint_weights, device=self.device)
-            assert torch.all(self.joint_weights > 0)
-        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
-        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-    
-    def compute(self) -> torch.Tensor:
-        dev = self.asset.data.joint_pos[:, self.joint_ids] - self.default_joint_pos
-        if self.joint_weights is not None:
-            dev = dev * self.joint_weights
-        return - dev.square().sum(1, True)
-
-
 class pitch_exp(Reward):
     def compute(self):
         error = self.env.command_manager.pitch_error_l2
         return torch.exp( -error ) - error
 
-class lin_vel_exp(Reward):
-    def compute(self):
-        error = self.env.command_manager.lin_vel_error_l2
-        return torch.exp( -error / 0.25) - 0.5 * error.sqrt()
 
 class ang_vel_x_exp(Reward):
     def compute(self):
         error = self.env.command_manager.ang_vel_x_error_l2
-        return torch.exp( -error / 0.25) - 0.5 * error
-
-class ang_vel_z_exp(Reward):
-    def compute(self):
-        error = self.env.command_manager.ang_vel_z_error_l2
         return torch.exp( -error / 0.25) - 0.5 * error
 
 
