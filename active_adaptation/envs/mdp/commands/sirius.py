@@ -19,8 +19,8 @@ if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
 
 
-JUMP_PREPARE_TIME = 0.4
-JUMP_LANDING_TIME = 0.3
+JUMP_PREPARE_TIME = 0.5
+JUMP_LANDING_TIME = 0.4
 
 class SiriusCommand(TensorClass):
     cmd_lin_vel: torch.Tensor # body frame
@@ -31,6 +31,7 @@ class SiriusCommand(TensorClass):
     des_height: torch.Tensor # [N, 2], fore and hind hip height
     des_contact: torch.Tensor # [N, 4]
     des_rpy: torch.Tensor
+    des_ang_vel: torch.Tensor # [N, 3]
     des_stand_vel: torch.Tensor
     
     time: torch.Tensor # [N, 1]
@@ -59,6 +60,7 @@ class SiriusCommand(TensorClass):
             cmd_ang_vel=torch.zeros(size, 3, device=device),
             cmd_rpy=torch.zeros(size, 3, device=device),
             des_rpy=torch.zeros(size, 3, device=device),
+            des_ang_vel=torch.zeros(size, 3, device=device),
             des_height=torch.zeros(size, 2, device=device),
             des_contact=torch.zeros(size, 4, device=device),
             des_stand_vel=torch.zeros(size, 1, device=device),
@@ -222,10 +224,12 @@ class SiriusCommandManager(Command):
     def command(self):
         # only episodic commands (jump and flip) have phase
         jump_mode = (self._command.mode == self.CMD_JUMP).reshape(-1, 1)
+        cmd_rpy = self._command.cmd_rpy.clone()
+        cmd_rpy[:, 2] = wrap_to_pi(cmd_rpy[:, 2] - self.asset.data.heading_w)
         result = torch.cat([
             self._command.cmd_lin_vel[:, :2],
             self._command.cmd_ang_vel,
-            self._command.cmd_rpy,
+            cmd_rpy,
             torch.where(jump_mode, self._command.time, torch.zeros_like(self._command.time)),
             torch.where(jump_mode, self._command.duration - self._command.time, torch.zeros_like(self._command.time)),
             torch.nn.functional.one_hot(self._command.mode, num_classes=4),
@@ -245,7 +249,7 @@ class SiriusCommandManager(Command):
         return SymmetryTransform.cat([
             SymmetryTransform(perm=torch.arange(2), signs=torch.tensor([1, -1])), # flip y
             SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])), # flip roll and yaw
-            SymmetryTransform(perm=torch.arange(2), signs=torch.tensor([-1, 1])), # flip roll
+            SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])), # flip roll and yaw
             SymmetryTransform(perm=torch.arange(6), signs=torch.ones(6)), # do nothing
             SymmetryTransform(perm=torch.tensor([2, 3, 0, 1]), signs=torch.ones(4))
         ])
@@ -310,7 +314,7 @@ class SiriusCommandManager(Command):
 
         self._command.cmd_ang_vel[:, 2:3] = torch.where(
             self._command.mode[:, None] == self.CMD_JUMP,
-            (self._command.yaw_stiffness * cmd_yaw_diff) * (self._command.mode[:, None] == self.CMD_JUMP),
+            self._command.des_ang_vel[:, 2:3] * self._command.in_air,
             (self._command.yaw_stiffness * cmd_yaw_diff).clamp(*self.ang_vel_z_range),
         )
 
@@ -341,7 +345,6 @@ class SiriusCommandManager(Command):
         command.cmd_lin_vel = command.cmd_lin_vel * command.cmd_lin_vel.norm(dim=-1, keepdim=True) > 0.15
         command.cmd_lin_vel = command.cmd_lin_vel * direction
         command.yaw_stiffness.uniform_(0.8, 1.2)
-        command.des_rpy[:, 2].uniform_(-torch.pi, torch.pi)
         command.des_rpy[:, 1].uniform_(-0.2 * torch.pi, 0.2 * torch.pi) # pitch
         command.des_height[:, 0] = 0.45 - command.des_rpy[:, 1].sin() * 0.314
         command.des_height[:, 1] = 0.45 + command.des_rpy[:, 1].sin() * 0.314
@@ -377,11 +380,12 @@ class SiriusCommandManager(Command):
     
     def sample_command_jump(self, size):
         command = SiriusCommand.zero(size, self.device)
-        command.cmd_lin_vel[:] = clamp_norm(self._command.cmd_lin_vel * torch.tensor([1., 0., 0.], device=self.device), min=0.6)
-        target_yaw = self.asset.data.heading_w + torch.randint(-1, 2, (size,), device=self.device) * torch.pi / 2.
-        command.des_rpy[:, 2] = target_yaw
+        command.cmd_lin_vel[:] = self._command.cmd_lin_vel * torch.tensor([1., 0., 0.], device=self.device)
+        target_yaw_change = torch.randint(-2, 3, (size,), device=self.device) * torch.pi / 3.
+        command.des_rpy[:, 2] = self.asset.data.heading_w + target_yaw_change
         command.yaw_stiffness.uniform_(0.8, 1.2)
-        command.duration.uniform_(0.9, 1.2)
+        command.duration.uniform_(1.0, 1.4)
+        command.des_ang_vel[:, 2] = target_yaw_change / (command.duration.squeeze(1) - JUMP_PREPARE_TIME - JUMP_LANDING_TIME)
         command.des_height[:] = 0.45
         command.mode[:] = self.CMD_JUMP
         return command
@@ -599,9 +603,11 @@ class sirius_jump_landing(Reward[SiriusCommandManager]):
         super().__init__(env, weight, enabled)
         self.asset = self.command_manager.asset
         self.is_landing = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
+        self.last_in_air = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
 
     def reset(self, env_ids: torch.Tensor):
         self.is_landing[env_ids] = False
+        self.last_in_air[env_ids] = False
     
     def update(self):
         self.is_landing = (self.last_in_air & ~self.command_manager._command.in_air)
@@ -610,6 +616,6 @@ class sirius_jump_landing(Reward[SiriusCommandManager]):
     def compute(self) -> torch.Tensor:
         landing_yaw = self.asset.data.heading_w
         desired_yaw = self.command_manager._command.des_rpy[:, 2]
-        rew = - wrap_to_pi(desired_yaw - landing_yaw)
+        rew = - wrap_to_pi(desired_yaw - landing_yaw).abs()
         return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
 
