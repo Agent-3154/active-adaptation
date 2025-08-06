@@ -595,7 +595,7 @@ class ang_vel_z_exp(Reward[SiriusCommandManager]):
         error = torch.square(
             self.command_manager._command.cmd_ang_vel[:, 2:3] 
             - self.command_manager.asset.data.root_ang_vel_w[:, 2:3])
-        return torch.exp( -error / 0.25) - 0.5 * error
+        return torch.exp( -error / 0.25) - 0.25 * error.sqrt()
 
 
 class sirius_jump_landing(Reward[SiriusCommandManager]):

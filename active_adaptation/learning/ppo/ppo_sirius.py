@@ -355,6 +355,7 @@ class PPOPolicy(ModBase):
             adv[mode_2] = normalize(adv[mode_2], subtract_mean=True)
             adv[mode_3] = normalize(adv[mode_3], subtract_mean=True)
         torch.clamp_(adv, -30., 30.) # to avoid extreme values
+        neg_reward_ratio = (tensordict[REWARD_KEY].sum(-1, True) <= 0.).float().mean()
         tensordict = tensordict.select(*self.train_in_keys)
         
         for epoch in range(self.cfg.ppo_epochs):
@@ -367,6 +368,7 @@ class PPOPolicy(ModBase):
         infos["critic/value_mode_1"] = tensordict["ret"][mode_1].mean().item()
         infos["critic/value_mode_2"] = tensordict["ret"][mode_2].mean().item()
         infos["critic/value_mode_3"] = tensordict["ret"][mode_3].mean().item()
+        infos["critic/neg_reward_ratio"] = neg_reward_ratio.item()
         self.num_frames += tensordict.numel()
         self.num_updates += 1
         return dict(sorted(infos.items()))
