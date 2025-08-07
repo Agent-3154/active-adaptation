@@ -209,10 +209,10 @@ class PPOPolicy(ModBase):
         ).to(self.device)
         
         critic_in_keys = [CMD_KEY, OBS_KEY, OBS_PRIV_KEY]
-        critic_module = nn.Sequential(make_mlp([512, 256, 256]), nn.LazyLinear(1))
         self.critic = Seq(
             CatTensors(critic_in_keys, "policy_priv", del_keys=False, sort=False),
-            Mod(critic_module, ["policy_priv"], ["state_value"])
+            Mod(make_mlp([256, 256, 128]), ["policy_priv"], ["critic_feature"]),
+            Mod(nn.LazyLinear(1), ["critic_feature"], ["state_value"])
         ).to(self.device)
 
         observation_dim = observation_spec[OBS_KEY].shape[-1]
@@ -259,14 +259,14 @@ class PPOPolicy(ModBase):
             self.critic = DDP(self.critic)
             self.world_size = active_adaptation.get_world_size()
         
-        self.opt_teacher = torch.optim.AdamW(
+        self.opt_teacher = torch.optim.Adam(
             [
                 {"params": self.priv_encoder.parameters()},
                 {"params": self.actor_teacher.parameters()},
                 {"params": self.critic.parameters()},
             ],
             lr=cfg.lr,
-            weight_decay=0.1,
+            # weight_decay=0.1,
             # fused=True
         )
         self.opt_model = torch.optim.Adam(self.dynamics.parameters(), lr=cfg.lr)
@@ -311,10 +311,10 @@ class PPOPolicy(ModBase):
     def get_rollout_policy(self, mode: str="train"):
         if self.cfg.phase == "train":
             policy = Seq(self.priv_encoder, self.actor_teacher)
-            out_keys = [ACTION_KEY, "action_log_prob"]
+            out_keys = [ACTION_KEY, "action_log_prob", "actor_input"]
         else:
             policy = Seq(self.adapt_module, self.actor_student) 
-            out_keys = [ACTION_KEY, "action_log_prob", ("next", "hx")]
+            out_keys = [ACTION_KEY, "action_log_prob", ("next", "hx"), "actor_input"]
         return policy.select_out_keys(*out_keys)
 
     def train_op(self, tensordict: TensorDict):
@@ -356,6 +356,8 @@ class PPOPolicy(ModBase):
             adv[mode_3] = normalize(adv[mode_3], subtract_mean=True)
         torch.clamp_(adv, -30., 30.) # to avoid extreme values
         neg_reward_ratio = (tensordict[REWARD_KEY].sum(-1, True) <= 0.).float().mean()
+        actor_feature_norm = tensordict["actor_input"].norm(dim=-1, keepdim=True).mean()
+        critic_feature_norm = tensordict["critic_feature"].norm(dim=-1, keepdim=True).mean()
         tensordict = tensordict.select(*self.train_in_keys)
         
         for epoch in range(self.cfg.ppo_epochs):
@@ -364,6 +366,8 @@ class PPOPolicy(ModBase):
                 infos.append(self.update_teacher(minibatch))
         
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
+        infos["actor/feature_norm"] = actor_feature_norm.item()
+        infos["critic/feature_norm"] = critic_feature_norm.item()
         infos["critic/value_mode_0"] = tensordict["ret"][mode_0].mean().item()
         infos["critic/value_mode_1"] = tensordict["ret"][mode_1].mean().item()
         infos["critic/value_mode_2"] = tensordict["ret"][mode_2].mean().item()

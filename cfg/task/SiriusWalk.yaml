@@ -21,7 +21,7 @@ sim:
 
 action:
   _target_: active_adaptation.envs.mdp.action.LegWheel
-  leg_scaling: {.*_(HAA|HFE|KFE): 0.5}
+  leg_scaling: {.*_(HAA|HFE|KFE): 0.75}
   wheel_scaling: {.*_WHEEL: 10.0}
 
 command:
@@ -67,7 +67,7 @@ reward:
     linvel_z_l2:        {weight: 0.5, enabled: true}
     sirius_base_height:  {weight: 1.0, enabled: true}
     contact_pattern:    {weight: 1.0, enabled: true}
-    sirius_jump_landing: {weight: 1.0, enabled: true}
+    sirius_jump_landing: {weight: 5.0, enabled: true}
     sirius_jump_turning: {weight: 1.0, enabled: true}
   reg:
     # no_drift:           {weight: 1.0, enabled: false}

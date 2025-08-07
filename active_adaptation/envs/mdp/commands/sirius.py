@@ -317,7 +317,8 @@ class SiriusCommandManager(Command):
 
         self._command.cmd_ang_vel[:, 2:3] = torch.where(
             self._command.mode[:, None] == self.CMD_JUMP,
-            self._command.des_ang_vel[:, 2:3] * self._command.in_air,
+            # self._command.des_ang_vel[:, 2:3] * self._command.in_air,
+            (self._command.yaw_stiffness * cmd_yaw_diff) * self._command.in_air,
             (self._command.yaw_stiffness * cmd_yaw_diff).clamp(*self.ang_vel_z_range),
         )
         self._command.ref_rpy[:, 2] += self.env.step_dt * self._command.cmd_ang_vel[:, 2]
@@ -385,11 +386,11 @@ class SiriusCommandManager(Command):
     def sample_command_jump(self, size):
         command = SiriusCommand.zero(size, self.device)
         command.cmd_lin_vel[:] = self._command.cmd_lin_vel * torch.tensor([1., 0., 0.], device=self.device)
-        target_yaw_change = torch.randint(-2, 3, (size,), device=self.device) * torch.pi / 4.
+        target_yaw_change = torch.randint(-3, 4, (size,), device=self.device) * torch.pi / 4.
         command.des_rpy[:, 2] = self.asset.data.heading_w + target_yaw_change
         command.ref_rpy[:, 2] = self.asset.data.heading_w
         command.yaw_stiffness.uniform_(0.8, 1.2)
-        command.duration.uniform_(1.0, 1.4)
+        command.duration.uniform_(1.1, 1.4)
         command.des_ang_vel[:, 2] = target_yaw_change / (command.duration.squeeze(1) - JUMP_PREPARE_TIME - JUMP_LANDING_TIME)
         command.des_height[:] = 0.45
         command.mode[:] = self.CMD_JUMP
@@ -621,7 +622,7 @@ class sirius_jump_landing(Reward[SiriusCommandManager]):
     def compute(self) -> torch.Tensor:
         landing_yaw = self.asset.data.heading_w
         desired_yaw = self.command_manager._command.des_rpy[:, 2]
-        rew = - wrap_to_pi(desired_yaw - landing_yaw).abs()
+        rew = 1. - wrap_to_pi(desired_yaw - landing_yaw).abs()
         return rew.reshape(self.num_envs, 1), self.last_in_air.reshape(self.num_envs, 1)
 
 
