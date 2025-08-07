@@ -351,6 +351,7 @@ class SiriusCommandManager(Command):
         command.cmd_lin_vel = command.cmd_lin_vel * direction
         command.yaw_stiffness.uniform_(0.8, 1.2)
         command.des_rpy[:, 1].uniform_(-0.2 * torch.pi, 0.2 * torch.pi) # pitch
+        command.des_rpy[:, 2].uniform_(-torch.pi, torch.pi)
         command.des_height[:, 0] = 0.45 - command.des_rpy[:, 1].sin() * 0.314
         command.des_height[:, 1] = 0.45 + command.des_rpy[:, 1].sin() * 0.314
         command.mode[:] = self.CMD_WALK
