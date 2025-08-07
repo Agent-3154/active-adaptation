@@ -209,10 +209,10 @@ class PPOPolicy(ModBase):
         ).to(self.device)
         
         critic_in_keys = [CMD_KEY, OBS_KEY, OBS_PRIV_KEY]
+        critic_mlp = nn.Sequential(make_mlp([512, 256, 256]), nn.LazyLinear(1))
         self.critic = Seq(
             CatTensors(critic_in_keys, "policy_priv", del_keys=False, sort=False),
-            Mod(make_mlp([256, 256, 128]), ["policy_priv"], ["critic_feature"]),
-            Mod(nn.LazyLinear(1), ["critic_feature"], ["state_value"])
+            Mod(critic_mlp, ["policy_priv"], ["state_value"])
         ).to(self.device)
 
         observation_dim = observation_spec[OBS_KEY].shape[-1]
@@ -357,7 +357,7 @@ class PPOPolicy(ModBase):
         torch.clamp_(adv, -30., 30.) # to avoid extreme values
         neg_reward_ratio = (tensordict[REWARD_KEY].sum(-1, True) <= 0.).float().mean()
         actor_feature_norm = tensordict["actor_input"].norm(dim=-1, keepdim=True).mean()
-        critic_feature_norm = tensordict["critic_feature"].norm(dim=-1, keepdim=True).mean()
+        # critic_feature_norm = tensordict["critic_feature"].norm(dim=-1, keepdim=True).mean()
         tensordict = tensordict.select(*self.train_in_keys)
         
         for epoch in range(self.cfg.ppo_epochs):
@@ -367,7 +367,7 @@ class PPOPolicy(ModBase):
         
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
         infos["actor/feature_norm"] = actor_feature_norm.item()
-        infos["critic/feature_norm"] = critic_feature_norm.item()
+        # infos["critic/feature_norm"] = critic_feature_norm.item()
         infos["critic/value_mode_0"] = tensordict["ret"][mode_0].mean().item()
         infos["critic/value_mode_1"] = tensordict["ret"][mode_1].mean().item()
         infos["critic/value_mode_2"] = tensordict["ret"][mode_2].mean().item()

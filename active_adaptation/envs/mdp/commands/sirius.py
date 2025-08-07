@@ -390,8 +390,8 @@ class SiriusCommandManager(Command):
         target_yaw_change = torch.randint(-3, 4, (size,), device=self.device) * torch.pi / 4.
         command.des_rpy[:, 2] = self.asset.data.heading_w + target_yaw_change
         command.ref_rpy[:, 2] = self.asset.data.heading_w
-        command.yaw_stiffness.uniform_(0.8, 1.2)
-        command.duration.uniform_(1.1, 1.4)
+        command.yaw_stiffness.uniform_(1.0, 2.0)
+        command.duration.uniform_(1.0, 1.4)
         command.des_ang_vel[:, 2] = target_yaw_change / (command.duration.squeeze(1) - JUMP_PREPARE_TIME - JUMP_LANDING_TIME)
         command.des_height[:] = 0.45
         command.mode[:] = self.CMD_JUMP
@@ -623,7 +623,7 @@ class sirius_jump_landing(Reward[SiriusCommandManager]):
     def compute(self) -> torch.Tensor:
         landing_yaw = self.asset.data.heading_w
         desired_yaw = self.command_manager._command.des_rpy[:, 2]
-        rew = 1. - wrap_to_pi(desired_yaw - landing_yaw).abs()
+        rew = torch.pi/2 - wrap_to_pi(desired_yaw - landing_yaw).abs()
         return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
 
 
