@@ -623,7 +623,7 @@ class sirius_jump_landing(Reward[SiriusCommandManager]):
         landing_yaw = self.asset.data.heading_w
         desired_yaw = self.command_manager._command.des_rpy[:, 2]
         rew = 1. - wrap_to_pi(desired_yaw - landing_yaw).abs()
-        return rew.reshape(self.num_envs, 1), self.last_in_air.reshape(self.num_envs, 1)
+        return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
 
 
 class sirius_jump_turning(Reward[SiriusCommandManager]):
