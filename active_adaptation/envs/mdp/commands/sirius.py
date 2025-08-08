@@ -24,6 +24,8 @@ JUMP_LANDING_TIME = 0.4
 
 class SiriusCommand(TensorClass):
     cmd_lin_vel: torch.Tensor # body frame
+    cmd_lin_vel_w: torch.Tensor # world frame
+    use_lin_vel_w: torch.Tensor # [N, 1]
     cmd_ang_vel: torch.Tensor
     cmd_rpy: torch.Tensor
     ref_rpy: torch.Tensor
@@ -58,6 +60,8 @@ class SiriusCommand(TensorClass):
     def zero(cls, size: int, device: str):
         return cls(
             cmd_lin_vel=torch.zeros(size, 3, device=device),
+            cmd_lin_vel_w=torch.zeros(size, 3, device=device),
+            use_lin_vel_w=torch.zeros(size, 1, dtype=bool, device=device),
             cmd_ang_vel=torch.zeros(size, 3, device=device),
             cmd_rpy=torch.zeros(size, 3, device=device),
             ref_rpy=torch.zeros(size, 3, device=device),
@@ -225,11 +229,16 @@ class SiriusCommandManager(Command):
     @property
     def command(self):
         # only episodic commands (jump and flip) have phase
+        cmd_lin_vel = torch.where(
+            self._command.use_lin_vel_w,
+            quat_rotate_inverse(yaw_quat(self.asset.data.root_quat_w), self._command.cmd_lin_vel_w),
+            self._command.cmd_lin_vel,
+        )
         jump_mode = (self._command.mode == self.CMD_JUMP).reshape(-1, 1)
         cmd_rpy = self._command.cmd_rpy.clone()
         cmd_rpy[:, 2] = wrap_to_pi(cmd_rpy[:, 2] - self.asset.data.heading_w)
         result = torch.cat([
-            self._command.cmd_lin_vel[:, :2],
+            cmd_lin_vel[:, :2],
             self._command.cmd_ang_vel,
             cmd_rpy,
             torch.where(jump_mode, self._command.time, torch.zeros_like(self._command.time)),
@@ -317,8 +326,8 @@ class SiriusCommandManager(Command):
 
         self._command.cmd_ang_vel[:, 2:3] = torch.where(
             self._command.mode[:, None] == self.CMD_JUMP,
-            # self._command.des_ang_vel[:, 2:3] * self._command.in_air,
-            (self._command.yaw_stiffness * cmd_yaw_diff) * self._command.in_air,
+            self._command.des_ang_vel[:, 2:3] * self._command.in_air,
+            # (self._command.yaw_stiffness * cmd_yaw_diff) * self._command.in_air,
             (self._command.yaw_stiffness * cmd_yaw_diff).clamp(*self.ang_vel_z_range),
         )
         self._command.ref_rpy[:, 2] += self.env.step_dt * self._command.cmd_ang_vel[:, 2]
@@ -386,12 +395,16 @@ class SiriusCommandManager(Command):
     
     def sample_command_jump(self, size):
         command = SiriusCommand.zero(size, self.device)
-        command.cmd_lin_vel[:] = self._command.cmd_lin_vel * torch.tensor([1., 0., 0.], device=self.device)
-        target_yaw_change = torch.randint(-3, 4, (size,), device=self.device) * torch.pi / 4.
+        command.cmd_lin_vel_w[:] = quat_rotate(
+            yaw_quat(self.asset.data.root_quat_w),
+            self._command.cmd_lin_vel * torch.tensor([1., 0., 0.], device=self.device)
+        )
+        command.use_lin_vel_w[:] = True
+        target_yaw_change = torch.randint(-4, 4, (size,), device=self.device) * torch.pi / 4.
         command.des_rpy[:, 2] = self.asset.data.heading_w + target_yaw_change
         command.ref_rpy[:, 2] = self.asset.data.heading_w
-        command.yaw_stiffness.uniform_(1.0, 2.0)
-        command.duration.uniform_(1.0, 1.4)
+        command.yaw_stiffness.uniform_(1.2, 2.4)
+        command.duration.uniform_(1.2, 1.4)
         command.des_ang_vel[:, 2] = target_yaw_change / (command.duration.squeeze(1) - JUMP_PREPARE_TIME - JUMP_LANDING_TIME)
         command.des_height[:] = 0.45
         command.mode[:] = self.CMD_JUMP
@@ -411,9 +424,14 @@ class SiriusCommandManager(Command):
                 scales=torch.tensor([[4., 1., 0.1]]).expand(self.num_envs, 3),
             )
 
+            cmd_lin_vel_w = torch.where(
+                self._command.use_lin_vel_w,
+                self._command.cmd_lin_vel_w,
+                quat_rotate(yaw_quat(self.asset.data.root_quat_w), self._command.cmd_lin_vel),
+            )
             self.env.debug_draw.vector(
                 self.asset.data.root_pos_w + torch.tensor([0., 0., 0.2], device=self.device),
-                quat_rotate(self.asset.data.root_quat_w, self._command.cmd_lin_vel),
+                cmd_lin_vel_w,
                 color=(1., 1., 1., 1.)
             )
 
@@ -602,7 +620,12 @@ class ang_vel_z_exp(Reward[SiriusCommandManager]):
         error = torch.square(
             self.command_manager._command.cmd_ang_vel[:, 2:3] 
             - self.command_manager.asset.data.root_ang_vel_w[:, 2:3])
-        return torch.exp( -error / 0.25) - 0.25 * error.sqrt()
+        rew = torch.exp( -error / 0.25) - 0.25 * error.sqrt()
+        is_active = (
+            (self.command_manager._command.mode[:, None] != self.command_manager.CMD_JUMP)
+            | (self.command_manager._command.in_air)
+        )
+        return rew.reshape(self.num_envs, 1), is_active.reshape(self.num_envs, 1)
 
 
 class sirius_jump_landing(Reward[SiriusCommandManager]):
