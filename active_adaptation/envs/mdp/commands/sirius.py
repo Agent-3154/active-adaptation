@@ -322,7 +322,11 @@ class SiriusCommandManager(Command):
         )
 
         # self._command.cmd_rpy[:, 1:3].add_(0.4 * wrap_to_pi(self._command.des_rpy[:, 1:3] - self._command.cmd_rpy[:, 1:3]))
-        self._command.cmd_rpy[:] = self._command.des_rpy
+        self._command.cmd_rpy[:, 2] = torch.where(
+            self._command.mode == self.CMD_JUMP,
+            self._command.des_rpy[:, 2],
+            self.asset.data.heading_w,
+        )
 
         self._command.cmd_ang_vel[:, 2:3] = torch.where(
             self._command.mode[:, None] == self.CMD_JUMP,

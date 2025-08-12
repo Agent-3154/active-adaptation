@@ -87,6 +87,7 @@ reward:
     wheel_contact_direction: {weight: 0.5, enabled: true}
     sirius_joint_deviation: {weight: 0.2, enabled: true}
     joint_deviation_l2: {weight: 0.1, enabled: true, joint_names: .*HAA}
+    joint_vel_l2:       {weight: 0.002, enabled: true, joint_names: .*_KFE}
     # ground_impact:      {weight: 1.0, enabled: true}
   debug:
     joint_torques_l2:   {weight: 1.0e-4, enabled: false}
@@ -102,8 +103,8 @@ randomization:
     (?!(front|back)).*: [0.8, 1.1]
   perturb_body_materials:
     body_names: ".*_FOOT"
-    static_friction_range:  [0.5, 4.0]
-    dynamic_friction_range: [0.5, 4.0]
+    static_friction_range:  [0.5, 2.0]
+    dynamic_friction_range: [0.5, 2.0]
     restitution_range:      [0.0, 0.5]
     homogeneous: true # ${task.homogeneous}
   motor_params:

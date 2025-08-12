@@ -110,8 +110,8 @@ randomization:
     .*: [0.8, 1.2]
   perturb_body_materials:
     body_names: ".*ankle_roll_link"
-    static_friction_range: [0.6, 4.0]
-    dynamic_friction_range: [0.6, 4.0]
+    static_friction_range: [0.6, 2.0]
+    dynamic_friction_range: [0.6, 2.0]
     restitution_range: [0.0, 0.2]
   motor_params_implicit:
     stiffness_range:
