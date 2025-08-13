@@ -316,7 +316,9 @@ class PPOPolicy(ModBase):
             out_keys = [ACTION_KEY, "action_log_prob", "actor_input", "loc", "scale"]
         else:
             policy = Seq(self.adapt_module, self.actor_student) 
-            out_keys = [ACTION_KEY, "action_log_prob", ("next", "hx"), "actor_input"]
+            out_keys = [ACTION_KEY, "action_log_prob", ("next", "hx"), "actor_input", "loc", "scale", "priv_feature_est"]
+        if mode == "deploy":
+            out_keys = out_keys = [ACTION_KEY, "action_log_prob", ("next", "hx"), "actor_input"]
         return policy.select_out_keys(*out_keys)
 
     def train_op(self, tensordict: TensorDict):
@@ -360,7 +362,7 @@ class PPOPolicy(ModBase):
         neg_reward_ratio = (tensordict[REWARD_KEY].sum(-1, True) <= 0.).float().mean()
         actor_feature_norm = tensordict["actor_input"].norm(dim=-1, keepdim=True).mean()
         # critic_feature_norm = tensordict["critic_feature"].norm(dim=-1, keepdim=True).mean()
-        tensordict = tensordict.select(*self.train_in_keys)
+        tensordict = tensordict.select(*self.train_in_keys, "loc", "scale")
         
         for epoch in range(self.cfg.ppo_epochs):
             batch = make_batch(tensordict, self.cfg.num_minibatches, self.cfg.train_every)
@@ -377,6 +379,7 @@ class PPOPolicy(ModBase):
                     self.opt_teacher.param_groups[0]["lr"] = actor_lr
         
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
+        infos["actor/lr"] = actor_lr
         infos["actor/feature_norm"] = actor_feature_norm.item()
         # infos["critic/feature_norm"] = critic_feature_norm.item()
         infos["critic/value_mode_0"] = tensordict["ret"][mode_0].mean().item()
@@ -461,7 +464,7 @@ class PPOPolicy(ModBase):
 
     def _update(self, tensordict: TensorDict, encoder: Mod, actor: ProbabilisticActor, critic: Mod, opt: torch.optim.Optimizer):
         bsize = tensordict.shape[0]
-        loc_old, scale_old = tensordict["loc"], tensordict["scale"]
+        loc_old, scale_old = tensordict.pop("loc"), tensordict.pop("scale")
 
         symmetry = tensordict.empty()
         symmetry[CMD_KEY] = self.cmd_transform(tensordict[CMD_KEY])
