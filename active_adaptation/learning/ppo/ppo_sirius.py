@@ -60,8 +60,9 @@ class PPOConfig:
     name: str = "ppo_sirius"
     train_every: int = 32
     ppo_epochs: int = 4
-    num_minibatches: int = 8
+    num_minibatches: int = 4
     lr: float = 5e-4
+    desired_kl: Union[float, None] = None
     clip_param: float = 0.2
     entropy_coef: float = 0.003
 
@@ -154,6 +155,7 @@ class PPOPolicy(ModBase):
         self.entropy_coef = self.cfg.entropy_coef
         self.clip_param = self.cfg.clip_param
         self.critic_loss_fn = nn.MSELoss(reduction="none")
+        self.desired_kl = self.cfg.desired_kl
         self.action_dim = action_spec.shape[-1]
         self.gae = GAE(0.99, 0.95)
         self.symaug = self.cfg.symaug
@@ -311,7 +313,7 @@ class PPOPolicy(ModBase):
     def get_rollout_policy(self, mode: str="train"):
         if self.cfg.phase == "train":
             policy = Seq(self.priv_encoder, self.actor_teacher)
-            out_keys = [ACTION_KEY, "action_log_prob", "actor_input"]
+            out_keys = [ACTION_KEY, "action_log_prob", "actor_input", "loc", "scale"]
         else:
             policy = Seq(self.adapt_module, self.actor_student) 
             out_keys = [ACTION_KEY, "action_log_prob", ("next", "hx"), "actor_input"]
@@ -364,6 +366,15 @@ class PPOPolicy(ModBase):
             batch = make_batch(tensordict, self.cfg.num_minibatches, self.cfg.train_every)
             for minibatch in batch:
                 infos.append(self.update_teacher(minibatch))
+
+                if self.desired_kl is not None: # adaptive learning rate
+                    kl = infos[-1]["actor/kl"]
+                    actor_lr = self.opt_teacher.param_groups[0]["lr"]
+                    if kl > self.desired_kl * 2.0:
+                        actor_lr = max(1e-5, actor_lr / 1.5)
+                    elif kl < self.desired_kl / 2.0 and kl > 0.0:
+                        actor_lr = min(1e-2, actor_lr * 1.5)
+                    self.opt_teacher.param_groups[0]["lr"] = actor_lr
         
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
         infos["actor/feature_norm"] = actor_feature_norm.item()
@@ -450,6 +461,8 @@ class PPOPolicy(ModBase):
 
     def _update(self, tensordict: TensorDict, encoder: Mod, actor: ProbabilisticActor, critic: Mod, opt: torch.optim.Optimizer):
         bsize = tensordict.shape[0]
+        loc_old, scale_old = tensordict["loc"], tensordict["scale"]
+
         symmetry = tensordict.empty()
         symmetry[CMD_KEY] = self.cmd_transform(tensordict[CMD_KEY])
         symmetry[OBS_KEY] = self.obs_transform(tensordict[OBS_KEY])
@@ -470,7 +483,8 @@ class PPOPolicy(ModBase):
         entropy = dist.entropy().mean()
 
         adv = tensordict["adv"]
-        ratio = torch.exp(log_probs - tensordict["action_log_prob"]).unsqueeze(-1)
+        log_ratio = (log_probs - tensordict["action_log_prob"]).unsqueeze(-1)
+        ratio = torch.exp(log_ratio)
         surr1 = adv * ratio
         surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
         policy_loss = - torch.mean(torch.min(surr1, surr2))
@@ -507,13 +521,19 @@ class PPOPolicy(ModBase):
         with torch.no_grad():
             explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
             clipfrac = ((ratio - 1.0).abs() > self.clip_param).float().mean()
+            loc, scale = dist.loc[:bsize], dist.scale[:bsize]
+            kl = torch.sum(
+                torch.log(scale) - torch.log(scale_old)
+                + (torch.square(scale_old) + torch.square(loc_old - loc)) / (2.0 * torch.square(scale))
+                - 0.5,
+                axis=-1,
+            ).mean()
             info["actor/clamp_ratio"] = clipfrac
-            info["actor/explained_var"] = explained_var
+            info["critic/explained_var"] = explained_var
+            info["actor/kl"] = kl
+            info["actor/approx_kl"] = ((ratio - 1.0) - log_ratio).mean()
             if self.symaug:
-                symmetry_loss = F.mse_loss(
-                    actor.get_dist(self.priv_encoder(symmetry)).mean, 
-                    self.act_transform(dist.mean[:bsize])
-                )
+                symmetry_loss = F.mse_loss(dist.mean[bsize:], self.act_transform(dist.mean[:bsize]))
                 info["actor/symmetry_loss"] = symmetry_loss
         return info
 
