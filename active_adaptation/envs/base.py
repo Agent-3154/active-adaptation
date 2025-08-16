@@ -506,7 +506,7 @@ class _Env(EnvBase):
     def get_extra_state(self) -> dict:
         return dict(self.extra)
 
-    def close(self):
+    def close(self, *, raise_if_closed: bool = True):
         if not self.is_closed:
             if self.backend == "isaac":
                 # destructor is order-sensitive
@@ -515,7 +515,7 @@ class _Env(EnvBase):
                 self.sim.clear_all_callbacks()
                 self.sim.clear_instance()
                 # update closing status
-            super().close()
+            super().close(raise_if_closed=raise_if_closed)
 
 
 class RewardGroup:

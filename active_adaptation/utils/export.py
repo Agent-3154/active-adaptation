@@ -1,4 +1,5 @@
 import torch
+import onnx, onnxscript
 from tensordict import TensorDictBase
 from tensordict.nn import TensorDictModuleBase as ModBase
 
@@ -10,9 +11,12 @@ def export_onnx(module: ModBase, td: TensorDictBase, path: str, meta=None):
 
     td = td.cpu().select(*module.in_keys, strict=True)
     module = module.cpu()
-    print(torch.__version__)
-    # breakpoint()
-    onnx_program = torch.onnx.dynamo_export(module, **td.to_dict())
+    
+    onnx_program = torch.onnx.export(
+        module,
+        kwargs=td.to_dict(),
+        dynamo=True,
+    )
     onnx_program.save(path)
     print(f"Exported ONNX model to {path}.")
 
@@ -21,12 +25,16 @@ def export_onnx(module: ModBase, td: TensorDictBase, path: str, meta=None):
     meta_path = path.replace(".onnx", ".json")
     if meta is None:
         meta = {}
+    meta["torch_version"] = str(torch.__version__)
+    meta["onnx_version"] = str(onnx.__version__)
+    meta["onnxscript_version"] = str(onnxscript.__version__)
     meta["in_keys"] = module.in_keys
     meta["out_keys"] = module.out_keys
     meta["in_shapes"] = ([td[k].shape for k in module.in_keys],)
 
     json.dump(meta, open(meta_path, "w"), indent=4)
     print(f"Exported metadata to {meta_path}.")
+    print(f"torch version: {torch.__version__}, onnx version: {onnx.__version__}, onnxscript version: {onnxscript.__version__}")
 
     import onnxruntime as ort
 
