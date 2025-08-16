@@ -81,7 +81,7 @@ reward:
     action_rate_l2:     {weight: 0.01, enabled: true}
     action_rate2_l2:    {weight: 0.002, enabled: true}
 
-    survival:           {weight: 1.0, enabled: true}
+    survival:           {weight: 2.0, enabled: true}
     lateral_swing_height: {weight: 2.0, enabled: true, feet_names: .*_FOOT}
     undesired_contact:  {body_names: ["trunk", ".*(hip|thigh|calf)"], weight: 0.25, enabled: true}
     wheel_contact_direction: {weight: 0.5, enabled: true}

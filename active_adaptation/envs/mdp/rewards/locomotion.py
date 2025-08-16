@@ -1342,8 +1342,8 @@ class lateral_swing_height(Reward):
         )
         feet_height_w = feet_pos_w[:, :, 2] - self.env.get_ground_height_at(feet_pos_w) # [N, 4]
         rew = torch.where(
-            feet_lin_vel_b[:, :, 1].abs() > 0.4,
-            (feet_height_w - self.target_height).clamp_max(0.),
+            feet_lin_vel_b[:, :, 1].abs() > 0.1,
+            (feet_height_w - self.target_height).clamp_max(0.05),
             0.
         )
         return rew.sum(1, True)
