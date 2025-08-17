@@ -536,7 +536,7 @@ class RewardGroup:
             ema_cnt.mul_(EMA_DECAY).add_(count)
             if func.enabled:
                 rewards.append(reward)
-        if len(rewards):
+        if self.enabled_rewards > 0:
             return sum(rewards)
         else:
             return torch.zeros((self.env.num_envs, 1), device=self.env.device)
