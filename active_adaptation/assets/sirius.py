@@ -48,13 +48,12 @@ SIRIUS_WHEEL_CFG = ArticulationCfg(
         "base_legs": ImplicitActuatorCfg(
             joint_names_expr=".*",
             effort_limit_sim={
-                ".*_HAA": 40.,
-                ".*_HFE": 40.,
+                ".*_HAA": 50.,
+                ".*_HFE": 50.,
                 ".*_KFE": 80.,
                 ".*_WHEEL": 80.
             },
-            velocity_limit=40.,
-            velocity_limit_sim=40.,
+            velocity_limit_sim=80.,
             # saturation_effort=100.0,
             stiffness={
                 ".*_HAA": 40.,

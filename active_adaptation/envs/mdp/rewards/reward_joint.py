@@ -75,6 +75,36 @@ class joint_vel_l2(Reward):
         return -joint_vel.square().sum(1, True)
 
 
+class joint_vel_limits(Reward):
+    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*", factor: float = 0.8):
+        super().__init__(env, weight, enabled)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
+        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
+        self.limits = torch.abs(self.asset.data.joint_vel_limits[:, self.joint_ids]) * factor
+    
+    def compute(self) -> torch.Tensor:
+        jvel = self.asset.data.joint_vel[:, self.joint_ids]
+        low, high = -self.limits, self.limits
+        violation = (low - jvel).clamp_min(0) + (jvel - high).clamp_min(0)
+        return - violation.sum(1, True)
+
+
+class joint_torque_limits(Reward):
+    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*", factor: float = 0.8):
+        super().__init__(env, weight, enabled)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
+        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
+        self.soft_limits = torch.abs(self.asset.data.joint_effort_limits[:, self.joint_ids]) * factor
+    
+    def compute(self) -> torch.Tensor:
+        applied_torque = self.asset.data.applied_torque[:, self.joint_ids]
+        low, high = -self.soft_limits, self.soft_limits
+        violation = (low - applied_torque).clamp_min(0) + (applied_torque - high).clamp_min(0)
+        return - violation.sum(1, True)
+
+
 class joint_deviation_l1(Reward):
     def __init__(self, env, weight: float, enabled: bool = True, joint_names: str=".*"):
         super().__init__(env, weight, enabled)

@@ -1349,18 +1349,6 @@ class lateral_swing_height(Reward):
         return rew.sum(1, True)
 
 
-class joint_torque_limits(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.soft_limits = torch.abs(self.asset.data.joint_effort_limits * 0.9)
-    
-    def compute(self) -> torch.Tensor:
-        violation_high = (self.asset.data.applied_torque - self.soft_limits).clamp_min(0.)
-        violation_low = (-self.soft_limits - self.asset.data.applied_torque).clamp_min(0.)
-        return - (violation_high + violation_low).sum(1, True)
-
-
 class action_rate_l2(Reward):
     """Penalize the rate of change of the action"""
     def __init__(self, env, weight: float, enabled: bool = True):
