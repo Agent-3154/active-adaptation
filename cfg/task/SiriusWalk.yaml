@@ -61,11 +61,11 @@ observation:
 
 reward:
   loco:
-    lin_vel_exp:        {weight: 1.75, enabled: true}
+    lin_vel_xy_exp:        {weight: 1.75, enabled: true}
     ang_vel_z_exp:      {weight: 1.5, enabled: true}
     pitch_exp:          {weight: 1.5, enabled: true}
     angvel_xy_l2:       {weight: 0.01, enabled: true}
-    linvel_z_l2:        {weight: 0.5, enabled: true}
+    lin_vel_z_l2:        {weight: 0.5, enabled: true}
     sirius_base_height:  {weight: 1.0, enabled: true}
     contact_pattern:    {weight: 1.0, enabled: true}
     sirius_jump_landing: {weight: 10.0, enabled: true}
@@ -88,7 +88,7 @@ reward:
     joint_deviation_l2: {weight: 0.1, enabled: true, joint_names: .*HAA}
     joint_vel_l2:       {weight: 0.002, enabled: true, joint_names: .*_(HFE|KFE)}
   safety:
-    joint_torque_limits: {weight: 0.2, enabled: true, factor: 0.8}
+    joint_torque_limits: {weight: 0.2, enabled: true, joint_names: .*_(HFE|KFE), factor: 0.8}
     joint_vel_limits:    {weight: 0.1, enabled: true, joint_names: .*_(HFE|KFE), factor: 0.8}
   debug:
     joint_torques_l2:   {weight: 1.0e-4, enabled: false}

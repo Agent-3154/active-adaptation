@@ -108,6 +108,8 @@ class joint_torque_limits(Reward):
     def compute(self) -> torch.Tensor:
         low, high = -self.soft_limits, self.soft_limits
         violation = (low - self.applied_torque).clamp_min(0) + (self.applied_torque - high).clamp_min(0)
+        discount = torch.exp(- violation * 0.25).prod(1, True)
+        self.env.discount.mul_(discount)
         return - violation.sum(1, True)
 
 

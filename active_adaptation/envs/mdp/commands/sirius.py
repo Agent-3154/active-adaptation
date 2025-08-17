@@ -1,5 +1,6 @@
 import torch
 import math
+import warp as wp
 
 from tensordict import TensorClass
 from typing import TYPE_CHECKING
@@ -609,7 +610,7 @@ class ground_impact(Reward[SiriusCommandManager]):
         self.env.debug_draw.vector(body_pos_w, incoming_joint_force_w * 0.2, color=(1, 0, 0, 1))
 
 
-class lin_vel_exp(Reward[SiriusCommandManager]):
+class lin_vel_xy_exp(Reward[SiriusCommandManager]):
     def compute(self):
         quat_yaw = yaw_quat(self.command_manager.asset.data.root_quat_w)
         cmd_lin_vel_b = self.command_manager._command.cmd_lin_vel
@@ -617,6 +618,13 @@ class lin_vel_exp(Reward[SiriusCommandManager]):
         lin_vel_w = self.command_manager.asset.data.root_lin_vel_w
         error = torch.square(cmd_lin_vel_w[:, :2] - lin_vel_w[:, :2]).sum(1, True)
         return torch.exp( -error / 0.25) - 0.5 * error.sqrt()
+
+
+class lin_vel_z_l2(Reward[SiriusCommandManager]):
+    def compute(self) -> torch.Tensor:
+        is_active = self.command_manager._command.mode == self.command_manager.CMD_WALK
+        linvel_z = self.command_manager.asset.data.root_lin_vel_b[:, 2].unsqueeze(1)
+        return - linvel_z.square(), is_active.reshape(self.num_envs, 1)
 
 
 class ang_vel_z_exp(Reward[SiriusCommandManager]):
