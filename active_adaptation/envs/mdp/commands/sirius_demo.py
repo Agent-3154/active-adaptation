@@ -6,12 +6,32 @@ from active_adaptation.utils.math import wrap_to_pi, quat_from_euler_xyz
 from active_adaptation.utils.symmetry import SymmetryTransform
 
 
+@wp.kernel
+def sample_command(
+    heading_w: wp.array(dtype=wp.float32),
+    cmd_lin_vel_w: wp.array(dtype=wp.vec3),
+    cmd_lin_vel_b: wp.array(dtype=wp.vec3),
+    cmd_rpy_w: wp.array(dtype=wp.vec3),
+    cmd_ang_vel_w: wp.array(dtype=wp.vec3),
+    sample: wp.array(dtype=wp.bool),
+    seed: wp.int32,
+):
+    tid = wp.tid()
+    seed_ = wp.rand_init(seed, tid)
+    if sample[tid]:
+        cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_, 0.5, 1.0), 0.0, 0.0)
+        cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
+        cmd_ang_vel_w[tid].z = wp.randf(seed_, wp.PI / 4.0, wp.PI / 2.0)
+
+
 class SiriusDemoCommand(Command):
     def __init__(self, env, teleop: bool = False) -> None:
         super().__init__(env, teleop)
         
         with torch.device(self.device):
             self.cmd_lin_vel_w = torch.zeros(self.num_envs, 3)
+            self.cmd_lin_vel_b = torch.zeros(self.num_envs, 3)
+            self.cmd_ang_vel_w = torch.zeros(self.num_envs, 3)
             self.cmd_rpy_w = torch.zeros(self.num_envs, 3)
             self.cmd_contact = torch.zeros(self.num_envs, 4)
             self.cmd_time = torch.zeros(self.num_envs, 1)
@@ -25,18 +45,26 @@ class SiriusDemoCommand(Command):
                 )
             )
             self.frame_marker.set_visibility(True)
+        self.seed = wp.rand_init(0)
     
     def reset(self, env_ids: torch.Tensor):
         self.cmd_rpy_w[env_ids, 2] = - self.asset.data.heading_w[env_ids]
 
     @property
     def command(self):
-        cmd_yaw_b = wrap_to_pi(self.cmd_rpy_w[:, 2] - self.asset.data.heading_w)
-        return cmd_yaw_b.reshape(self.num_envs, -1)
+        cmd_rpy_b = self.cmd_rpy_w.clone()
+        cmd_rpy_b[:, 2] = wrap_to_pi(cmd_rpy_b[:, 2] - self.asset.data.heading_w)
+        return torch.cat([
+            self.cmd_lin_vel_b,
+            self.cmd_ang_vel_w,
+            cmd_rpy_b,
+        ], dim=1)
     
     def symmetry_transforms(self):
         return SymmetryTransform.cat([
-            SymmetryTransform(perm=torch.arange(1), signs=torch.tensor([-1])), # flip yaw
+            SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([1, -1, 1])), # flip y
+            SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])), # flip roll and yaw
+            SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])), # flip yaw
         ])
     
     @property
@@ -49,9 +77,23 @@ class SiriusDemoCommand(Command):
     
     def update(self):
         c1 = self.env.episode_length_buf % 50 == 0
-        c2 = self.yaw_error.square() < 0.2
-        c = (c1 & c2).reshape(self.num_envs)
-        self.cmd_rpy_w[c, 2] = - self.asset.data.heading_w[c]
+        c2 = torch.rand(self.num_envs, device=self.device) < 0.5
+        resample = c1 & c2
+        wp.launch(
+            sample_command,
+            dim=self.num_envs,
+            inputs=[
+                wp.from_torch(self.asset.data.heading_w, return_ctype=True),
+                wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
+                wp.from_torch(self.cmd_lin_vel_b, return_ctype=True),
+                wp.from_torch(self.cmd_rpy_w, return_ctype=True),
+                wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
+                wp.from_torch(resample, return_ctype=True),
+                self.seed,
+            ],
+            device=self.device.type,
+        )
+        self.cmd_rpy_w = self.cmd_rpy_w + self.cmd_ang_vel_w * self.env.step_dt
     
     def debug_draw(self):
         if self.env.sim.has_gui() and self.env.backend == "isaac":
@@ -67,4 +109,26 @@ class sirius_yaw(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
         error = self.command_manager.yaw_error
         return torch.cos(error).reshape(self.num_envs, -1)
+
+
+class sirius_lin_vel_xy(Reward[SiriusDemoCommand]):
+    def compute(self) -> torch.Tensor:
+        error = self.command_manager.cmd_lin_vel_b[:, :2] - self.command_manager.asset.data.root_lin_vel_b[:, :2]
+        error = error.square().sum(1, True)
+        return torch.exp(- error / 0.25)
+
+
+class sirius_ang_vel_z(Reward[SiriusDemoCommand]):
+    def compute(self) -> torch.Tensor:
+        error = self.command_manager.cmd_ang_vel_w[:, 2] - self.command_manager.asset.data.root_ang_vel_b[:, 2]
+        error = error.square().reshape(self.num_envs, 1)
+        return torch.exp(- error / 0.25)
+
+
+class sirius_base_height(Reward[SiriusDemoCommand]):
+    def compute(self) -> torch.Tensor:
+        error = 0.45 - self.command_manager.asset.data.root_pos_w[:, 2]
+        error = error.square().reshape(self.num_envs, 1)
+        rew = torch.exp(- error / 0.1)
+        return rew
 

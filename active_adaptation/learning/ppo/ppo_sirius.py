@@ -62,7 +62,7 @@ class PPOConfig:
     ppo_epochs: int = 4
     num_minibatches: int = 4
     lr: float = 5e-4
-    desired_kl: Union[float, None] = None
+    desired_kl: Union[float, None] = 0.02
     clip_param: float = 0.2
     entropy_coef: float = 0.003
 
