@@ -489,7 +489,7 @@ class PPOPolicy(ModBase):
         valid_cnt = valid.sum()
         dist = actor.get_dist(tensordict)
         log_probs = dist.log_prob(tensordict[ACTION_KEY])
-        entropy = dist.entropy()
+        entropy = (dist.entropy().reshape_as(valid) * valid).sum() / valid_cnt
 
         adv = tensordict["adv"]
         log_ratio = (log_probs - tensordict["action_log_prob"]).unsqueeze(-1)
@@ -497,7 +497,7 @@ class PPOPolicy(ModBase):
         surr1 = adv * ratio
         surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
         policy_loss = - (torch.min(surr1, surr2).reshape_as(valid) * valid).sum() / valid_cnt
-        entropy_loss = - (entropy.reshape_as(valid) * valid).sum() / valid_cnt
+        entropy_loss = - self.entropy_coef * entropy
 
         b_returns = tensordict["ret"]
         values = critic(tensordict)["state_value"]
