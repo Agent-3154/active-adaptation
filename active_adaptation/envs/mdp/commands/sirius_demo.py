@@ -81,7 +81,7 @@ class SiriusDemoCommand(Command):
             self.cmd_contact = torch.zeros(self.num_envs, 4)
             self.cmd_time = torch.zeros(self.num_envs, 1)
             self.cmd_duration = torch.zeros(self.num_envs, 1)
-            self.cmd_mode = torch.zeros(self.num_envs, 1, dtype=torch.int32)
+            self.cmd_mode = torch.zeros(self.num_envs, dtype=torch.int32)
 
         if self.env.sim.has_gui() and self.env.backend == "isaac":
             from isaaclab.markers import RED_ARROW_X_MARKER_CFG, VisualizationMarkers
@@ -106,6 +106,8 @@ class SiriusDemoCommand(Command):
                 self.cmd_lin_vel_b,
                 self.cmd_ang_vel_w,
                 cmd_rpy_b,
+                torch.nn.functional.one_hot(self.cmd_mode.long(), num_classes=2),
+                self.cmd_contact,
             ],
             dim=1,
         )
@@ -113,15 +115,11 @@ class SiriusDemoCommand(Command):
     def symmetry_transforms(self):
         return SymmetryTransform.cat(
             [
-                SymmetryTransform(
-                    perm=torch.arange(3), signs=torch.tensor([1, -1, 1])
-                ),  # flip y
-                SymmetryTransform(
-                    perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])
-                ),  # flip roll and yaw
-                SymmetryTransform(
-                    perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])
-                ),  # flip yaw
+                SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([1, -1, 1])),  # flip y
+                SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])),  # flip roll and yaw
+                SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])),  # flip yaw,
+                SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # cmd_mode: do nothing
+                SymmetryTransform(perm=torch.tensor([2, 3, 0, 1]), signs=torch.ones(4)) # cmd_contact: flip left and right
             ]
         )
 
