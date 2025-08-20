@@ -35,12 +35,12 @@ def sample_command(
     if sample[tid]:
         if next_mode[tid] == 0:
             cmd_lin_vel_w[tid] = wp.vec3()
-            cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_, 0.5, 1.0), 0.0, 0.0)
+            cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_ + 1, 0.5, 1.0), wp.randf(seed_ + 2, -0.5, 0.5), 0.0)
             use_lin_vel_w[tid] = False
             cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             yaw_rate = wp.randf(seed_, wp.PI / 4.0, wp.PI / 2.0)
             cmd_ang_vel_w[tid].z = yaw_rate * wp.sign(wp.randn(seed_))
-            cmd_duration[tid] = 3.0
+            cmd_duration[tid] = wp.randf(seed_ + 3, 1.0, 3.0)
         if next_mode[tid] == 1:
             cmd_lin_vel_w[tid] = wp.vec3(1.0, 0.0, 0.0)
             cmd_lin_vel_b[tid] = wp.vec3()
@@ -72,8 +72,8 @@ def step_command(
             cmd_height[tid] = 0.40
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
         elif time < cmd_duration[tid] - POST_JUMP_TIME:
+            cmd_height[tid] = 0.65
             cmd_contact[tid] = - wp.vec4(1.0, 1.0, 1.0, 1.0)
-            cmd_height[tid] = 0.60
         else:
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
             cmd_height[tid] = 0.45
@@ -170,7 +170,7 @@ class SiriusDemoCommand(Command):
         return wrap_to_pi(self.cmd_rpy_w[:, 2] - self.asset.data.heading_w)
 
     def update(self):
-        c1 = self.env.episode_length_buf % 50 == 0
+        c1 = self.env.episode_length_buf % 25 == 0
         c2 = torch.rand(self.num_envs, device=self.device) < 0.5
         c3 = (self.cmd_time > self.cmd_duration).squeeze(1)
         resample = (c1 & c2 & c3)
