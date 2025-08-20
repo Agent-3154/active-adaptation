@@ -2,7 +2,12 @@ import torch
 import warp as wp
 
 from active_adaptation.envs.mdp.base import Command, Reward
-from active_adaptation.utils.math import quat_from_euler_xyz, quat_rotate, wrap_to_pi
+from active_adaptation.utils.math import (
+    quat_rotate,
+    quat_rotate_inverse,
+    quat_from_euler_xyz,
+    wrap_to_pi,
+)
 from active_adaptation.utils.symmetry import SymmetryTransform
 
 
@@ -51,6 +56,7 @@ def step_command(
     cmd_ang_vel_w: wp.array(dtype=wp.vec3),
     cmd_rpy_w: wp.array(dtype=wp.vec3),
     cmd_contact: wp.array(dtype=wp.vec4),
+    cmd_height: wp.array(dtype=wp.float32),
     mode: wp.array(dtype=wp.int32),
     cmd_time: wp.array(dtype=wp.float32),
     cmd_duration: wp.array(dtype=wp.float32),
@@ -58,12 +64,14 @@ def step_command(
     tid = wp.tid()
     time = cmd_time[tid]
     if mode[tid] == 0:
-        pass
+        cmd_height[tid] = 0.45
     elif mode[tid] == 1:  # jump
         if time > PRE_JUMP_TIME and time < cmd_duration[tid] - POST_JUMP_TIME:
             cmd_contact[tid] = -wp.vec4(1.0, 1.0, 1.0, 1.0)
+            cmd_height[tid] = 0.60
         else:
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
+            cmd_height[tid] = 0.45
     cmd_time[tid] += 0.02
     cmd_rpy_w[tid] += cmd_ang_vel_w[tid] * 0.02
 
@@ -76,6 +84,7 @@ class SiriusDemoCommand(Command):
             self.cmd_lin_vel_w = torch.zeros(self.num_envs, 3)
             self.cmd_lin_vel_b = torch.zeros(self.num_envs, 3)
             self.use_lin_vel_w = torch.zeros(self.num_envs, 1, dtype=bool)
+            self.cmd_height = torch.zeros(self.num_envs, 1)
             self.cmd_ang_vel_w = torch.zeros(self.num_envs, 3)
             self.cmd_rpy_w = torch.zeros(self.num_envs, 3)
             self.cmd_contact = torch.zeros(self.num_envs, 4)
@@ -103,7 +112,7 @@ class SiriusDemoCommand(Command):
         cmd_rpy_b[:, 2] = wrap_to_pi(cmd_rpy_b[:, 2] - self.asset.data.heading_w)
         return torch.cat(
             [
-                self.cmd_lin_vel_b,
+                self.obs_cmd_lin_vel_b,
                 self.cmd_ang_vel_w,
                 cmd_rpy_b,
                 torch.nn.functional.one_hot(self.cmd_mode.long(), num_classes=2),
@@ -135,9 +144,8 @@ class SiriusDemoCommand(Command):
         c1 = self.env.episode_length_buf % 50 == 0
         c2 = torch.rand(self.num_envs, device=self.device) < 0.5
         resample = c1 & c2
-        next_mode = torch.randint(
-            0, 2, (self.num_envs,), dtype=torch.int32, device=self.device
-        )
+        next_mode_prob = torch.tensor([0.6, 0.4], device=self.device).expand(self.num_envs, 2)
+        next_mode = next_mode_prob.multinomial(1, replacement=True).squeeze(-1)
 
         wp.launch(
             sample_command,
@@ -165,6 +173,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_rpy_w, return_ctype=True),
                 wp.from_torch(self.cmd_contact, return_ctype=True),
+                wp.from_torch(self.cmd_height, return_ctype=True),
                 wp.from_torch(self.cmd_mode, return_ctype=True),
                 wp.from_torch(self.cmd_time, return_ctype=True),
                 wp.from_torch(self.cmd_duration, return_ctype=True),
@@ -172,6 +181,14 @@ class SiriusDemoCommand(Command):
             device=self.device.type,
         )
 
+    @property
+    def obs_cmd_lin_vel_b(self):
+        return torch.where(
+            self.use_lin_vel_w,
+            quat_rotate_inverse(self.asset.data.root_quat_w, self.cmd_lin_vel_w),
+            self.cmd_lin_vel_b,
+        )
+    
     @property
     def des_cmd_lin_vel_w(self):
         return torch.where(
@@ -224,7 +241,8 @@ class sirius_ang_vel_z(Reward[SiriusDemoCommand]):
 
 class sirius_base_height(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
-        error = 0.45 - self.command_manager.asset.data.root_pos_w[:, 2]
+        root_height = self.command_manager.asset.data.root_pos_w[:, 2:3]
+        error = self.command_manager.cmd_height - root_height
         error = error.square().reshape(self.num_envs, 1)
         rew = torch.exp(-error / 0.1)
         return rew
