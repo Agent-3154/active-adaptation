@@ -1124,11 +1124,14 @@ class drive_model_properties(Randomization):
         self.velocity_resistance_range = velocity_resistance_range
         self.drive_model_properties = self.asset.root_physx_view.get_dof_drive_model_properties().clone()
 
-    def reset(self, env_ids: torch.Tensor):
+    def startup(self):
         properties = self.drive_model_properties.clone()
-        zeros = torch.zeros(self.num_envs, len(self.joint_ids), device=self.device)
+        zeros = torch.zeros(self.num_envs, len(self.joint_ids))
         properties[:, self.joint_ids, 2] = zeros.uniform_(*self.velocity_resistance_range)
-        self.asset.root_physx_view.set_dof_drive_model_properties(properties, indices=env_ids)
+        self.asset.root_physx_view.set_dof_drive_model_properties(
+            data=properties,
+            indices=torch.arange(self.num_envs)
+        )
 
 
 def clamp_norm(x: torch.Tensor, min: float = 0.0, max: float = torch.inf):

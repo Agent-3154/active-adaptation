@@ -24,36 +24,17 @@ def termination_wrapper(func):
 
 
 class crash(Termination):
-    def __init__(
-        self, 
-        env, 
-        body_names_expr: str,
-        t_thres: float = 0.,
-        min_time: float = 0.,
-        **kwargs
-    ):
+    def __init__(self, env, body_names_expr: str, t_thres: float = 0.):
         super().__init__(env)
+        self.t_thres = t_thres
         self.asset: Articulation = self.env.scene["robot"]
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
         self.body_indices, self.body_names = self.contact_sensor.find_bodies(body_names_expr)
-        self.t_thres = t_thres
-        self._decay = 0.98
-        self._thres = (self.t_thres / self.env.physics_dt) * 0.9
-        self.count = torch.zeros(self.num_envs, len(self.body_indices), device=self.env.device)
-        self.min_steps = int(min_time / self.env.step_dt)
-        print(f"Terminate upon contact on {self.body_names}")
-    
-    def reset(self, env_ids):
-        self.count[env_ids] = 0.
-    
-    def update(self):
-        in_contact = self.contact_sensor.data.net_forces_w[:, self.body_indices].norm(dim=-1) > 1.0
-        self.count.add_(in_contact.float()).mul_(self._decay)
         
     def compute(self, termination: torch.Tensor):
-        valid = (self.env.episode_length_buf > self.min_steps)
-        undesired_contact = (self.count > self._thres).any(-1)
-        return (undesired_contact & valid).reshape(self.num_envs, 1)
+        contact_time = self.contact_sensor.data.current_contact_time[:, self.body_indices]
+        return (contact_time > self.t_thres).any(1, True)
+
 
 class soft_contact(Termination):
     def __init__(self, env, body_names: str):

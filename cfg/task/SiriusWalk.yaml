@@ -90,15 +90,15 @@ reward:
     joint_deviation_l2: {weight: 0.1, enabled: true, joint_names: .*HAA}
     joint_vel_l2:       {weight: 0.002, enabled: true, joint_names: .*_(HFE|KFE)}
   safety:
-    joint_torque_limits: {weight: 0.2, enabled: true, joint_names: .*_(HFE|KFE), factor: 0.8}
+    # joint_torque_limits: {weight: 0.2, enabled: true, joint_names: .*_(HFE|KFE), factor: 0.8}
     joint_vel_limits:    {weight: 0.1, enabled: true, joint_names: .*_(HFE|KFE), factor: 0.8}
   debug:
     joint_torques_l2:   {weight: 1.0e-4, enabled: false}
     feet_contact_count: {weight: 1.0, enabled: false, body_names: .*_FOOT}
 
 termination:
-  crash_leg(crash): {body_names_expr: [".*thigh"], t_thres: 0.03}
-  crash_body(crash): {body_names_expr: ["trunk", ".*hip"], t_thres: 0.03}
+  crash_leg(crash): {body_names_expr: [".*thigh"], t_thres: 0.004}
+  crash_body(crash): {body_names_expr: ["trunk", ".*hip"], t_thres: 0.004}
   # stand_error_exceeds: {}
 
 randomization:
