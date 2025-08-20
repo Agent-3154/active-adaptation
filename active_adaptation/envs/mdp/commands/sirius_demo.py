@@ -68,7 +68,10 @@ def step_command(
         cmd_height[tid] = 0.45
         cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
     elif mode[tid] == 1:  # jump
-        if time > PRE_JUMP_TIME and time < cmd_duration[tid] - POST_JUMP_TIME:
+        if time < PRE_JUMP_TIME:
+            cmd_height[tid] = 0.40
+            cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
+        elif time < cmd_duration[tid] - POST_JUMP_TIME:
             cmd_contact[tid] = - wp.vec4(1.0, 1.0, 1.0, 1.0)
             cmd_height[tid] = 0.60
         else:

@@ -233,6 +233,7 @@ class _Env(EnvBase):
             print(f"Reward group: {group_name}")
             funcs = OrderedDict()
             self._stats_ema[group_name] = {}
+            eval_func = eval(func_specs.pop("_eval_", "lambda *args: sum(args)"))
 
             for rew_spec, params in func_specs.items():
                 rew_name, cls_name = parse_name_and_class(rew_spec)
@@ -248,7 +249,7 @@ class _Env(EnvBase):
                 print(f"\t{rew_name}: \t{reward.weight:.2f}, \t{reward.enabled}")
                 self._stats_ema[group_name][rew_name] = (torch.tensor(0., device=self.device), torch.tensor(0., device=self.device))
 
-            self.reward_groups[group_name] = RewardGroup(self, group_name, funcs)
+            self.reward_groups[group_name] = RewardGroup(self, group_name, funcs, eval_func)
             reward_spec["stats", group_name, "return"] = UnboundedContinuous(1, device=self.device)
 
         reward_spec["reward"] = UnboundedContinuous(max(1, len(self.reward_groups)), device=self.device)
@@ -519,12 +520,12 @@ class _Env(EnvBase):
 
 
 class RewardGroup:
-    def __init__(self, env: _Env, name: str, funcs: OrderedDict[str, mdp.Reward]):
+    def __init__(self, env: _Env, name: str, funcs: OrderedDict[str, mdp.Reward], eval_func):
         self.env = env
         self.name = name
         self.funcs = funcs
+        self.eval_func = eval_func
         self.enabled_rewards = sum([func.enabled for func in funcs.values()])
-        self.rew_buf = torch.zeros(env.num_envs, self.enabled_rewards, device=env.device)
     
     def compute(self) -> torch.Tensor:
         rewards = []
