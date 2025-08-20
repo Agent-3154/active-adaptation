@@ -287,6 +287,7 @@ class sirius_contact(Reward[SiriusDemoCommand]):
 
     def compute(self) -> torch.Tensor:
         contact_forces = self.contact_forces.data.net_forces_w[:, self.foot_ids]
-        in_contact = contact_forces.norm(dim=-1) > 1.0
+        in_contact = contact_forces.norm(dim=-1) > 0.2
         rew = (in_contact * self.command_manager.cmd_contact).sum(1, True)
-        return rew
+        return torch.exp(rew)
+
