@@ -38,8 +38,9 @@ def sample_command(
             cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_, 0.5, 1.0), 0.0, 0.0)
             use_lin_vel_w[tid] = False
             cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
-            cmd_ang_vel_w[tid].z = wp.randf(seed_, wp.PI / 4.0, wp.PI / 2.0)
-            cmd_duration[tid] = 0.0
+            yaw_rate = wp.randf(seed_, wp.PI / 4.0, wp.PI / 2.0)
+            cmd_ang_vel_w[tid].z = yaw_rate * wp.sign(wp.randn(seed_))
+            cmd_duration[tid] = 3.0
         if next_mode[tid] == 1:
             cmd_lin_vel_w[tid] = wp.vec3(1.0, 0.0, 0.0)
             cmd_lin_vel_b[tid] = wp.vec3()
@@ -65,9 +66,10 @@ def step_command(
     time = cmd_time[tid]
     if mode[tid] == 0:
         cmd_height[tid] = 0.45
+        cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
     elif mode[tid] == 1:  # jump
         if time > PRE_JUMP_TIME and time < cmd_duration[tid] - POST_JUMP_TIME:
-            cmd_contact[tid] = -wp.vec4(1.0, 1.0, 1.0, 1.0)
+            cmd_contact[tid] = - wp.vec4(1.0, 1.0, 1.0, 1.0)
             cmd_height[tid] = 0.60
         else:
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
@@ -104,8 +106,29 @@ class SiriusDemoCommand(Command):
         self.seed = wp.rand_init(0)
 
     def reset(self, env_ids: torch.Tensor):
-        self.cmd_rpy_w[env_ids, 2] = -self.asset.data.heading_w[env_ids]
-
+        resample = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        resample[env_ids] = True
+        next_mode = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        wp.launch(
+            sample_command,
+            dim=self.num_envs,
+            inputs=[
+                wp.from_torch(self.asset.data.heading_w, return_ctype=True),
+                wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
+                wp.from_torch(self.cmd_lin_vel_b, return_ctype=True),
+                wp.from_torch(self.use_lin_vel_w, return_ctype=True),
+                wp.from_torch(self.cmd_rpy_w, return_ctype=True),
+                wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
+                wp.from_torch(resample, return_ctype=True),
+                wp.from_torch(self.cmd_mode, return_ctype=True),
+                wp.from_torch(next_mode, return_ctype=True),
+                wp.from_torch(self.cmd_time, return_ctype=True),
+                wp.from_torch(self.cmd_duration, return_ctype=True),
+                self.seed,
+            ],
+            device=self.device.type,
+        )
+        
     @property
     def command(self):
         cmd_rpy_b = self.cmd_rpy_w.clone()
@@ -143,7 +166,8 @@ class SiriusDemoCommand(Command):
     def update(self):
         c1 = self.env.episode_length_buf % 50 == 0
         c2 = torch.rand(self.num_envs, device=self.device) < 0.5
-        resample = c1 & c2
+        c3 = (self.cmd_time > self.cmd_duration).squeeze(1)
+        resample = (c1 & c2 & c3)
         next_mode_prob = torch.tensor([0.6, 0.4], device=self.device).expand(self.num_envs, 2)
         next_mode = next_mode_prob.multinomial(1, replacement=True).squeeze(-1)
 
@@ -162,7 +186,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(next_mode, return_ctype=True),
                 wp.from_torch(self.cmd_time, return_ctype=True),
                 wp.from_torch(self.cmd_duration, return_ctype=True),
-                self.seed,
+                self.env.timestamp,
             ],
             device=self.device.type,
         )
@@ -200,9 +224,10 @@ class SiriusDemoCommand(Command):
     def debug_draw(self):
         if self.env.sim.has_gui() and self.env.backend == "isaac":
             quat = quat_from_euler_xyz(*self.cmd_rpy_w.unbind(1))
+            translations = self.asset.data.root_pos_w.clone()
+            translations[:, 2:3] = self.cmd_height
             self.frame_marker.visualize(
-                translations=self.asset.data.root_pos_w
-                + torch.tensor([0.0, 0.0, 0.2], device=self.device),
+                translations=translations + torch.tensor([0.0, 0.0, 0.2], device=self.device),
                 orientations=quat,
                 scales=torch.tensor([4.0, 1.0, 0.1]).expand(self.num_envs, 3),
             )
