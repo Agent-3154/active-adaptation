@@ -138,6 +138,8 @@ class SiriusDemoCommand(Command):
                 self.obs_cmd_lin_vel_b,
                 self.cmd_ang_vel_w,
                 cmd_rpy_b,
+                torch.where(self.cmd_mode[:, None] == 1, self.cmd_time, torch.zeros_like(self.cmd_time)),
+                torch.where(self.cmd_mode[:, None] == 1, self.cmd_duration - self.cmd_time, torch.zeros_like(self.cmd_time)),
                 torch.nn.functional.one_hot(self.cmd_mode.long(), num_classes=2),
                 self.cmd_contact,
             ],
@@ -150,6 +152,7 @@ class SiriusDemoCommand(Command):
                 SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([1, -1, 1])),  # flip y
                 SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])),  # flip roll and yaw
                 SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])),  # flip yaw,
+                SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # phase: do nothing
                 SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # cmd_mode: do nothing
                 SymmetryTransform(perm=torch.tensor([2, 3, 0, 1]), signs=torch.ones(4)) # cmd_contact: flip left and right
             ]
