@@ -13,17 +13,20 @@ setup(
         "active_adaptation_projects",
         "scripts",
     ],
-    version="0.1.2",
+    version="0.1.3",
     install_requires=[
+        "setproctitle",
         "hydra-core",
         "omegaconf",
         "wandb",
         "moviepy",
-        "imageio",
-        "einops",
         "av", # for moviepy
-        "pandas",
+        "einops",
         "termcolor",
         "pygame", # for game controller
+        "tensordict",
+        "torchrl",
+        "mujoco",
+        "linuxfd",
     ],
 )
