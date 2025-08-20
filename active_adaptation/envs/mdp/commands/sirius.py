@@ -485,23 +485,23 @@ class no_drift(Reward[SiriusCommandManager]):
         return rew.reshape(self.num_envs, 1)
 
 
-# class sirius_base_height(Reward[SiriusCommandManager]):
-#     def __init__(self, env, weight: float, enabled: bool = True):
-#         super().__init__(env, weight, enabled)
-#         self.asset = self.command_manager.asset
-#         self.fore_hip_ids = self.asset.find_bodies("[L,R]F_hip")[0]
-#         self.hind_hip_ids = self.asset.find_bodies("[L,R]H_hip")[0]
+class sirius_base_height(Reward[SiriusCommandManager]):
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.asset = self.command_manager.asset
+        self.fore_hip_ids = self.asset.find_bodies("[L,R]F_hip")[0]
+        self.hind_hip_ids = self.asset.find_bodies("[L,R]H_hip")[0]
 
-#     def compute(self) -> torch.Tensor:
-#         is_active = self.command_manager._command.mode == self.command_manager.CMD_WALK
-#         fore_height = self.asset.data.body_pos_w[:, self.fore_hip_ids, 2].mean(dim=1)
-#         hind_height = self.asset.data.body_pos_w[:, self.hind_hip_ids, 2].mean(dim=1)
-#         des_height = self.command_manager._command.des_height
-#         rew = 0.5 * (
-#             torch.exp( - (fore_height - des_height[:, 0]).square() / 0.1)
-#             + torch.exp( - (hind_height - des_height[:, 1]).square() / 0.1)
-#         )
-#         return rew.reshape(self.num_envs, 1), is_active.reshape(self.num_envs, 1)
+    def compute(self) -> torch.Tensor:
+        is_active = self.command_manager._command.mode == self.command_manager.CMD_WALK
+        fore_height = self.asset.data.body_pos_w[:, self.fore_hip_ids, 2].mean(dim=1)
+        hind_height = self.asset.data.body_pos_w[:, self.hind_hip_ids, 2].mean(dim=1)
+        des_height = self.command_manager._command.des_height
+        rew = 0.5 * (
+            torch.exp( - (fore_height - des_height[:, 0]).square() / 0.1)
+            + torch.exp( - (hind_height - des_height[:, 1]).square() / 0.1)
+        )
+        return rew.reshape(self.num_envs, 1), is_active.reshape(self.num_envs, 1)
 
 
 class wheel_contact_direction(Reward[SiriusCommandManager]):

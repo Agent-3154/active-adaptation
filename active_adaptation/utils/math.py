@@ -133,6 +133,20 @@ def sample_quat_yaw(size, yaw_range=(0, torch.pi * 2), device: torch.device = "c
     return quat
 
 
+def normal_noise(x: torch.Tensor, std: float):
+    """
+    Add normal noise to a tensor. Clamp the noise to 3 standard deviations for stability.
+    """
+    return x + torch.randn_like(x).clamp(-3., 3.) * std
+
+
+def uniform_noise(x: torch.Tensor, min: float, max: float):
+    """
+    Add uniform noise to a tensor.
+    """
+    return x + torch.rand_like(x) * (max - min) + min
+
+
 class MultiUniform(D.Distribution):
     """
     A distribution over the union of multiple disjoint intervals.

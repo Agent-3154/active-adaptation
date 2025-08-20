@@ -132,7 +132,7 @@ class GRUModule(nn.Module):
 class PPOPolicy(ModBase):
     
     train_in_keys = [CMD_KEY, OBS_KEY, OBS_PRIV_KEY, ACTION_KEY, 
-                     "adv", "ret", "is_init", "action_log_prob", ("next", "policy")]
+                     "adv", "ret", "is_init", "action_log_prob", ("next", "policy"), "joint_vel_"]
     
     teacher_in_keys = [CMD_KEY, OBS_KEY, "priv_feature"]
     student_in_keys = [CMD_KEY, OBS_KEY, "priv_feature_est"]
@@ -172,6 +172,7 @@ class PPOPolicy(ModBase):
         self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transforms().to(self.device)
         self.priv_transform = env.observation_funcs[OBS_PRIV_KEY].symmetry_transforms().to(self.device)
         self.act_transform = env.action_manager.symmetry_transforms().to(self.device)
+        self.joint_vel_transform = env.observation_funcs["joint_vel_"].symmetry_transforms().to(self.device)
 
         self.priv_encoder = Mod(
             nn.Sequential(make_mlp([128]), nn.LazyLinear(128)),
@@ -191,6 +192,7 @@ class PPOPolicy(ModBase):
                 CatTensors(self.teacher_in_keys, "actor_input", del_keys=False, sort=False),
                 Mod(actor_mlp, ["actor_input"], ["actor_input"]),
                 Mod(self._actor, ["actor_input"], ["loc", "scale"]),
+                Mod(nn.LazyLinear(16), ["actor_input"], ["joint_vel_est"])
             ),
             in_keys=["loc", "scale"],
             out_keys=[ACTION_KEY],
@@ -203,6 +205,7 @@ class PPOPolicy(ModBase):
                 CatTensors(self.student_in_keys, "actor_input", del_keys=False, sort=False),
                 Mod(actor_mlp, ["actor_input"], ["actor_input"]),
                 Mod(Actor(self.action_dim), ["actor_input"], ["loc", "scale"]),
+                Mod(nn.LazyLinear(16), ["actor_input"], ["joint_vel_est"])
             ),
             in_keys=["loc", "scale"],
             out_keys=[ACTION_KEY],
@@ -379,7 +382,7 @@ class PPOPolicy(ModBase):
                     self.opt_teacher.param_groups[0]["lr"] = actor_lr
         
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
-        infos["actor/lr"] = actor_lr
+        infos["actor/lr"] = self.opt_teacher.param_groups[0]["lr"]
         infos["actor/feature_norm"] = actor_feature_norm.item()
         # infos["critic/feature_norm"] = critic_feature_norm.item()
         infos["critic/value_mode_0"] = tensordict["ret"][mode_0].mean().item()
@@ -476,50 +479,57 @@ class PPOPolicy(ModBase):
         symmetry["adv"] = tensordict["adv"]
         symmetry["ret"] = tensordict["ret"]
         symmetry["is_init"] = tensordict["is_init"]
+        symmetry["joint_vel_"] = self.joint_vel_transform(tensordict["joint_vel_"])
         if self.symaug:
             tensordict = torch.cat([tensordict, symmetry], dim=0)
         
         if encoder is not None:
             tensordict = encoder(tensordict)
+        valid = (~tensordict["is_init"]).float()
+        valid_cnt = valid.sum()
         dist = actor.get_dist(tensordict)
         log_probs = dist.log_prob(tensordict[ACTION_KEY])
-        entropy = dist.entropy().mean()
+        entropy = dist.entropy()
 
         adv = tensordict["adv"]
         log_ratio = (log_probs - tensordict["action_log_prob"]).unsqueeze(-1)
         ratio = torch.exp(log_ratio)
         surr1 = adv * ratio
         surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
-        policy_loss = - torch.mean(torch.min(surr1, surr2))
-        entropy_loss = - self.entropy_coef * entropy
+        policy_loss = - (torch.min(surr1, surr2).reshape_as(valid) * valid).sum() / valid_cnt
+        entropy_loss = - (entropy.reshape_as(valid) * valid).sum() / valid_cnt
 
         b_returns = tensordict["ret"]
         values = critic(tensordict)["state_value"]
         value_loss = self.critic_loss_fn(b_returns, values)
-        value_loss = (value_loss * (~tensordict["is_init"])).mean()
+        value_loss = (value_loss.reshape_as(valid) * valid).sum() / valid_cnt
+
+        aux_loss = (tensordict["joint_vel_est"] - tensordict["joint_vel_"]).abs().mean(-1)
+        aux_loss = (aux_loss.reshape_as(valid) * valid).sum() / valid_cnt
         
-        loss = policy_loss + entropy_loss + value_loss
+        loss = policy_loss + entropy_loss + value_loss + 0.5 * aux_loss
         opt.zero_grad(set_to_none=True)
         loss.backward()
         actor_grad_norm = nn.utils.clip_grad_norm_(actor.parameters(), 2.)
         critic_grad_norm = nn.utils.clip_grad_norm_(critic.parameters(), 2.)
         opt.step()
 
-        self.dynamics(tensordict)
-        loss_dynamics = F.mse_loss(tensordict["next", OBS_KEY], tensordict[f"next_{OBS_KEY}"])
-        self.opt_model.zero_grad(set_to_none=True)
-        loss_dynamics.backward()
-        model_grad_norm = nn.utils.clip_grad_norm_(self.dynamics.parameters(), 2.)
-        self.opt_model.step()
+        # self.dynamics(tensordict)
+        # loss_dynamics = F.mse_loss(tensordict["next", OBS_KEY], tensordict[f"next_{OBS_KEY}"])
+        # self.opt_model.zero_grad(set_to_none=True)
+        # loss_dynamics.backward()
+        # model_grad_norm = nn.utils.clip_grad_norm_(self.dynamics.parameters(), 2.)
+        # self.opt_model.step()
         
         info = {
             "actor/policy_loss": policy_loss.detach(),
-            "actor/entropy": entropy.detach(),
+            "actor/entropy": entropy.mean().detach(),
             "actor/grad_norm": actor_grad_norm,
+            "actor/aux_loss": aux_loss.detach(),
             "critic/value_loss": value_loss.detach(),
             "critic/grad_norm": critic_grad_norm,
-            "dynamics/loss": loss_dynamics.detach(),
-            "dynamics/grad_norm": model_grad_norm,
+            # "dynamics/loss": loss_dynamics.detach(),
+            # "dynamics/grad_norm": model_grad_norm,
         }
         with torch.no_grad():
             explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
