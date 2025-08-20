@@ -47,7 +47,7 @@ def sample_command(
             cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
             use_lin_vel_w[tid] = True
-            cmd_duration[tid] = 1.5
+            cmd_duration[tid] = 1.7
         cmd_time[tid] = 0.0  # reset time
         mode[tid] = next_mode[tid]
 
@@ -68,11 +68,14 @@ def step_command(
         cmd_height[tid] = 0.45
         cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
     elif mode[tid] == 1:  # jump
-        if time < PRE_JUMP_TIME:
+        if time < PRE_JUMP_TIME :
             cmd_height[tid] = 0.40
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
+        elif time < PRE_JUMP_TIME + 0.2:
+            cmd_height[tid] = 0.40 + (time - PRE_JUMP_TIME)
+            cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
         elif time < cmd_duration[tid] - POST_JUMP_TIME:
-            cmd_height[tid] = 0.65
+            cmd_height[tid] = 0.60
             cmd_contact[tid] = - wp.vec4(1.0, 1.0, 1.0, 1.0)
         else:
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
@@ -96,6 +99,11 @@ class SiriusDemoCommand(Command):
             self.cmd_time = torch.zeros(self.num_envs, 1)
             self.cmd_duration = torch.zeros(self.num_envs, 1)
             self.cmd_mode = torch.zeros(self.num_envs, dtype=torch.int32)
+
+            self.transition_prob = torch.tensor([
+                [0.2, 0.8],
+                [1.0, 0.0],
+            ], device=self.device)
 
         if self.env.sim.has_gui() and self.env.backend == "isaac":
             from isaaclab.markers import RED_ARROW_X_MARKER_CFG, VisualizationMarkers
@@ -173,8 +181,8 @@ class SiriusDemoCommand(Command):
         c1 = self.env.episode_length_buf % 25 == 0
         c2 = torch.rand(self.num_envs, device=self.device) < 0.5
         c3 = (self.cmd_time > self.cmd_duration).squeeze(1)
-        resample = (c1 & c2 & c3)
-        next_mode_prob = torch.tensor([0.6, 0.4], device=self.device).expand(self.num_envs, 2)
+        resample = (c1 & c2) | c3
+        next_mode_prob = self.transition_prob[self.cmd_mode.long()]
         next_mode = next_mode_prob.multinomial(1, replacement=True).squeeze(-1)
 
         wp.launch(
