@@ -93,6 +93,7 @@ def main(cfg: DictConfig):
         torch.save(state_dict, ckpt_path)
         run.save(ckpt_path, policy="now", base_path=run.dir)
         logging.info(f"Saved checkpoint to {str(ckpt_path)}")
+        return ckpt_path
 
     assert env.training
     if aa.is_main_process():
@@ -105,6 +106,7 @@ def main(cfg: DictConfig):
             return False
         return i > 0 and i % save_interval == 0
     
+    ckpt_path = None
     carry = env.reset()
     rollout_policy: TensorDictModuleBase = policy.get_rollout_policy("train")
 
@@ -163,20 +165,21 @@ def main(cfg: DictConfig):
         info["performance/iter_time"] = (time.perf_counter() - rollout_start)
         
         if should_save(i):
-            save(policy, f"checkpoint_{i}")
+            ckpt_path = save(policy, f"checkpoint_{i}")
 
         if aa.is_main_process():
             print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, (float, int))}))
+            print(f"Latest checkpoint: {ckpt_path}")
             run.log(info)
-    
-    if aa.is_main_process():
-        save(policy, "checkpoint_final")
 
+    if aa.is_main_process():
+        ckpt_path = save(policy, "checkpoint_final")
         policy_eval = policy.get_rollout_policy("eval")
         info, trajs, stats = evaluate(env, policy_eval, render=cfg.eval_render, seed=cfg.seed)
+        info["env_frames"] = env_frames
         run.log(info)
-
-    wandb.finish()
+        wandb.finish()
+        print(f"Final checkpoint: {ckpt_path}")
     exit(0)
     
     env.close()

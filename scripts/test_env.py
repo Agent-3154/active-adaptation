@@ -97,15 +97,9 @@ def main(cfg: DictConfig):
         if "vecnorm" in locals():
             state_dict["vecnorm"] = vecnorm.state_dict()
         torch.save(state_dict, ckpt_path)
-        if artifact:
-            artifact = wandb.Artifact(
-                f"{type(env).__name__}-{type(policy).__name__}", 
-                type="model"
-            )
-            artifact.add_file(ckpt_path)
-            run.log_artifact(artifact)
         run.save(ckpt_path, policy="now", base_path=run.dir)
         logging.info(f"Saved checkpoint to {str(ckpt_path)}")
+        return ckpt_path
 
     assert env.training
     if aa.is_main_process():
@@ -118,6 +112,7 @@ def main(cfg: DictConfig):
             return False
         return i > 0 and i % save_interval == 0
     
+    ckpt_path = None
     for i, data in enumerate(p):
         start = time.perf_counter()
         
@@ -141,27 +136,25 @@ def main(cfg: DictConfig):
         info["training_time"] = time.perf_counter() - start
         
         if should_save(i):
-            save(policy, f"checkpoint_{i}")
-
-        run.log(info)
+            ckpt_path = save(policy, f"checkpoint_{i}")
 
         if aa.is_main_process():
             print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, (float, int))}))
+            print(f"Latest checkpoint: {ckpt_path}")
+            run.log(info)
     
     if aa.is_main_process():
-        save(policy, "checkpoint_final")
-
-    policy_eval = policy.get_rollout_policy("eval")
-    info, trajs, stats = evaluate(env, policy_eval, render=cfg.eval_render, seed=cfg.seed)
-    info["env_frames"] = collector._frames
-    run.log(info)
-
-    wandb.finish()
+        ckpt_path = save(policy, "checkpoint_final")
+        policy_eval = policy.get_rollout_policy("eval")
+        info, trajs, stats = evaluate(env, policy_eval, render=cfg.eval_render, seed=cfg.seed)
+        info["env_frames"] = collector._frames
+        run.log(info)
+        wandb.finish()
+        print(f"Final checkpoint: {ckpt_path}")
     exit(0)
     
     base_env.close()
     simulation_app.close()
-    exit(0)
 
 
 if __name__ == "__main__":
