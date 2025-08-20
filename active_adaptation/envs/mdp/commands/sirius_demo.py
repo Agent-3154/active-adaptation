@@ -2,8 +2,12 @@ import torch
 import warp as wp
 
 from active_adaptation.envs.mdp.base import Command, Reward
-from active_adaptation.utils.math import quat_from_euler_xyz, wrap_to_pi
+from active_adaptation.utils.math import quat_from_euler_xyz, quat_rotate, wrap_to_pi
 from active_adaptation.utils.symmetry import SymmetryTransform
+
+
+PRE_JUMP_TIME = 0.5
+POST_JUMP_TIME = 0.5
 
 
 @wp.kernel
@@ -15,7 +19,10 @@ def sample_command(
     cmd_rpy_w: wp.array(dtype=wp.vec3),
     cmd_ang_vel_w: wp.array(dtype=wp.vec3),
     sample: wp.array(dtype=wp.bool),
+    mode: wp.array(dtype=wp.int32),
     next_mode: wp.array(dtype=wp.int32),
+    cmd_time: wp.array(dtype=wp.float32),
+    cmd_duration: wp.array(dtype=wp.float32),
     seed: wp.int32,
 ):
     tid = wp.tid()
@@ -27,12 +34,38 @@ def sample_command(
             use_lin_vel_w[tid] = False
             cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid].z = wp.randf(seed_, wp.PI / 4.0, wp.PI / 2.0)
+            cmd_duration[tid] = 0.0
         if next_mode[tid] == 1:
             cmd_lin_vel_w[tid] = wp.vec3(1.0, 0.0, 0.0)
             cmd_lin_vel_b[tid] = wp.vec3()
             cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
             use_lin_vel_w[tid] = True
+            cmd_duration[tid] = 1.5
+        cmd_time[tid] = 0.0  # reset time
+        mode[tid] = next_mode[tid]
+
+
+@wp.kernel
+def step_command(
+    cmd_ang_vel_w: wp.array(dtype=wp.vec3),
+    cmd_rpy_w: wp.array(dtype=wp.vec3),
+    cmd_contact: wp.array(dtype=wp.vec4),
+    mode: wp.array(dtype=wp.int32),
+    cmd_time: wp.array(dtype=wp.float32),
+    cmd_duration: wp.array(dtype=wp.float32),
+):
+    tid = wp.tid()
+    time = cmd_time[tid]
+    if mode[tid] == 0:
+        pass
+    elif mode[tid] == 1:  # jump
+        if time > PRE_JUMP_TIME and time < cmd_duration[tid] - POST_JUMP_TIME:
+            cmd_contact[tid] = -wp.vec4(1.0, 1.0, 1.0, 1.0)
+        else:
+            cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
+    cmd_time[tid] += 0.02
+    cmd_rpy_w[tid] += cmd_ang_vel_w[tid] * 0.02
 
 
 class SiriusDemoCommand(Command):
@@ -119,12 +152,35 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(self.cmd_rpy_w, return_ctype=True),
                 wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
                 wp.from_torch(resample, return_ctype=True),
-                wp.from_torch(next_mode),
+                wp.from_torch(self.cmd_mode, return_ctype=True),
+                wp.from_torch(next_mode, return_ctype=True),
+                wp.from_torch(self.cmd_time, return_ctype=True),
+                wp.from_torch(self.cmd_duration, return_ctype=True),
                 self.seed,
             ],
             device=self.device.type,
         )
-        self.cmd_rpy_w = self.cmd_rpy_w + self.cmd_ang_vel_w * self.env.step_dt
+        wp.launch(
+            step_command,
+            dim=self.num_envs,
+            inputs=[
+                wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
+                wp.from_torch(self.cmd_rpy_w, return_ctype=True),
+                wp.from_torch(self.cmd_contact, return_ctype=True),
+                wp.from_torch(self.cmd_mode, return_ctype=True),
+                wp.from_torch(self.cmd_time, return_ctype=True),
+                wp.from_torch(self.cmd_duration, return_ctype=True),
+            ],
+            device=self.device.type,
+        )
+
+    @property
+    def des_cmd_lin_vel_w(self):
+        return torch.where(
+            self.use_lin_vel_w,
+            self.cmd_lin_vel_w,
+            quat_rotate(self.asset.data.root_quat_w, self.cmd_lin_vel_b),
+        )
 
     def debug_draw(self):
         if self.env.sim.has_gui() and self.env.backend == "isaac":
@@ -136,8 +192,9 @@ class SiriusDemoCommand(Command):
                 scales=torch.tensor([4.0, 1.0, 0.1]).expand(self.num_envs, 3),
             )
             self.env.debug_draw.vector(
-                self.asset.data.root_pos_w + torch.tensor([0.0, 0.0, 0.2], device=self.device),
-                self.cmd_lin_vel_w
+                self.asset.data.root_pos_w
+                + torch.tensor([0.0, 0.0, 0.2], device=self.device),
+                self.des_cmd_lin_vel_w,
             )
 
 
@@ -149,19 +206,12 @@ class sirius_yaw(Reward[SiriusDemoCommand]):
 
 class sirius_lin_vel_xy(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
-        target_lin_vel_xy = torch.where(
-            self.command_manager.use_lin_vel_w,
-            self.command_manager.cmd_lin_vel_w[:, :2],
-            self.command_manager.cmd_lin_vel_b[:, :2],
+        target_lin_vel_xy = self.command_manager.des_cmd_lin_vel_w[:, :2]
+        current_lin_vel_xy = self.command_manager.asset.data.root_lin_vel_w[:, :2]
+        error_l2 = (target_lin_vel_xy - current_lin_vel_xy).square().sum(1, True)
+        return torch.exp(-error_l2 / 0.25) * (
+            -self.command_manager.asset.data.projected_gravity_b[:, 2:3]
         )
-        current_lin_vel_xy = torch.where(
-            self.command_manager.use_lin_vel_w,
-            self.command_manager.asset.data.root_lin_vel_w[:, :2],
-            self.command_manager.asset.data.root_lin_vel_b[:, :2],
-        )
-        error = target_lin_vel_xy - current_lin_vel_xy
-        error = error.square().sum(1, True)
-        return torch.exp(-error / 0.25)
 
 
 class sirius_ang_vel_z(Reward[SiriusDemoCommand]):
@@ -179,4 +229,17 @@ class sirius_base_height(Reward[SiriusDemoCommand]):
         error = 0.45 - self.command_manager.asset.data.root_pos_w[:, 2]
         error = error.square().reshape(self.num_envs, 1)
         rew = torch.exp(-error / 0.1)
+        return rew
+
+
+class sirius_contact(Reward[SiriusDemoCommand]):
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.contact_forces = self.env.scene["contact_forces"]
+        self.foot_ids = self.contact_forces.find_bodies(".*_FOOT")[0]
+
+    def compute(self) -> torch.Tensor:
+        contact_forces = self.contact_forces.data.net_forces_w[:, self.foot_ids]
+        in_contact = contact_forces.norm(dim=-1) > 1.0
+        rew = (in_contact * self.command_manager.cmd_contact).sum(1, True)
         return rew
