@@ -58,7 +58,7 @@ reward:
     sirius_yaw:         {weight: 1.0, enabled: true}
     sirius_base_height:  {weight: 1.0, enabled: true}
     sirius_contact:      {weight: 1.0, enabled: true}
-    _eval_: "lambda a,b,c,d,e: (a+b+c)*d*e"
+    # _eval_: "lambda a,b,c,d,e: (a+b+c)*d*e"
   reg:
     energy_l1:          {weight: 0.0001, enabled: true}
     joint_acc_l2:       {weight: 2.5e-7, enabled: true, joint_names: .*_(HAA|HFE|KFE)}

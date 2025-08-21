@@ -18,6 +18,7 @@ POST_JUMP_TIME = 0.5
 @wp.kernel(enable_backward=False)
 def sample_command(
     heading_w: wp.array(dtype=wp.float32),
+    lin_vel_w: wp.array(dtype=wp.vec3),
     cmd_lin_vel_w: wp.array(dtype=wp.vec3),
     cmd_lin_vel_b: wp.array(dtype=wp.vec3),
     use_lin_vel_w: wp.array(dtype=wp.bool),
@@ -52,7 +53,7 @@ def sample_command(
                 cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_duration[tid] = wp.randf(seed_, 1.0, 3.0)
         if next_mode[tid] == 1:
-            cmd_lin_vel_w[tid] = wp.vec3(1.0, 0.0, 0.0)
+            cmd_lin_vel_w[tid] = lin_vel_w[tid]
             cmd_lin_vel_b[tid] = wp.vec3()
             use_lin_vel_w[tid] = True
             cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
@@ -84,7 +85,7 @@ def step_command(
         if use_yaw_stiffness[tid]:
             yaw_error = (cmd_rpy_w[tid].z - heading_w[tid])
             yaw_error = yaw_error % (2.0 * wp.PI) - wp.PI
-            cmd_ang_vel_w[tid].z = yaw_stiffness[tid] * yaw_error
+            cmd_ang_vel_w[tid].z = wp.clamp(yaw_stiffness[tid] * yaw_error, -2.0, 2.0)
     elif mode[tid] == 1:  # jump
         if time < PRE_JUMP_TIME :
             cmd_height[tid] = 0.40
@@ -145,6 +146,7 @@ class SiriusDemoCommand(Command):
             dim=self.num_envs,
             inputs=[
                 wp.from_torch(self.asset.data.heading_w, return_ctype=True),
+                wp.from_torch(self.asset.data.root_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_lin_vel_b, return_ctype=True),
                 wp.from_torch(self.use_lin_vel_w, return_ctype=True),
@@ -203,7 +205,7 @@ class SiriusDemoCommand(Command):
         c1 = self.env.episode_length_buf % 25 == 0
         c2 = torch.rand(self.num_envs, device=self.device) < 0.5
         c3 = (self.cmd_time > self.cmd_duration).squeeze(1)
-        resample = (c1 & c2) | c3
+        resample = (c1 & c2 & c3) | c3
         next_mode_prob = self.transition_prob[self.cmd_mode.long()]
         next_mode = next_mode_prob.multinomial(1, replacement=True).squeeze(-1)
         heading_wp = wp.from_torch(self.asset.data.heading_w, return_ctype=True)
@@ -214,6 +216,7 @@ class SiriusDemoCommand(Command):
             inputs=[
                 heading_wp,
                 wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
+                wp.from_torch(self.asset.data.root_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_lin_vel_b, return_ctype=True),
                 wp.from_torch(self.use_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_rpy_w, return_ctype=True),
@@ -291,9 +294,7 @@ class sirius_lin_vel_xy(Reward[SiriusDemoCommand]):
         target_lin_vel_xy = self.command_manager.des_cmd_lin_vel_w[:, :2]
         current_lin_vel_xy = self.command_manager.asset.data.root_lin_vel_w[:, :2]
         error_l2 = (target_lin_vel_xy - current_lin_vel_xy).square().sum(1, True)
-        return torch.exp(-error_l2 / 0.25) * (
-            -self.command_manager.asset.data.projected_gravity_b[:, 2:3]
-        )
+        return torch.exp(-error_l2 / 0.25)
 
 
 class sirius_ang_vel_z(Reward[SiriusDemoCommand]):
@@ -325,5 +326,6 @@ class sirius_contact(Reward[SiriusDemoCommand]):
         contact_forces = self.contact_forces.data.net_forces_w[:, self.foot_ids]
         in_contact = contact_forces.norm(dim=-1) > 0.2
         rew = (in_contact * self.command_manager.cmd_contact).sum(1, True)
-        return torch.exp(rew)
+        self.env.discount.mul_(torch.exp(0.25 * rew))
+        return rew.reshape(self.num_envs, 1)
 
