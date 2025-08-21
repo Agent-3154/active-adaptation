@@ -59,6 +59,7 @@ reward:
     sirius_yaw:         {weight: 1.0}
     sirius_base_height:  {weight: 1.0}
     sirius_contact:      {weight: 1.0}
+    sirius_jump_landing: {weight: 5.0}
     # _eval_: "lambda a,b,c,d,e: (a+b+c)*d*e"
   joint_reg:
     _compile_: true

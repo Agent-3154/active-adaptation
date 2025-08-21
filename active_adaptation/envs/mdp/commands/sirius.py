@@ -640,26 +640,26 @@ class ang_vel_z_exp(Reward[SiriusCommandManager]):
         return rew.reshape(self.num_envs, 1), is_active.reshape(self.num_envs, 1)
 
 
-class sirius_jump_landing(Reward[SiriusCommandManager]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
-        self.asset = self.command_manager.asset
-        self.is_landing = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
-        self.last_in_air = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
+# class sirius_jump_landing(Reward[SiriusCommandManager]):
+#     def __init__(self, env, weight: float, enabled: bool = True):
+#         super().__init__(env, weight, enabled)
+#         self.asset = self.command_manager.asset
+#         self.is_landing = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
+#         self.last_in_air = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
 
-    def reset(self, env_ids: torch.Tensor):
-        self.is_landing[env_ids] = False
-        self.last_in_air[env_ids] = False
+#     def reset(self, env_ids: torch.Tensor):
+#         self.is_landing[env_ids] = False
+#         self.last_in_air[env_ids] = False
     
-    def update(self):
-        self.is_landing = (self.last_in_air & ~self.command_manager._command.in_air)
-        self.last_in_air = self.command_manager._command.in_air
+#     def update(self):
+#         self.is_landing = (self.last_in_air & ~self.command_manager._command.in_air)
+#         self.last_in_air = self.command_manager._command.in_air
 
-    def compute(self) -> torch.Tensor:
-        landing_yaw = self.asset.data.heading_w
-        desired_yaw = self.command_manager._command.des_rpy[:, 2]
-        rew = torch.pi/2 - wrap_to_pi(desired_yaw - landing_yaw).abs()
-        return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
+#     def compute(self) -> torch.Tensor:
+#         landing_yaw = self.asset.data.heading_w
+#         desired_yaw = self.command_manager._command.des_rpy[:, 2]
+#         rew = torch.pi/2 - wrap_to_pi(desired_yaw - landing_yaw).abs()
+#         return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
 
 
 class sirius_jump_turning(Reward[SiriusCommandManager]):

@@ -12,7 +12,7 @@ from active_adaptation.utils.math import (
 from active_adaptation.utils.symmetry import SymmetryTransform
 
 
-PRE_JUMP_TIME = 0.5
+PRE_JUMP_TIME = 0.6
 POST_JUMP_TIME = 0.5
 
 
@@ -88,6 +88,7 @@ def step_command(
     mode: wp.array(dtype=wp.int32),
     cmd_time: wp.array(dtype=wp.float32),
     cmd_duration: wp.array(dtype=wp.float32),
+    cmd_in_air: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
     time = cmd_time[tid]
@@ -98,6 +99,7 @@ def step_command(
             yaw_error = (des_rpy_w[tid].z - heading_w[tid])
             yaw_error = yaw_error % (2.0 * wp.PI) - wp.PI
             cmd_ang_vel_w[tid].z = wp.clamp(yaw_stiffness[tid] * yaw_error, -2.0, 2.0)
+        cmd_in_air[tid] = False
     elif mode[tid] == 1:  # jump
         air_time = cmd_duration[tid] - PRE_JUMP_TIME - POST_JUMP_TIME
         if time < PRE_JUMP_TIME :
@@ -107,13 +109,16 @@ def step_command(
             cmd_height[tid] = 0.40 + (time - PRE_JUMP_TIME)
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
             cmd_ang_vel_w[tid].z = wp.PI / air_time
+            cmd_in_air[tid] = True
         elif time < cmd_duration[tid] - POST_JUMP_TIME:
             cmd_height[tid] = 0.60
             cmd_contact[tid] = - wp.vec4(1.0, 1.0, 1.0, 1.0)
+            cmd_in_air[tid] = True
         else:
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
             cmd_height[tid] = 0.45
             cmd_ang_vel_w[tid].z = 0.0
+            cmd_in_air[tid] = False
     cmd_rpy_w[tid] += cmd_ang_vel_w[tid] * 0.02
     cmd_time[tid] += 0.02
 
@@ -136,6 +141,7 @@ class SiriusDemoCommand(Command):
             self.cmd_time = torch.zeros(self.num_envs, 1)
             self.cmd_duration = torch.zeros(self.num_envs, 1)
             self.cmd_mode = torch.zeros(self.num_envs, dtype=torch.int32)
+            self.in_air = torch.zeros(self.num_envs, 1, dtype=bool)
 
             self.transition_prob = torch.tensor([
                 [0.2, 0.8],
@@ -269,6 +275,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(self.cmd_mode, return_ctype=True),
                 wp.from_torch(self.cmd_time, return_ctype=True),
                 wp.from_torch(self.cmd_duration, return_ctype=True),
+                wp.from_torch(self.in_air, return_ctype=True),
             ],
             device=self.device.type,
         )
@@ -364,4 +371,26 @@ class sirius_contact(Reward[SiriusDemoCommand]):
         rew = (in_contact * self.command_manager.cmd_contact).sum(1, True)
         self.env.discount.mul_(torch.exp(0.25 * rew.clamp_max(0.0)))
         return rew.reshape(self.num_envs, 1)
+
+
+class sirius_jump_landing(Reward[SiriusDemoCommand]):
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.asset = self.command_manager.asset
+        self.is_landing = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
+        self.last_in_air = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
+
+    def reset(self, env_ids: torch.Tensor):
+        self.is_landing[env_ids] = False
+        self.last_in_air[env_ids] = False
+    
+    def update(self):
+        self.is_landing = (self.last_in_air & ~self.command_manager.in_air)
+        self.last_in_air = self.command_manager.in_air.clone()
+
+    def compute(self) -> torch.Tensor:
+        landing_yaw = self.asset.data.heading_w
+        desired_yaw = self.command_manager.des_rpy_w[:, 2]
+        rew = torch.pi/2 - wrap_to_pi(desired_yaw - landing_yaw).abs()
+        return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
 
