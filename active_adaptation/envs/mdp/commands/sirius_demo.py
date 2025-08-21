@@ -24,6 +24,7 @@ def sample_command(
     cmd_lin_vel_w: wp.array(dtype=wp.vec3),
     cmd_lin_vel_b: wp.array(dtype=wp.vec3),
     use_lin_vel_w: wp.array(dtype=wp.bool),
+    des_rpy_w: wp.array(dtype=wp.vec3),
     cmd_rpy_w: wp.array(dtype=wp.vec3),
     cmd_ang_vel_w: wp.array(dtype=wp.vec3),
     yaw_stiffness: wp.array(dtype=wp.float32),
@@ -43,26 +44,33 @@ def sample_command(
             cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_, 0.3, 1.5), wp.randf(seed_, -0.5, 0.5), 0.0)
             use_lin_vel_w[tid] = False
             # yaw command
-            use_yaw_stiffness[tid] = wp.randf(seed_) < 0.6
+            use_yaw_stiffness[tid] = wp.randf(seed_) < 1.0
             if use_yaw_stiffness[tid]:
                 yaw_stiffness[tid] = wp.randf(seed_, 0.5, 1.0)
                 cmd_ang_vel_w[tid].z = 0.0
-                cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, wp.randf(seed_) * wp.PI * 2.0)
+                cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
+                des_rpy_w[tid] = wp.vec3(0.0, 0.0, wp.randf(seed_) * wp.PI * 2.0)
             else:
                 yaw_rate = wp.randf(seed_, wp.PI / 4.0, wp.PI / 2.0)
                 yaw_stiffness[tid] = 0.0
                 cmd_ang_vel_w[tid].z = yaw_rate * wp.sign(wp.randn(seed_))
                 cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
+                des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_duration[tid] = wp.randf(seed_, 1.0, 3.0)
         if next_mode[tid] == 1:
             cmd_lin_vel_b[tid] = wp.cw_mul(cmd_lin_vel_b[tid], wp.vec3(1.0, 0.0, 0.0))
-            cmd_lin_vel_b[tid].x += 0.2
+            cmd_lin_vel_b[tid].x += wp.randf(seed_, 0.2, 0.3)
             cmd_lin_vel_w[tid] = wp.quat_rotate(quat_w[tid], cmd_lin_vel_b[tid])
             use_lin_vel_w[tid] = True
-            cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
+            turn = wp.randf(seed_) < 0.5
+            air_time = wp.randf(seed_, 0.6, 0.7)
+            if turn:
+                des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid] + wp.PI)
+            else:
+                des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
             use_yaw_stiffness[tid] = False
-            cmd_duration[tid] = 1.7
+            cmd_duration[tid] = air_time + PRE_JUMP_TIME + POST_JUMP_TIME
         cmd_time[tid] = 0.0  # reset time
         mode[tid] = next_mode[tid]
 
@@ -71,6 +79,7 @@ def sample_command(
 def step_command(
     heading_w: wp.array(dtype=wp.float32),
     cmd_ang_vel_w: wp.array(dtype=wp.vec3),
+    des_rpy_w: wp.array(dtype=wp.vec3),
     cmd_rpy_w: wp.array(dtype=wp.vec3),
     yaw_stiffness: wp.array(dtype=wp.float32),
     use_yaw_stiffness: wp.array(dtype=wp.bool),
@@ -86,24 +95,26 @@ def step_command(
         cmd_height[tid] = 0.45
         cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
         if use_yaw_stiffness[tid]:
-            yaw_error = (cmd_rpy_w[tid].z - heading_w[tid])
+            yaw_error = (des_rpy_w[tid].z - heading_w[tid])
             yaw_error = yaw_error % (2.0 * wp.PI) - wp.PI
             cmd_ang_vel_w[tid].z = wp.clamp(yaw_stiffness[tid] * yaw_error, -2.0, 2.0)
-        else:
-            cmd_rpy_w[tid] += cmd_ang_vel_w[tid] * 0.02
     elif mode[tid] == 1:  # jump
+        air_time = cmd_duration[tid] - PRE_JUMP_TIME - POST_JUMP_TIME
         if time < PRE_JUMP_TIME :
             cmd_height[tid] = 0.40
             cmd_contact[tid] = 0.25 * wp.vec4(1.0, 1.0, 1.0, 1.0)
         elif time < PRE_JUMP_TIME + 0.2:
             cmd_height[tid] = 0.40 + (time - PRE_JUMP_TIME)
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
+            cmd_ang_vel_w[tid].z = wp.PI / air_time
         elif time < cmd_duration[tid] - POST_JUMP_TIME:
             cmd_height[tid] = 0.60
             cmd_contact[tid] = - wp.vec4(1.0, 1.0, 1.0, 1.0)
         else:
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
             cmd_height[tid] = 0.45
+            cmd_ang_vel_w[tid].z = 0.0
+    cmd_rpy_w[tid] += cmd_ang_vel_w[tid] * 0.02
     cmd_time[tid] += 0.02
 
 
@@ -117,6 +128,7 @@ class SiriusDemoCommand(Command):
             self.use_lin_vel_w = torch.zeros(self.num_envs, 1, dtype=bool)
             self.cmd_height = torch.zeros(self.num_envs, 1)
             self.cmd_ang_vel_w = torch.zeros(self.num_envs, 3)
+            self.des_rpy_w = torch.zeros(self.num_envs, 3)
             self.cmd_rpy_w = torch.zeros(self.num_envs, 3)
             self.yaw_stiffness = torch.zeros(self.num_envs, 1)
             self.use_yaw_stiffness = torch.zeros(self.num_envs, 1, dtype=bool)
@@ -155,6 +167,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_lin_vel_b, return_ctype=True),
                 wp.from_torch(self.use_lin_vel_w, return_ctype=True),
+                wp.from_torch(self.des_rpy_w, return_ctype=True),
                 wp.from_torch(self.cmd_rpy_w, return_ctype=True),
                 wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
                 wp.from_torch(self.yaw_stiffness, return_ctype=True),
@@ -205,7 +218,8 @@ class SiriusDemoCommand(Command):
     @property
     def euler_error(self):
         euler = euler_from_quat(self.asset.data.root_quat_w)
-        return wrap_to_pi(self.cmd_rpy_w - euler)
+        error = wrap_to_pi(self.cmd_rpy_w - euler)
+        return error
 
     def update(self):
         c1 = self.env.episode_length_buf % 25 == 0
@@ -226,6 +240,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_lin_vel_b, return_ctype=True),
                 wp.from_torch(self.use_lin_vel_w, return_ctype=True),
+                wp.from_torch(self.des_rpy_w, return_ctype=True),
                 wp.from_torch(self.cmd_rpy_w, return_ctype=True),
                 wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
                 wp.from_torch(self.yaw_stiffness, return_ctype=True),
@@ -245,6 +260,7 @@ class SiriusDemoCommand(Command):
             inputs=[
                 heading_wp,
                 wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
+                wp.from_torch(self.des_rpy_w, return_ctype=True),
                 wp.from_torch(self.cmd_rpy_w, return_ctype=True),
                 wp.from_torch(self.yaw_stiffness, return_ctype=True),
                 wp.from_torch(self.use_yaw_stiffness, return_ctype=True),
@@ -304,8 +320,8 @@ class sirius_yaw(Reward[SiriusDemoCommand]):
 
 class sirius_pitch(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
-        error = self.command_manager.euler_error[:, 1]
-        rew = torch.exp(-error.square()) - error.abs()
+        error = self.command_manager.euler_error[:, 1].square()
+        rew = torch.exp(-error) - error
         return rew.reshape(self.num_envs, -1)
 
 
