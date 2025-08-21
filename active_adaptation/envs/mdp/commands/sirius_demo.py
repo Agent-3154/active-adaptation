@@ -17,6 +17,7 @@ POST_JUMP_TIME = 0.5
 
 @wp.kernel(enable_backward=False)
 def sample_command(
+    quat_w: wp.array(dtype=wp.quatf),
     heading_w: wp.array(dtype=wp.float32),
     lin_vel_w: wp.array(dtype=wp.vec3),
     cmd_lin_vel_w: wp.array(dtype=wp.vec3),
@@ -37,7 +38,7 @@ def sample_command(
     seed_ = wp.rand_init(seed, tid)
     if sample[tid]:
         if next_mode[tid] == 0:
-            cmd_lin_vel_w[tid] = wp.vec3()
+            cmd_lin_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
             cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_, 0.4, 1.2), wp.randf(seed_, -0.5, 0.5), 0.0)
             use_lin_vel_w[tid] = False
             # yaw command
@@ -53,8 +54,11 @@ def sample_command(
                 cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_duration[tid] = wp.randf(seed_, 1.0, 3.0)
         if next_mode[tid] == 1:
-            cmd_lin_vel_w[tid] = wp.cw_mul(cmd_lin_vel_b[tid], wp.vec3(1.0, 0.0, 0.0))
-            cmd_lin_vel_b[tid] = wp.vec3()
+            cmd_lin_vel_w[tid] = wp.quat_rotate(
+                quat_w[tid],
+                wp.cw_mul(cmd_lin_vel_b[tid], wp.vec3(1.0, 0.0, 0.0))
+            )
+            cmd_lin_vel_b[tid] = wp.vec3(0.0, 0.0, 0.0)
             use_lin_vel_w[tid] = True
             cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -146,6 +150,7 @@ class SiriusDemoCommand(Command):
             sample_command,
             dim=self.num_envs,
             inputs=[
+                wp.from_torch(self.asset.data.root_quat_w.roll(-1, dims=1), return_ctype=True),
                 wp.from_torch(self.asset.data.heading_w, return_ctype=True),
                 wp.from_torch(self.asset.data.root_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
@@ -215,9 +220,10 @@ class SiriusDemoCommand(Command):
             sample_command,
             dim=self.num_envs,
             inputs=[
+                wp.from_torch(self.asset.data.root_quat_w.roll(-1, dims=1), return_ctype=True),
                 heading_wp,
-                wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.asset.data.root_lin_vel_w, return_ctype=True),
+                wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_lin_vel_b, return_ctype=True),
                 wp.from_torch(self.use_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_rpy_w, return_ctype=True),
