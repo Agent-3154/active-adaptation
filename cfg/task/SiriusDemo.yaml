@@ -53,29 +53,30 @@ observation:
 
 reward:
   loco:
-    sirius_lin_vel_xy:  {weight: 1.5, enabled: true}
-    sirius_ang_vel_z:   {weight: 1.0, enabled: true}
-    sirius_yaw:         {weight: 1.0, enabled: true}
-    sirius_base_height:  {weight: 1.0, enabled: true}
-    sirius_contact:      {weight: 1.0, enabled: true}
+    sirius_lin_vel_xy:  {weight: 1.5}
+    sirius_ang_vel_z:   {weight: 1.0}
+    sirius_yaw:         {weight: 1.0}
+    sirius_base_height:  {weight: 1.0}
+    sirius_contact:      {weight: 1.0}
     # _eval_: "lambda a,b,c,d,e: (a+b+c)*d*e"
   reg:
-    energy_l1:          {weight: 0.0001, enabled: true}
-    joint_acc_l2:       {weight: 2.5e-7, enabled: true, joint_names: .*_(HAA|HFE|KFE)}
+    energy_l1:          {weight: 0.0001}
+    joint_acc_l2:       {weight: 2.5e-7, joint_names: .*_(HAA|HFE|KFE)}
 
-    action_rate_l2:     {weight: 0.01, enabled: true}
-    action_rate2_l2:    {weight: 0.002, enabled: true}
+    action_rate_l2:     {weight: 0.01}
+    action_rate2_l2:    {weight: 0.002}
 
-    survival:           {weight: 1.0, enabled: true}
-    lateral_swing_height: {weight: 2.0, enabled: true, feet_names: .*_FOOT}
-    undesired_contact:  {body_names: ["trunk", ".*(hip|thigh|calf)"], weight: 0.25, enabled: true}
-    wheel_contact_direction: {weight: 0.5, enabled: true}
-    joint_deviation_l2: {weight: 0.1, enabled: true, joint_names: .*HAA}
-    joint_vel_l2:       {weight: 0.002, enabled: true, joint_names: .*_(HFE|KFE)}
+    survival:           {weight: 1.0}
+    lateral_swing_height: {weight: 2.0, feet_names: .*_FOOT}
+    undesired_contact:  {body_names: ["trunk", ".*(hip|thigh|calf)"], weight: 0.25}
+    wheel_contact_direction: {weight: 0.5}
+    joint_deviation_l2: {weight: 0.1, joint_names: .*HAA}
+    joint_vel_l2:       {weight: 0.002, joint_names: .*_(HFE|KFE)}
   # safety:
   #   joint_torque_limits: {weight: 0.2, enabled: true, joint_names: .*_(HFE|KFE), factor: 0.8}
   #   joint_vel_limits:    {weight: 0.1, enabled: true, joint_names: .*_(HFE|KFE), factor: 0.8}
   debug:
+    _enabled_: false
     joint_torques_l2:   {weight: 1.0e-4, enabled: false}
     feet_contact_count: {weight: 1.0, enabled: false, body_names: .*_FOOT}
 

@@ -229,11 +229,15 @@ class _Env(EnvBase):
         self._stats_ema = {}
 
         self.reward_groups = OrderedDict()
+        enabled_groups = 0
         for group_name, func_specs in self.cfg.reward.items():
             print(f"Reward group: {group_name}")
             funcs = OrderedDict()
             self._stats_ema[group_name] = {}
             eval_func = eval(func_specs.pop("_eval_", "lambda *args: sum(args)"))
+            enabled = func_specs.pop("_enabled_", True)
+            compile = func_specs.pop("_compile_", False)
+            enabled_groups += enabled
 
             for rew_spec, params in func_specs.items():
                 rew_name, cls_name = parse_name_and_class(rew_spec)
@@ -249,10 +253,10 @@ class _Env(EnvBase):
                 print(f"\t{rew_name}: \t{reward.weight:.2f}, \t{reward.enabled}")
                 self._stats_ema[group_name][rew_name] = (torch.tensor(0., device=self.device), torch.tensor(0., device=self.device))
 
-            self.reward_groups[group_name] = RewardGroup(self, group_name, funcs, eval_func)
+            self.reward_groups[group_name] = RewardGroup(self, group_name, funcs, eval_func, enabled, compile)
             reward_spec["stats", group_name, "return"] = UnboundedContinuous(1, device=self.device)
 
-        reward_spec["reward"] = UnboundedContinuous(max(1, len(self.reward_groups)), device=self.device)
+        reward_spec["reward"] = UnboundedContinuous(max(1, enabled_groups), device=self.device)
         reward_spec["discount"] = UnboundedContinuous(1, device=self.device)
         self.reward_spec.update(reward_spec.expand(self.num_envs).to(self.device))
         self.discount = torch.ones((self.num_envs, 1), device=self.device)
@@ -356,15 +360,15 @@ class _Env(EnvBase):
         if not self.reward_groups:
             return {"reward": torch.ones((self.num_envs, 1), device=self.device)}
         
-        rewards = []
+        all_rewards = []
         for group, reward_group in self.reward_groups.items():
             reward = reward_group.compute()
-            if self.mult_dt:
-                reward *= self.step_dt
-            rewards.append(reward)
             self.stats[group, "return"].add_(reward)
-
-        rewards = torch.cat(rewards, 1)
+            if reward_group.enabled:
+                all_rewards.append(reward)
+        rewards = torch.cat(all_rewards, 1)
+        if self.mult_dt:
+            rewards *= self.step_dt
 
         self.stats["episode_len"][:] = self.episode_length_buf.unsqueeze(1)
         self.stats["success"][:] = (self.episode_length_buf >= self.max_episode_length * 0.9).unsqueeze(1).float()
@@ -520,27 +524,42 @@ class _Env(EnvBase):
 
 
 class RewardGroup:
-    def __init__(self, env: _Env, name: str, funcs: OrderedDict[str, mdp.Reward], eval_func):
+    def __init__(
+        self,
+        env: _Env,
+        name: str,
+        funcs: OrderedDict[str, mdp.Reward],
+        eval_func,
+        enabled: bool = True,
+        compile: bool = False,
+    ):
         self.env = env
         self.name = name
         self.funcs = funcs
         self.eval_func = eval_func
-        self.enabled_rewards = sum([func.enabled for func in funcs.values()])
-    
+        self.enabled = enabled
+        self.compile = compile
+
+        if self.enabled and not all([func.enabled for func in funcs.values()]):
+            incompatible = [key for key, func in funcs.items() if not func.enabled]
+            raise ValueError(f"Reward group {name} is enabled but some rewards are disabled: {incompatible}")
+        if not self.enabled and any([func.enabled for func in funcs.values()]):
+            incompatible = [key for key, func in funcs.items() if func.enabled]
+            raise ValueError(f"Reward group {name} is disabled but some rewards are enabled: {incompatible}")
+        
+        if compile:
+            self.compute = torch.compile(self.compute, fullgraph=True)
+
     def compute(self) -> torch.Tensor:
-        rewards = []
+        all_rewards = []
         for key, func in self.funcs.items():
             reward, count = func()
             self.env.stats[self.name, key].add_(reward)
             ema_sum, ema_cnt = self.env._stats_ema[self.name][key]
             ema_sum.mul_(EMA_DECAY).add_(reward.sum())
             ema_cnt.mul_(EMA_DECAY).add_(count)
-            if func.enabled:
-                rewards.append(reward)
-        if self.enabled_rewards > 0:
-            return sum(rewards)
-        else:
-            return torch.zeros((self.env.num_envs, 1), device=self.env.device)
+            all_rewards.append(reward)
+        return self.eval_func(*all_rewards)
 
 
 def _initialize_warp_meshes(mesh_prim_path, device):
