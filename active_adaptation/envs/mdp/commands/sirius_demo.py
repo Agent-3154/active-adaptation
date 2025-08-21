@@ -53,7 +53,7 @@ def sample_command(
                 cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_duration[tid] = wp.randf(seed_, 1.0, 3.0)
         if next_mode[tid] == 1:
-            cmd_lin_vel_w[tid] = lin_vel_w[tid]
+            cmd_lin_vel_w[tid] = wp.cw_mul(cmd_lin_vel_b[tid], wp.vec3(1.0, 0.0, 0.0))
             cmd_lin_vel_b[tid] = wp.vec3()
             use_lin_vel_w[tid] = True
             cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
@@ -86,6 +86,8 @@ def step_command(
             yaw_error = (cmd_rpy_w[tid].z - heading_w[tid])
             yaw_error = yaw_error % (2.0 * wp.PI) - wp.PI
             cmd_ang_vel_w[tid].z = wp.clamp(yaw_stiffness[tid] * yaw_error, -2.0, 2.0)
+        else:
+            cmd_rpy_w[tid] += cmd_ang_vel_w[tid] * 0.02
     elif mode[tid] == 1:  # jump
         if time < PRE_JUMP_TIME :
             cmd_height[tid] = 0.40
@@ -100,7 +102,6 @@ def step_command(
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
             cmd_height[tid] = 0.45
     cmd_time[tid] += 0.02
-    cmd_rpy_w[tid] += cmd_ang_vel_w[tid] * 0.02
 
 
 class SiriusDemoCommand(Command):
