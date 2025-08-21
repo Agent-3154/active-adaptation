@@ -346,6 +346,6 @@ class sirius_contact(Reward[SiriusDemoCommand]):
         contact_forces = self.contact_forces.data.net_forces_w[:, self.foot_ids]
         in_contact = contact_forces.norm(dim=-1) > 0.2
         rew = (in_contact * self.command_manager.cmd_contact).sum(1, True)
-        self.env.discount.mul_(torch.exp(0.25 * rew))
+        self.env.discount.mul_(torch.exp(0.25 * rew.clamp_max(0.0)))
         return rew.reshape(self.num_envs, 1)
 
