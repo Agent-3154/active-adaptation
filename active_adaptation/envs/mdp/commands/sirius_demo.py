@@ -305,7 +305,7 @@ class sirius_yaw(Reward[SiriusDemoCommand]):
 class sirius_pitch(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
         error = self.command_manager.euler_error[:, 1]
-        rew = torch.exp(-error.square()) - error
+        rew = torch.exp(-error.square()) - error.abs()
         return rew.reshape(self.num_envs, -1)
 
 
