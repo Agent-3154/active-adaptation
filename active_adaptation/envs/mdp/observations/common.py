@@ -1004,24 +1004,20 @@ class path_integrator(Observation):
 
 
 class prev_actions(Observation):
-    def __init__(self, env, steps: int=1, flatten: bool=True, permute: bool=False):
+    def __init__(self, env, steps: int=1, flatten: bool=True):
         super().__init__(env)
         self.steps = steps
         self.flatten = flatten
-        self.permute = permute
         self.action_manager = self.env.action_manager
     
     def compute(self):
         action_buf = self.action_manager.action_buf[:, :, :self.steps].clone()
-        if self.permute:
-            action_buf = action_buf.permute(0, 2, 1)
         if self.flatten:
             return action_buf.reshape(self.num_envs, -1)
         else:
             return action_buf
 
     def symmetry_transforms(self):
-        assert self.permute
         transform = self.action_manager.symmetry_transforms()
         return transform.repeat(self.steps)
 

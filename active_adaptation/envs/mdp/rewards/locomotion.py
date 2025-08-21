@@ -1357,7 +1357,7 @@ class action_rate_l2(Reward):
     
     def compute(self) -> torch.Tensor:
         action_buf = self.action_manager.action_buf
-        action_diff = action_buf[:, :, 0] - action_buf[:, :, 1]
+        action_diff = action_buf[:, 0] - action_buf[:, 1]
         rew = - action_diff.square().sum(dim=-1, keepdim=True)
         return rew
 
@@ -1371,7 +1371,7 @@ class action_rate2_l2(Reward):
     def compute(self) -> torch.Tensor:
         action_buf = self.action_manager.action_buf
         action_diff = (
-            action_buf[:, :, 0] - 2 * action_buf[:, :, 1] + action_buf[:, :, 2]
+            action_buf[:, 0] - 2 * action_buf[:, 1] + action_buf[:, 2]
         )
         rew = - action_diff.square().sum(dim=-1, keepdim=True)
         return rew

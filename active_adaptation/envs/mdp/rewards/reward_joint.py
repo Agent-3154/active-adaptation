@@ -13,13 +13,13 @@ class joint_acc_l2(Reward):
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids = self.asset.find_joints(joint_names)[0]
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
+    
+    def update(self):
+        self.joint_acc = self.asset.data.joint_acc
 
     def compute(self) -> torch.Tensor:
-        r = -self.asset.data.joint_acc[:, self.joint_ids].square().sum(dim=-1, keepdim=True)
-        if hasattr(self.asset.data, "linvel_exp"):
-            return r * (0.5 + 0.5 * self.asset.data.linvel_exp)
-        else:
-            return r
+        r = -self.joint_acc[:, self.joint_ids].square().sum(dim=-1, keepdim=True)
+        return r
 
 
 class energy_l1(Reward):
@@ -122,10 +122,10 @@ class joint_deviation_l1(Reward):
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
     
     def update(self):
-        self.joint_pos = self.asset.data.joint_pos[:, self.joint_ids]
+        self.joint_pos = self.asset.data.joint_pos
     
     def compute(self) -> torch.Tensor:
-        deviation = self.joint_pos - self.default_joint_pos
+        deviation = self.joint_pos[:, self.joint_ids] - self.default_joint_pos
         return - deviation.abs().sum(1, True)
 
 
@@ -138,10 +138,10 @@ class joint_deviation_l2(Reward):
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
     
     def update(self):
-        self.joint_pos = self.asset.data.joint_pos[:, self.joint_ids]
+        self.joint_pos = self.asset.data.joint_pos
     
     def compute(self) -> torch.Tensor:
-        deviation = self.joint_pos - self.default_joint_pos
+        deviation = self.joint_pos[:, self.joint_ids] - self.default_joint_pos
         return - deviation.square().sum(1, True)
 
 

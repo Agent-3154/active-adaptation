@@ -107,7 +107,7 @@ class JointPosition(ActionManager):
         self.decimation = int(self.env.step_dt / self.env.physics_dt)
 
         with torch.device(self.device):
-            self.action_buf = torch.zeros(self.num_envs, self.action_dim, 4, device=self.device) # TODO: permute to (num_envs, 4, action_dim)
+            self.action_buf = torch.zeros(self.num_envs, 4, self.action_dim, device=self.device) # TODO: permute to (num_envs, 4, action_dim)
             self.action_queue = torch.zeros(self.num_envs, self.max_delay + self.decimation, self.action_dim)
             self.applied_action = torch.zeros(self.num_envs, self.action_dim)
             self.alpha = torch.ones(self.num_envs, 1)
@@ -136,8 +136,8 @@ class JointPosition(ActionManager):
         if substep == 0:
             if isinstance(action, TensorDictBase):
                 action = action["action"]
-            self.action_buf = self.action_buf.roll(1, dims=-1)
-            self.action_buf[:, :, 0] = action
+            self.action_buf = self.action_buf.roll(1, dims=1)
+            self.action_buf[:, 0] = action
             self.action_queue = torch.where(
                 (torch.arange(self.action_queue.shape[1], device=self.device) < self.delay).reshape(self.num_envs, self.action_queue.shape[1], 1),
                 self.action_queue,
