@@ -6,6 +6,7 @@ from active_adaptation.utils.math import (
     quat_rotate,
     quat_rotate_inverse,
     quat_from_euler_xyz,
+    euler_from_quat,
     wrap_to_pi,
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
@@ -39,7 +40,7 @@ def sample_command(
     if sample[tid]:
         if next_mode[tid] == 0:
             cmd_lin_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
-            cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_, 0.4, 1.2), wp.randf(seed_, -0.5, 0.5), 0.0)
+            cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_, 0.3, 1.5), wp.randf(seed_, -0.5, 0.5), 0.0)
             use_lin_vel_w[tid] = False
             # yaw command
             use_yaw_stiffness[tid] = wp.randf(seed_) < 0.6
@@ -54,11 +55,9 @@ def sample_command(
                 cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_duration[tid] = wp.randf(seed_, 1.0, 3.0)
         if next_mode[tid] == 1:
-            cmd_lin_vel_w[tid] = wp.quat_rotate(
-                quat_w[tid],
-                wp.cw_mul(cmd_lin_vel_b[tid], wp.vec3(1.0, 0.0, 0.0))
-            )
-            cmd_lin_vel_b[tid] = wp.vec3(0.0, 0.0, 0.0)
+            cmd_lin_vel_b[tid] = wp.cw_mul(cmd_lin_vel_b[tid], wp.vec3(1.0, 0.0, 0.0))
+            cmd_lin_vel_b[tid].x += 0.2
+            cmd_lin_vel_w[tid] = wp.quat_rotate(quat_w[tid], cmd_lin_vel_b[tid])
             use_lin_vel_w[tid] = True
             cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -95,7 +94,7 @@ def step_command(
     elif mode[tid] == 1:  # jump
         if time < PRE_JUMP_TIME :
             cmd_height[tid] = 0.40
-            cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
+            cmd_contact[tid] = 0.25 * wp.vec4(1.0, 1.0, 1.0, 1.0)
         elif time < PRE_JUMP_TIME + 0.2:
             cmd_height[tid] = 0.40 + (time - PRE_JUMP_TIME)
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
@@ -204,8 +203,9 @@ class SiriusDemoCommand(Command):
         return torch.zeros(self.num_envs, 1, dtype=torch.int32, device=self.device)
 
     @property
-    def yaw_error(self):
-        return wrap_to_pi(self.cmd_rpy_w[:, 2] - self.asset.data.heading_w)
+    def euler_error(self):
+        euler = euler_from_quat(self.asset.data.root_quat_w)
+        return wrap_to_pi(self.cmd_rpy_w - euler)
 
     def update(self):
         c1 = self.env.episode_length_buf % 25 == 0
@@ -288,12 +288,25 @@ class SiriusDemoCommand(Command):
                 + torch.tensor([0.0, 0.0, 0.2], device=self.device),
                 self.des_cmd_lin_vel_w,
             )
+            self.env.debug_draw.vector(
+                self.asset.data.root_pos_w
+                + torch.tensor([0.0, 0.0, 0.2], device=self.device),
+                self.asset.data.root_lin_vel_w * torch.tensor([1., 1., 0.], device=self.device),
+                color=(1., 1., 1., 1.)
+            )
 
 
 class sirius_yaw(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
-        error = self.command_manager.yaw_error
-        return torch.cos(error).reshape(self.num_envs, -1)
+        rew = torch.cos(self.command_manager.euler_error[:, 2])
+        return rew.reshape(self.num_envs, -1)
+
+
+class sirius_pitch(Reward[SiriusDemoCommand]):
+    def compute(self) -> torch.Tensor:
+        error = self.command_manager.euler_error[:, 1]
+        rew = torch.exp(-error.square()) - error
+        return rew.reshape(self.num_envs, -1)
 
 
 class sirius_lin_vel_xy(Reward[SiriusDemoCommand]):
