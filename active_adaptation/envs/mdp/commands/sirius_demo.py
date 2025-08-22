@@ -150,6 +150,7 @@ class SiriusDemoCommand(Command):
             self.cmd_mode = torch.zeros(self.num_envs, dtype=torch.int32)
             self.in_air = torch.zeros(self.num_envs, 1, dtype=bool)
             self.cmd_jump_turn = torch.zeros(self.num_envs, 1)
+            self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=bool)
 
             self.transition_prob = torch.tensor(transition_prob, device=self.device)
             self.transition_prob = self.transition_prob / self.transition_prob.sum(1, True)
@@ -301,6 +302,7 @@ class SiriusDemoCommand(Command):
             ],
             device=self.device.type,
         )
+        self.is_standing_env = self.obs_cmd_lin_vel_b.norm(dim=-1, keepdim=True) < 0.1
 
     @property
     def obs_cmd_lin_vel_b(self):
