@@ -358,7 +358,7 @@ class PPOPolicy(ModBase):
             adv[mode_1] = normalize(adv[mode_1], subtract_mean=True)
             adv[mode_2] = normalize(adv[mode_2], subtract_mean=True)
             adv[mode_3] = normalize(adv[mode_3], subtract_mean=True)
-        torch.clamp_(adv, -30., 30.) # to avoid extreme values
+        torch.clamp_(adv, -20., 20.) # to avoid extreme values
         neg_reward_ratio = (tensordict[REWARD_KEY].sum(-1, True) <= 0.).float().mean()
         actor_feature_norm = tensordict["actor_input"].norm(dim=-1, keepdim=True).mean()
         # critic_feature_norm = tensordict["critic_feature"].norm(dim=-1, keepdim=True).mean()
@@ -485,7 +485,7 @@ class PPOPolicy(ModBase):
         log_probs = dist.log_prob(tensordict[ACTION_KEY])
         entropy = dist.entropy().mean()
 
-        valid = (~tensordict["is_init"]).float()
+        valid = (~tensordict["is_init"])
         valid_cnt = valid.sum()
 
         adv = tensordict["adv"]
