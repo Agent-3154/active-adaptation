@@ -429,3 +429,23 @@ class sirius_jump_behave(Reward[SiriusDemoCommand]):
         rew = - torch.abs(self.asset.data.joint_pos[:, self.joint_ids]-self.default_jpos).sum(1, True)
         return rew, is_active
 
+
+class sirius_walk_behave(Reward[SiriusDemoCommand]):
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.asset = self.command_manager.asset
+        self.joint_ids = self.asset.find_joints(".*HAA")[0]
+        self.default_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
+        self.cum_error = torch.zeros(self.num_envs, len(self.joint_ids), device=self.device)
+    
+    def reset(self, env_ids: torch.Tensor):
+        self.cum_error[env_ids] = 0.0
+    
+    def update(self):
+        error = (self.asset.data.joint_pos[:, self.joint_ids] - self.default_jpos).abs()
+        self.cum_error = torch.where(error < 0.1, 0., self.cum_error + error)
+    
+    def compute(self) -> torch.Tensor:
+        is_active = self.command_manager.cmd_mode[:, None] == 0
+        return - self.cum_error.sum(1, True), is_active
+
