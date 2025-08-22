@@ -24,6 +24,7 @@
 import datetime
 import logging
 import os
+import math
 
 import wandb
 from omegaconf import OmegaConf
@@ -90,7 +91,7 @@ def init_wandb(cfg):
 def parse_checkpoint_path(path: str=None):
     """
     Parse a checkpoint path from local or wandb.
-    If `path` is of the form `run:<wandb_run_id>`, it will be downloaded from wandb.
+    If `path` is of the form `run:<wandb_run_id>[:<iterations>]`, it will be downloaded from wandb.
 
     Args:
         path (str or None): Path to a checkpoint. 
@@ -103,7 +104,13 @@ def parse_checkpoint_path(path: str=None):
 
     if path.startswith("run:"):
         api = wandb.Api()
-        run = api.run(path[4:])
+        try:
+            run_path, iteration_str = path[4:].split(":")
+            iterations = int(iteration_str)
+            run = api.run(run_path)
+        except:
+            run = api.run(path[4:])
+            iterations = None
         root = os.path.join(os.path.dirname(__file__), "wandb", run.name)
         os.makedirs(root, exist_ok=True)
 
@@ -115,17 +122,25 @@ def parse_checkpoint_path(path: str=None):
             elif file.name == "files/cfg.yaml":
                 file.download(root, replace=True)
 
-        def sort_by_time(file):
-            number_str = file.name[:-3].split("_")[-1]
-            if number_str == "final":
-                return 100000
-            else:
-                return int(number_str)
-
-        checkpoints.sort(key=sort_by_time)
-        checkpoint = checkpoints[-1]
+        if iterations is not None:
+            checkpoint = None
+            for file in checkpoints:
+                if file.name == f"checkpoint_{iterations}.pt":
+                    checkpoint = file
+                    break
+            if checkpoint is None:
+                raise ValueError(f"Checkpoint {iterations} not found")
+        else:
+            def sort_by_time(file):
+                iteration_str = file.name[:-3].split("_")[-1]
+                if iteration_str == "final":
+                    return math.inf
+                else:
+                    return int(iteration_str)
+            checkpoints.sort(key=sort_by_time)
+            checkpoint = checkpoints[-1]
         path = os.path.join(root, checkpoint.name)
         print(f"Downloading checkpoint to {path}")
-        checkpoint.download(root, replace=True)
+        checkpoint.download(root)
     return path
 

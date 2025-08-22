@@ -5,7 +5,7 @@ import mujoco.viewer
 import time
 import warnings
 import trimesh
-import coacd
+import zmq
 
 from pathlib import Path
 from typing import Sequence, Union, Any, Dict, Optional
@@ -364,10 +364,6 @@ class MJArticulation:
             joint_vel_all[joint_ids] = joint_vel[0]
             self.mj_data.qvel[self.joint_qveladr_read] = joint_vel_all
 
-    def setup_logger(self, name: str):
-        self._log_path = Path.cwd() / f"{name}.pt"
-        self._log_states = []
-
 
 @dataclass
 class MjContactData:
@@ -507,6 +503,12 @@ class MJScene:
         self.mj_data = self.articulations["robot"].mj_data
         self.env_origins = torch.zeros(1, 3)
 
+        self.zmq_context = zmq.Context()
+        self.zmq_socket = self.zmq_context.socket(zmq.PUB)
+        self.zmq_socket.bind("tcp://*:5555")
+        self.last_publish_time = 0.0
+        self.publish_interval = 0.02
+
     def reset(self, env_ids: torch.Tensor):
         for articulation in self.articulations.values():
             continue
@@ -517,6 +519,14 @@ class MJScene:
     def update(self, dt: float):
         for articulation in self.articulations.values():
             articulation.update(dt)
+            if self.mj_data.time - self.last_publish_time > self.publish_interval:
+                self.zmq_socket.send_pyobj({
+                    "time": self.mj_data.time,
+                    "joint_pos": articulation.data.joint_pos[0], # [num_joints]
+                    "joint_vel": articulation.data.joint_vel[0], # [num_joints]
+                    "applied_torque": articulation.data.applied_torque[0], # [num_joints]
+                })
+                self.last_publish_time = self.mj_data.time
         for sensor in self.sensors.values():
             sensor.update(dt)
     

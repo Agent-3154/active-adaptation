@@ -54,7 +54,6 @@ SIRIUS_WHEEL_CFG = ArticulationCfg(
                 ".*_WHEEL": 80.
             },
             velocity_limit_sim=80.,
-            # saturation_effort=100.0,
             stiffness={
                 ".*_HAA": 30.,
                 ".*_HFE": 30.,
