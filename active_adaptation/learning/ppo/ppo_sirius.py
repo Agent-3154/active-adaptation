@@ -375,7 +375,7 @@ class PPOPolicy(ModBase):
                     if kl > self.desired_kl * 2.0:
                         actor_lr = max(1e-5, actor_lr / 1.5)
                     elif kl < self.desired_kl / 2.0 and kl > 0.0:
-                        actor_lr = min(1e-2, actor_lr * 1.5)
+                        actor_lr = min(1e-3, actor_lr * 1.5)
                     self.opt_teacher.param_groups[0]["lr"] = actor_lr
         
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
@@ -485,6 +485,9 @@ class PPOPolicy(ModBase):
         log_probs = dist.log_prob(tensordict[ACTION_KEY])
         entropy = dist.entropy().mean()
 
+        valid = (~tensordict["is_init"]).float()
+        valid_cnt = valid.sum()
+
         adv = tensordict["adv"]
         log_ratio = (log_probs - tensordict["action_log_prob"]).unsqueeze(-1)
         ratio = torch.exp(log_ratio)
@@ -496,7 +499,7 @@ class PPOPolicy(ModBase):
         b_returns = tensordict["ret"]
         values = critic(tensordict)["state_value"]
         value_loss = self.critic_loss_fn(b_returns, values)
-        value_loss = (value_loss * (~tensordict["is_init"])).mean()
+        value_loss = (value_loss * valid).sum() / valid_cnt
         
         loss = policy_loss + entropy_loss + value_loss
         opt.zero_grad(set_to_none=True)
@@ -522,7 +525,7 @@ class PPOPolicy(ModBase):
             "dynamics/grad_norm": model_grad_norm,
         }
         with torch.no_grad():
-            explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
+            explained_var = 1 - F.mse_loss(values[valid], b_returns[valid]) / b_returns[valid].var()
             clipfrac = ((ratio - 1.0).abs() > self.clip_param).float().mean()
             loc, scale = dist.loc[:bsize], dist.scale[:bsize]
             kl = torch.sum(

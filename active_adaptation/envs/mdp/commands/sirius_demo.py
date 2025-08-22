@@ -228,7 +228,7 @@ class SiriusDemoCommand(Command):
             [
                 SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([1, -1, 1])),  # flip y
                 SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])),  # flip roll and yaw
-                SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1, -1])),  # flip yaw,
+                SymmetryTransform(perm=torch.arange(4), signs=torch.tensor([-1, 1, -1, -1])),  # flip yaw,
                 SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # phase: do nothing
                 SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # cmd_mode: do nothing
                 SymmetryTransform(perm=torch.tensor([2, 3, 0, 1]), signs=torch.ones(4)) # cmd_contact: flip left and right
@@ -359,7 +359,7 @@ class sirius_joint_deviation(Observation[SiriusDemoCommand]):
         self.cum_error = torch.where(error < 0.1, 0., self.cum_error + error)
     
     def compute(self) -> torch.Tensor:
-        return self.cum_error * self.env.step_dt
+        return self.cum_error
     
     def symmetry_transforms(self):
         return SymmetryTransform(perm=torch.tensor([2, 3, 0, 1]), signs=torch.ones(4))
@@ -467,7 +467,7 @@ class sirius_walk_behave(Reward[SiriusDemoCommand]):
     
     def update(self):
         error = (self.asset.data.joint_pos[:, self.joint_ids] - self.default_jpos).abs()
-        self.cum_error = torch.where(error < 0.1, 0., self.cum_error + error)
+        self.cum_error = torch.where(error < 0.1, 0., self.cum_error + error * self.env.step_dt)
     
     def compute(self) -> torch.Tensor:
         is_active = self.command_manager.cmd_mode[:, None] == 0
