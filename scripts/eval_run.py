@@ -84,7 +84,7 @@ def main():
         cfg = OmegaConf.load(os.path.join(root, "cfg.yaml"))
     OmegaConf.set_struct(cfg, False)
 
-    cfg["checkpoint_path"] = os.path.join(root, checkpoint.name)
+    cfg["checkpoint_path"] = f"run:{args.run_path}"
     cfg["vecnorm"] = "eval"
     # cfg["algo"]["phase"] = "adapt"
     # cfg['algo']["phase"] = "finetune"
