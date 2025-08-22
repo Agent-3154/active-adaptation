@@ -1127,11 +1127,14 @@ class drive_model_properties(Randomization):
     def startup(self):
         properties = self.drive_model_properties.clone()
         zeros = torch.zeros(self.num_envs, len(self.joint_ids))
-        properties[:, self.joint_ids, 2] = zeros.uniform_(*self.velocity_resistance_range)
+        properties[:, :, 0] = 0.01 # speed effort gradient
+        properties[:, :, 1] = self.asset.data.joint_vel_limits # max actuator velocity
+        properties[:, self.joint_ids, 2] = zeros.uniform_(*self.velocity_resistance_range) # velocity dependent resistance
         self.asset.root_physx_view.set_dof_drive_model_properties(
             data=properties,
             indices=torch.arange(self.num_envs)
         )
+        assert torch.allclose(properties, self.asset.root_physx_view.get_dof_drive_model_properties())
 
 
 def clamp_norm(x: torch.Tensor, min: float = 0.0, max: float = torch.inf):

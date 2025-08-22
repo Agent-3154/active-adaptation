@@ -42,7 +42,9 @@ def sample_command(
     if sample[tid]:
         if next_mode[tid] == 0:
             cmd_lin_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
-            cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_, 0.3, 1.5), wp.randf(seed_, -0.8, 0.8), 0.0)
+            cmd_lin_vel_b[tid] = wp.vec3(
+                wp.randf(seed_, 0.3, 1.5) * wp.sign(wp.randn(seed_)),
+                wp.randf(seed_, -0.8, 0.8), 0.0)
             use_lin_vel_w[tid] = False
             # yaw command
             use_yaw_stiffness[tid] = wp.randf(seed_) < 1.0
@@ -63,8 +65,8 @@ def sample_command(
             cmd_lin_vel_b[tid].x += wp.randf(seed_, 0.2, 0.3)
             cmd_lin_vel_w[tid] = wp.quat_rotate(quat_w[tid], cmd_lin_vel_b[tid])
             use_lin_vel_w[tid] = True
-            turn = wp.randf(seed_) < 0.5
-            air_time = wp.randf(seed_, 0.6, 0.7)
+            air_time = wp.randf(seed_, 0.3, 0.7)
+            turn = air_time > 0.5
             if turn:
                 cmd_jump_turn[tid] = wp.PI
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid] + wp.PI)

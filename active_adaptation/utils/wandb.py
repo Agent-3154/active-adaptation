@@ -141,6 +141,6 @@ def parse_checkpoint_path(path: str=None):
             checkpoint = checkpoints[-1]
         path = os.path.join(root, checkpoint.name)
         print(f"Downloading checkpoint to {path}")
-        checkpoint.download(root)
+        checkpoint.download(root, exist_ok=True)
     return path
 
