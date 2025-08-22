@@ -1,7 +1,7 @@
 import torch
 import warp as wp
 
-from active_adaptation.envs.mdp.base import Command, Reward
+from active_adaptation.envs.mdp.base import Command, Reward, Observation
 from active_adaptation.utils.math import (
     quat_rotate,
     quat_rotate_inverse,
@@ -9,7 +9,7 @@ from active_adaptation.utils.math import (
     euler_from_quat,
     wrap_to_pi,
 )
-from active_adaptation.utils.symmetry import SymmetryTransform
+from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
 
 
 PRE_JUMP_TIME = 0.8
@@ -228,7 +228,7 @@ class SiriusDemoCommand(Command):
             [
                 SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([1, -1, 1])),  # flip y
                 SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])),  # flip roll and yaw
-                SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])),  # flip yaw,
+                SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1, -1])),  # flip yaw,
                 SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # phase: do nothing
                 SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # cmd_mode: do nothing
                 SymmetryTransform(perm=torch.tensor([2, 3, 0, 1]), signs=torch.ones(4)) # cmd_contact: flip left and right
@@ -343,6 +343,28 @@ class SiriusDemoCommand(Command):
             )
 
 
+class sirius_joint_deviation(Observation[SiriusDemoCommand]):
+    def __init__(self, env):
+        super().__init__(env)
+        self.asset = self.command_manager.asset
+        self.joint_ids = self.asset.find_joints(".*HAA")[0]
+        self.default_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
+        self.cum_error = torch.zeros(self.num_envs, len(self.joint_ids), device=self.device)
+    
+    def reset(self, env_ids: torch.Tensor):
+        self.cum_error[env_ids] = 0.0
+    
+    def update(self):
+        error = (self.asset.data.joint_pos[:, self.joint_ids] - self.default_jpos).abs()
+        self.cum_error = torch.where(error < 0.1, 0., self.cum_error + error)
+    
+    def compute(self) -> torch.Tensor:
+        return self.cum_error * self.env.step_dt
+    
+    def symmetry_transforms(self):
+        return SymmetryTransform(perm=torch.tensor([2, 3, 0, 1]), signs=torch.ones(4))
+
+
 class sirius_yaw(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
         rew = torch.cos(self.command_manager.euler_error[:, 2])
@@ -436,7 +458,7 @@ class sirius_walk_behave(Reward[SiriusDemoCommand]):
     def __init__(self, env, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
         self.asset = self.command_manager.asset
-        self.joint_ids = self.asset.find_joints(".*HAA")[0]
+        self.joint_ids, self.joint_names = self.asset.find_joints(".*HAA")
         self.default_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
         self.cum_error = torch.zeros(self.num_envs, len(self.joint_ids), device=self.device)
     

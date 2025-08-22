@@ -43,6 +43,7 @@ observation:
     # joint_vel_multistep: {steps: 4, noise_std: 0.2, joint_names: .*}
     prev_actions: {steps: 2}
     # wheel_trans_vel:    {}
+    sirius_joint_deviation: {}
   priv:
     applied_action:
     applied_torque:
