@@ -27,6 +27,9 @@ action:
 command:
   _target_: active_adaptation.envs.mdp.commands.sirius_demo.SiriusDemoCommand
   teleop: false
+  transition_prob:
+    - [0.2, 0.8]
+    - [1.0, 0.0]
 
 observation:
   command_mode_: # won't be normalized

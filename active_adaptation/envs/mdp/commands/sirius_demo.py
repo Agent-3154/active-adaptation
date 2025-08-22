@@ -124,7 +124,7 @@ def step_command(
 
 
 class SiriusDemoCommand(Command):
-    def __init__(self, env, teleop: bool = False) -> None:
+    def __init__(self, env, transition_prob, teleop: bool = False) -> None:
         super().__init__(env, teleop)
 
         with torch.device(self.device):
@@ -143,10 +143,8 @@ class SiriusDemoCommand(Command):
             self.cmd_mode = torch.zeros(self.num_envs, dtype=torch.int32)
             self.in_air = torch.zeros(self.num_envs, 1, dtype=bool)
 
-            self.transition_prob = torch.tensor([
-                [0.2, 0.8],
-                [1.0, 0.0],
-            ], device=self.device)
+            self.transition_prob = torch.tensor(transition_prob, device=self.device)
+            self.transition_prob = self.transition_prob / self.transition_prob.sum(1, True)
 
         if self.env.sim.has_gui() and self.env.backend == "isaac":
             from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, ISAAC_NUCLEUS_DIR, sim_utils, BLUE_ARROW_X_MARKER_CFG
@@ -230,7 +228,7 @@ class SiriusDemoCommand(Command):
 
     @property
     def command_mode(self):
-        return torch.zeros(self.num_envs, 1, dtype=torch.int32, device=self.device)
+        return self.cmd_mode.reshape(self.num_envs, 1)
 
     @property
     def euler_error(self):
