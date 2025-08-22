@@ -34,6 +34,7 @@ def sample_command(
     next_mode: wp.array(dtype=wp.int32),
     cmd_time: wp.array(dtype=wp.float32),
     cmd_duration: wp.array(dtype=wp.float32),
+    cmd_jump_turn: wp.array(dtype=wp.float32),
     seed: wp.int32,
 ):
     tid = wp.tid()
@@ -65,8 +66,10 @@ def sample_command(
             turn = wp.randf(seed_) < 0.5
             air_time = wp.randf(seed_, 0.6, 0.7)
             if turn:
+                cmd_jump_turn[tid] = wp.PI
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid] + wp.PI)
             else:
+                cmd_jump_turn[tid] = 0.0
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
             use_yaw_stiffness[tid] = False
@@ -89,6 +92,7 @@ def step_command(
     cmd_time: wp.array(dtype=wp.float32),
     cmd_duration: wp.array(dtype=wp.float32),
     cmd_in_air: wp.array(dtype=wp.bool),
+    cmd_jump_turn: wp.array(dtype=wp.float32),
 ):
     tid = wp.tid()
     time = cmd_time[tid]
@@ -108,7 +112,8 @@ def step_command(
         elif time < PRE_JUMP_TIME + 0.2:
             cmd_height[tid] = 0.40 + (time - PRE_JUMP_TIME)
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
-            cmd_ang_vel_w[tid].z = wp.PI / air_time
+            if cmd_jump_turn[tid] > 0.0:
+                cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
             cmd_in_air[tid] = True
         elif time < cmd_duration[tid] - POST_JUMP_TIME:
             cmd_height[tid] = 0.60
@@ -142,6 +147,7 @@ class SiriusDemoCommand(Command):
             self.cmd_duration = torch.zeros(self.num_envs, 1)
             self.cmd_mode = torch.zeros(self.num_envs, dtype=torch.int32)
             self.in_air = torch.zeros(self.num_envs, 1, dtype=bool)
+            self.cmd_jump_turn = torch.zeros(self.num_envs, 1)
 
             self.transition_prob = torch.tensor(transition_prob, device=self.device)
             self.transition_prob = self.transition_prob / self.transition_prob.sum(1, True)
@@ -192,6 +198,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(next_mode, return_ctype=True),
                 wp.from_torch(self.cmd_time, return_ctype=True),
                 wp.from_torch(self.cmd_duration, return_ctype=True),
+                wp.from_torch(self.cmd_jump_turn, return_ctype=True),
                 self.seed,
             ],
             device=self.device.type,
@@ -265,6 +272,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(next_mode, return_ctype=True),
                 wp.from_torch(self.cmd_time, return_ctype=True),
                 wp.from_torch(self.cmd_duration, return_ctype=True),
+                wp.from_torch(self.cmd_jump_turn, return_ctype=True),
                 self.env.timestamp,
             ],
             device=self.device.type,
@@ -285,6 +293,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(self.cmd_time, return_ctype=True),
                 wp.from_torch(self.cmd_duration, return_ctype=True),
                 wp.from_torch(self.in_air, return_ctype=True),
+                wp.from_torch(self.cmd_jump_turn, return_ctype=True),
             ],
             device=self.device.type,
         )
