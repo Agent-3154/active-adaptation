@@ -372,6 +372,10 @@ class MJArticulation:
 @dataclass
 class MjContactData:
     net_forces_w: ArrayType = None
+    last_air_time: ArrayType = None
+    current_air_time: ArrayType = None
+    last_contact_time: ArrayType = None
+    current_contact_time: ArrayType = None
 
 
 class MjContactSensor:
@@ -382,15 +386,52 @@ class MjContactSensor:
         self.body_names = self.articulation.body_names
         self.body_adrs_read = self.articulation.body_adrs_read
         self._data = MjContactData(
-            net_forces_w=torch.zeros(1, self.articulation.num_bodies, 3)
+            net_forces_w=torch.zeros(1, self.articulation.num_bodies, 3),
+            last_air_time=torch.zeros(1, self.articulation.num_bodies),
+            current_air_time=torch.zeros(1, self.articulation.num_bodies),
+            last_contact_time=torch.zeros(1, self.articulation.num_bodies),
+            current_contact_time=torch.zeros(1, self.articulation.num_bodies)
         )
     
     def find_bodies(self, name_keys: str | Sequence[str], preserve_order: bool = False):
         return self.articulation.find_bodies(name_keys, preserve_order)
 
+    def reset(self, env_ids):
+        self._data.current_air_time[env_ids] = 0.0
+        self._data.last_air_time[env_ids] = 0.0
+        self._data.current_contact_time[env_ids] = 0.0
+        self._data.last_contact_time[env_ids] = 0.0
+
     def update(self, dt: float):
+        elapsed_time = torch.tensor(dt)
         cfrc_ext = self.articulation.mj_data.cfrc_ext[self.body_adrs_read, :3]
         self._data.net_forces_w = torch.as_tensor(cfrc_ext, dtype=torch.float32)[None]
+
+        is_contact = torch.norm(self._data.net_forces_w, dim=-1) > 0.1
+        is_first_contact = (self._data.current_air_time > 0) * is_contact
+        is_first_detached = (self._data.current_contact_time > 0) * ~is_contact
+        
+        env_ids = slice(None)
+        # -- update the last contact time if body has just become in contact
+        self._data.last_air_time[env_ids] = torch.where(
+            is_first_contact,
+            self._data.current_air_time[env_ids] + elapsed_time.unsqueeze(-1),
+            self._data.last_air_time[env_ids],
+        )
+        # -- increment time for bodies that are not in contact
+        self._data.current_air_time[env_ids] = torch.where(
+            ~is_contact, self._data.current_air_time[env_ids] + elapsed_time.unsqueeze(-1), 0.0
+        )
+        # -- update the last contact time if body has just detached
+        self._data.last_contact_time[env_ids] = torch.where(
+            is_first_detached,
+            self._data.current_contact_time[env_ids] + elapsed_time.unsqueeze(-1),
+            self._data.last_contact_time[env_ids],
+        )
+        # -- increment time for bodies that are in contact
+        self._data.current_contact_time[env_ids] = torch.where(
+            is_contact, self._data.current_contact_time[env_ids] + elapsed_time.unsqueeze(-1), 0.0
+        )
 
     @property
     def data(self):
@@ -470,6 +511,8 @@ class MJScene:
         for articulation in self.articulations.values():
             continue
             articulation.reset(env_ids)
+        for sensor in self.sensors.values():
+            sensor.reset(env_ids)
 
     def update(self, dt: float):
         for articulation in self.articulations.values():

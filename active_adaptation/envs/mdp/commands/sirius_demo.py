@@ -12,8 +12,8 @@ from active_adaptation.utils.math import (
 from active_adaptation.utils.symmetry import SymmetryTransform
 
 
-PRE_JUMP_TIME = 0.6
-POST_JUMP_TIME = 0.5
+PRE_JUMP_TIME = 0.8
+POST_JUMP_TIME = 0.8
 
 
 @wp.kernel(enable_backward=False)
@@ -41,7 +41,7 @@ def sample_command(
     if sample[tid]:
         if next_mode[tid] == 0:
             cmd_lin_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
-            cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_, 0.3, 1.5), wp.randf(seed_, -0.5, 0.5), 0.0)
+            cmd_lin_vel_b[tid] = wp.vec3(wp.randf(seed_, 0.3, 1.5), wp.randf(seed_, -0.8, 0.8), 0.0)
             use_lin_vel_w[tid] = False
             # yaw command
             use_yaw_stiffness[tid] = wp.randf(seed_) < 1.0
@@ -97,7 +97,7 @@ def step_command(
         cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
         if use_yaw_stiffness[tid]:
             yaw_error = (des_rpy_w[tid].z - heading_w[tid])
-            yaw_error = yaw_error % (2.0 * wp.PI) - wp.PI
+            yaw_error = (yaw_error + wp.PI) % (2.0 * wp.PI) - wp.PI
             cmd_ang_vel_w[tid].z = wp.clamp(yaw_stiffness[tid] * yaw_error, -2.0, 2.0)
         cmd_in_air[tid] = False
     elif mode[tid] == 1:  # jump
@@ -149,13 +149,24 @@ class SiriusDemoCommand(Command):
             ], device=self.device)
 
         if self.env.sim.has_gui() and self.env.backend == "isaac":
-            from isaaclab.markers import RED_ARROW_X_MARKER_CFG, VisualizationMarkers
+            from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, ISAAC_NUCLEUS_DIR, sim_utils, BLUE_ARROW_X_MARKER_CFG
 
-            self.frame_marker = VisualizationMarkers(
-                RED_ARROW_X_MARKER_CFG.replace(
-                    prim_path="/Visuals/Command/frame",
-                )
+            marker_cfg = VisualizationMarkersCfg(
+                prim_path="/World/Visuals/testMarkers",
+                markers={
+                    "red_arrow": sim_utils.UsdFileCfg(
+                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                        scale=(1.0, 0.1, 0.1),
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+                    ),
+                    "blue_arrow": sim_utils.UsdFileCfg(
+                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                        scale=(1.0, 0.1, 0.1),
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
+                    )
+                }
             )
+            self.frame_marker = VisualizationMarkers(marker_cfg)
             self.frame_marker.set_visibility(True)
         self.seed = wp.rand_init(0)
 
@@ -298,13 +309,17 @@ class SiriusDemoCommand(Command):
 
     def debug_draw(self):
         if self.env.sim.has_gui() and self.env.backend == "isaac":
-            quat = quat_from_euler_xyz(*self.cmd_rpy_w.unbind(1))
-            translations = self.asset.data.root_pos_w.clone()
-            translations[:, 2:3] = self.cmd_height
+            translations = torch.cat([self.asset.data.root_pos_w, self.asset.data.root_pos_w]) 
+            translations[:self.num_envs, 2:3] = self.cmd_height
+            orientations = torch.cat([
+                quat_from_euler_xyz(*self.des_rpy_w.unbind(1)),
+                self.asset.data.root_quat_w,
+            ])
             self.frame_marker.visualize(
-                translations=translations + torch.tensor([0.0, 0.0, 0.2], device=self.device),
-                orientations=quat,
-                scales=torch.tensor([4.0, 1.0, 0.1]).expand(self.num_envs, 3),
+                translations=translations + torch.tensor([0., 0., 0.2], device=self.device),
+                orientations=orientations,
+                scales=torch.tensor([4.0, 1.0, 0.1]).expand(2 * self.num_envs, 3),
+                marker_indices=[0] * self.num_envs + [1] * self.num_envs
             )
             self.env.debug_draw.vector(
                 self.asset.data.root_pos_w
@@ -393,4 +408,17 @@ class sirius_jump_landing(Reward[SiriusDemoCommand]):
         desired_yaw = self.command_manager.des_rpy_w[:, 2]
         rew = torch.pi/2 - wrap_to_pi(desired_yaw - landing_yaw).abs()
         return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
+
+
+class sirius_jump_behave(Reward[SiriusDemoCommand]):
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.asset = self.command_manager.asset
+        self.joint_ids = self.asset.find_joints(".*HAA")[0]
+        self.default_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
+    
+    def compute(self) -> torch.Tensor:
+        is_active = (self.command_manager.cmd_mode[:, None] == 1) & ~self.command_manager.in_air
+        rew = - torch.abs(self.asset.data.joint_pos[:, self.joint_ids]-self.default_jpos).sum(1, True)
+        return rew, is_active
 
