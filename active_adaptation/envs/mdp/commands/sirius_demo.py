@@ -208,11 +208,13 @@ class SiriusDemoCommand(Command):
     def command(self):
         cmd_rpy_b = self.cmd_rpy_w.clone()
         cmd_rpy_b[:, 2] = wrap_to_pi(cmd_rpy_b[:, 2] - self.asset.data.heading_w)
+        des_yaw_b = wrap_to_pi(self.des_rpy_w[:, 2] - self.asset.data.heading_w).unsqueeze(1)
         return torch.cat(
             [
                 self.obs_cmd_lin_vel_b,
                 self.cmd_ang_vel_w,
                 cmd_rpy_b,
+                des_yaw_b,
                 torch.where(self.cmd_mode[:, None] == 1, self.cmd_time, torch.zeros_like(self.cmd_time)),
                 torch.where(self.cmd_mode[:, None] == 1, self.cmd_duration - self.cmd_time, torch.zeros_like(self.cmd_time)),
                 torch.nn.functional.one_hot(self.cmd_mode.long(), num_classes=2),
