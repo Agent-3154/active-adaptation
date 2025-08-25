@@ -10,6 +10,7 @@ from active_adaptation.utils.math import (
     quat_from_euler_xyz,
     euler_from_quat,
     wrap_to_pi,
+    yaw_quat,
 )
 from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
 
@@ -40,6 +41,9 @@ def sample_command(
     seed: wp.int32,
     homogeneous: bool
 ):
+    lin_vel_prob = 0.9
+    yaw_stiffness_prob = 0.7
+
     tid = wp.tid()
     if homogeneous:
         seed_ = wp.rand_init(seed)
@@ -47,13 +51,18 @@ def sample_command(
         seed_ = wp.rand_init(seed, tid)
     if sample[tid]:
         if next_mode[tid] == 0:
+            # body frame linear velocity command
             cmd_lin_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
-            cmd_lin_vel_b[tid] = wp.vec3(
-                wp.randf(seed_, 0.3, 1.5) * wp.sign(wp.randn(seed_)),
-                wp.randf(seed_, -0.8, 0.8), 0.0)
             use_lin_vel_w[tid] = False
+            has_lin_vel = wp.randf(seed_) < lin_vel_prob
+            if has_lin_vel:
+                cmd_lin_vel_b[tid] = wp.vec3(
+                    wp.randf(seed_, 0.3, 1.5) * wp.sign(wp.randn(seed_)),
+                    wp.randf(seed_, -0.8, 0.8), 0.0)
+            else:
+                cmd_lin_vel_b[tid] = wp.vec3(0.0, 0.0, 0.0)
             # yaw command
-            use_yaw_stiffness[tid] = wp.randf(seed_) < 1.0
+            use_yaw_stiffness[tid] = wp.randf(seed_) < yaw_stiffness_prob
             if use_yaw_stiffness[tid]:
                 yaw_stiffness[tid] = wp.randf(seed_, 0.5, 1.0)
                 cmd_ang_vel_w[tid].z = 0.0
@@ -71,12 +80,13 @@ def sample_command(
             cmd_lin_vel_b[tid].x += wp.randf(seed_, 0.2, 0.3)
             cmd_lin_vel_w[tid] = wp.quat_rotate(quat_w[tid], cmd_lin_vel_b[tid])
             use_lin_vel_w[tid] = True
-            air_time = wp.randf(seed_, 0.3, 0.7)
-            turn = air_time > 0.5
+            turn = wp.randf(seed_) > 0.5
             if turn:
+                air_time = wp.randf(seed_, 0.5, 0.7) # more time to turn
                 cmd_jump_turn[tid] = wp.PI
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid] + wp.PI)
             else:
+                air_time = wp.randf(seed_, 0.3, 0.7)
                 cmd_jump_turn[tid] = 0.0
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -90,6 +100,7 @@ def sample_command(
 def step_command(
     heading_w: wp.array(dtype=wp.float32),
     cmd_ang_vel_w: wp.array(dtype=wp.vec3),
+    cum_hip_deviation: wp.array(dtype=wp.vec4),
     des_rpy_w: wp.array(dtype=wp.vec3),
     cmd_rpy_w: wp.array(dtype=wp.vec3),
     yaw_stiffness: wp.array(dtype=wp.float32),
@@ -106,7 +117,9 @@ def step_command(
     time = cmd_time[tid]
     if mode[tid] == 0:
         cmd_height[tid] = 0.45
-        cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
+        # cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
+        for i in range(4):
+            cmd_contact[tid][i] = wp.where(cum_hip_deviation[tid][i] > 0.5, -1.0, 0.0)
         if use_yaw_stiffness[tid]:
             yaw_error = (des_rpy_w[tid].z - heading_w[tid])
             yaw_error = (yaw_error + wp.PI) % (2.0 * wp.PI) - wp.PI
@@ -140,6 +153,8 @@ class SiriusDemoCommand(Command):
     def __init__(self, env, transition_prob, homogeneous: bool = False, teleop: bool = False) -> None:
         super().__init__(env, teleop)
         self.homogeneous = homogeneous
+        self.joint_ids, self.joint_names = self.asset.find_joints(".*HAA")
+        self.default_hip_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
 
         with torch.device(self.device):
             self.cmd_lin_vel_w = torch.zeros(self.num_envs, 3)
@@ -158,6 +173,7 @@ class SiriusDemoCommand(Command):
             self.in_air = torch.zeros(self.num_envs, 1, dtype=bool)
             self.cmd_jump_turn = torch.zeros(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=bool)
+            self.cum_hip_deviation = torch.zeros(self.num_envs, 4)
 
             self.transition_prob = torch.tensor(transition_prob, device=self.device)
             self.transition_prob = self.transition_prob / self.transition_prob.sum(1, True)
@@ -288,6 +304,9 @@ class SiriusDemoCommand(Command):
             next_mode = next_mode[0].expand_as(next_mode)
         heading_wp = wp.from_torch(self.asset.data.heading_w, return_ctype=True)
 
+        error = (self.asset.data.joint_pos[:, self.joint_ids] - self.default_hip_jpos).abs()
+        self.cum_hip_deviation = torch.where(error < 0.1, 0., self.cum_hip_deviation + error * self.env.step_dt)
+
         wp.launch(
             sample_command,
             dim=self.num_envs,
@@ -320,6 +339,7 @@ class SiriusDemoCommand(Command):
             inputs=[
                 heading_wp,
                 wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
+                wp.from_torch(self.cum_hip_deviation, return_ctype=True),
                 wp.from_torch(self.des_rpy_w, return_ctype=True),
                 wp.from_torch(self.cmd_rpy_w, return_ctype=True),
                 wp.from_torch(self.yaw_stiffness, return_ctype=True),
@@ -338,18 +358,20 @@ class SiriusDemoCommand(Command):
 
     @property
     def obs_cmd_lin_vel_b(self):
+        quat = yaw_quat(self.asset.data.root_quat_w)
         return torch.where(
             self.use_lin_vel_w,
-            quat_rotate_inverse(self.asset.data.root_quat_w, self.cmd_lin_vel_w),
+            quat_rotate_inverse(quat, self.cmd_lin_vel_w),
             self.cmd_lin_vel_b,
         )
     
     @property
     def des_cmd_lin_vel_w(self):
+        quat = yaw_quat(self.asset.data.root_quat_w)
         return torch.where(
             self.use_lin_vel_w,
             self.cmd_lin_vel_w,
-            quat_rotate(self.asset.data.root_quat_w, self.cmd_lin_vel_b),
+            quat_rotate(quat, self.cmd_lin_vel_b),
         )
 
     def debug_draw(self):
@@ -497,20 +519,17 @@ class sirius_walk_behave(Reward[SiriusDemoCommand]):
     def __init__(self, env, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
         self.asset = self.command_manager.asset
-        self.joint_ids, self.joint_names = self.asset.find_joints(".*HAA")
-        self.default_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
-        self.cum_error = torch.zeros(self.num_envs, len(self.joint_ids), device=self.device)
-    
-    def reset(self, env_ids: torch.Tensor):
-        self.cum_error[env_ids] = 0.0
-    
-    def update(self):
-        error = (self.asset.data.joint_pos[:, self.joint_ids] - self.default_jpos).abs()
-        self.cum_error = torch.where(error < 0.1, 0., self.cum_error + error * self.env.step_dt)
+        self.body_ids, self.body_names = self.asset.find_bodies(".*_hip")
     
     def compute(self) -> torch.Tensor:
         is_active = self.command_manager.cmd_mode[:, None] == 0
-        rew_hip_dev = - self.cum_error.square().sum(1, True)
+        rew_hip_dev = - self.command_manager.cum_hip_deviation.square().sum(1, True)
         rew_roll_dev = - self.command_manager.euler_error[:, 0:1].abs()
         return rew_hip_dev + rew_roll_dev, is_active
+
+    def debug_draw(self):
+        body_pos_w = self.asset.data.body_pos_w[:, self.body_ids]
+        vec = torch.zeros_like(body_pos_w)
+        vec[:, :, 2] = self.command_manager.cum_hip_deviation
+        self.env.debug_draw.vector(body_pos_w, vec, size=2.0, color=(1., 0., 0., 1.))
 
