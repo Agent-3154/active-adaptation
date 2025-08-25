@@ -510,5 +510,7 @@ class sirius_walk_behave(Reward[SiriusDemoCommand]):
     
     def compute(self) -> torch.Tensor:
         is_active = self.command_manager.cmd_mode[:, None] == 0
-        return - self.cum_error.square().sum(1, True), is_active
+        rew_hip_dev = - self.cum_error.square().sum(1, True)
+        rew_roll_dev = - self.command_manager.euler_error[:, 0:1].abs()
+        return rew_hip_dev + rew_roll_dev, is_active
 
