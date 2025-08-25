@@ -113,6 +113,46 @@ class joint_torque_limits(Reward):
         return - violation.sum(1, True)
 
 
+class joint_torque_disc(Reward):
+    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*"):
+        super().__init__(env, weight, enabled)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
+        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
+        
+        self.applied_torques = []
+        self.computed_torques = []
+        self.projected_joint_forces = []
+    
+    def update(self):
+        self.applied_torque = self.asset.data.applied_torque[:, self.joint_ids]
+        self.computed_torque = self.asset.data.computed_torque[:, self.joint_ids]
+        self.projected_joint_force = self.asset.root_physx_view.get_dof_projected_joint_forces()[:, self.joint_ids]
+        self.applied_torques.append(self.applied_torque)
+        self.computed_torques.append(self.computed_torque)
+        self.projected_joint_forces.append(self.projected_joint_force)
+        if self.env.timestamp == 990:
+            applied_torques = torch.stack(self.applied_torques).cpu()
+            computed_torques = torch.stack(self.computed_torques).cpu()
+            projected_joint_forces = torch.stack(self.projected_joint_forces).cpu()
+            import matplotlib.pyplot as plt
+            fig, axes = plt.subplots(4, 4, figsize=(10, 10), sharex=True, sharey=True)
+            axes = axes.flatten()
+            for i, name in enumerate(self.asset.joint_names):
+                ax = axes[i]
+                ax.plot(applied_torques[:, 0, i], label="applied")
+                # ax.plot(computed_torques[:, 0, i], label="computed")
+                ax.plot(projected_joint_forces[:, 0, i], label="projected")
+                ax.set_ylim(-80, 80)
+                ax.legend()
+            plt.show()
+    
+    def compute(self) -> torch.Tensor:
+        # print((projected_joint_forces[:, self.joint_ids] - self.computed_torque).abs())
+        discrepancy = (self.projected_joint_force - self.applied_torque).abs()
+        return - discrepancy.sum(1, True)
+
+
 class joint_deviation_l1(Reward):
     def __init__(self, env, weight: float, enabled: bool = True, joint_names: str=".*"):
         super().__init__(env, weight, enabled)
@@ -168,4 +208,20 @@ class joint_deviation_cum(Reward):
     
     def compute(self) -> torch.Tensor:
         return - self.cum_deviation.sum(1, True)
+
+
+class joint_torques_l2(Reward):
+    def __init__(
+        self, env, weight: float, enabled: bool = True, joint_names: str = ".*"
+    ):
+        super().__init__(env, weight, enabled)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.joint_ids = self.asset.find_joints(joint_names)[0]
+        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
+    
+    def update(self):
+        self.applied_torque = self.asset.data.applied_torque
+
+    def compute(self) -> torch.Tensor:
+        return -self.applied_torque[:, self.joint_ids].square().sum(1, keepdim=True)
 

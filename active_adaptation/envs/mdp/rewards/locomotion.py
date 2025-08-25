@@ -57,23 +57,6 @@ class angvel_xy_l2(Reward):
         return r.reshape(self.num_envs, 1)
 
 
-class joint_torques_l2(Reward):
-    def __init__(
-        self, env, weight: float, enabled: bool = True, joint_names: str = ".*"
-    ):
-        super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.joint_ids = self.asset.find_joints(joint_names)[0]
-        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-
-    def compute(self) -> torch.Tensor:
-        return (
-            -self.asset.data.applied_torque[:, self.joint_ids]
-            .square()
-            .sum(1, keepdim=True)
-        )
-
-
 class joint_torques_berhu(Reward):
     """
     Berhu loss:

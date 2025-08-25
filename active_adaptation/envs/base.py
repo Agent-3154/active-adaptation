@@ -28,6 +28,7 @@ if active_adaptation.get_backend() == "isaac":
     import isaaclab.sim as sim_utils
     from isaaclab.terrains.trimesh.utils import make_plane
     from isaaclab.scene import InteractiveScene
+    from isaaclab.sim import SimulationContext
     from pxr import UsdGeom, UsdPhysics
 
 
@@ -108,7 +109,9 @@ class _Env(EnvBase):
         # self._set_seed(cfg.seed)
 
         self.scene: InteractiveScene
+        self.sim: SimulationContext
         self.setup_scene()
+
         self._ground_mesh = None
         
         self.max_episode_length = self.cfg.max_episode_length
@@ -285,7 +288,7 @@ class _Env(EnvBase):
             self._reset_callbacks.append(term.reset)
             self.reward_spec["stats", "termination", term_name] = UnboundedContinuous((self.num_envs, 1), device=self.device)
         
-        self.timestamp = 0
+        self.timestamp: int = 0 # global timestamp in steps
 
         self.stats = self.reward_spec["stats"].zero()
     

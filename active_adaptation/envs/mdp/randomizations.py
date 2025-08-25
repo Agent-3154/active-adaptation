@@ -1115,21 +1115,39 @@ class constant_force(Randomization):
 
 
 class drive_model_properties(Randomization):
-    def __init__(self, env, joint_names: str, velocity_resistance_range: Tuple[float, float]):
+    def __init__(
+        self,
+        env,
+        joint_names: str,
+        velocity_resistance_range: Tuple[float, float],
+        bins: int = 10,
+    ):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
-        self.joint_ids = self.asset.find_joints(joint_names)[0]
-        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
+        self.bins = bins
+        self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
+        self.joint_ids = torch.tensor(self.joint_ids, device="cpu")
 
         self.velocity_resistance_range = velocity_resistance_range
+        self.velocity_resistance_bins = torch.linspace(
+            velocity_resistance_range[0],
+            velocity_resistance_range[1],
+            bins+1
+        )
         self.drive_model_properties = self.asset.root_physx_view.get_dof_drive_model_properties().clone()
 
     def startup(self):
         properties = self.drive_model_properties.clone()
-        zeros = torch.zeros(self.num_envs, len(self.joint_ids))
-        properties[:, :, 0] = 0.01 # speed effort gradient
-        properties[:, :, 1] = self.asset.data.joint_vel_limits # max actuator velocity
-        properties[:, self.joint_ids, 2] = zeros.uniform_(*self.velocity_resistance_range) # velocity dependent resistance
+        if (ids := torch.nonzero(properties[0, self.joint_ids, 1] == 0.0)).numel() > 0:
+            joint_names = [self.joint_names[i.item()] for i in ids.squeeze(-1)]
+            raise ValueError(
+                f"Detected zero joint velocity limits for {joint_names}. "
+                "This indicates that the drive_model_properties feature is not enabled. "
+                "Please set the `drive_model_properties` to non-default values in the USD file to enable this feature."
+            )
+        # properties[:, :, 0] = 0.01 # speed effort gradient
+        # properties[:, :, 1] = self.asset.data.joint_vel_limits # max actuator velocity
+        properties[:, self.joint_ids, 2] = sample_from_bins(self.velocity_resistance_bins, (self.num_envs, 1))
         self.asset.root_physx_view.set_dof_drive_model_properties(
             data=properties,
             indices=torch.arange(self.num_envs)
@@ -1179,3 +1197,8 @@ def angle_mix(a: torch.Tensor, b: torch.Tensor, weight: float = 0.1):
     d[d > torch.pi] -= 2 * torch.pi
     d[d < -torch.pi] += 2 * torch.pi
     return a - d * weight
+
+
+def sample_from_bins(bins: torch.Tensor, shape: torch.Size):
+    return bins[torch.randint(0, len(bins), shape, device=bins.device)]
+
