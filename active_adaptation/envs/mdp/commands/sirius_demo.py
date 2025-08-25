@@ -5,6 +5,8 @@ from active_adaptation.envs.mdp.base import Command, Reward, Observation
 from active_adaptation.utils.math import (
     quat_rotate,
     quat_rotate_inverse,
+    quat_mul,
+    sample_quat_yaw,
     quat_from_euler_xyz,
     euler_from_quat,
     wrap_to_pi,
@@ -36,9 +38,13 @@ def sample_command(
     cmd_duration: wp.array(dtype=wp.float32),
     cmd_jump_turn: wp.array(dtype=wp.float32),
     seed: wp.int32,
+    homogeneous: bool
 ):
     tid = wp.tid()
-    seed_ = wp.rand_init(seed, tid)
+    if homogeneous:
+        seed_ = wp.rand_init(seed)
+    else:
+        seed_ = wp.rand_init(seed, tid)
     if sample[tid]:
         if next_mode[tid] == 0:
             cmd_lin_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -131,8 +137,9 @@ def step_command(
 
 
 class SiriusDemoCommand(Command):
-    def __init__(self, env, transition_prob, teleop: bool = False) -> None:
+    def __init__(self, env, transition_prob, homogeneous: bool = False, teleop: bool = False) -> None:
         super().__init__(env, teleop)
+        self.homogeneous = homogeneous
 
         with torch.device(self.device):
             self.cmd_lin_vel_w = torch.zeros(self.num_envs, 3)
@@ -203,9 +210,28 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(self.cmd_duration, return_ctype=True),
                 wp.from_torch(self.cmd_jump_turn, return_ctype=True),
                 self.seed,
+                self.homogeneous,
             ],
             device=self.device.type,
         )
+    
+    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Called before `reset` to sample initial state for the next episodes.
+        This can be used for implementing curriculum learning.
+        """
+        init_root_state = self.init_root_state[env_ids]
+        if self.terrain_type == "plane":
+            pos_w = self.env.scene.env_origins[env_ids]
+        else:
+            idx = torch.randint(0, len(self._origins), (len(env_ids),), device=self.device)
+            pos_w = self._origins[idx]
+        quat = sample_quat_yaw(len(env_ids), device=self.device)
+        if self.homogeneous:
+            quat = quat[0:1].expand(len(env_ids), -1)
+        init_root_state[:, :3] += pos_w
+        init_root_state[:, 3:7] = quat_mul(init_root_state[:, 3:7], quat)
+        return init_root_state
         
     @property
     def command(self):
@@ -250,11 +276,16 @@ class SiriusDemoCommand(Command):
 
     def update(self):
         c1 = self.env.episode_length_buf % 25 == 0
-        c2 = torch.rand(self.num_envs, device=self.device) < 0.5
+        if self.homogeneous:
+            c2 = torch.rand(1, device=self.device) < 0.5
+        else:
+            c2 = torch.rand(self.num_envs, device=self.device) < 0.5
         c3 = (self.cmd_time > self.cmd_duration).squeeze(1)
         resample = (c1 & c2 & c3) | c3
         next_mode_prob = self.transition_prob[self.cmd_mode.long()]
         next_mode = next_mode_prob.multinomial(1, replacement=True).squeeze(-1)
+        if self.homogeneous:
+            next_mode = next_mode[0].expand_as(next_mode)
         heading_wp = wp.from_torch(self.asset.data.heading_w, return_ctype=True)
 
         wp.launch(
@@ -279,6 +310,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(self.cmd_duration, return_ctype=True),
                 wp.from_torch(self.cmd_jump_turn, return_ctype=True),
                 self.env.timestamp,
+                self.homogeneous,
             ],
             device=self.device.type,
         )

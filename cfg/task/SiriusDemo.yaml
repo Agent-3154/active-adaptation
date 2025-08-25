@@ -26,6 +26,7 @@ action:
 
 command:
   _target_: active_adaptation.envs.mdp.commands.sirius_demo.SiriusDemoCommand
+  homogeneous: false # if `true`, all envs share the same initial state and command
   teleop: false
   transition_prob:
     - [0.2, 0.8]
@@ -125,3 +126,6 @@ randomization:
     pos_scales:
       .*: [0.8, 1.2]
   random_impulse: {}
+  drive_model_properties:
+    joint_names: .*_(HFE|KFE)
+    velocity_resistance_range: [0.0, 10.0]
