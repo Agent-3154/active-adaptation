@@ -101,6 +101,8 @@ def step_command(
     heading_w: wp.array(dtype=wp.float32),
     cmd_ang_vel_w: wp.array(dtype=wp.vec3),
     cum_hip_deviation: wp.array(dtype=wp.vec4),
+    in_contact: wp.array(dtype=wp.bool),
+    swing_thres: wp.array(dtype=wp.float32),
     des_rpy_w: wp.array(dtype=wp.vec3),
     cmd_rpy_w: wp.array(dtype=wp.vec3),
     yaw_stiffness: wp.array(dtype=wp.float32),
@@ -119,7 +121,8 @@ def step_command(
         cmd_height[tid] = 0.45
         # cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
         for i in range(4):
-            cmd_contact[tid][i] = wp.where(cum_hip_deviation[tid][i] > 0.5, -1.0, 0.0)
+            cond = (cum_hip_deviation[tid][i] > swing_thres[tid]) and in_contact[tid]
+            cmd_contact[tid][i] = wp.where(cond, -1.0, 0.0)
         if use_yaw_stiffness[tid]:
             yaw_error = (des_rpy_w[tid].z - heading_w[tid])
             yaw_error = (yaw_error + wp.PI) % (2.0 * wp.PI) - wp.PI
@@ -152,9 +155,11 @@ def step_command(
 class SiriusDemoCommand(Command):
     def __init__(self, env, transition_prob, homogeneous: bool = False, teleop: bool = False) -> None:
         super().__init__(env, teleop)
+        self.contact_sensor = self.env.scene["contact_forces"]
         self.homogeneous = homogeneous
         self.joint_ids, self.joint_names = self.asset.find_joints(".*HAA")
         self.default_hip_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
+        self.wheel_ids_contact = self.contact_sensor.find_bodies(".*_FOOT")[0]
 
         with torch.device(self.device):
             self.cmd_lin_vel_w = torch.zeros(self.num_envs, 3)
@@ -173,7 +178,10 @@ class SiriusDemoCommand(Command):
             self.in_air = torch.zeros(self.num_envs, 1, dtype=bool)
             self.cmd_jump_turn = torch.zeros(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=bool)
+
             self.cum_hip_deviation = torch.zeros(self.num_envs, 4)
+            self.swing_thres = torch.zeros(self.num_envs, 1)
+            self.swing_thres.uniform_(0.5, 0.8)
 
             self.transition_prob = torch.tensor(transition_prob, device=self.device)
             self.transition_prob = self.transition_prob / self.transition_prob.sum(1, True)
@@ -230,6 +238,7 @@ class SiriusDemoCommand(Command):
             ],
             device=self.device.type,
         )
+        self.cum_hip_deviation[env_ids] = 0.0
     
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -306,6 +315,7 @@ class SiriusDemoCommand(Command):
 
         error = (self.asset.data.joint_pos[:, self.joint_ids] - self.default_hip_jpos).abs()
         self.cum_hip_deviation = torch.where(error < 0.1, 0., self.cum_hip_deviation + error * self.env.step_dt)
+        in_contact = self.contact_sensor.data.current_contact_time[:, self.wheel_ids_contact] > 0.0
 
         wp.launch(
             sample_command,
@@ -340,6 +350,8 @@ class SiriusDemoCommand(Command):
                 heading_wp,
                 wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
                 wp.from_torch(self.cum_hip_deviation, return_ctype=True),
+                wp.from_torch(in_contact, return_ctype=True),
+                wp.from_torch(self.swing_thres, return_ctype=True),
                 wp.from_torch(self.des_rpy_w, return_ctype=True),
                 wp.from_torch(self.cmd_rpy_w, return_ctype=True),
                 wp.from_torch(self.yaw_stiffness, return_ctype=True),
@@ -379,7 +391,7 @@ class SiriusDemoCommand(Command):
             translations = torch.cat([self.asset.data.root_pos_w, self.asset.data.root_pos_w]) 
             translations[:self.num_envs, 2:3] = self.cmd_height
             orientations = torch.cat([
-                quat_from_euler_xyz(*self.des_rpy_w.unbind(1)),
+                quat_from_euler_xyz(*self.cmd_rpy_w.unbind(1)),
                 self.asset.data.root_quat_w,
             ])
             self.frame_marker.visualize(
