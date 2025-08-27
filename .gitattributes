@@ -1,2 +1,0 @@
-active_adaptation/assets_mjcf/**/*.obj filter=lfs diff=lfs merge=lfs -text
-active_adaptation/assets_mjcf/**/*.mtl filter=lfs diff=lfs merge=lfs -text
