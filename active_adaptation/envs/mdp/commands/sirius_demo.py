@@ -280,7 +280,7 @@ class SiriusDemoCommand(Command):
             [
                 SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([1, -1, 1])),  # flip y
                 SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])),  # flip roll and yaw
-                SymmetryTransform(perm=torch.arange(4), signs=torch.tensor([-1, 1, -1, -1])),  # flip yaw,
+                SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])),  # flip yaw,
                 SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # phase: do nothing
                 SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # cmd_mode: do nothing
                 SymmetryTransform(perm=torch.tensor([2, 3, 0, 1]), signs=torch.ones(4)) # cmd_contact: flip left and right

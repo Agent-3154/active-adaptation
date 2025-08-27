@@ -159,6 +159,7 @@ class PPOPolicy(ModBase):
         self.action_dim = action_spec.shape[-1]
         self.gae = GAE(0.99, 0.95)
         self.symaug = self.cfg.symaug
+        self.init_lr = self.cfg.lr
 
         self.value_norm = ValueNormFake(input_shape=1).to(self.device)
 
@@ -267,7 +268,7 @@ class PPOPolicy(ModBase):
                 {"params": self.actor_teacher.parameters()},
                 {"params": self.critic.parameters()},
             ],
-            lr=cfg.lr,
+            lr=self.init_lr,
             # weight_decay=0.1,
             # fused=True
         )
@@ -375,7 +376,7 @@ class PPOPolicy(ModBase):
                     if kl > self.desired_kl * 2.0:
                         actor_lr = max(1e-5, actor_lr / 1.5)
                     elif kl < self.desired_kl / 2.0 and kl > 0.0:
-                        actor_lr = min(1e-3, actor_lr * 1.5)
+                        actor_lr = min(self.init_lr, actor_lr * 1.1)
                     self.opt_teacher.param_groups[0]["lr"] = actor_lr
         
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
