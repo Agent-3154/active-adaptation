@@ -66,13 +66,11 @@ def sample_command(
             if use_yaw_stiffness[tid]:
                 yaw_stiffness[tid] = wp.randf(seed_, 0.5, 1.0)
                 cmd_ang_vel_w[tid].z = 0.0
-                cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, wp.randf(seed_) * wp.PI * 2.0)
             else:
                 yaw_rate = wp.randf(seed_, wp.PI / 4.0, wp.PI / 2.0)
                 yaw_stiffness[tid] = 0.0
                 cmd_ang_vel_w[tid].z = yaw_rate * wp.sign(wp.randn(seed_))
-                cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_duration[tid] = wp.randf(seed_, 1.0, 3.0)
         if next_mode[tid] == 1:
@@ -92,6 +90,7 @@ def sample_command(
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
             use_yaw_stiffness[tid] = False
             cmd_duration[tid] = air_time + PRE_JUMP_TIME + POST_JUMP_TIME
+        cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
         cmd_time[tid] = 0.0  # reset time
         mode[tid] = next_mode[tid]
 
@@ -260,15 +259,14 @@ class SiriusDemoCommand(Command):
         
     @property
     def command(self):
-        cmd_rpy_b = self.cmd_rpy_w.clone()
+        cmd_rpy_b = torch.zeros_like(self.cmd_rpy_w)
+        cmd_rpy_b[:, 2] = torch.where(self.cmd_mode == 1, self.des_rpy_w[:, 2], self.cmd_rpy_w[:, 2])
         cmd_rpy_b[:, 2] = wrap_to_pi(cmd_rpy_b[:, 2] - self.asset.data.heading_w)
-        des_yaw_b = wrap_to_pi(self.des_rpy_w[:, 2] - self.asset.data.heading_w).unsqueeze(1)
         return torch.cat(
             [
                 self.obs_cmd_lin_vel_b,
                 self.cmd_ang_vel_w,
                 cmd_rpy_b,
-                des_yaw_b,
                 torch.where(self.cmd_mode[:, None] == 1, self.cmd_time, torch.zeros_like(self.cmd_time)),
                 torch.where(self.cmd_mode[:, None] == 1, self.cmd_duration - self.cmd_time, torch.zeros_like(self.cmd_time)),
                 torch.nn.functional.one_hot(self.cmd_mode.long(), num_classes=2),

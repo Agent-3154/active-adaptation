@@ -5,7 +5,6 @@ import torch
 from .quadruped import *
 from .humanoid import *
 from .scene import *
-from .arm import *
 from .sirius import *
 
 
@@ -16,7 +15,6 @@ ROBOTS = {
     "aliengo": UNITREE_ALIENGO_CFG,
     "h1": H1_CFG,
     "cy1": CY1_CFG,
-    "a1-arm": A1_CFG,
     "sirius_wheel": SIRIUS_WHEEL_CFG,
     "g1_27dof": G1_27DOF_CFG,
     "g1_23dof": G1_23DOF_CFG,
