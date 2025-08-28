@@ -94,7 +94,7 @@ reward:
 termination:
   crash_leg(crash): {body_names_expr: [".*thigh", ".*calf"], t_thres: 0.01}
   crash_body(crash): {body_names_expr: ["trunk", ".*hip"], t_thres: 0.01}
-  # stand_error_exceeds: {}
+  root_height_below: {thres: 0.20}
 
 randomization:
   perturb_body_mass:

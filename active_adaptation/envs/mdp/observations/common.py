@@ -1011,7 +1011,7 @@ class prev_actions(Observation):
         self.action_manager = self.env.action_manager
     
     def compute(self):
-        action_buf = self.action_manager.action_buf[:, :, :self.steps].clone()
+        action_buf = self.action_manager.action_buf[:, :self.steps].clone()
         if self.flatten:
             return action_buf.reshape(self.num_envs, -1)
         else:

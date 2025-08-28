@@ -151,10 +151,13 @@ class impedance_pos_error(Termination):
 
 
 class root_height_below(Termination):
-    def __init__(self, env, thres_world: float):
+    def __init__(self, env, thres: float):
         super().__init__(env)
-        self.thres_world = thres_world
+        self.thres = thres
         self.asset: Articulation = self.env.scene["robot"]
     
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
-        return self.asset.data.root_pos_w[:, 2, None] < self.thres_world
+        ground_height = self.env.get_ground_height_at(self.asset.data.root_pos_w)
+        height = self.asset.data.root_pos_w[:, 2] - ground_height
+        return (height < self.thres).reshape(self.num_envs, 1)
+

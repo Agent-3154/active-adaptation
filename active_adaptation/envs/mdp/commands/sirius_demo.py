@@ -260,9 +260,9 @@ class SiriusDemoCommand(Command):
     @property
     def command(self):
         cmd_rpy_b = torch.zeros_like(self.cmd_rpy_w)
-        cmd_rpy_b[:, 2] = torch.where(self.cmd_mode == 1, self.des_rpy_w[:, 2], self.cmd_rpy_w[:, 2])
+        cmd_rpy_b[:, 2] = torch.where(self.cmd_mode == 1, self.des_rpy_w[:, 2], self.asset.data.heading_w)
         cmd_rpy_b[:, 2] = wrap_to_pi(cmd_rpy_b[:, 2] - self.asset.data.heading_w)
-        return torch.cat(
+        result = torch.cat(
             [
                 self.obs_cmd_lin_vel_b,
                 self.cmd_ang_vel_w,
@@ -274,6 +274,7 @@ class SiriusDemoCommand(Command):
             ],
             dim=1,
         )
+        return result
 
     def symmetry_transforms(self):
         return SymmetryTransform.cat(

@@ -178,13 +178,13 @@ class LegWheel(ActionManager):
         self.action_dim = len(self.leg_ids) + len(self.wheel_ids)
         
         self.applied_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
-        self.action_buf = torch.zeros(self.num_envs, self.action_dim, 4, device=self.device)
+        self.action_buf = torch.zeros(self.num_envs, 4, self.action_dim, device=self.device)
 
     def apply_action(self, tensordict: TensorDictBase, substep: int):
         action = tensordict["action"]
         if substep == 0:
-            self.action_buf = self.action_buf.roll(1, dims=-1)
-            self.action_buf[:, :, 0] = action
+            self.action_buf = self.action_buf.roll(1, dims=1)
+            self.action_buf[:, 0] = action
         self.applied_action = self.applied_action.lerp(action, 0.8)
         leg_action, wheel_action = self.applied_action.split([self.leg_action_dim, self.wheel_action_dim], dim=-1)
         leg_pos_target = self.asset.data.default_joint_pos[:, self.leg_ids] + self.leg_scaling * leg_action
