@@ -40,7 +40,7 @@ class SimpleEnv(_Env):
         from isaaclab.assets import AssetBaseCfg
         from isaaclab.sensors import ContactSensorCfg
         from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
-        from active_adaptation.assets import ROBOTS, get_asset_meta
+        from active_adaptation.assets import AssetRegistry, get_asset_meta
         from active_adaptation.envs.terrain import TERRAINS_ISAAC
         
         scene_cfg = InteractiveSceneCfg(num_envs=self.cfg.num_envs, env_spacing=2.5)
@@ -51,7 +51,8 @@ class SimpleEnv(_Env):
                 texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
             ),
         )
-        scene_cfg.robot = ROBOTS[self.cfg.robot.name]
+        registry = AssetRegistry.instance()
+        scene_cfg.robot = registry.get(self.cfg.robot.name)
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
         scene_cfg.terrain = TERRAINS_ISAAC[self.cfg.terrain]
         scene_cfg.contact_forces = ContactSensorCfg(
