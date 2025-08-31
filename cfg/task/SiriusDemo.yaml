@@ -66,6 +66,7 @@ reward:
     sirius_contact:       {weight: 0.8}
     sirius_jump_landing:  {weight: 5.0}
     sirius_jump_behave:   {weight: 0.1}
+    sirius_land_behave:   {weight: 0.1}
     sirius_walk_behave:   {weight: 0.4}
     angvel_xy_l2:         {weight: 0.01}
     # _eval_: "lambda a,b,c,d,e: (a+b+c)*d*e"
@@ -94,7 +95,7 @@ reward:
 termination:
   crash_leg(crash): {body_names_expr: [".*thigh", ".*calf"], t_thres: 0.01}
   crash_body(crash): {body_names_expr: ["trunk", ".*hip"], t_thres: 0.01}
-  root_height_below: {thres: 0.20}
+  root_height_below: {thres: 0.25}
 
 randomization:
   perturb_body_mass:

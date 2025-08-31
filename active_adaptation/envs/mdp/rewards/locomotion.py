@@ -1337,6 +1337,7 @@ class action_rate_l2(Reward):
     def __init__(self, env, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
         self.action_manager = self.env.action_manager
+        assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
     
     def compute(self) -> torch.Tensor:
         action_buf = self.action_manager.action_buf
@@ -1350,6 +1351,7 @@ class action_rate2_l2(Reward):
     def __init__(self, env, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
         self.action_manager = self.env.action_manager
+        assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
     
     def compute(self) -> torch.Tensor:
         action_buf = self.action_manager.action_buf

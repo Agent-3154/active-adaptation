@@ -17,6 +17,7 @@ class Gamepad:
         self.num_axes = self.joystick.get_numaxes()
         self.num_hats = self.joystick.get_numhats()
         self.num_buttons = self.joystick.get_numbuttons()
+        self.button_mapping = BTK_KP20
         self.update()
     
     @property
@@ -38,6 +39,19 @@ class Gamepad:
     def update(self):
         pygame.event.pump()
         self.axes = [self.joystick.get_axis(i) for i in range(self.num_axes)]
-        self.buttons = [self.joystick.get_button(i) for i in range(self.num_buttons)]
+        self.buttons = {
+            name: self.joystick.get_button(idx)
+            for name, idx in self.button_mapping.items()
+        }
         self.hats = [self.joystick.get_hat(i) for i in range(self.num_hats)]
+
+
+BTK_KP20 = {
+    "A": 0,
+    "B": 1,
+    "X": 3,
+    "Y": 4,
+    "LB": 6,
+    "RB": 7,
+}
 

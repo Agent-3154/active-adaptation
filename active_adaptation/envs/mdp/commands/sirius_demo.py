@@ -205,6 +205,11 @@ class SiriusDemoCommand(Command):
             )
             self.frame_marker = VisualizationMarkers(marker_cfg)
             self.frame_marker.set_visibility(True)
+        
+        if self.teleop:
+            from active_adaptation.utils.gamepad import Gamepad
+            self.gamepad = Gamepad()
+            
         self.seed = wp.rand_init(0)
 
     def reset(self, env_ids: torch.Tensor):
@@ -299,49 +304,70 @@ class SiriusDemoCommand(Command):
         return error
 
     def update(self):
-        c1 = self.env.episode_length_buf % 25 == 0
-        if self.homogeneous:
-            c2 = torch.rand(1, device=self.device) < 0.5
-        else:
-            c2 = torch.rand(self.num_envs, device=self.device) < 0.5
-        c3 = (self.cmd_time > self.cmd_duration).squeeze(1)
-        resample = (c1 & c2 & c3) | c3
-        next_mode_prob = self.transition_prob[self.cmd_mode.long()]
-        next_mode = next_mode_prob.multinomial(1, replacement=True).squeeze(-1)
-        if self.homogeneous:
-            next_mode = next_mode[0].expand_as(next_mode)
         heading_wp = wp.from_torch(self.asset.data.heading_w, return_ctype=True)
-
         error = (self.asset.data.joint_pos[:, self.joint_ids] - self.default_hip_jpos).abs()
         self.cum_hip_deviation = torch.where(error < 0.1, 0., self.cum_hip_deviation + error * self.env.step_dt)
         in_contact = self.contact_sensor.data.current_contact_time[:, self.wheel_ids_contact] > 0.0
 
-        wp.launch(
-            sample_command,
-            dim=self.num_envs,
-            inputs=[
-                wp.from_torch(self.asset.data.root_quat_w.roll(-1, dims=1), return_ctype=True),
-                heading_wp,
-                wp.from_torch(self.asset.data.root_lin_vel_w, return_ctype=True),
-                wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
-                wp.from_torch(self.cmd_lin_vel_b, return_ctype=True),
-                wp.from_torch(self.use_lin_vel_w, return_ctype=True),
-                wp.from_torch(self.des_rpy_w, return_ctype=True),
-                wp.from_torch(self.cmd_rpy_w, return_ctype=True),
-                wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
-                wp.from_torch(self.yaw_stiffness, return_ctype=True),
-                wp.from_torch(self.use_yaw_stiffness, return_ctype=True),
-                wp.from_torch(resample, return_ctype=True),
-                wp.from_torch(self.cmd_mode, return_ctype=True),
-                wp.from_torch(next_mode, return_ctype=True),
-                wp.from_torch(self.cmd_time, return_ctype=True),
-                wp.from_torch(self.cmd_duration, return_ctype=True),
-                wp.from_torch(self.cmd_jump_turn, return_ctype=True),
-                self.env.timestamp,
-                self.homogeneous,
-            ],
-            device=self.device.type,
-        )
+        if self.teleop:
+            self.gamepad.update()
+            self.cmd_lin_vel_b[:, 0] = self.gamepad.lxy[1] * 1.2
+            self.cmd_lin_vel_b[:, 1] = self.gamepad.lxy[0]
+            self.cmd_ang_vel_w[:, 2] = -self.gamepad.rxy[0]
+            self.use_yaw_stiffness[:] = False
+            
+            if (self.gamepad.buttons["A"]):
+                air_time = 0.7
+                self.cmd_mode[:] = 1
+                self.cmd_time[:] = 0.0
+                self.cmd_duration[:] = air_time + PRE_JUMP_TIME + POST_JUMP_TIME
+                self.cmd_jump_turn[:] = torch.pi
+                self.cmd_lin_vel_w[:] = quat_rotate(self.asset.data.root_quat_w, self.cmd_lin_vel_b)
+                self.use_lin_vel_w[:] = True
+                self.des_rpy_w[:, 2] = self.asset.data.heading_w + self.cmd_jump_turn
+            
+            jump_end = (self.cmd_mode == 1) & (self.cmd_time > self.cmd_duration).squeeze(1)
+            self.cmd_mode[jump_end] = 0
+            self.cmd_time[jump_end] = 0.0
+            self.cmd_duration[jump_end] = 0.0
+        else:
+            c1 = self.env.episode_length_buf % 25 == 0
+            if self.homogeneous:
+                c2 = torch.rand(1, device=self.device) < 0.5
+            else:
+                c2 = torch.rand(self.num_envs, device=self.device) < 0.5
+            c3 = (self.cmd_time > self.cmd_duration).squeeze(1)
+            resample = (c1 & c2 & c3) | c3
+            next_mode_prob = self.transition_prob[self.cmd_mode.long()]
+            next_mode = next_mode_prob.multinomial(1, replacement=True).squeeze(-1)
+            if self.homogeneous:
+                next_mode = next_mode[0].expand_as(next_mode)
+            wp.launch(
+                sample_command,
+                dim=self.num_envs,
+                inputs=[
+                    wp.from_torch(self.asset.data.root_quat_w.roll(-1, dims=1), return_ctype=True),
+                    heading_wp,
+                    wp.from_torch(self.asset.data.root_lin_vel_w, return_ctype=True),
+                    wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
+                    wp.from_torch(self.cmd_lin_vel_b, return_ctype=True),
+                    wp.from_torch(self.use_lin_vel_w, return_ctype=True),
+                    wp.from_torch(self.des_rpy_w, return_ctype=True),
+                    wp.from_torch(self.cmd_rpy_w, return_ctype=True),
+                    wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
+                    wp.from_torch(self.yaw_stiffness, return_ctype=True),
+                    wp.from_torch(self.use_yaw_stiffness, return_ctype=True),
+                    wp.from_torch(resample, return_ctype=True),
+                    wp.from_torch(self.cmd_mode, return_ctype=True),
+                    wp.from_torch(next_mode, return_ctype=True),
+                    wp.from_torch(self.cmd_time, return_ctype=True),
+                    wp.from_torch(self.cmd_duration, return_ctype=True),
+                    wp.from_torch(self.cmd_jump_turn, return_ctype=True),
+                    self.env.timestamp,
+                    self.homogeneous,
+                ],
+                device=self.device.type,
+            )
         wp.launch(
             step_command,
             dim=self.num_envs,
@@ -468,7 +494,7 @@ class sirius_ang_vel_z(Reward[SiriusDemoCommand]):
 class sirius_base_height(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
         root_height = self.command_manager.asset.data.root_pos_w[:, 2:3]
-        error = self.command_manager.cmd_height - root_height
+        error = (self.command_manager.cmd_height - root_height).clamp_min(0.0)
         error = error.square().reshape(self.num_envs, 1)
         rew = torch.exp(-error / 0.1)
         return rew
@@ -522,6 +548,23 @@ class sirius_jump_behave(Reward[SiriusDemoCommand]):
 
     def compute(self) -> torch.Tensor:
         is_active = (self.command_manager.cmd_mode[:, None] == 1) & (~self.command_manager.in_air)
+        rew_dev = - torch.abs(self.joint_pos - self.default_jpos).sum(1, True)
+        return rew_dev, is_active
+
+
+class sirius_land_behave(Reward[SiriusDemoCommand]):
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.asset = self.command_manager.asset
+        self.joint_ids = self.asset.find_joints(".*(HAA|HFE|KFE)")[0]
+        self.default_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
+    
+    def update(self):
+        self.joint_pos = self.asset.data.joint_pos[:, self.joint_ids]
+
+    def compute(self) -> torch.Tensor:
+        is_landing = (self.command_manager.cmd_time > self.command_manager.cmd_duration - POST_JUMP_TIME)
+        is_active = (self.command_manager.cmd_mode[:, None] == 1) & is_landing
         rew_dev = - torch.abs(self.joint_pos - self.default_jpos).sum(1, True)
         return rew_dev, is_active
 
