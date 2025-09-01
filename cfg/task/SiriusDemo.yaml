@@ -44,7 +44,7 @@ observation:
     # joint_vel_multistep: {steps: 4, noise_std: 0.2, joint_names: .*}
     prev_actions: {steps: 2}
     # wheel_trans_vel:    {}
-    sirius_joint_deviation: {}
+    # sirius_joint_deviation: {}
   priv:
     applied_action:
     applied_torque:
@@ -64,9 +64,9 @@ reward:
     sirius_yaw:           {weight: 1.0}
     sirius_base_height:   {weight: 1.0}
     sirius_contact:       {weight: 0.8}
-    sirius_jump_landing:  {weight: 5.0}
+    sirius_jump_landing:  {weight: 10.0}
     sirius_jump_behave:   {weight: 0.1}
-    sirius_land_behave:   {weight: 0.1}
+    sirius_land_behave:   {weight: 0.5}
     sirius_walk_behave:   {weight: 0.4}
     angvel_xy_l2:         {weight: 0.01}
     # _eval_: "lambda a,b,c,d,e: (a+b+c)*d*e"
@@ -75,7 +75,7 @@ reward:
     energy_l1:          {weight: 0.0001}
     joint_acc_l2:       {weight: 2.5e-7, joint_names: .*_(HAA|HFE|KFE)}
     joint_deviation_l2: {weight: 0.1, joint_names: .*HAA}
-    joint_vel_l2:       {weight: 0.002, joint_names: .*_(HFE|KFE)}
+    joint_vel_l2:       {weight: 0.002, joint_names: .*_(HAA|HFE|KFE)}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
     survival:           {weight: 1.0}
@@ -93,8 +93,8 @@ reward:
     feet_contact_count: {weight: 1.0, enabled: false, body_names: .*_FOOT}
 
 termination:
-  crash_leg(crash): {body_names_expr: [".*thigh", ".*calf"], t_thres: 0.01}
-  crash_body(crash): {body_names_expr: ["trunk", ".*hip"], t_thres: 0.01}
+  crash_leg(crash): {body_names_expr: [".*thigh", ".*calf"], t_thres: 0.02}
+  crash_body(crash): {body_names_expr: ["trunk", ".*hip"], t_thres: 0.02}
   root_height_below: {thres: 0.25}
 
 randomization:
@@ -127,6 +127,6 @@ randomization:
     pos_scales:
       .*: [0.8, 1.2]
   random_impulse: {}
-  drive_model_properties:
-    joint_names: .*_(HFE|KFE)
-    velocity_resistance_range: [0.0, 10.0]
+  # drive_model_properties:
+  #   joint_names: .*_(HFE|KFE)
+  #   velocity_resistance_range: [0.0, 10.0]

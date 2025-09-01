@@ -57,7 +57,7 @@ def sample_command(
             has_lin_vel = wp.randf(seed_) < lin_vel_prob
             if has_lin_vel:
                 cmd_lin_vel_b[tid] = wp.vec3(
-                    wp.randf(seed_, 0.3, 1.5) * wp.sign(wp.randn(seed_)),
+                    wp.randf(seed_, 0.3, 1.6) * wp.sign(wp.randn(seed_)),
                     wp.randf(seed_, -0.8, 0.8), 0.0)
             else:
                 cmd_lin_vel_b[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -75,16 +75,18 @@ def sample_command(
             cmd_duration[tid] = wp.randf(seed_, 1.0, 3.0)
         if next_mode[tid] == 1:
             cmd_lin_vel_b[tid] = wp.cw_mul(cmd_lin_vel_b[tid], wp.vec3(1.0, 0.0, 0.0))
-            cmd_lin_vel_b[tid].x += wp.randf(seed_, 0.2, 0.3)
+            x_vel = cmd_lin_vel_b[tid].x
+            x_vel = (wp.abs(x_vel) + wp.randf(seed_, 0.1, 0.4)) * wp.sign(x_vel)
             cmd_lin_vel_w[tid] = wp.quat_rotate(quat_w[tid], cmd_lin_vel_b[tid])
             use_lin_vel_w[tid] = True
-            turn = wp.randf(seed_) > 0.5
+            # cmd_lin_vel_b will be updated by `step_command`
+            turn = wp.randf(seed_) < 0.5
             if turn:
-                air_time = wp.randf(seed_, 0.5, 0.7) # more time to turn
+                air_time = wp.randf(seed_, 0.6, 0.8) # more time to turn
                 cmd_jump_turn[tid] = wp.PI
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid] + wp.PI)
             else:
-                air_time = wp.randf(seed_, 0.3, 0.7)
+                air_time = wp.randf(seed_, 0.3, 0.8)
                 cmd_jump_turn[tid] = 0.0
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -132,15 +134,16 @@ def step_command(
         if time < PRE_JUMP_TIME :
             cmd_height[tid] = 0.40
             cmd_contact[tid] = 0.25 * wp.vec4(1.0, 1.0, 1.0, 1.0)
+            cmd_ang_vel_w[tid].z = 0.0
         elif time < PRE_JUMP_TIME + 0.2:
             cmd_height[tid] = 0.40 + (time - PRE_JUMP_TIME)
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
-            if cmd_jump_turn[tid] > 0.0:
-                cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
+            cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
             cmd_in_air[tid] = True
         elif time < cmd_duration[tid] - POST_JUMP_TIME:
             cmd_height[tid] = 0.60
             cmd_contact[tid] = - wp.vec4(1.0, 1.0, 1.0, 1.0)
+            cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
             cmd_in_air[tid] = True
         else:
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
@@ -317,16 +320,20 @@ class SiriusDemoCommand(Command):
             self.use_yaw_stiffness[:] = False
             
             if (self.gamepad.buttons["A"]):
-                air_time = 0.7
+                air_time = 0.8
                 self.cmd_mode[:] = 1
                 self.cmd_time[:] = 0.0
                 self.cmd_duration[:] = air_time + PRE_JUMP_TIME + POST_JUMP_TIME
                 self.cmd_jump_turn[:] = torch.pi
-                self.cmd_lin_vel_w[:] = quat_rotate(self.asset.data.root_quat_w, self.cmd_lin_vel_b)
+                self.cmd_lin_vel_w[:] = quat_rotate(
+                    self.asset.data.root_quat_w,
+                    self.cmd_lin_vel_b * torch.tensor([1.0, 0.0, 0.0], device=self.device)
+                )
                 self.use_lin_vel_w[:] = True
                 self.des_rpy_w[:, 2] = self.asset.data.heading_w + self.cmd_jump_turn
             
             jump_end = (self.cmd_mode == 1) & (self.cmd_time > self.cmd_duration).squeeze(1)
+            self.use_lin_vel_w[jump_end] = False
             self.cmd_mode[jump_end] = 0
             self.cmd_time[jump_end] = 0.0
             self.cmd_duration[jump_end] = 0.0
@@ -556,7 +563,7 @@ class sirius_land_behave(Reward[SiriusDemoCommand]):
     def __init__(self, env, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
         self.asset = self.command_manager.asset
-        self.joint_ids = self.asset.find_joints(".*(HAA|HFE|KFE)")[0]
+        self.joint_ids = self.asset.find_joints(".*(HFE|KFE)")[0]
         self.default_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
     
     def update(self):
@@ -565,7 +572,7 @@ class sirius_land_behave(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
         is_landing = (self.command_manager.cmd_time > self.command_manager.cmd_duration - POST_JUMP_TIME)
         is_active = (self.command_manager.cmd_mode[:, None] == 1) & is_landing
-        rew_dev = - torch.abs(self.joint_pos - self.default_jpos).sum(1, True)
+        rew_dev = - torch.square(self.joint_pos - self.default_jpos).sum(1, True)
         return rew_dev, is_active
 
 
@@ -579,7 +586,7 @@ class sirius_walk_behave(Reward[SiriusDemoCommand]):
         is_active = self.command_manager.cmd_mode[:, None] == 0
         rew_hip_dev = - self.command_manager.cum_hip_deviation.square().sum(1, True)
         rew_roll_dev = - self.command_manager.euler_error[:, 0:1].abs()
-        return rew_hip_dev + rew_roll_dev, is_active
+        return rew_roll_dev, is_active
 
     def debug_draw(self):
         body_pos_w = self.asset.data.body_pos_w[:, self.body_ids]
