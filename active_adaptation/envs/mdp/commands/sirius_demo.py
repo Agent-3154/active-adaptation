@@ -65,12 +65,12 @@ def sample_command(
             use_yaw_stiffness[tid] = wp.randf(seed_) < yaw_stiffness_prob
             if use_yaw_stiffness[tid]:
                 yaw_stiffness[tid] = wp.randf(seed_, 0.5, 1.0)
-                cmd_ang_vel_w[tid].z = 0.0
+                cmd_ang_vel_w[tid].z = 0.0 # computed in `step_command`
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, wp.randf(seed_) * wp.PI * 2.0)
             else:
-                yaw_rate = wp.randf(seed_, wp.PI / 4.0, wp.PI / 2.0)
+                yaw_rate_sample = wp.randf(seed_, wp.PI / 4.0, wp.PI / 2.0)
                 yaw_stiffness[tid] = 0.0
-                cmd_ang_vel_w[tid].z = yaw_rate * wp.sign(wp.randn(seed_))
+                cmd_ang_vel_w[tid].z = yaw_rate_sample * wp.sign(wp.randn(seed_))
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_duration[tid] = wp.randf(seed_, 1.0, 3.0)
         if next_mode[tid] == 1:
@@ -80,7 +80,7 @@ def sample_command(
             cmd_lin_vel_w[tid] = wp.quat_rotate(quat_w[tid], cmd_lin_vel_b[tid])
             use_lin_vel_w[tid] = True
             # cmd_lin_vel_b will be updated by `step_command`
-            turn = wp.randf(seed_) < 0.5
+            turn = wp.randf(seed_) < 0.0
             if turn:
                 air_time = wp.randf(seed_, 0.6, 0.8) # more time to turn
                 cmd_jump_turn[tid] = wp.PI
@@ -92,7 +92,6 @@ def sample_command(
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
             use_yaw_stiffness[tid] = False
             cmd_duration[tid] = air_time + PRE_JUMP_TIME + POST_JUMP_TIME
-        cmd_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
         cmd_time[tid] = 0.0  # reset time
         mode[tid] = next_mode[tid]
 
@@ -267,8 +266,7 @@ class SiriusDemoCommand(Command):
         
     @property
     def command(self):
-        cmd_rpy_b = torch.zeros_like(self.cmd_rpy_w)
-        cmd_rpy_b[:, 2] = torch.where(self.cmd_mode == 1, self.des_rpy_w[:, 2], self.asset.data.heading_w)
+        cmd_rpy_b = self.cmd_rpy_w.clone()
         cmd_rpy_b[:, 2] = wrap_to_pi(cmd_rpy_b[:, 2] - self.asset.data.heading_w)
         result = torch.cat(
             [
