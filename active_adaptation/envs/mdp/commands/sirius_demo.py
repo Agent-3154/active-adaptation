@@ -100,6 +100,7 @@ def sample_command(
 def step_command(
     heading_w: wp.array(dtype=wp.float32),
     cmd_ang_vel_w: wp.array(dtype=wp.vec3),
+    cmd_lin_vel_w: wp.array(dtype=wp.vec3),
     cum_hip_deviation: wp.array(dtype=wp.vec4),
     in_contact: wp.array(dtype=wp.bool),
     swing_thres: wp.array(dtype=wp.float32),
@@ -136,6 +137,7 @@ def step_command(
             cmd_ang_vel_w[tid].z = 0.0
         elif time < PRE_JUMP_TIME + 0.3:
             cmd_height[tid] = 0.40 + 0.8 * (time - PRE_JUMP_TIME)
+            cmd_lin_vel_w[tid] = wp.vec3(0.0, 0.0, 1.0)
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
             cmd_in_air[tid] = True
         elif time < PRE_JUMP_TIME + 0.3 + 0.3:
@@ -380,6 +382,7 @@ class SiriusDemoCommand(Command):
             inputs=[
                 heading_wp,
                 wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
+                wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cum_hip_deviation, return_ctype=True),
                 wp.from_torch(in_contact, return_ctype=True),
                 wp.from_torch(self.swing_thres, return_ctype=True),
@@ -485,6 +488,14 @@ class sirius_lin_vel_xy(Reward[SiriusDemoCommand]):
         current_lin_vel_xy = self.command_manager.asset.data.root_lin_vel_w[:, :2]
         error_l2 = (target_lin_vel_xy - current_lin_vel_xy).square().sum(1, True)
         return torch.exp(-error_l2 / 0.25)
+
+
+class sirius_lin_vel_z(Reward[SiriusDemoCommand]):
+    def compute(self) -> torch.Tensor:
+        target_lin_vel_z = self.command_manager.des_cmd_lin_vel_w[:, 2]
+        current_lin_vel_z = self.command_manager.asset.data.root_lin_vel_w[:, 2]
+        error_l2 = (target_lin_vel_z - current_lin_vel_z).square()
+        return torch.exp(-error_l2 / 0.2).reshape(self.num_envs, 1)
 
 
 class sirius_ang_vel_z(Reward[SiriusDemoCommand]):
