@@ -130,26 +130,22 @@ def step_command(
         cmd_in_air[tid] = False
     elif mode[tid] == 1:  # jump
         air_time = cmd_duration[tid] - PRE_JUMP_TIME - POST_JUMP_TIME
+        cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
         if time < PRE_JUMP_TIME :
             cmd_height[tid] = 0.40
-            cmd_contact[tid] = 0.25 * wp.vec4(1.0, 1.0, 1.0, 1.0)
             cmd_ang_vel_w[tid].z = 0.0
         elif time < PRE_JUMP_TIME + 0.3:
             cmd_height[tid] = 0.40 + 0.8 * (time - PRE_JUMP_TIME)
-            cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
             cmd_in_air[tid] = True
         elif time < PRE_JUMP_TIME + 0.3 + 0.3:
-            cmd_height[tid] = 0.60
-            cmd_contact[tid] = - wp.vec4(1.0, 1.0, 1.0, 1.0)
+            cmd_height[tid] = 0.64
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
             cmd_in_air[tid] = True
         elif time < cmd_duration[tid] - POST_JUMP_TIME:
-            cmd_height[tid] = 0.60
+            cmd_height[tid] = 0.64
             cmd_in_air[tid] = True
-            cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
         else:
-            cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
             cmd_height[tid] = 0.45
             cmd_ang_vel_w[tid].z = 0.0
             cmd_in_air[tid] = False

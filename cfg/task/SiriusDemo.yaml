@@ -63,13 +63,13 @@ reward:
     sirius_pitch:         {weight: 1.0}
     sirius_yaw:           {weight: 1.0}
     sirius_base_height:   {weight: 1.0}
-    sirius_contact:       {weight: 0.8}
-    sirius_jump_landing:  {weight: 10.0}
-    sirius_jump_behave:   {weight: 0.1}
-    sirius_land_behave:   {weight: 0.5}
-    sirius_walk_behave:   {weight: 0.4}
-    angvel_xy_l2:         {weight: 0.01}
-    # _eval_: "lambda a,b,c,d,e: (a+b+c)*d*e"
+    # sirius_contact:       {weight: 0.8}
+    # sirius_jump_landing:  {weight: 10.0}
+    # sirius_jump_behave:   {weight: 0.1}
+    # sirius_land_behave:   {weight: 0.5}
+    # sirius_walk_behave:   {weight: 0.4}
+    # angvel_xy_l2:         {weight: 0.01}
+    _eval_: "lambda a,b,c,d,e: (a+b+c+d) * e"
   joint_reg:
     _compile_: true
     energy_l1:          {weight: 0.0001}
