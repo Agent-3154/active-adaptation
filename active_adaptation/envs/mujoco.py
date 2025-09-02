@@ -521,9 +521,11 @@ class MJScene:
             articulation.update(dt)
             if self.mj_data.time - self.last_publish_time > self.publish_interval:
                 self.zmq_socket.send_pyobj({
-                    "time": self.mj_data.time,
+                    "sim_time": self.mj_data.time,
+                    "joint_names": articulation.joint_names,
                     "joint_pos": articulation.data.joint_pos[0], # [num_joints]
                     "joint_vel": articulation.data.joint_vel[0], # [num_joints]
+                    "computed_torque": articulation.data.applied_torque[0],
                     "applied_torque": articulation.data.applied_torque[0], # [num_joints]
                 })
                 self.last_publish_time = self.mj_data.time

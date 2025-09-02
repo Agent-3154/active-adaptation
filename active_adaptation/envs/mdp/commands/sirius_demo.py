@@ -82,11 +82,11 @@ def sample_command(
             # cmd_lin_vel_b will be updated by `step_command`
             turn = wp.randf(seed_) < 0.0
             if turn:
-                air_time = wp.randf(seed_, 0.6, 0.8) # more time to turn
+                air_time = wp.randf(seed_, 0.6, 0.9) # more time to turn
                 cmd_jump_turn[tid] = wp.PI
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid] + wp.PI)
             else:
-                air_time = wp.randf(seed_, 0.3, 0.8)
+                air_time = wp.randf(seed_, 1.0, 1.0)
                 cmd_jump_turn[tid] = 0.0
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -134,16 +134,20 @@ def step_command(
             cmd_height[tid] = 0.40
             cmd_contact[tid] = 0.25 * wp.vec4(1.0, 1.0, 1.0, 1.0)
             cmd_ang_vel_w[tid].z = 0.0
-        elif time < PRE_JUMP_TIME + 0.2:
-            cmd_height[tid] = 0.40 + (time - PRE_JUMP_TIME)
+        elif time < PRE_JUMP_TIME + 0.3:
+            cmd_height[tid] = 0.40 + 0.8 * (time - PRE_JUMP_TIME)
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
             cmd_in_air[tid] = True
-        elif time < cmd_duration[tid] - POST_JUMP_TIME:
+        elif time < PRE_JUMP_TIME + 0.3 + 0.3:
             cmd_height[tid] = 0.60
             cmd_contact[tid] = - wp.vec4(1.0, 1.0, 1.0, 1.0)
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
             cmd_in_air[tid] = True
+        elif time < cmd_duration[tid] - POST_JUMP_TIME:
+            cmd_height[tid] = 0.60
+            cmd_in_air[tid] = True
+            cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
         else:
             cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
             cmd_height[tid] = 0.45
@@ -244,6 +248,7 @@ class SiriusDemoCommand(Command):
             ],
             device=self.device.type,
         )
+        self.cmd_rpy_w[env_ids, 2] = self.asset.data.heading_w[env_ids]
         self.cum_hip_deviation[env_ids] = 0.0
     
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
