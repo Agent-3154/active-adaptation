@@ -15,7 +15,8 @@ from active_adaptation.utils.math import (
 from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
 
 
-PRE_JUMP_TIME = 0.8
+PRE_JUMP_TIME = 0.6
+TAKEOFF_TIME = 0.3
 POST_JUMP_TIME = 0.8
 
 
@@ -86,7 +87,7 @@ def sample_command(
                 cmd_jump_turn[tid] = wp.PI
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid] + wp.PI)
             else:
-                air_time = wp.randf(seed_, 1.0, 1.0)
+                air_time = wp.randf(seed_, 0.7, 0.9)
                 cmd_jump_turn[tid] = 0.0
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -115,6 +116,7 @@ def step_command(
     cmd_duration: wp.array(dtype=wp.float32),
     cmd_in_air: wp.array(dtype=wp.bool),
     cmd_jump_turn: wp.array(dtype=wp.float32),
+    cmd_jump_ref: wp.array(dtype=wp.vec2),
 ):
     tid = wp.tid()
     time = cmd_time[tid]
@@ -132,25 +134,33 @@ def step_command(
     elif mode[tid] == 1:  # jump
         air_time = cmd_duration[tid] - PRE_JUMP_TIME - POST_JUMP_TIME
         cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
-        if time < PRE_JUMP_TIME :
-            cmd_height[tid] = 0.40
+        jump_ref = cmd_jump_ref[tid]
+        ref_hei = jump_ref[0]
+        ref_vel = jump_ref[1]
+        if time < PRE_JUMP_TIME:
             cmd_ang_vel_w[tid].z = 0.0
-        elif time < PRE_JUMP_TIME + 0.3:
-            cmd_height[tid] = 0.40 + 0.8 * (time - PRE_JUMP_TIME)
-            cmd_lin_vel_w[tid] = wp.vec3(0.0, 0.0, (time - PRE_JUMP_TIME) * 8.0)
-            cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
-            cmd_in_air[tid] = True
-        elif time < PRE_JUMP_TIME + 0.3 + 0.3:
-            cmd_height[tid] = 0.64
-            cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
-            cmd_in_air[tid] = True
-        elif time < cmd_duration[tid] - POST_JUMP_TIME:
-            cmd_height[tid] = 0.64
-            cmd_in_air[tid] = True
-        else:
-            cmd_height[tid] = 0.45
-            cmd_ang_vel_w[tid].z = 0.0
+            ref_hei = 0.40
+            ref_vel = 0.0
             cmd_in_air[tid] = False
+        elif time < PRE_JUMP_TIME + TAKEOFF_TIME:
+            ref_acc = 1.0 + 30.0 * (time - PRE_JUMP_TIME)
+            ref_vel = ref_vel + ref_acc * 0.02
+            ref_hei = ref_hei + ref_vel * 0.02
+        elif time < PRE_JUMP_TIME + air_time:
+            ref_acc = -9.81
+            if ref_hei < 0.5:
+                ref_acc = ref_acc * 0.2 + 100.0 * (0.5-ref_hei) - 20.0 * ref_vel
+            ref_vel = ref_vel + ref_acc * 0.02
+            ref_hei = ref_hei + ref_vel * 0.02
+            cmd_in_air[tid] = True
+        elif time < cmd_duration[tid]:
+            ref_hei = 0.45
+            ref_vel = 0.0
+            cmd_ang_vel_w[tid].z = 0.0
+        cmd_jump_ref[tid] = wp.vec2(ref_hei, ref_vel)
+        cmd_height[tid] = ref_hei
+        cmd_lin_vel_w[tid].z = ref_vel
+        
     cmd_rpy_w[tid] += cmd_ang_vel_w[tid] * 0.02
     cmd_time[tid] += 0.02
 
@@ -180,6 +190,7 @@ class SiriusDemoCommand(Command):
             self.cmd_mode = torch.zeros(self.num_envs, dtype=torch.int32)
             self.in_air = torch.zeros(self.num_envs, 1, dtype=bool)
             self.cmd_jump_turn = torch.zeros(self.num_envs, 1)
+            self.cmd_jump_ref = torch.zeros(self.num_envs, 2)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=bool)
 
             self.cum_hip_deviation = torch.zeros(self.num_envs, 4)
@@ -397,6 +408,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(self.cmd_duration, return_ctype=True),
                 wp.from_torch(self.in_air, return_ctype=True),
                 wp.from_torch(self.cmd_jump_turn, return_ctype=True),
+                wp.from_torch(self.cmd_jump_ref, return_ctype=True),
             ],
             device=self.device.type,
         )

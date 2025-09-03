@@ -59,7 +59,7 @@ observation:
 reward:
   loco:
     sirius_lin_vel_xy:    {weight: 1.5}
-    sirius_lin_vel_z:     {weight: 0.5}
+    sirius_lin_vel_z:     {weight: 1.5}
     sirius_ang_vel_z:     {weight: 1.0}
     sirius_pitch:         {weight: 1.0}
     sirius_yaw:           {weight: 1.0}
