@@ -18,6 +18,7 @@ from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symm
 PRE_JUMP_TIME = 0.6
 TAKEOFF_TIME = 0.3
 POST_JUMP_TIME = 0.8
+NOMINAL_HEIGHT = 0.5
 
 
 @wp.kernel(enable_backward=False)
@@ -81,7 +82,7 @@ def sample_command(
             cmd_lin_vel_w[tid] = wp.quat_rotate(quat_w[tid], cmd_lin_vel_b[tid])
             use_lin_vel_w[tid] = True
             # cmd_lin_vel_b will be updated by `step_command`
-            turn = wp.randf(seed_) < 0.0
+            turn = wp.randf(seed_) < 0.5
             if turn:
                 air_time = wp.randf(seed_, 0.6, 0.9) # more time to turn
                 cmd_jump_turn[tid] = wp.PI
@@ -138,24 +139,27 @@ def step_command(
         ref_hei = jump_ref[0]
         ref_vel = jump_ref[1]
         if time < PRE_JUMP_TIME:
-            cmd_ang_vel_w[tid].z = 0.0
             ref_hei = 0.40
             ref_vel = 0.0
             cmd_in_air[tid] = False
+            cmd_ang_vel_w[tid].z = 0.0
         elif time < PRE_JUMP_TIME + TAKEOFF_TIME:
-            ref_acc = 1.0 + 30.0 * (time - PRE_JUMP_TIME)
+            ref_acc = 1.0 + 32.0 * (time - PRE_JUMP_TIME)
             ref_vel = ref_vel + ref_acc * 0.02
             ref_hei = ref_hei + ref_vel * 0.02
+            cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
         elif time < PRE_JUMP_TIME + air_time:
             ref_acc = -9.81
-            if ref_hei < 0.5:
-                ref_acc = ref_acc * 0.2 + 100.0 * (0.5-ref_hei) - 20.0 * ref_vel
+            if ref_hei < NOMINAL_HEIGHT:
+                ref_acc = ref_acc * 0.2 + 100.0 * (NOMINAL_HEIGHT-ref_hei) - 20.0 * ref_vel
             ref_vel = ref_vel + ref_acc * 0.02
             ref_hei = ref_hei + ref_vel * 0.02
             cmd_in_air[tid] = True
+            cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
         elif time < cmd_duration[tid]:
             ref_hei = 0.45
             ref_vel = 0.0
+            cmd_in_air[tid] = False
             cmd_ang_vel_w[tid].z = 0.0
         cmd_jump_ref[tid] = wp.vec2(ref_hei, ref_vel)
         cmd_height[tid] = ref_hei
@@ -192,6 +196,7 @@ class SiriusDemoCommand(Command):
             self.cmd_jump_turn = torch.zeros(self.num_envs, 1)
             self.cmd_jump_ref = torch.zeros(self.num_envs, 2)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=bool)
+            self.in_contact = torch.zeros(self.num_envs, 4, dtype=bool)
 
             self.cum_hip_deviation = torch.zeros(self.num_envs, 4)
             self.swing_thres = torch.zeros(self.num_envs, 1)
@@ -322,7 +327,7 @@ class SiriusDemoCommand(Command):
         heading_wp = wp.from_torch(self.asset.data.heading_w, return_ctype=True)
         error = (self.asset.data.joint_pos[:, self.joint_ids] - self.default_hip_jpos).abs()
         self.cum_hip_deviation = torch.where(error < 0.1, 0., self.cum_hip_deviation + error * self.env.step_dt)
-        in_contact = self.contact_sensor.data.current_contact_time[:, self.wheel_ids_contact] > 0.0
+        self.in_contact = self.contact_sensor.data.current_contact_time[:, self.wheel_ids_contact] > 0.0
 
         if self.teleop:
             self.gamepad.update()
@@ -395,7 +400,7 @@ class SiriusDemoCommand(Command):
                 wp.from_torch(self.cmd_ang_vel_w, return_ctype=True),
                 wp.from_torch(self.cmd_lin_vel_w, return_ctype=True),
                 wp.from_torch(self.cum_hip_deviation, return_ctype=True),
-                wp.from_torch(in_contact, return_ctype=True),
+                wp.from_torch(self.in_contact, return_ctype=True),
                 wp.from_torch(self.swing_thres, return_ctype=True),
                 wp.from_torch(self.des_rpy_w, return_ctype=True),
                 wp.from_torch(self.cmd_rpy_w, return_ctype=True),
@@ -630,11 +635,12 @@ class sirius_takeoff(Reward[SiriusDemoCommand]):
         self.takeoff[env_ids] = False
 
     def update(self):
-        non_contact = ~self.command_manager.cmd_contact.any(dim=1, keepdim=True)
-        self.takeoff = self.non_contact & ~non_contact
+        non_contact = (~self.command_manager.in_contact).all(dim=1, keepdim=True)
+        self.takeoff = ~self.non_contact & non_contact
         self.non_contact = non_contact
 
     def compute(self) -> torch.Tensor:
         is_active = (self.command_manager.cmd_mode[:, None] == 1) & (self.command_manager.cmd_time > PRE_JUMP_TIME)
         rew = self.takeoff.float()
         return rew, is_active
+
