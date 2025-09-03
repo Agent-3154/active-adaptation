@@ -137,7 +137,7 @@ def step_command(
             cmd_ang_vel_w[tid].z = 0.0
         elif time < PRE_JUMP_TIME + 0.3:
             cmd_height[tid] = 0.40 + 0.8 * (time - PRE_JUMP_TIME)
-            cmd_lin_vel_w[tid] = wp.vec3(0.0, 0.0, 1.0)
+            cmd_lin_vel_w[tid] = wp.vec3(0.0, 0.0, (time - PRE_JUMP_TIME) * 8.0)
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
             cmd_in_air[tid] = True
         elif time < PRE_JUMP_TIME + 0.3 + 0.3:
@@ -492,10 +492,11 @@ class sirius_lin_vel_xy(Reward[SiriusDemoCommand]):
 
 class sirius_lin_vel_z(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
+        is_active = (self.command_manager.cmd_mode[:, None] == 1)
         target_lin_vel_z = self.command_manager.des_cmd_lin_vel_w[:, 2]
         current_lin_vel_z = self.command_manager.asset.data.root_lin_vel_w[:, 2]
         error_l2 = (target_lin_vel_z - current_lin_vel_z).square()
-        return torch.exp(-error_l2 / 0.2).reshape(self.num_envs, 1)
+        return torch.exp(-error_l2 / 0.2).reshape(self.num_envs, 1), is_active
 
 
 class sirius_ang_vel_z(Reward[SiriusDemoCommand]):
@@ -604,3 +605,24 @@ class sirius_walk_behave(Reward[SiriusDemoCommand]):
         vec[:, :, 2] = self.command_manager.cum_hip_deviation
         self.env.debug_draw.vector(body_pos_w, vec, size=2.0, color=(1., 0., 0., 1.))
 
+
+class sirius_takeoff(Reward[SiriusDemoCommand]):
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.asset = self.command_manager.asset
+        self.non_contact = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
+        self.takeoff = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
+    
+    def reset(self, env_ids: torch.Tensor):
+        self.non_contact[env_ids] = False
+        self.takeoff[env_ids] = False
+
+    def update(self):
+        non_contact = ~self.command_manager.cmd_contact.any(dim=1, keepdim=True)
+        self.takeoff = self.non_contact & ~non_contact
+        self.non_contact = non_contact
+
+    def compute(self) -> torch.Tensor:
+        is_active = (self.command_manager.cmd_mode[:, None] == 1) & (self.command_manager.cmd_time > PRE_JUMP_TIME)
+        rew = self.takeoff.float()
+        return rew, is_active
