@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
 
 from active_adaptation.envs.mdp.base import Reward
+from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
 
 
 class max_feet_height(Reward):
@@ -34,4 +35,22 @@ class max_feet_height(Reward):
         first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[:, self.body_contact_ids]
         rew = self.rew * first_contact
         return rew.sum(1, keepdim=True)
+
+
+class feet_sliding(Reward):
+    def __init__(self, env, body_names: str, weight: float):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.body_ids = self.asset.find_bodies(body_names)[0]
+        self.body_contact_ids = self.contact_sensor.find_bodies(body_names)[0]
+
+    def compute(self) -> torch.Tensor:
+        in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.0        
+        feet_vel_b = quat_rotate_inverse(
+            yaw_quat(self.asset.data.root_quat_w).unsqueeze(1),
+            self.asset.data.body_lin_vel_w[:, self.body_ids]
+        )
+        slip = (in_contact * feet_vel_b[:, :, 1].square()).sum(dim=1)
+        return - slip.reshape(self.num_envs, 1)
 

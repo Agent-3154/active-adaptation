@@ -431,25 +431,6 @@ class tracking_error_exp(Reward):
         return torch.exp(-self.asset.data._tracking_error / 0.5)
 
 
-class feet_slip(Reward):
-    def __init__(self, env, body_names: str, weight: float):
-        super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
-
-        self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
-        self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
-        self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
-
-    def compute(self) -> torch.Tensor:
-        in_contact = (
-            self.contact_sensor.data.current_contact_time[:, self.body_ids] > 0.02
-        )
-        feet_vel = self.asset.data.body_lin_vel_w[:, self.articulation_body_ids, :2]
-        slip = (in_contact * feet_vel.norm(dim=-1).square()).sum(dim=1, keepdim=True)
-        return -slip
-
-
 class feet_air_time(Reward):
     def __init__(self, env, body_names: str, thres: float, weight: float, condition_on_linvel: bool = False):
         super().__init__(env, weight)

@@ -43,7 +43,6 @@ observation:
     joint_pos_multistep: {steps: 4, noise_std: 0.05, joint_names: .*_(HAA|HFE|KFE)}
     # joint_vel_multistep: {steps: 4, noise_std: 0.2, joint_names: .*}
     prev_actions: {steps: 2}
-    # wheel_trans_vel:    {}
     # sirius_joint_deviation: {}
   priv:
     applied_action:
@@ -87,6 +86,7 @@ reward:
     wheel_contact_direction: {weight: 0.5}
     feet_air_time:      {weight: 0.2, body_names: .*_FOOT, thres: 0.4}
     max_feet_height:    {weight: 2.0, body_names: .*_FOOT, target_height: 0.2}
+    feet_sliding:       {weight: 0.5, body_names: .*_FOOT}
   # safety:
   #   joint_torque_limits: {weight: 0.2, enabled: true, joint_names: .*_(HFE|KFE), factor: 0.8}
   #   joint_vel_limits:    {weight: 0.1, enabled: true, joint_names: .*_(HFE|KFE), factor: 0.5}
