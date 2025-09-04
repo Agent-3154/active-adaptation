@@ -63,14 +63,13 @@ reward:
     sirius_pitch:         {weight: 1.0}
     sirius_yaw:           {weight: 1.0}
     sirius_base_height:   {weight: 1.0}
+
     sirius_contact:       {weight: 0.8}
-    # sirius_takeoff:       {weight: 10.0}
-    # sirius_jump_behave:   {weight: 0.1}
     sirius_jump_landing:  {weight: 10.0}
     sirius_land_behave:   {weight: 0.5}
     # sirius_walk_behave:   {weight: 0.4}
     angvel_xy_l2:         {weight: 0.01}
-    # _eval_: "lambda a,b,c,d,e,f,g,h: (a+b+c+d+e)*f+g+h"
+    _eval_: "lambda a,b,c,d,e,f,g,h,i,j: (a+b+c+d+e)*f+g+h+i+j"
   joint_reg:
     _compile_: true
     energy_l1:          {weight: 0.0001}
@@ -84,7 +83,7 @@ reward:
     lateral_swing_height: {weight: 2.0, feet_names: .*_FOOT}
     undesired_contact:  {body_names: ["trunk", ".*(hip|thigh|calf)"], weight: 0.25}
     wheel_contact_direction: {weight: 0.5}
-    feet_air_time:      {weight: 0.2, body_names: .*_FOOT, thres: 0.4}
+    feet_air_time:      {weight: 0.4, body_names: .*_FOOT, thres: 0.4}
     max_feet_height:    {weight: 2.0, body_names: .*_FOOT, target_height: 0.2}
     feet_sliding:       {weight: 0.5, body_names: .*_FOOT}
   # safety:

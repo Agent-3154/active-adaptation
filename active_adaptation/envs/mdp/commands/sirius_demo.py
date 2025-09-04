@@ -84,11 +84,11 @@ def sample_command(
             # cmd_lin_vel_b will be updated by `step_command`
             turn = wp.randf(seed_) < 0.5
             if turn:
-                air_time = wp.randf(seed_, 0.6, 0.9) # more time to turn
+                air_time = wp.randf(seed_, 0.75, 0.95) # more time to turn
                 cmd_jump_turn[tid] = wp.PI
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid] + wp.PI)
             else:
-                air_time = wp.randf(seed_, 0.7, 0.9)
+                air_time = wp.randf(seed_, 0.75, 0.95)
                 cmd_jump_turn[tid] = 0.0
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -144,7 +144,7 @@ def step_command(
             cmd_in_air[tid] = False
             cmd_ang_vel_w[tid].z = 0.0
         elif time < PRE_JUMP_TIME + TAKEOFF_TIME:
-            ref_acc = 1.0 + 32.0 * (time - PRE_JUMP_TIME)
+            ref_acc = 0.5 + 30.0 * (time - PRE_JUMP_TIME)
             ref_vel = ref_vel + ref_acc * 0.02
             ref_hei = ref_hei + ref_vel * 0.02
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
@@ -515,7 +515,7 @@ class sirius_lin_vel_z(Reward[SiriusDemoCommand]):
         target_lin_vel_z = self.command_manager.des_cmd_lin_vel_w[:, 2]
         current_lin_vel_z = self.command_manager.asset.data.root_lin_vel_w[:, 2]
         error_l2 = (target_lin_vel_z - current_lin_vel_z).square()
-        return torch.exp(-error_l2 / 0.2).reshape(self.num_envs, 1), is_active
+        return torch.exp(-error_l2 / 0.25).reshape(self.num_envs, 1), is_active
 
 
 class sirius_ang_vel_z(Reward[SiriusDemoCommand]):
@@ -532,9 +532,8 @@ class sirius_base_height(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
         root_height = self.command_manager.asset.data.root_pos_w[:, 2:3]
         error = (self.command_manager.cmd_height - root_height).clamp_min(0.0)
-        error = error.square().reshape(self.num_envs, 1)
         rew = torch.exp(-error / 0.1)
-        return rew
+        return rew.reshape(self.num_envs, 1)
 
 
 class sirius_contact(Reward[SiriusDemoCommand]):
