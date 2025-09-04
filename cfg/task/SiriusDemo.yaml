@@ -69,7 +69,7 @@ reward:
     sirius_land_behave:   {weight: 0.5}
     # sirius_walk_behave:   {weight: 0.4}
     angvel_xy_l2:         {weight: 0.01}
-    _eval_: "lambda a,b,c,d,e,f,g,h,i,j: (a+b+c+d+e)*f+g+h+i+j"
+    _eval_: "lambda a,b,c,d,e,f,g,h,i,j: (a+b+c+d+e+f)*f+g+h+i+j"
   joint_reg:
     _compile_: true
     energy_l1:          {weight: 0.0001}

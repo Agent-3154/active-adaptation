@@ -144,7 +144,8 @@ def step_command(
             cmd_in_air[tid] = False
             cmd_ang_vel_w[tid].z = 0.0
         elif time < PRE_JUMP_TIME + TAKEOFF_TIME:
-            ref_acc = 0.5 + 30.0 * (time - PRE_JUMP_TIME)
+            ref_acc = 0.5 + 36.0 * (time - PRE_JUMP_TIME)
+            ref_acc = wp.clamp(ref_acc, 0.0, 9.0)
             ref_vel = ref_vel + ref_acc * 0.02
             ref_hei = ref_hei + ref_vel * 0.02
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
@@ -546,7 +547,7 @@ class sirius_contact(Reward[SiriusDemoCommand]):
         contact_forces = self.contact_forces.data.net_forces_w[:, self.foot_ids]
         in_contact = contact_forces.norm(dim=-1) > 0.2
         rew = (in_contact * self.command_manager.cmd_contact).sum(1, True)
-        # self.env.discount.mul_(torch.exp(0.25 * rew.clamp_max(0.0)))
+        self.env.discount.mul_(torch.exp(0.25 * rew.clamp_max(0.0)))
         return rew.reshape(self.num_envs, 1)
 
 
