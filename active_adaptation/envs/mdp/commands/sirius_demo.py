@@ -154,11 +154,13 @@ def step_command(
                 ref_acc = ref_acc * 0.2 + 100.0 * (NOMINAL_HEIGHT-ref_hei) - 20.0 * ref_vel
             ref_vel = ref_vel + ref_acc * 0.02
             ref_hei = ref_hei + ref_vel * 0.02
+            cmd_contact[tid] = - wp.vec4(1.0, 1.0, 1.0, 1.0)
             cmd_in_air[tid] = True
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
         elif time < cmd_duration[tid]:
             ref_hei = 0.45
             ref_vel = 0.0
+            cmd_contact[tid] = wp.vec4(0.0, 0.0, 0.0, 0.0)
             cmd_in_air[tid] = False
             cmd_ang_vel_w[tid].z = 0.0
         cmd_jump_ref[tid] = wp.vec2(ref_hei, ref_vel)
@@ -295,7 +297,7 @@ class SiriusDemoCommand(Command):
                 torch.where(self.cmd_mode[:, None] == 1, self.cmd_time, torch.zeros_like(self.cmd_time)),
                 torch.where(self.cmd_mode[:, None] == 1, self.cmd_duration - self.cmd_time, torch.zeros_like(self.cmd_time)),
                 torch.nn.functional.one_hot(self.cmd_mode.long(), num_classes=2),
-                self.cmd_contact,
+                # self.cmd_contact,
             ],
             dim=1,
         )
@@ -309,7 +311,7 @@ class SiriusDemoCommand(Command):
                 SymmetryTransform(perm=torch.arange(3), signs=torch.tensor([-1, 1, -1])),  # flip yaw,
                 SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # phase: do nothing
                 SymmetryTransform(perm=torch.arange(2), signs=torch.ones(2)), # cmd_mode: do nothing
-                SymmetryTransform(perm=torch.tensor([2, 3, 0, 1]), signs=torch.ones(4)) # cmd_contact: flip left and right
+                # SymmetryTransform(perm=torch.tensor([2, 3, 0, 1]), signs=torch.ones(4)) # cmd_contact: flip left and right
             ]
         )
 
@@ -545,7 +547,7 @@ class sirius_contact(Reward[SiriusDemoCommand]):
         contact_forces = self.contact_forces.data.net_forces_w[:, self.foot_ids]
         in_contact = contact_forces.norm(dim=-1) > 0.2
         rew = (in_contact * self.command_manager.cmd_contact).sum(1, True)
-        self.env.discount.mul_(torch.exp(0.25 * rew.clamp_max(0.0)))
+        # self.env.discount.mul_(torch.exp(0.25 * rew.clamp_max(0.0)))
         return rew.reshape(self.num_envs, 1)
 
 
