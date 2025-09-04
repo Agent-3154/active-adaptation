@@ -75,7 +75,7 @@ reward:
     joint_acc_l2:       {weight: 2.5e-7, joint_names: .*_(HAA|HFE|KFE)}
     joint_deviation_l2: {weight: 0.1, joint_names: .*HAA}
     joint_vel_l2:       {weight: 0.002, joint_names: .*_(HAA|HFE|KFE)}
-    joint_vel_limits:   {weight: 0.2, joint_names: .*_(HAA|HFE|KFE), factor: 0.5}
+    joint_vel_limits:   {weight: 0.4, joint_names: .*_(HAA|HFE|KFE), factor: 0.4}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
     survival:           {weight: 1.0}

@@ -71,14 +71,14 @@ class joint_pos_multistep(Observation):
 
         shape = (self.num_envs, steps, self.num_joints)
         self.joint_pos_multistep = torch.zeros(shape, device=self.device)
-        self.joint_pos = torch.zeros(self.num_envs, 2, self.num_joints, device=self.device)
+        self.joint_pos_substep = torch.zeros(self.num_envs, 2, self.num_joints, device=self.device)
     
     def post_step(self, substep):
-        self.joint_pos[:, substep % 2] = self.asset.data.joint_pos[:, self.joint_ids]
+        self.joint_pos_substep[:, substep % 2] = self.asset.data.joint_pos[:, self.joint_ids]
     
     def update(self):
         next_joint_pos_multistep = self.joint_pos_multistep.roll(1, 1)
-        next_joint_pos = self.joint_pos.mean(1)
+        next_joint_pos = self.joint_pos_substep.mean(1)
         next_joint_pos_multistep[:, 0] = next_joint_pos
         self.joint_pos_multistep = torch.where(
             (self.env.episode_length_buf % self.interval == 0).reshape(self.num_envs, 1, 1),
