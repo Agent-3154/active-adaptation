@@ -16,7 +16,7 @@ from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symm
 
 
 PRE_JUMP_TIME = 0.6
-TAKEOFF_TIME = 0.32
+TAKEOFF_TIME = 0.36
 POST_JUMP_TIME = 0.8
 NOMINAL_HEIGHT = 0.5
 
@@ -84,11 +84,11 @@ def sample_command(
             # cmd_lin_vel_b will be updated by `step_command`
             turn = wp.randf(seed_) < 0.5
             if turn:
-                air_time = wp.randf(seed_, 0.75, 0.95) # more time to turn
+                air_time = wp.randf(seed_, 0.9, 1.0) # more time to turn
                 cmd_jump_turn[tid] = wp.PI
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid] + wp.PI)
             else:
-                air_time = wp.randf(seed_, 0.75, 0.95)
+                air_time = wp.randf(seed_, 0.9, 1.0)
                 cmd_jump_turn[tid] = 0.0
                 des_rpy_w[tid] = wp.vec3(0.0, 0.0, heading_w[tid])
             cmd_ang_vel_w[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -144,8 +144,8 @@ def step_command(
             cmd_in_air[tid] = False
             cmd_ang_vel_w[tid].z = 0.0
         elif time < PRE_JUMP_TIME + TAKEOFF_TIME:
-            ref_acc = 0.1 + 40.0 * (time - PRE_JUMP_TIME)
-            ref_acc = wp.clamp(ref_acc, 0.0, 20.0)
+            ref_acc = 0.1 + 30.0 * (time - PRE_JUMP_TIME)
+            ref_acc = wp.clamp(ref_acc, 0.0, 10.0)
             ref_vel = ref_vel + ref_acc * 0.02
             ref_hei = ref_hei + ref_vel * 0.02
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time

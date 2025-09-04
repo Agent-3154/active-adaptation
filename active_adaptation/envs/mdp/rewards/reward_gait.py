@@ -46,7 +46,7 @@ class feet_sliding(Reward):
         self.body_contact_ids = self.contact_sensor.find_bodies(body_names)[0]
 
     def compute(self) -> torch.Tensor:
-        in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.0        
+        in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.005 
         feet_vel_b = quat_rotate_inverse(
             yaw_quat(self.asset.data.root_quat_w).unsqueeze(1),
             self.asset.data.body_lin_vel_w[:, self.body_ids]
