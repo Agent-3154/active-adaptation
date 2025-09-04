@@ -1,7 +1,7 @@
 import torch
 import warp as wp
 
-from active_adaptation.envs.mdp.base import Command, Reward, Observation
+from active_adaptation.envs.mdp.base import Command, Reward, Observation, Termination
 from active_adaptation.utils.math import (
     quat_rotate,
     quat_rotate_inverse,
@@ -639,24 +639,18 @@ class sirius_walk_behave(Reward[SiriusDemoCommand]):
         self.env.debug_draw.vector(body_pos_w, vec, size=2.0, color=(1., 0., 0., 1.))
 
 
-class sirius_takeoff(Reward[SiriusDemoCommand]):
-    def __init__(self, env, weight: float):
-        super().__init__(env, weight)
-        self.asset = self.command_manager.asset
-        self.non_contact = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
-        self.takeoff = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
-    
-    def reset(self, env_ids: torch.Tensor):
-        self.non_contact[env_ids] = False
-        self.takeoff[env_ids] = False
+class sirius_jump(Termination[SiriusDemoCommand]):
+    def __init__(self, env):
+        super().__init__(env)
+        self.contact_forces = self.env.scene["contact_forces"]
+        self.foot_ids = self.contact_forces.find_bodies(".*_FOOT")[0]
 
-    def update(self):
-        non_contact = (~self.command_manager.in_contact).all(dim=1, keepdim=True)
-        self.takeoff = ~self.non_contact & non_contact
-        self.non_contact = non_contact
-
-    def compute(self) -> torch.Tensor:
-        is_active = (self.command_manager.cmd_mode[:, None] == 1) & (self.command_manager.cmd_time > PRE_JUMP_TIME)
-        rew = self.takeoff.float()
-        return rew, is_active
+    def compute(self, termination: torch.Tensor) -> torch.Tensor:
+        cond = (
+            (self.command_manager.cmd_mode[:, None] == 1)
+            & (self.command_manager.cmd_time > PRE_JUMP_TIME + TAKEOFF_TIME)
+            & (self.command_manager.cmd_time < PRE_JUMP_TIME + TAKEOFF_TIME + 0.3)
+            & (self.contact_forces.data.current_contact_time[:, self.foot_ids] > 0).any(dim=1, keepdim=True)
+        )
+        return cond
 
