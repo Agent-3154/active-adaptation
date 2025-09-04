@@ -64,7 +64,7 @@ reward:
     sirius_yaw:           {weight: 1.0}
     sirius_base_height:   {weight: 1.0}
 
-    sirius_contact:       {weight: 0.8}
+    sirius_contact:       {weight: 10.0}
     sirius_jump_landing:  {weight: 10.0}
     sirius_land_behave:   {weight: 0.5}
     # sirius_walk_behave:   {weight: 0.4}

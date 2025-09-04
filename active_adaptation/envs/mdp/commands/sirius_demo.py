@@ -16,7 +16,7 @@ from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symm
 
 
 PRE_JUMP_TIME = 0.6
-TAKEOFF_TIME = 0.3
+TAKEOFF_TIME = 0.32
 POST_JUMP_TIME = 0.8
 NOMINAL_HEIGHT = 0.5
 
@@ -144,8 +144,8 @@ def step_command(
             cmd_in_air[tid] = False
             cmd_ang_vel_w[tid].z = 0.0
         elif time < PRE_JUMP_TIME + TAKEOFF_TIME:
-            ref_acc = 0.5 + 36.0 * (time - PRE_JUMP_TIME)
-            ref_acc = wp.clamp(ref_acc, 0.0, 9.0)
+            ref_acc = 0.1 + 40.0 * (time - PRE_JUMP_TIME)
+            ref_acc = wp.clamp(ref_acc, 0.0, 20.0)
             ref_vel = ref_vel + ref_acc * 0.02
             ref_hei = ref_hei + ref_vel * 0.02
             cmd_ang_vel_w[tid].z = cmd_jump_turn[tid] / air_time
@@ -542,13 +542,23 @@ class sirius_contact(Reward[SiriusDemoCommand]):
         super().__init__(env, weight)
         self.contact_forces = self.env.scene["contact_forces"]
         self.foot_ids = self.contact_forces.find_bodies(".*_FOOT")[0]
+        self.last_air_time = torch.zeros(self.num_envs, len(self.foot_ids), device=self.device)
+
+    # def compute(self) -> torch.Tensor:
+    #     contact_forces = self.contact_forces.data.net_forces_w[:, self.foot_ids]
+    #     in_contact = contact_forces.norm(dim=-1) > 0.2
+    #     rew = (in_contact * self.command_manager.cmd_contact).sum(1, True)
+    #     return rew.reshape(self.num_envs, 1)
+
+    def update(self):
+        last_air_time = self.contact_forces.data.last_air_time[:, self.foot_ids]
+        self.impact = self.last_air_time != last_air_time
+        self.last_air_time = last_air_time
 
     def compute(self) -> torch.Tensor:
-        contact_forces = self.contact_forces.data.net_forces_w[:, self.foot_ids]
-        in_contact = contact_forces.norm(dim=-1) > 0.2
-        rew = (in_contact * self.command_manager.cmd_contact).sum(1, True)
-        self.env.discount.mul_(torch.exp(0.25 * rew.clamp_max(0.0)))
-        return rew.reshape(self.num_envs, 1)
+        is_active = (self.command_manager.cmd_mode[:, None] == 1) & (self.command_manager.cmd_time > PRE_JUMP_TIME + TAKEOFF_TIME)
+        rew = self.last_air_time.clamp_max(0.5) * self.impact
+        return rew.sum(1, True), is_active.reshape(self.num_envs, 1)
 
 
 class sirius_jump_landing(Reward[SiriusDemoCommand]):
