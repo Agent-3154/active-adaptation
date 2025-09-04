@@ -556,7 +556,11 @@ class sirius_contact(Reward[SiriusDemoCommand]):
         self.last_air_time = last_air_time
 
     def compute(self) -> torch.Tensor:
-        is_active = (self.command_manager.cmd_mode[:, None] == 1) & (self.command_manager.cmd_time > PRE_JUMP_TIME + TAKEOFF_TIME)
+        is_active = (
+            (self.command_manager.cmd_mode[:, None] == 1)
+            & (self.command_manager.cmd_time > PRE_JUMP_TIME + TAKEOFF_TIME)
+            & self.impact.any(dim=1, keepdim=True)
+        )
         rew = self.last_air_time.clamp_max(0.5) * self.impact
         return rew.sum(1, True), is_active.reshape(self.num_envs, 1)
 
