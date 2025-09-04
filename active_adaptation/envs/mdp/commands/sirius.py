@@ -506,8 +506,8 @@ class no_drift(Reward[SiriusCommandManager]):
 
 class wheel_contact_direction(Reward[SiriusCommandManager]):
     """Penalize contacts where the wheels are not upright"""
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset = self.command_manager.asset
         self.contact_forces: ContactSensor = self.env.scene["contact_forces"]
         self.wheel_ids = self.asset.find_bodies(".*_FOOT")[0]

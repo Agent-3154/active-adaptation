@@ -80,8 +80,8 @@ class joint_torques_berhu(Reward):
 
 
 class undesired_contact(Reward):
-    def __init__(self, env, body_names, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, body_names, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
 
@@ -524,14 +524,13 @@ class feet_slip(Reward):
 class feet_air_time(Reward):
     def __init__(
         self,
-        env: "LocomotionEnv",
+        env,
         body_names: str,
         thres: float,
         weight: float,
-        enabled: bool = True,
         condition_on_linvel: bool = True,
     ):
-        super().__init__(env, weight, enabled)
+        super().__init__(env, weight)
         self.thres = thres
         self.asset: Articulation = self.env.scene["robot"]
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
@@ -556,8 +555,6 @@ class feet_air_time(Reward):
             (last_air_time - self.thres).clamp_max(0.0) * contact, dim=1, keepdim=True
         )
         self.reward *= ~self.env.command_manager.is_standing_env
-        # if self.condition_on_linvel and hasattr(self.asset.data, "linvel_exp"):
-        #     self.reward *= self.asset.data.linvel_exp
         return self.reward
 
 
@@ -606,112 +603,9 @@ class feet_air_time(Reward):
 #         self.env.debug_draw.vector(self.center, self.center_vel, color=(1.0, 0., 0., 1.))
 
 
-class max_feet_height(Reward):
-    def __init__(
-        self,
-        env,
-        body_names: str,
-        target_height: float,
-        weight: float,
-        enabled: bool = True,
-    ):
-        super().__init__(env, weight, enabled)
-        self.target_height = target_height
-
-        self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
-        self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
-        self.body_ids = torch.tensor(self.body_ids, device=self.device)
-
-        self.asset_body_ids, self.asset_body_names = self.asset.find_bodies(body_names)
-
-        self.in_contact = torch.zeros(
-            self.num_envs, len(self.body_ids), dtype=bool, device=self.device
-        )
-        self.impact = torch.zeros(
-            self.num_envs, len(self.body_ids), dtype=bool, device=self.device
-        )
-        self.detach = torch.zeros(
-            self.num_envs, len(self.body_ids), dtype=bool, device=self.device
-        )
-        self.has_impact = torch.zeros(
-            self.num_envs, len(self.body_ids), dtype=bool, device=self.device
-        )
-        self.max_height = torch.zeros(
-            self.num_envs, len(self.body_ids), device=self.device
-        )
-        self.impact_point = torch.zeros(
-            self.num_envs, len(self.body_ids), 3, device=self.device
-        )
-        self.detach_point = torch.zeros(
-            self.num_envs, len(self.body_ids), 3, device=self.device
-        )
-
-    def reset(self, env_ids):
-        self.has_impact[env_ids] = False
-
-    def update(self):
-        contact_force = self.contact_sensor.data.net_forces_w_history[
-            :, :, self.body_ids
-        ]
-        feet_pos_w = self.asset.data.body_pos_w[:, self.asset_body_ids]
-        in_contact = (contact_force.norm(dim=-1) > 0.01).any(dim=1)
-        self.impact[:] = (~self.in_contact) & in_contact
-        self.detach[:] = self.in_contact & (~in_contact)
-        self.in_contact[:] = in_contact
-        self.has_impact.logical_or_(self.impact)
-        self.impact_point[self.impact] = feet_pos_w[self.impact]
-        self.detach_point[self.detach] = feet_pos_w[self.detach]
-        self.max_height[:] = torch.where(
-            self.detach,
-            feet_pos_w[:, :, 2],
-            torch.maximum(self.max_height, feet_pos_w[:, :, 2]),
-        )
-
-    def compute(self) -> torch.Tensor:
-        reference_height = torch.maximum(
-            self.impact_point[:, :, 2], self.detach_point[:, :, 2]
-        )
-        max_height = self.max_height - reference_height
-        r = (self.impact * (max_height / self.target_height).clamp_max(1.0)).sum(
-            dim=1, keepdim=True
-        )
-        is_standing = self.env.command_manager.is_standing_env.squeeze(1)
-        r[~is_standing] -= r[~is_standing].mean()
-        r[is_standing] = 0
-        return r
-
-    def debug_draw(self):
-        feet_pos_w = self.asset.data.body_pos_w[:, self.asset_body_ids]
-        self.env.debug_draw.point(
-            feet_pos_w[self.impact],
-            color=(1.0, 0.0, 0.0, 1.0),
-            size=30,
-        )
-
-    # def _reward_feet_max_height_for_this_air(self):
-    #     # Reward long steps
-    #     # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
-    #     contact = self.contact_forces[:, self.feet_indices, 2] > 1.
-
-    #     contact_filt = torch.logical_or(contact, self.last_contacts)
-    #     from_air_to_contact = torch.logical_and(contact_filt, ~self.last_contacts_filt)
-
-    #     self.last_contacts = contact
-    #     self.last_contacts_filt = contact_filt
-
-    #     self.feet_air_max_height = torch.max(self.feet_air_max_height, self._rigid_body_pos[:, self.feet_indices, 2])
-
-    #     rew_feet_max_height = torch.sum((torch.clamp_min(self.cfg.rewards.desired_feet_max_height_for_this_air - self.feet_air_max_height, 0)) * from_air_to_contact, dim=1) # reward only on first contact with the ground
-    #     self.feet_air_max_height *= ~contact_filt
-    #     return rew_feet_max_height
-
-
 class feet_contact_count(Reward):
-    def __init__(
-        self, env: "LocomotionEnv", body_names: str, weight: float, enabled: bool = True
-    ):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, body_names: str, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
 
@@ -748,8 +642,8 @@ class step_up(Reward):
 
 
 class step_up_needed(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.feet_height_map: torch.Tensor = self.asset.data.feet_height_map
 
@@ -763,8 +657,8 @@ class step_up_needed(Reward):
 
 
 class step_lift(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.mesh = _initialize_warp_meshes("/World/ground", "cuda")
         self.command_manager: Command2 = self.env.command_manager
@@ -789,8 +683,8 @@ class step_lift(Reward):
 
 
 class com_linvel(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
 
         with torch.device(self.device):
@@ -819,8 +713,8 @@ class com_linvel(Reward):
 
 
 class base_height_l1(Reward):
-    def __init__(self, env, target_height: float, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, target_height: float, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         if isinstance(target_height, str) and target_height == "command":
             self.target_height = self.env.command_manager._target_base_height
@@ -842,8 +736,8 @@ class base_height_l1(Reward):
 
 
 class tracking_base_height(Reward):
-    def __init__(self, env, target_height: float, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, target_height: float, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.target_height = target_height
 
@@ -856,8 +750,8 @@ class tracking_base_height(Reward):
 
 
 class single_foot_contact(Reward):
-    def __init__(self, env, body_names: str, margin: float, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, body_names: str, margin: float, weight: float):
+        super().__init__(env, weight)
         # self.asset: Articulation = self.env.scene["robot"]
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
         self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
@@ -871,28 +765,17 @@ class single_foot_contact(Reward):
 
 
 class is_standing_env(Reward):
-    def __init__(
-        self,
-        env,
-        weight: float,
-        enabled: bool = False,
-    ):
-        super().__init__(env, weight, enabled,)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
 
     def compute(self) -> torch.Tensor:
         return self.env.command_manager.is_standing_env.reshape(self.num_envs, 1)
 
 
 class stance_width(Reward):
-    def __init__(
-        self,
-        env,
-        weight: float,
-        enabled: bool = True,
-        target_width=0.15,
-    ):
+    def __init__(self, env, weight: float, target_width=0.15):
         """penalize stance width smaller than target_width"""
-        super().__init__(env, weight, enabled,)
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.target_width = target_width
 
@@ -912,8 +795,8 @@ class stance_width(Reward):
 
 
 class feet_swing_height(Reward):
-    def __init__(self, env, target_height: float, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, target_height: float, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.target_height = target_height
         self.feet_ids = self.asset.find_bodies(".*foot.*")[0]
@@ -943,8 +826,8 @@ class feet_swing_height(Reward):
 
 
 class head_clearance(Reward):
-    def __init__(self, env, target_height: float, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, target_height: float, weight: float):
+        super().__init__(env, weight)
         self.target_height = target_height
         self.asset: Articulation = self.env.scene["robot"]
         self.head_height: torch.Tensor = self.asset.data.head_height
@@ -954,8 +837,8 @@ class head_clearance(Reward):
 
 
 class com_support(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.feet_ids = self.asset.find_bodies(".*foot")[0]
 
@@ -970,8 +853,8 @@ class com_support(Reward):
 
 
 class com_linvel_exp(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         with torch.device(self.device):
             self.com_pos_w = torch.zeros(self.num_envs, 3)
@@ -996,10 +879,8 @@ class com_linvel_exp(Reward):
 
 
 class joint_limits(Reward):
-    def __init__(
-        self, env, joint_names: str, offset: float, weight: float, enabled: bool = True
-    ):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, joint_names: str, offset: float, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids = self.asset.find_joints(joint_names)[0]
         self.joint_limits = self.asset.data.joint_limits[:, self.joint_ids].clone()
@@ -1014,8 +895,8 @@ class joint_limits(Reward):
 
 
 class step_vel(Reward):
-    def __init__(self, env, weight, enabled=True):
-        super().__init__(env, weight, enabled,)
+    def __init__(self, env, weight):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.prev_root_pos_w = torch.zeros(self.num_envs, 4, 3, device=self.device)
         self.last_impact_time = torch.zeros(self.num_envs, 4, 1, device=self.device)
@@ -1056,9 +937,8 @@ class oscillator(Reward):
         omega_range=(2., 2.),
         margin: float = 0.0,
         weight=1.0,
-        enabled=True,
     ):
-        super().__init__(env, weight, enabled)
+        super().__init__(env, weight)
         self.margin = margin
         self.target_swing_height = 0.08
 
@@ -1146,8 +1026,8 @@ class oscillator(Reward):
 
 
 class gait(Reward):
-    def __init__(self, env, weight, enabled=True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.command_manager: Command2 = self.env.command_manager
         self.phi: torch.Tensor = self.asset.phi
@@ -1165,8 +1045,8 @@ class gait(Reward):
 
 
 class quad_leg_swing(Reward):
-    def __init__(self, env, weight, feet_names: str = ".*_foot", enabled=True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight, feet_names: str = ".*_foot"):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
         self.feet_ids = self.asset.find_bodies(feet_names)[0]
@@ -1206,52 +1086,6 @@ class quad_leg_swing(Reward):
         )
 
 
-class pos_tracking(Reward):
-    def __init__(self, env, weight, enabled = True):
-        super().__init__(env, weight, enabled,)
-        self.command_manager: Command3 = self.env.command_manager
-        self.asset: Articulation = self.env.scene["robot"]
-
-    def compute(self):
-        diff = self.command_manager.des_key_pos_w - self.command_manager.key_pos_w
-        error_l2 = diff.square().sum(-1, True)
-        return torch.exp(-error_l2 / 0.25).mean(1)
-
-
-class yaw_tracking(Reward):
-    def __init__(self, env, weight, enabled = True):
-        super().__init__(env, weight, enabled,)
-        self.command_manager: Command3 = self.env.command_manager
-        self.asset: Articulation = self.env.scene["robot"]
-    
-    def compute(self):
-        return torch.cos(self.asset.data.heading_w.unsqueeze(1) - self.command_manager.des_yaw_w)
-
-
-class vel_tracking(Reward):
-    def __init__(self, env, weight, enabled = True):
-        super().__init__(env, weight, enabled,)
-        self.command_manager: Command3 = self.env.command_manager
-        self.asset: Articulation = self.env.scene["robot"]
-    
-    def compute(self):
-        diff = self.command_manager.des_key_pos_w - self.command_manager.key_pos_w
-        target_vel_z = 2.0 * diff[:, 0, 2]
-        r = (self.command_manager.key_vel_w[:, 0, 2] - target_vel_z) * (target_vel_z > 0.)
-        return r.unsqueeze(1)
-
-class vel_xy_tracking(Reward):
-    def __init__(self, env, weight, enabled = True):
-        super().__init__(env, weight, enabled,)
-        self.command_manager: Command3 = self.env.command_manager
-        self.asset: Articulation = self.env.scene["robot"]
-    
-    def compute(self):
-        diff = self.command_manager.des_vel_w - self.asset.data.root_lin_vel_w
-        error_l2 = diff[:, :2].square().sum(-1, True)
-        return torch.exp(- error_l2 / 0.25)
-
-
 def is_expr(expr):
     if isinstance(expr, str):
         return True
@@ -1272,8 +1106,8 @@ class ang_vel_x_exp(Reward):
 
 
 class oscillator_biped(Reward):
-    def __init__(self, env, weight, enabled=True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.gravity = self.asset.data.default_mass[0].sum().item() * 9.81
         self.contact_forces: ContactSensor = self.env.scene["contact_forces"]
@@ -1287,8 +1121,8 @@ class oscillator_biped(Reward):
 
 
 class quadruped_stand(Reward):
-    def __init__(self, env, feet_names: str, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, feet_names: str, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.feet_ids = self.asset.find_bodies(feet_names)[0]
         if not hasattr(self.env.command_manager, "is_standing_env"):
@@ -1310,8 +1144,8 @@ class quadruped_stand(Reward):
 
 
 class lateral_swing_height(Reward):
-    def __init__(self, env, feet_names: str, weight: float, enabled=True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, feet_names: str, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.feet_ids = self.asset.find_bodies(feet_names)[0]
         self.target_height = 0.16
@@ -1334,8 +1168,8 @@ class lateral_swing_height(Reward):
 
 class action_rate_l2(Reward):
     """Penalize the rate of change of the action"""
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.action_manager = self.env.action_manager
         assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
     
@@ -1348,8 +1182,8 @@ class action_rate_l2(Reward):
 
 class action_rate2_l2(Reward):
     """Penalize the second order rate of change of the action"""
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.action_manager = self.env.action_manager
         assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
     
@@ -1363,8 +1197,8 @@ class action_rate2_l2(Reward):
 
 
 class support_polygon(Reward):
-    def __init__(self, env, margin: float, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, margin: float, weight: float):
+        super().__init__(env, weight)
         self.margin = margin
         self.asset: Articulation = self.env.scene["robot"]
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]

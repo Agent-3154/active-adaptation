@@ -8,8 +8,8 @@ from active_adaptation.envs.mdp.base import Reward
 
 
 class joint_acc_l2(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*"):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float, joint_names: str = ".*"):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids = self.asset.find_joints(joint_names)[0]
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
@@ -23,8 +23,8 @@ class joint_acc_l2(Reward):
 
 
 class energy_l1(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*"):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float, joint_names: str = ".*"):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
@@ -43,8 +43,8 @@ class energy_l2(Reward):
     Penalize the energy of the joints. This is less commonly used than energy_l1 because it is much
     larger and therefore imposes a much stronger regularization.
     """
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*"):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float, joint_names: str = ".*"):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
@@ -59,8 +59,8 @@ class energy_l2(Reward):
 
 
 class joint_vel_l2(Reward):
-    def __init__(self, env, joint_names: str, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, joint_names: str, weight: float):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, _ = self.asset.find_joints(joint_names)
         self.joint_vel = torch.zeros(
@@ -76,8 +76,8 @@ class joint_vel_l2(Reward):
 
 
 class joint_vel_limits(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*", factor: float = 0.8):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float, joint_names: str = ".*", factor: float = 0.8):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
@@ -94,8 +94,8 @@ class joint_vel_limits(Reward):
 
 
 class joint_torque_limits(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*", factor: float = 0.8):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float, joint_names: str = ".*", factor: float = 0.8):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
@@ -114,8 +114,8 @@ class joint_torque_limits(Reward):
 
 
 class joint_torque_disc(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str = ".*"):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float, joint_names: str = ".*"):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
@@ -154,8 +154,8 @@ class joint_torque_disc(Reward):
 
 
 class joint_deviation_l1(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str=".*"):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float, joint_names: str=".*"):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
@@ -170,8 +170,8 @@ class joint_deviation_l1(Reward):
 
 
 class joint_deviation_l2(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str=".*"):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float, joint_names: str=".*"):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
@@ -189,8 +189,8 @@ class joint_deviation_cum(Reward):
     """
     Penalize the cumulative deviation of the joints.
     """
-    def __init__(self, env, weight: float, enabled: bool = True, joint_names: str=".*"):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float, joint_names: str=".*"):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
@@ -211,10 +211,8 @@ class joint_deviation_cum(Reward):
 
 
 class joint_torques_l2(Reward):
-    def __init__(
-        self, env, weight: float, enabled: bool = True, joint_names: str = ".*"
-    ):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float, joint_names: str = ".*"):
+        super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids = self.asset.find_joints(joint_names)[0]
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)

@@ -245,6 +245,8 @@ class _Env(EnvBase):
             for rew_spec, params in func_specs.items():
                 rew_name, cls_name = parse_name_and_class(rew_spec)
                 rew_cls = mdp.Reward.registry[cls_name]
+                if "enabled" in params:
+                    params.pop("enabled")
                 reward: mdp.Reward = rew_cls(self, **params)
                 funcs[rew_name] = reward
                 reward_spec["stats", group_name, rew_name] = UnboundedContinuous(1, device=self.device)
@@ -253,7 +255,7 @@ class _Env(EnvBase):
                 self._debug_draw_callbacks.append(reward.debug_draw)
                 self._pre_step_callbacks.append(reward.step)
                 self._post_step_callbacks.append(reward.post_step)
-                print(f"\t{rew_name}: \t{reward.weight:.2f}, \t{reward.enabled}")
+                print(f"\t{rew_name}: \t{reward.weight:.2f}")
                 self._stats_ema[group_name][rew_name] = (torch.tensor(0., device=self.device), torch.tensor(0., device=self.device))
 
             self.reward_groups[group_name] = RewardGroup(self, group_name, funcs, eval_func, enabled, compile)
@@ -542,13 +544,6 @@ class RewardGroup:
         self.eval_func = eval_func
         self.enabled = enabled
         self.compile = compile
-
-        if self.enabled and not all([func.enabled for func in funcs.values()]):
-            incompatible = [key for key, func in funcs.items() if not func.enabled]
-            raise ValueError(f"Reward group {name} is enabled but some rewards are disabled: {incompatible}")
-        if not self.enabled and any([func.enabled for func in funcs.values()]):
-            incompatible = [key for key, func in funcs.items() if func.enabled]
-            raise ValueError(f"Reward group {name} is disabled but some rewards are enabled: {incompatible}")
         
         if compile:
             self.compute = torch.compile(self.compute, fullgraph=True)

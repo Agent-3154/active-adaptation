@@ -538,8 +538,8 @@ class sirius_base_height(Reward[SiriusDemoCommand]):
 
 
 class sirius_contact(Reward[SiriusDemoCommand]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.contact_forces = self.env.scene["contact_forces"]
         self.foot_ids = self.contact_forces.find_bodies(".*_FOOT")[0]
 
@@ -552,8 +552,8 @@ class sirius_contact(Reward[SiriusDemoCommand]):
 
 
 class sirius_jump_landing(Reward[SiriusDemoCommand]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset = self.command_manager.asset
         self.is_landing = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
         self.last_in_air = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
@@ -574,8 +574,8 @@ class sirius_jump_landing(Reward[SiriusDemoCommand]):
 
 
 class sirius_jump_behave(Reward[SiriusDemoCommand]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset = self.command_manager.asset
         self.joint_ids = self.asset.find_joints(".*HAA")[0]
         self.default_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
@@ -590,8 +590,8 @@ class sirius_jump_behave(Reward[SiriusDemoCommand]):
 
 
 class sirius_land_behave(Reward[SiriusDemoCommand]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset = self.command_manager.asset
         self.joint_ids = self.asset.find_joints(".*(HFE|KFE)")[0]
         self.default_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
@@ -607,8 +607,8 @@ class sirius_land_behave(Reward[SiriusDemoCommand]):
 
 
 class sirius_walk_behave(Reward[SiriusDemoCommand]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset = self.command_manager.asset
         self.body_ids, self.body_names = self.asset.find_bodies(".*_hip")
     
@@ -626,8 +626,8 @@ class sirius_walk_behave(Reward[SiriusDemoCommand]):
 
 
 class sirius_takeoff(Reward[SiriusDemoCommand]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.asset = self.command_manager.asset
         self.non_contact = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)
         self.takeoff = torch.zeros(self.num_envs, 1, dtype=bool, device=self.device)

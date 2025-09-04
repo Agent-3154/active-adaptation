@@ -174,12 +174,10 @@ class Reward(Generic[CT], _RegistryMixin):
         self,
         env,
         weight: float,
-        enabled: bool = True,
     ):
         self.env: _Env = env
         self.command_manager: CT = env.command_manager
         self.weight = weight
-        self.enabled = enabled
 
     @property
     def num_envs(self):
