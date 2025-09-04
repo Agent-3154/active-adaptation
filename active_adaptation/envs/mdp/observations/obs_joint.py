@@ -144,7 +144,7 @@ class joint_vel_multistep(Observation):
     
     def compute(self):
         joint_vel = self.joint_vel_multistep.clone()
-        joint_vel = random_noise(joint_vel, self.noise_std)
+        joint_vel = random_noise(joint_vel, self.noise_std.unsqueeze(1))
         return joint_vel.reshape(self.num_envs, -1)
 
     def symmetry_transforms(self):

@@ -90,7 +90,9 @@ class joint_vel_limits(Reward):
     def compute(self) -> torch.Tensor:
         low, high = -self.limits, self.limits
         violation = (low - self.jvel).clamp_min(0) + (self.jvel - high).clamp_min(0)
-        return - violation.sum(1, True)
+        rew = - violation.sum(1, True)
+        self.env.discount.mul_(torch.exp(- rew * 0.25))
+        return rew
 
 
 class joint_torque_limits(Reward):
