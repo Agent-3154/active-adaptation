@@ -662,15 +662,15 @@ class ang_vel_z_exp(Reward[SiriusCommandManager]):
 #         return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
 
 
-class sirius_jump_turning(Reward[SiriusCommandManager]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
-        self.asset = self.command_manager.asset
+# class sirius_jump_turning(Reward[SiriusCommandManager]):
+#     def __init__(self, env, weight: float, enabled: bool = True):
+#         super().__init__(env, weight, enabled)
+#         self.asset = self.command_manager.asset
 
-    def compute(self) -> torch.Tensor:
-        in_air = self.command_manager._command.in_air
-        ref_yaw = self.command_manager._command.ref_rpy[:, 2]
-        yaw = self.asset.data.heading_w
-        rew = - wrap_to_pi(yaw - ref_yaw).abs()
-        return rew.reshape(self.num_envs, 1), in_air.reshape(self.num_envs, 1)
+#     def compute(self) -> torch.Tensor:
+#         in_air = self.command_manager._command.in_air
+#         ref_yaw = self.command_manager._command.ref_rpy[:, 2]
+#         yaw = self.asset.data.heading_w
+#         rew = - wrap_to_pi(yaw - ref_yaw).abs()
+#         return rew.reshape(self.num_envs, 1), in_air.reshape(self.num_envs, 1)
 

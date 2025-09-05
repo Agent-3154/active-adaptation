@@ -139,7 +139,7 @@ def step_command(
         ref_hei = jump_ref[0]
         ref_vel = jump_ref[1]
         if time < PRE_JUMP_TIME:
-            ref_hei = 0.40
+            ref_hei = 0.35
             ref_vel = 0.0
             cmd_in_air[tid] = False
             cmd_ang_vel_w[tid].z = 0.0
@@ -565,7 +565,23 @@ class sirius_contact(Reward[SiriusDemoCommand]):
         return rew.sum(1, True), is_active.reshape(self.num_envs, 1)
 
 
-class sirius_jump_landing(Reward[SiriusDemoCommand]):
+class sirius_jump_behave(Reward[SiriusDemoCommand]):
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
+        self.asset = self.command_manager.asset
+        self.foot_ids = self.asset.find_bodies(".*_FOOT")[0]
+
+    def compute(self) -> torch.Tensor:
+        is_active = (
+            (self.command_manager.cmd_mode[:, None] == 1)
+            & (self.command_manager.cmd_time > PRE_JUMP_TIME + TAKEOFF_TIME)
+            & (self.command_manager.cmd_time < PRE_JUMP_TIME + TAKEOFF_TIME + 0.3)
+        )
+        rew = self.asset.data.body_pos_w[:, self.foot_ids, 2].min(dim=1).values
+        return rew.reshape(self.num_envs, 1), is_active.reshape(self.num_envs, 1)
+
+
+class sirius_jump_turning(Reward[SiriusDemoCommand]):
     def __init__(self, env, weight: float):
         super().__init__(env, weight)
         self.asset = self.command_manager.asset
@@ -585,22 +601,6 @@ class sirius_jump_landing(Reward[SiriusDemoCommand]):
         desired_yaw = self.command_manager.des_rpy_w[:, 2]
         rew = torch.pi/2 - wrap_to_pi(desired_yaw - landing_yaw).abs()
         return rew.reshape(self.num_envs, 1), self.is_landing.reshape(self.num_envs, 1)
-
-
-class sirius_jump_behave(Reward[SiriusDemoCommand]):
-    def __init__(self, env, weight: float):
-        super().__init__(env, weight)
-        self.asset = self.command_manager.asset
-        self.joint_ids = self.asset.find_joints(".*HAA")[0]
-        self.default_jpos = self.asset.data.default_joint_pos[:, self.joint_ids]
-    
-    def update(self):
-        self.joint_pos = self.asset.data.joint_pos[:, self.joint_ids]
-
-    def compute(self) -> torch.Tensor:
-        is_active = (self.command_manager.cmd_mode[:, None] == 1) & (~self.command_manager.in_air)
-        rew_dev = - torch.abs(self.joint_pos - self.default_jpos).sum(1, True)
-        return rew_dev, is_active
 
 
 class sirius_land_behave(Reward[SiriusDemoCommand]):
