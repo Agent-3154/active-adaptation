@@ -90,12 +90,13 @@ class joint_vel_limits(Reward):
     def compute(self) -> torch.Tensor:
         low, high = -self.limits, self.limits
         violation = (low - self.jvel).clamp_min(0) + (self.jvel - high).clamp_min(0)
+        discount = torch.exp(- violation * 0.25).prod(1, True)
+        self.env.discount.mul_(discount)
         rew = - violation.sum(1, True)
-        self.env.discount.mul_(torch.exp(- rew * 0.25))
         return rew
 
 
-class joint_torque_limits(Reward):
+class joint_tau_limits(Reward):
     def __init__(self, env, weight: float, joint_names: str = ".*", factor: float = 0.8):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
@@ -112,7 +113,8 @@ class joint_torque_limits(Reward):
         violation = (low - self.applied_torque).clamp_min(0) + (self.applied_torque - high).clamp_min(0)
         discount = torch.exp(- violation * 0.25).prod(1, True)
         self.env.discount.mul_(discount)
-        return - violation.sum(1, True)
+        rew = - violation.sum(1, True)
+        return rew
 
 
 class joint_torque_disc(Reward):

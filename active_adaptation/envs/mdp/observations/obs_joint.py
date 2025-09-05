@@ -69,10 +69,15 @@ class joint_pos_multistep(Observation):
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.num_joints = len(self.joint_ids)
 
-        shape = (self.num_envs, steps, self.num_joints)
+        shape = (self.num_envs, steps * interval, self.num_joints)
         self.joint_pos_multistep = torch.zeros(shape, device=self.device)
         self.joint_pos_substep = torch.zeros(self.num_envs, 2, self.num_joints, device=self.device)
     
+    def reset(self, env_ids: torch.Tensor):
+        jpos = self.asset.data.joint_pos[env_ids.unsqueeze(1), self.joint_ids]
+        self.joint_pos_multistep[env_ids] = jpos.unsqueeze(1)
+        self.joint_pos_substep[env_ids] = jpos.unsqueeze(1)
+
     def post_step(self, substep):
         self.joint_pos_substep[:, substep % 2] = self.asset.data.joint_pos[:, self.joint_ids]
     
@@ -80,14 +85,10 @@ class joint_pos_multistep(Observation):
         next_joint_pos_multistep = self.joint_pos_multistep.roll(1, 1)
         next_joint_pos = self.joint_pos_substep.mean(1)
         next_joint_pos_multistep[:, 0] = next_joint_pos
-        self.joint_pos_multistep = torch.where(
-            (self.env.episode_length_buf % self.interval == 0).reshape(self.num_envs, 1, 1),
-            next_joint_pos_multistep,
-            self.joint_pos_multistep
-        )
+        self.joint_pos_multistep = next_joint_pos_multistep
     
     def compute(self):
-        joint_pos = self.joint_pos_multistep.clone()
+        joint_pos = self.joint_pos_multistep[:, ::self.interval] # [num_envs, steps, joints]
         if self.noise_std > 0:
             joint_pos = random_noise(joint_pos, self.noise_std)
         return joint_pos.reshape(self.num_envs, -1)
