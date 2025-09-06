@@ -536,8 +536,10 @@ class sirius_ang_vel_z(Reward[SiriusDemoCommand]):
 
 class sirius_base_height(Reward[SiriusDemoCommand]):
     def compute(self) -> torch.Tensor:
-        root_height = self.command_manager.asset.data.root_pos_w[:, 2:3]
-        error = (self.command_manager.cmd_height - root_height).clamp_min(0.0)
+        root_pos_w = self.command_manager.asset.data.root_pos_w
+        ground_height = self.env.get_ground_height_at(root_pos_w)
+        root_height = root_pos_w[:, 2] - ground_height
+        error = (self.command_manager.cmd_height - root_height[:, None]).clamp_min(0.0)
         rew = torch.exp(-error / 0.1)
         return rew.reshape(self.num_envs, 1)
 

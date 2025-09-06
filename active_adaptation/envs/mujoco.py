@@ -318,9 +318,6 @@ class MJArticulation:
         self._data.root_ang_vel_w = self._data.body_ang_vel_w[:, 0]
         self._data.root_ang_vel_b = quat_rotate_inverse(self._data.root_quat_w, self._data.root_ang_vel_w)
         self._data.root_lin_vel_b = quat_rotate_inverse(self._data.root_quat_w, self._data.root_lin_vel_w)
-        
-        if hasattr(self, "_log_path"):
-            self._log_states.append(self._data)
 
     def write_root_state_to_sim(self, root_state: ArrayType, env_ids: ArrayType=None):
         self.mj_data.qpos[:3] = root_state[0, :3]
