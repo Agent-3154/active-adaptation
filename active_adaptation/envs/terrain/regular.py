@@ -434,16 +434,15 @@ ROUGH_TERRAIN_BASE_CFG = TerrainImporterCfg(
     debug_vis=False,
 )
 
+from active_adaptation.registry import Registry
 
-TERRAINS = {
-    "medium": ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=ROUGH_MEDIUM),
-    "medium_curriculum": ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=ROUGH_MEDIUM.replace(curriculum=True)),
-    "easy": ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=ROUGH_EASY),
-    "hard": ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=ROUGH_HARD),
-    "plane": PLANE_TERRAIN_CFG,
-    "stairs": ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=STAIRS),
-    "stairs_test": ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=STAIRS_TEST),
-    "stairs_easy": ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=STAIRS_EASY),
-}
-
-
+registry = Registry.instance()
+registry.register("terrain", "regular", ROUGH_TERRAIN_BASE_CFG)
+registry.register("terrain", "medium", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=ROUGH_MEDIUM))
+registry.register("terrain", "medium_curriculum", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=ROUGH_MEDIUM.replace(curriculum=True)))
+registry.register("terrain", "easy", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=ROUGH_EASY))
+registry.register("terrain", "hard", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=ROUGH_HARD))
+registry.register("terrain", "plane", PLANE_TERRAIN_CFG)
+registry.register("terrain", "stairs", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=STAIRS))
+registry.register("terrain", "stairs_test", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=STAIRS_TEST))
+registry.register("terrain", "stairs_easy", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=STAIRS_EASY))

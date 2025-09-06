@@ -59,7 +59,7 @@ def sample_command(
             has_lin_vel = wp.randf(seed_) < lin_vel_prob
             if has_lin_vel:
                 cmd_lin_vel_b[tid] = wp.vec3(
-                    wp.randf(seed_, 0.3, 1.6) * wp.sign(wp.randn(seed_)),
+                    wp.randf(seed_, 0.3, 1.7) * wp.sign(wp.randn(seed_)),
                     wp.randf(seed_, -0.8, 0.8), 0.0)
             else:
                 cmd_lin_vel_b[tid] = wp.vec3(0.0, 0.0, 0.0)
@@ -77,8 +77,13 @@ def sample_command(
             cmd_duration[tid] = wp.randf(seed_, 1.0, 3.0)
         if next_mode[tid] == 1:
             cmd_lin_vel_b[tid] = wp.cw_mul(cmd_lin_vel_b[tid], wp.vec3(1.0, 0.0, 0.0))
-            x_vel = cmd_lin_vel_b[tid].x
-            x_vel = (wp.abs(x_vel) + wp.randf(seed_, 0.1, 0.4)) * wp.sign(x_vel)
+            fast_jump = wp.randf(seed_) < 0.4
+            if fast_jump:
+                x_vel = cmd_lin_vel_b[tid].x
+                x_vel = wp.randf(seed_, 1.6, 2.2) * wp.sign(x_vel)
+            else:
+                x_vel = cmd_lin_vel_b[tid].x
+                x_vel = (wp.abs(x_vel) + wp.randf(seed_, 0.0, 0.4)) * wp.sign(x_vel)
             cmd_lin_vel_w[tid] = wp.quat_rotate(quat_w[tid], cmd_lin_vel_b[tid])
             use_lin_vel_w[tid] = True
             # cmd_lin_vel_b will be updated by `step_command`
@@ -139,7 +144,7 @@ def step_command(
         ref_hei = jump_ref[0]
         ref_vel = jump_ref[1]
         if time < PRE_JUMP_TIME:
-            ref_hei = 0.35
+            ref_hei = 0.32
             ref_vel = 0.0
             cmd_in_air[tid] = False
             cmd_ang_vel_w[tid].z = 0.0
@@ -648,8 +653,8 @@ class sirius_jump(Termination[SiriusDemoCommand]):
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
         cond = (
             (self.command_manager.cmd_mode[:, None] == 1)
-            & (self.command_manager.cmd_time > PRE_JUMP_TIME + TAKEOFF_TIME)
-            & (self.command_manager.cmd_time < PRE_JUMP_TIME + TAKEOFF_TIME + 0.3)
+            & (self.command_manager.cmd_time > PRE_JUMP_TIME + TAKEOFF_TIME + 0.05)
+            & (self.command_manager.cmd_time < PRE_JUMP_TIME + TAKEOFF_TIME + 0.35)
             & (self.contact_forces.data.current_contact_time[:, self.foot_ids] > 0).any(dim=1, keepdim=True)
         )
         return cond

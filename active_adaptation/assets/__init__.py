@@ -5,15 +5,12 @@ import torch
 from .quadruped import *
 from .humanoid import *
 from .scene import *
-from .sirius import *
-from .registry import AssetRegistry
+from active_adaptation.registry import Registry
 
-
-registry = AssetRegistry.instance()
-registry.register("go2", UNITREE_GO2_CFG)
-registry.register("aliengo", UNITREE_ALIENGO_CFG)
-registry.register("sirius_wheel", SIRIUS_WHEEL_CFG)
-registry.register("b1z1", UNITREE_B1Z1_CFG)
+registry = Registry.instance()
+registry.register("asset", "go2", UNITREE_GO2_CFG)
+registry.register("asset", "aliengo", UNITREE_ALIENGO_CFG)
+registry.register("asset", "b1z1", UNITREE_B1Z1_CFG)
 
 def get_asset_meta(asset: Articulation):
     if not asset.is_initialized:

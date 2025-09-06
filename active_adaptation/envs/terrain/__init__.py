@@ -10,7 +10,6 @@ current_dir = Path(__file__).parent
 terrain_files = glob.glob(os.path.join(current_dir, "*.py"))
 
 # Import TERRAINS from each file
-TERRAINS_ISAAC = {}
 TERRAINS_MUJOCO = {}
 
 if active_adaptation.get_backend() == "isaac":
@@ -25,18 +24,6 @@ if active_adaptation.get_backend() == "isaac":
         # Import the module
         print(f"Importing terrains from {file}")
         module = importlib.import_module(f".{module_name}", package=__package__)
-        
-        # Get TERRAINS dict if it exists
-        if hasattr(module, "TERRAINS"):
-            TERRAINS_ISAAC.update(module.TERRAINS)
-
-
-    for key, terrain in TERRAINS_ISAAC.items():
-        assert isinstance(terrain, TerrainImporterCfg), f"Terrain {key} is not a TerrainImporterCfg"
-        terrain: TerrainImporterCfg
-        terrain.class_type = TerrainImporter
-        if terrain.terrain_type == "generator":
-            terrain.terrain_generator.class_type = TerrainGenerator
 else:
     from active_adaptation.envs.mujoco import MjTerrainCfg
     path = Path(active_adaptation.__path__[0]) / "assets_mjcf" / "plane.xml"
