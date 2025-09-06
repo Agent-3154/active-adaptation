@@ -644,6 +644,26 @@ class sirius_walk_behave(Reward[SiriusDemoCommand]):
         self.env.debug_draw.vector(body_pos_w, vec, size=2.0, color=(1., 0., 0., 1.))
 
 
+class wheel_contact_direction(Reward[SiriusDemoCommand]):
+    """Penalize contacts where the wheels are not upright"""
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
+        self.asset = self.command_manager.asset
+        self.contact_forces = self.env.scene["contact_forces"]
+        self.wheel_ids = self.asset.find_bodies(".*_FOOT")[0]
+        self.wheel_ids_contact = self.contact_forces.find_bodies(".*_FOOT")[0]
+        self.gravity = self.asset.data.default_mass[0].sum(-1).to(self.device) * 9.81
+
+    def compute(self) -> torch.Tensor:
+        wheel_contact_forces = self.contact_forces.data.net_forces_w[:, self.wheel_ids_contact] / self.gravity
+        wheel_normal = quat_rotate(
+            self.asset.data.body_quat_w[:, self.wheel_ids],
+            torch.tensor([0., 0., 1.], device=self.device).expand(self.num_envs, 4, 3)
+        )
+        rew = - (wheel_contact_forces * wheel_normal).sum(dim=-1).abs()
+        return rew.sum(1, True)
+
+
 class sirius_jump(Termination[SiriusDemoCommand]):
     def __init__(self, env):
         super().__init__(env)
