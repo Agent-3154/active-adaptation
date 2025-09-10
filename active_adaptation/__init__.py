@@ -63,7 +63,7 @@ _PROJECT_ENTRY_POINTS = []
 
 for entry_point in importlib.metadata.entry_points(group="active_adaptation.projects"):
     # get the module path
-    spec = importlib.util.find_spec(entry_point.name)
+    spec = importlib.util.find_spec(entry_point.value)
     _CONFIG_SEARCH_PATHS.append(str(Path(spec.origin).parent.absolute()))
     _PROJECT_ENTRY_POINTS.append(entry_point)
 

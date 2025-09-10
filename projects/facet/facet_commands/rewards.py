@@ -8,8 +8,8 @@ from .impedance_manip import ImpedanceCommandManager
 
 
 class impedance_pos(Reward[Impedance]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.impedance: Impedance = self.env.command_manager
 
     def compute(self) -> torch.Tensor:
@@ -20,8 +20,8 @@ class impedance_pos(Reward[Impedance]):
 
 
 class impedance_vel(Reward[Impedance]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.impedance: Impedance = self.env.command_manager
 
     def compute(self) -> torch.Tensor:
@@ -32,8 +32,8 @@ class impedance_vel(Reward[Impedance]):
         return r.max(dim=1).values
 
 class impedance_acc(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.command_manager: Impedance = self.env.command_manager
         self.asset = self.command_manager.asset
 
@@ -44,8 +44,8 @@ class impedance_acc(Reward):
 
 
 class impedance_yaw_pos(Reward):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.command_manager: Impedance = self.env.command_manager
         self.asset = self.command_manager.asset
         
@@ -59,8 +59,8 @@ class impedance_yaw_pos(Reward):
 
 
 class impedance_yaw_vel(Reward[Impedance]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.command_manager: Impedance = self.env.command_manager
 
     def compute(self) -> torch.Tensor:
@@ -72,8 +72,8 @@ class impedance_yaw_vel(Reward[Impedance]):
 
 
 class impedance_pos_error(Reward[Impedance]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.impedance: Impedance = self.env.command_manager
 
     def compute(self) -> torch.Tensor:
@@ -83,8 +83,8 @@ class impedance_pos_error(Reward[Impedance]):
 
 
 class impedance_vel_error(Reward[Impedance]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.impedance: Impedance = self.env.command_manager
 
     def compute(self) -> torch.Tensor:
@@ -94,8 +94,8 @@ class impedance_vel_error(Reward[Impedance]):
 
 
 class impedance_acc_error(Reward[Impedance]):
-    def __init__(self, env, weight: float, enabled: bool = True):
-        super().__init__(env, weight, enabled)
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
         self.impedance: Impedance = self.env.command_manager
 
     def compute(self) -> torch.Tensor:

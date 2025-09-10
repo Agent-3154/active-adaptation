@@ -77,11 +77,8 @@ class JointPosition(ActionManager):
         action_scaling: Dict[str, float] = 0.5,
         max_delay: int = 2,  # delay in simulation steps
         alpha: Union[float, Tuple[float, float]] = (0.5, 1.0),
-        **kwargs,
     ):
         super().__init__(env)
-        if len(kwargs) > 0: # warn user that kwargs are deprecated
-            warnings.warn(f"JointPosition kwargs are deprecated: {kwargs}")
         self.joint_ids, self.joint_names, self.action_scaling = (
             string_utils.resolve_matching_names_values(
                 dict(action_scaling), self.asset.joint_names
@@ -93,14 +90,13 @@ class JointPosition(ActionManager):
         self.max_delay = max_delay
         self.action_dim = len(self.joint_ids)
 
-        import omegaconf
-
         if isinstance(alpha, float):
             self.alpha_range = (alpha, alpha)
-        elif isinstance(alpha, omegaconf.listconfig.ListConfig):
-            self.alpha_range = tuple(alpha)
         else:
-            raise ValueError(f"Invalid alpha type: {type(alpha)}")
+            try:
+                self.alpha_range = tuple(alpha)
+            except:
+                raise ValueError(f"Invalid alpha type: {type(alpha)}")
 
         self.default_joint_pos = self.asset.data.default_joint_pos.clone()
         self.offset = torch.zeros_like(self.default_joint_pos)
