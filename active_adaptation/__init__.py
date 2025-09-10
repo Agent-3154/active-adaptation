@@ -1,6 +1,9 @@
 import os
 import active_adaptation.learning
 import builtins
+import importlib.metadata
+import importlib.util
+from pathlib import Path
 
 _BACKEND = "isaac"
 
@@ -52,4 +55,24 @@ def set_backend(backend: str):
 
 def get_backend():
     return _BACKEND
+
+
+_CONFIG_SEARCH_PATHS = []
+_PROJECT_ENTRY_POINTS = []
+
+
+for entry_point in importlib.metadata.entry_points(group="active_adaptation.projects"):
+    # get the module path
+    spec = importlib.util.find_spec(entry_point.name)
+    _CONFIG_SEARCH_PATHS.append(str(Path(spec.origin).parent.absolute()))
+    _PROJECT_ENTRY_POINTS.append(entry_point)
+
+
+from hydra_plugins.aa_searchpath_plugin.aa_searchpath_plugin import ActiveAdaptationSearchPathPlugin
+
+
+def import_projects():
+    for entry_point in _PROJECT_ENTRY_POINTS:
+        print(f"Importing project {entry_point.name}")
+        entry_point.load()
 
