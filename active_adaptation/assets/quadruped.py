@@ -31,7 +31,7 @@ UNITREE_GO2_CFG = ArticulationCfg(
             max_depenetration_velocity=1.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=True,
+            enabled_self_collisions=False,
             solver_position_iteration_count=8,
             solver_velocity_iteration_count=0,
         ),
@@ -104,12 +104,12 @@ UNITREE_ALIENGO_CFG = copy.deepcopy(UNITREE_GO2_CFG)
 UNITREE_ALIENGO_CFG.spawn.usd_path = f"{ASSET_PATH}/Aliengo/aliengo.usd"
 UNITREE_ALIENGO_CFG.init_state.pos = (0.0, 0.0, 0.40)
 UNITREE_ALIENGO_CFG.init_state.joint_pos = {
-    ".*L_hip_joint": 0.3,
-    ".*R_hip_joint": -0.3,
-    "F.*_thigh_joint": 1.0,
-    "R.*_thigh_joint": 1.1,
-    "F.*_calf_joint": -2.0,
-    "R.*_calf_joint": -2.1,
+    ".*L_hip_joint": 0.1,
+    ".*R_hip_joint": -0.1,
+    "F.*_thigh_joint": 0.6,
+    "R.*_thigh_joint": 0.6,
+    "F.*_calf_joint": -1.2,
+    "R.*_calf_joint": -1.2,
 }
 
 UNITREE_ALIENGO_CFG.actuators["base_legs"] = ImplicitActuatorCfg(

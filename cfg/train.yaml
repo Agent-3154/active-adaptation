@@ -28,7 +28,7 @@ camera_follow: true
 wandb:
   name: ${..exp_name}/${now:%m-%d}_${now:%H-%M}
   job_type: train
-  project: go2m_impedance
+  project: ${oc.select:task.project,active_adaptation}
   mode: online # set to 'disabled' when debugging locally
   tags: []
 
