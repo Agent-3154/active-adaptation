@@ -120,12 +120,14 @@ class SimpleEnv(_Env):
     
     def setup_scene_mujoco(self):
         from active_adaptation.envs.mujoco import MJScene, MJSim
-        from active_adaptation.assets_mjcf import ROBOTS
+        from active_adaptation.registry import Registry
         from active_adaptation.envs.terrain import TERRAINS_MUJOCO
+
+        registry = Registry.instance()
 
         @configclass
         class SceneCfg:
-            robot = ROBOTS[self.cfg.robot.name]
+            robot = registry.get("asset", self.cfg.robot.name)
             contact_forces = "robot"
             terrain = TERRAINS_MUJOCO[self.cfg.terrain]
         

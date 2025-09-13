@@ -59,7 +59,7 @@ class energy_l2(Reward):
 
 
 class joint_vel_l2(Reward):
-    def __init__(self, env, joint_names: str, weight: float):
+    def __init__(self, env, weight: float, joint_names: str=".*"):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, _ = self.asset.find_joints(joint_names)

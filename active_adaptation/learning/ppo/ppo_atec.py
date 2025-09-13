@@ -61,7 +61,7 @@ class PPOConfig:
     name: str = "ppo_atec"
     train_every: int = 32
     ppo_epochs: int = 4
-    num_minibatches: int = 8
+    num_minibatches: int = 4
     lr: float = 5e-4
     desired_kl: Union[float, None] = None
     clip_param: float = 0.2
@@ -140,12 +140,13 @@ class PPOPolicy(TensorDictModuleBase):
         self.actor(fake_input)
         self.critic(fake_input)
 
-        self.opt = torch.optim.Adam(
+        self.opt = torch.optim.AdamW(
             [
                 {"params": self.actor.parameters()},
                 {"params": self.critic.parameters()},
             ],
-            lr=cfg.lr
+            lr=cfg.lr,
+            weight_decay=0.02
         )
         
         def init_(module):
@@ -260,7 +261,7 @@ class PPOPolicy(TensorDictModuleBase):
         symmetry["is_init"] = tensordict["is_init"]
         tensordict = torch.cat([tensordict.select(*symmetry.keys(True, True)), symmetry], dim=0)
 
-        valid = (~tensordict["is_init"]).float()
+        valid = (~tensordict["is_init"])
         valid_cnt = valid.sum()
         action_data = tensordict[ACTION_KEY]
         log_probs_data = tensordict["action_log_prob"]

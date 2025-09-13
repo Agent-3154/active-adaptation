@@ -1015,9 +1015,10 @@ from active_adaptation.envs.mdp.utils.forces import ConstantForce, ImpulseForce
 
 
 class random_impulse(Randomization):
-    def __init__(self, env):
+    def __init__(self, env, prob: float = 0.005):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
+        self.prob = prob
         self.impulse_force = ImpulseForce.sample(self.num_envs, device=self.device)
 
     def step(self, substep):
@@ -1030,7 +1031,7 @@ class random_impulse(Randomization):
 
     def update(self):
         expire = self.impulse_force.time > self.impulse_force.duration
-        r = torch.rand(self.num_envs, 1, device=self.device) < 0.005
+        r = torch.rand(self.num_envs, 1, device=self.device) < self.prob
         sample = r & expire
         impulse_force = ImpulseForce.sample(self.num_envs, self.device)
         self.impulse_force.time.add_(self.env.step_dt)

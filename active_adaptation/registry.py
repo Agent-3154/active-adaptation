@@ -53,7 +53,13 @@ class Registry:
         Returns:
             The stored configuration or None if not found
         """
-        return self._configs[group_name].get(name)
+        result = self._configs[group_name].get(name)
+        if result is None:
+            raise ValueError(
+                f"Configuration {name} not found in group {group_name}."
+                f"Available configurations: {list(self._configs[group_name].keys())}"
+            )
+        return result
 
     def update(self, group_name: str, name: str, config) -> bool:
         """

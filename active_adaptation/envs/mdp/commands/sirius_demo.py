@@ -144,7 +144,7 @@ def step_command(
         ref_hei = jump_ref[0]
         ref_vel = jump_ref[1]
         if time < PRE_JUMP_TIME:
-            ref_hei = 0.32
+            ref_hei = 0.3
             ref_vel = 0.0
             cmd_in_air[tid] = False
             cmd_ang_vel_w[tid].z = 0.0
@@ -539,8 +539,13 @@ class sirius_base_height(Reward[SiriusDemoCommand]):
         root_pos_w = self.command_manager.asset.data.root_pos_w
         ground_height = self.env.get_ground_height_at(root_pos_w)
         root_height = root_pos_w[:, 2] - ground_height
-        error = (self.command_manager.cmd_height - root_height[:, None]).clamp_min(0.0)
-        rew = torch.exp(-error / 0.1)
+        error = (self.command_manager.cmd_height - root_height[:, None])
+        pre_jump = (self.command_manager.cmd_mode[:, None] ==1) & (self.command_manager.cmd_time < PRE_JUMP_TIME-0.05)
+        rew = torch.where(
+            pre_jump,
+            torch.exp(- error.square() / 0.1),
+            torch.exp(- error.clamp_min(0.0) / 0.1)
+        )
         return rew.reshape(self.num_envs, 1)
 
 
@@ -667,17 +672,26 @@ class wheel_contact_direction(Reward[SiriusDemoCommand]):
 
 
 class sirius_jump(Termination[SiriusDemoCommand]):
-    def __init__(self, env):
+    def __init__(self, env, height_thres: float):
         super().__init__(env)
+        self.asset = self.command_manager.asset
+        self.height_thres = height_thres
         self.contact_forces = self.env.scene["contact_forces"]
         self.foot_ids = self.contact_forces.find_bodies(".*_FOOT")[0]
 
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
-        cond = (
+        in_air = (
             (self.command_manager.cmd_mode[:, None] == 1)
             & (self.command_manager.cmd_time > PRE_JUMP_TIME + TAKEOFF_TIME + 0.05)
             & (self.command_manager.cmd_time < PRE_JUMP_TIME + TAKEOFF_TIME + 0.35)
-            & (self.contact_forces.data.current_contact_time[:, self.foot_ids] > 0).any(dim=1, keepdim=True)
+        )
+        landed = (
+            (self.command_manager.cmd_mode[:, None] == 1)
+            & (self.command_manager.cmd_time > self.command_manager.cmd_duration - POST_JUMP_TIME)
+        )
+        cond = (
+            (in_air & (self.contact_forces.data.current_contact_time[:, self.foot_ids] > 0).any(dim=1, keepdim=True))
+            | (landed & (self.asset.data.root_pos_w[:, 2] < self.height_thres).unsqueeze(1))
         )
         return cond
 
