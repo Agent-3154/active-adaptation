@@ -349,12 +349,14 @@ class projected_gravity_b(Observation):
 
 
 class gravity_multistep(Observation):
-    def __init__(self, env, steps: int=4, noise_std: float=0.):
+    def __init__(
+        self, env, steps: int=4, interval: int=1, noise_std: float=0.):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
-        self.noise_std = noise_std
         self.steps = steps
-        self.gravity_multistep = torch.zeros((self.num_envs, self.steps, 3), device=self.device)
+        self.interval = interval
+        self.noise_std = noise_std
+        self.gravity_multistep = torch.zeros((self.num_envs, self.steps * interval, 3), device=self.device)
     
     def update(self):
         gravity = random_noise(self.asset.data.projected_gravity_b, self.noise_std)
@@ -363,10 +365,14 @@ class gravity_multistep(Observation):
         self.gravity_multistep[:, 0] = gravity
     
     def compute(self):
-        return self.gravity_multistep.reshape(self.num_envs, -1)
+        gravity_vector = self.gravity_multistep[:, ::self.interval]
+        return gravity_vector.reshape(self.num_envs, -1)
     
     def symmetry_transforms(self):
-        transform = sym_utils.SymmetryTransform(perm=torch.arange(3), signs=[1, -1, 1])
+        transform = sym_utils.SymmetryTransform(
+            perm=torch.arange(3),
+            signs=[1, -1, 1]
+        )
         return transform.repeat(self.steps)
 
 

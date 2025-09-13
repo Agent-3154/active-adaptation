@@ -104,17 +104,19 @@ class joint_vel_multistep(Observation):
         env,
         joint_names=".*",
         steps: int=4,
+        interval: int=1,
         noise_std: float=0.,
     ):
         super().__init__(env)
         self.steps = steps
+        self.interval = interval
         self.noise_std_max = max(noise_std, 0.)
         self.from_pos = True
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.num_joints = len(self.joint_ids)
 
-        shape = (self.num_envs, steps, self.num_joints)
+        shape = (self.num_envs, steps * interval, self.num_joints)
         
         self.joint_vel_multistep = torch.zeros(shape, device=self.device)
         
@@ -144,7 +146,7 @@ class joint_vel_multistep(Observation):
         self.joint_vel_multistep[:, 0] = joint_vel
     
     def compute(self):
-        joint_vel = self.joint_vel_multistep.clone()
+        joint_vel = self.joint_vel_multistep[:, ::self.interval].clone()
         joint_vel = random_noise(joint_vel, self.noise_std.unsqueeze(1))
         return joint_vel.reshape(self.num_envs, -1)
 
