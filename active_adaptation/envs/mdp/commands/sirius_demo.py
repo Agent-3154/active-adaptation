@@ -144,7 +144,7 @@ def step_command(
         ref_hei = jump_ref[0]
         ref_vel = jump_ref[1]
         if time < PRE_JUMP_TIME:
-            ref_hei = 0.3
+            ref_hei = wp.clamp(0.45 - time * 0.4, 0.3, 0.45)
             ref_vel = 0.0
             cmd_in_air[tid] = False
             cmd_ang_vel_w[tid].z = 0.0
