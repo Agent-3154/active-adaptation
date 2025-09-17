@@ -9,19 +9,6 @@ if TYPE_CHECKING:
 
 from .base import Termination
 
-def termination_func(func):
-    class TermFunc(Termination):
-        def compute(self, termination: torch.Tensor):
-            return func(self.env)
-    return TermFunc
-
-
-def termination_wrapper(func):
-    class TerminationWrapper(Termination):
-        def compute(self, termination: torch.Tensor):
-            return func()
-    return TerminationWrapper
-
 
 class crash(Termination):
     def __init__(self, env, body_names_expr: str, t_thres: float = 0.):

@@ -83,7 +83,6 @@ class SimpleEnv(_Env):
         # sim_cfg.physx.gpu_heap_capacity = 2**24
         
         self.sim, self.scene = scene.create_isaaclab_sim_and_scene(sim_cfg, scene_cfg)
-
         # set camera view for "/OmniverseKit_Persp" camera
         self.sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat)
         try:
@@ -129,7 +128,7 @@ class SimpleEnv(_Env):
         class SceneCfg:
             robot = registry.get("asset", self.cfg.robot.name)
             contact_forces = "robot"
-            terrain = TERRAINS_MUJOCO[self.cfg.terrain]
+            terrain = TERRAINS_MUJOCO.get(self.cfg.terrain, TERRAINS_MUJOCO["plane"])
         
         self.scene = MJScene(SceneCfg())
         self.sim = MJSim(self.scene)
