@@ -463,13 +463,14 @@ class perturb_body_mass(Randomization):
             )
         )
         self.mass_ranges = torch.tensor(values)
-        print(self.body_names)
 
     def startup(self):
-        logging.info(f"Randomize body masses of {self.body_names} upon startup.")
+        logging.info(
+            f"Randomize body masses of {self.body_names} upon startup."
+            f"Default masses: {self.asset.data.default_mass[0].tolist()}"
+        )
         masses = self.asset.data.default_mass.clone()
         inertias = self.asset.data.default_inertia.clone()
-        print(f"Default masses: {masses[0]}")
         scale = uniform(
             self.mass_ranges[:, 0].expand_as(masses[:, self.body_ids]),
             self.mass_ranges[:, 1].expand_as(masses[:, self.body_ids]),

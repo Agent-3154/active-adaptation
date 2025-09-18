@@ -896,11 +896,11 @@ class quadruped_stand(Reward):
 
 
 class lateral_swing_height(Reward):
-    def __init__(self, env, feet_names: str, weight: float):
+    def __init__(self, env, weight: float, feet_names: str, target_height: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.feet_ids = self.asset.find_bodies(feet_names)[0]
-        self.target_height = 0.16
+        self.target_height = target_height
         
     def compute(self):
         feet_pos_w = self.asset.data.body_pos_w[:, self.feet_ids]
@@ -912,10 +912,10 @@ class lateral_swing_height(Reward):
         feet_height_w = feet_pos_w[:, :, 2] - self.env.get_ground_height_at(feet_pos_w) # [N, 4]
         rew = torch.where(
             feet_lin_vel_b[:, :, 1].abs() > 0.1,
-            (feet_height_w - self.target_height).clamp_max(0.05),
+            1.0 + (feet_height_w/self.target_height - self.target_height).clamp_max(0.0),
             0.
         )
-        return rew.sum(1, True)
+        return rew.sum(1, True) / len(self.feet_ids)
 
 
 class action_rate_l2(Reward):

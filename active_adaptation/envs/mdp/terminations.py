@@ -67,22 +67,14 @@ class tracking_error(Termination):
 class cum_error(Termination):
     def __init__(self, env, thres: float = 0.85, min_steps: int = 50):
         super().__init__(env)
-        from .commands import Command2
         self.thres = torch.tensor(thres, device=self.env.device)
-        self.min_steps = min_steps # tolerate the first few steps
-        self.error_exceeded_count = torch.zeros(self.env.num_envs, 1, device=self.env.device, dtype=torch.int32)
-        self.command_manager: Command2 = self.env.command_manager
-    
-    def reset(self, env_ids):
-        self.error_exceeded_count[env_ids] = 0
-
-    def update(self):
-        error_exceeded = (self.command_manager._cum_error > self.thres).any(-1, True)
-        self.error_exceeded_count[error_exceeded] += 1
-        self.error_exceeded_count[~error_exceeded] = 0
+        self.command_manager = self.env.command_manager
+        if not hasattr(self.command_manager, "cum_error"):
+            raise ValueError("`cum_error` attribute not found in command manager")
     
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
-        return (self.error_exceeded_count > self.min_steps).reshape(-1, 1)
+        return (self.command_manager.cum_error > self.thres).any(-1, True)
+
 
 class ee_cum_error(Termination):
     def __init__(self, env, thres: float = 1.0, min_steps: int = 50):
