@@ -571,6 +571,8 @@ class PPOPolicy(ModBase):
                 module = module.module
             state_dict[name] = module.state_dict()
         state_dict["last_phase"] = self.cfg.phase
+        state_dict["opt_teacher"] = self.opt_teacher.state_dict()
+        state_dict["opt_adapt"] = self.opt_adapt.state_dict()
         return state_dict
     
     def load_state_dict(self, state_dict, strict=True):
@@ -590,6 +592,11 @@ class PPOPolicy(ModBase):
         if state_dict.get("last_phase", "train") == "train":
             # only copy to initialize the actor once
             hard_copy_(self.actor_teacher, self.actor_student)
+        
+        if "opt_teacher" in state_dict.keys():
+            self.opt_teacher.load_state_dict(state_dict["opt_teacher"])
+            self.opt_adapt.load_state_dict(state_dict["opt_adapt"])
+        
         return failed_keys
 
 

@@ -282,6 +282,9 @@ class MJArticulation:
         # find joints
         return string_utils.resolve_matching_names(name_keys, joint_subset, preserve_order)
 
+    def reset(self, env_ids: ArrayType=None):
+        self.update(0.0)
+
     def update(self, dt: float):
         jpos = self.mj_data.qpos[self.joint_qposadr_read]
         jvel = self.mj_data.qvel[self.joint_qveladr_read]
@@ -508,7 +511,6 @@ class MJScene:
 
     def reset(self, env_ids: torch.Tensor):
         for articulation in self.articulations.values():
-            continue
             articulation.reset(env_ids)
         for sensor in self.sensors.values():
             sensor.reset(env_ids)
