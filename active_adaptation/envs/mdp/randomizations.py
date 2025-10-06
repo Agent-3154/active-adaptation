@@ -522,6 +522,8 @@ class reset_joint_states_uniform(Randomization):
                 dict(vel_ranges), self.asset.joint_names
             )
             self.vel_ranges = torch.as_tensor(self.vel_ranges, device=self.device).unbind(-1)
+        else:
+            self.vel_ranges = None
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
         self.default_joint_vel = self.asset.data.default_joint_vel[:, self.joint_ids]
         self.joint_limits = self.asset.data.joint_limits[0, self.joint_ids].unbind(-1)
