@@ -12,9 +12,11 @@ from isaaclab.app import AppLauncher
 from torchrl.envs.utils import set_exploration_type, ExplorationType
 from tensordict.nn import TensorDictSequential
 
+import active_adaptation
 from active_adaptation.utils.export import export_onnx
 from active_adaptation.utils.torchrl import ObsNorm
 
+active_adaptation.import_algorithms()
 
 @hydra.main(config_path="../cfg", config_name="play", version_base=None)
 def main(cfg):

@@ -59,6 +59,7 @@ def get_backend():
 
 _CONFIG_SEARCH_PATHS = []
 _PROJECT_ENTRY_POINTS = []
+_LEARNING_ENTRY_POINTS = []
 
 
 for entry_point in importlib.metadata.entry_points(group="active_adaptation.projects"):
@@ -68,6 +69,10 @@ for entry_point in importlib.metadata.entry_points(group="active_adaptation.proj
     _PROJECT_ENTRY_POINTS.append(entry_point)
 
 
+for entry_point in importlib.metadata.entry_points(group="active_adaptation.learning"):
+    _LEARNING_ENTRY_POINTS.append(entry_point)
+
+
 from hydra_plugins.aa_searchpath_plugin.aa_searchpath_plugin import ActiveAdaptationSearchPathPlugin
 
 
@@ -75,4 +80,11 @@ def import_projects():
     for entry_point in _PROJECT_ENTRY_POINTS:
         print(f"Importing project {entry_point.name}")
         entry_point.load()
+
+
+def import_algorithms():
+    for entry_point in _LEARNING_ENTRY_POINTS:
+        print(f"Importing learning {entry_point.name}")
+        entry_point.load()
+
 
