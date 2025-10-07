@@ -27,6 +27,7 @@ torch.backends.cudnn.benchmark = False
 FILE_PATH = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(FILE_PATH, "..", "cfg")
 
+aa.import_algorithms()
 
 @hydra.main(config_path=CONFIG_PATH, config_name="train", version_base=None)
 def main(cfg: DictConfig):
