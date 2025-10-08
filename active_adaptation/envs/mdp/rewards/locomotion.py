@@ -513,6 +513,20 @@ class base_height_l1(Reward):
         return height.clamp(max=target_height).reshape(self.num_envs, 1)
 
 
+class base_height_exp(Reward):
+    def __init__(self, env, target_height: float, weight: float):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.target_height = target_height
+    
+    def compute(self) -> torch.Tensor:
+        root_pos_w = self.asset.data.root_pos_w
+        height = root_pos_w[:, 2] - self.env.get_ground_height_at(root_pos_w)
+        error = (height - self.target_height).square()
+        rew = torch.exp(-error / 0.2)
+        return rew.reshape(self.num_envs, 1)
+
+
 class tracking_base_height(Reward):
     def __init__(self, env, target_height: float, weight: float):
         super().__init__(env, weight)
