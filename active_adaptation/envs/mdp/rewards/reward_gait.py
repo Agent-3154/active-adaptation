@@ -54,3 +54,22 @@ class feet_sliding(Reward):
         slip = (in_contact * feet_vel_b[:, :, 1].square()).sum(dim=1)
         return - slip.reshape(self.num_envs, 1)
 
+
+class quadruped_trot(Reward):
+    """
+    Reward either (FL-RR) or (FR-RL) are in contact but not both.
+    """
+    def __init__(self, env, weight: float, body_names: str):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.body_ids, self.body_names = self.asset.find_bodies(body_names)
+        self.body_contact_ids = self.contact_sensor.find_bodies(body_names)[0]
+    
+    def compute(self) -> torch.Tensor:
+        in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.005
+        FL_RR = in_contact[:, [0, 3]].all(dim=1)
+        FR_RL = in_contact[:, [1, 2]].all(dim=1)
+        rew = torch.logical_xor(FL_RR, FR_RL)
+        return rew.reshape(self.num_envs, 1)
+
