@@ -41,16 +41,20 @@ DONE_KEY = ("next", "done")
 CMD_KEY = "command"
 
 
-class ResFCLayer(nn.Module):
-    def __init__(self, out_dim: int, activation=nn.Mish):
+class ResidualFC(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int, activation: nn.Module=nn.Mish):
         super().__init__()
-        self.linear = nn.LazyLinear(out_dim * 2)
-        self.mish = activation()
-        self.ln = nn.LayerNorm(out_dim)
+        if input_dim != output_dim:
+            self.linear_skip = nn.LazyLinear(output_dim)
+        else:
+            self.linear_skip = nn.Identity()
+        self.linear = nn.LazyLinear(output_dim)
+        self.act = activation()
+        self.ln = nn.LayerNorm(output_dim)
     
     def forward(self, x):
-        x, skip = self.linear(x).chunk(2, dim=-1)
-        return self.ln(self.mish(x) + skip)
+        x_skip = self.linear_skip(x)
+        return self.ln(self.act(self.linear(x)) + x_skip)
 
 
 def make_mlp(num_units, activation=nn.Mish, norm="before", dropout=0.):

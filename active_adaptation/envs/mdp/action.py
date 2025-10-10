@@ -35,6 +35,9 @@ class ActionManager:
 
     def debug_draw(self):
         pass
+    
+    def process_action(self, action: TENSORLIKE):
+        pass
 
     def apply_action(self, tensordict: TENSORLIKE, substep: int):
         pass
@@ -128,24 +131,24 @@ class JointPosition(ActionManager):
         alpha.uniform_(self.alpha_range[0], self.alpha_range[1])
         self.alpha[env_ids] = alpha
 
+    def process_action(self, action: TENSORLIKE):
+        action = action["action"]
+        self.action_buf = self.action_buf.roll(1, dims=1)
+        self.action_buf[:, 0] = action
+        self.action_queue = torch.where(
+            (torch.arange(self.action_queue.shape[1], device=self.device) < self.delay).reshape(self.num_envs, self.action_queue.shape[1], 1),
+            self.action_queue,
+            action.unsqueeze(1)
+        )
+
     def apply_action(self, action: TENSORLIKE, substep: int):
-        if substep == 0:
-            if isinstance(action, TensorDictBase):
-                action = action["action"]
-            self.action_buf = self.action_buf.roll(1, dims=1)
-            self.action_buf[:, 0] = action
-            self.action_queue = torch.where(
-                (torch.arange(self.action_queue.shape[1], device=self.device) < self.delay).reshape(self.num_envs, self.action_queue.shape[1], 1),
-                self.action_queue,
-                action.unsqueeze(1)
-            )
         # deplay model: each substep, the first action in queue is consumed
         self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
         self.action_queue = self.action_queue.roll(-1, dims=1)
 
-        pos_target = self.default_joint_pos.clone()
-        pos_target[:, self.joint_ids] += self.applied_action * self.action_scaling
-        self.asset.set_joint_position_target(pos_target)
+        jpos_target = self.default_joint_pos.clone()
+        jpos_target[:, self.joint_ids] += self.applied_action * self.action_scaling
+        self.asset.set_joint_position_target(jpos_target)
 
 
 class LegWheel(ActionManager):
@@ -193,39 +196,6 @@ class LegWheel(ActionManager):
             symmetry_utils.joint_space_symmetry(self.asset, self.leg_names),
             symmetry_utils.joint_space_symmetry(self.asset, self.wheel_names),
         ])
-
-
-class DecapAction(ActionManager):
-    """
-    Decaying Action Prior as described in https://arxiv.org/pdf/2310.05714
-    """
-    def __init__(self, env, action_scaling: Dict[str, float] = 8.0):
-        super().__init__(env)
-        self.joint_ids, self.joint_names, self.action_scaling = (
-            string_utils.resolve_matching_names_values(
-                dict(action_scaling), self.asset.joint_names
-            )
-        )
-        self.action_scaling = torch.tensor(self.action_scaling, device=self.device)
-        self.action_dim = len(self.joint_ids)
-
-        self.action_buf = torch.zeros(self.num_envs, self.action_dim, 4, device=self.device)
-        self.applied_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
-    
-    def symmetry_transforms(self):
-        transform = symmetry_utils.joint_space_symmetry(self.asset, self.joint_names)
-        return transform
-    
-    def apply_action(self, tensordict: TensorDictBase, substep: int):
-        if substep == 0:
-            if isinstance(tensordict, TensorDictBase):
-                action = tensordict["action"]
-            action = action.clamp(-10, 10)
-            self.action_buf[:, :, 1:] = self.action_buf[:, :, :-1]
-            self.action_buf[:, :, 0] = action
-            self.applied_action = self.applied_action.lerp(action, 0.8)
-        torque = self.applied_action * self.action_scaling
-        self.asset.set_joint_effort_target(torque, self.joint_ids)
     
 
 def clamp_norm(x: torch.Tensor, max_norm: float):
