@@ -30,7 +30,7 @@ def main():
     
     parser.add_argument("-e", "--export", action="store_true", default=False)
     parser.add_argument("-v", "--video", action="store_true", default=False)
-    parser.add_argument("-i", "--interations", type=int, default=None)
+    parser.add_argument("-i", "--iterations", type=int, default=None)
     args = parser.parse_args()
 
     api = wandb.Api()
@@ -52,24 +52,6 @@ def main():
             file.download(root, replace=True)
         elif file.name == "config.yaml":
             file.download(root, replace=True)
-    
-    if args.interations is None:
-        def sort_by_time(file):
-            number_str = file.name[:-3].split("_")[-1]
-            if number_str == "final":
-                return 100000
-            else:
-                return int(number_str)
-
-        checkpoints.sort(key=sort_by_time)
-        checkpoint = checkpoints[-1]
-    else:
-        for file in checkpoints:
-            if file.name == f"checkpoint_{args.interations}.pt":
-                checkpoint = file
-                break
-    print(f"Downloading {os.path.join(root, checkpoint.name)}")
-    checkpoint.download(root, replace=True)
 
     # `run.config` does not preserve order of the keys
     # so we need to manually load the config file :(
@@ -84,7 +66,10 @@ def main():
         cfg = OmegaConf.load(os.path.join(root, "cfg.yaml"))
     OmegaConf.set_struct(cfg, False)
 
-    cfg["checkpoint_path"] = f"run:{args.run_path}"
+    if args.iterations is not None:
+        cfg["checkpoint_path"] = f"run:{args.run_path}:{args.iterations}"
+    else:
+        cfg["checkpoint_path"] = f"run:{args.run_path}"
     cfg["vecnorm"] = "eval"
     # cfg["algo"]["phase"] = "adapt"
     # cfg['algo']["phase"] = "finetune"

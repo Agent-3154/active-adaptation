@@ -11,7 +11,7 @@ import datetime
 from typing import Sequence
 from tensordict import TensorDictBase, TensorDict
 from tensordict.nn import TensorDictModuleBase as ModBase
-from torchrl.envs.transforms import VecNorm
+from torchrl.envs.transforms import VecNorm, VecNormV2
 
 from termcolor import colored
 from collections import OrderedDict
@@ -67,7 +67,7 @@ def make_env_policy(cfg: DictConfig):
     cfg.seed = cfg.seed + active_adaptation.get_local_rank()
     
     from active_adaptation.envs import SimpleEnv
-    from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, VecNorm, StepCounter
+    from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
     
     base_env = SimpleEnv(cfg.task)
 
@@ -95,8 +95,7 @@ def make_env_policy(cfg: DictConfig):
 
     assert cfg.vecnorm in ("train", "eval", None)
     print(colored(f"[Info]: create VecNorm for keys: {obs_keys}", "green"))
-    vecnorm = VecNorm(obs_keys, decay=0.9999)
-    vecnorm(base_env.fake_tensordict())
+    vecnorm = VecNormV2(obs_keys, decay=0.999, reduce_batch_dims=True)
 
     if "vecnorm" in state_dict.keys():
         print(colored("[Info]: Load VecNorm from checkpoint.", "green"))
