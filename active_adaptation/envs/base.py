@@ -402,6 +402,7 @@ class _Env(EnvBase):
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
         start = time.perf_counter()
+        self.action_manager.process_action(tensordict)
         for substep in range(self.decimation):
             for asset in self.scene.articulations.values():
                 if asset.has_external_wrench:
