@@ -172,7 +172,6 @@ artifacts/
 *.mp4
 
 # local scripts
-*.sh
 scripts/*.png
 scripts/*.pt
 scripts/*.onnx
