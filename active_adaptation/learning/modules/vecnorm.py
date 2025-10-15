@@ -64,8 +64,8 @@ class VecNorm(nn.Module):
     
     def _update(self, input_vector: torch.Tensor):
         input_vector = input_vector.reshape(-1, *self.input_shape)
-        sum_ = input_vector.mean(dim=self.reduction_dims).sum(0)
-        ssq_ = input_vector.square().mean(dim=self.reduction_dims).sum(0)
+        sum_ = input_vector.mean(dim=self.reduction_dims, keepdim=True).sum(0)
+        ssq_ = input_vector.square().mean(dim=self.reduction_dims, keepdim=True).sum(0)
         if self.decay < 1.0:
             weight = 1 - self.decay
             self.count.add_(input_vector.shape[0])

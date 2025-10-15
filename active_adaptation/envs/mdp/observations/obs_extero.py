@@ -68,7 +68,10 @@ class height_scan(Observation):
         height_map = (root_pos_w[:, :, :, 2] - self.height_map_w).clamp(-1., 1.)
         if self.include_xy:
             xy = einops.rearrange(self.pos[..., :2], "X Y C -> C X Y")
-            height_map = torch.cat([xy.expand(self.num_envs, *xy.shape), height_map], dim=-1)
+            height_map = torch.cat([
+                xy.expand(self.num_envs, *xy.shape),
+                height_map.reshape(self.num_envs, 1, *self.shape)
+            ], dim=1)
         if self.flatten:
             return height_map.reshape(self.num_envs, -1)
         else:
