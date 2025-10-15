@@ -80,8 +80,6 @@ def main(cfg: DictConfig):
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
 
-    rollout_policy = policy.get_rollout_policy("train")
-
     def save(policy, checkpoint_name: str):
         ckpt_path = os.path.join(run.dir, f"{checkpoint_name}.pt")
         state_dict = OrderedDict()
