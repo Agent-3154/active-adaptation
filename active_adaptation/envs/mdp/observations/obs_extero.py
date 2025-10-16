@@ -173,3 +173,65 @@ class forward_scan(Observation):
         if self.env.backend == "isaac":
             pos = self.ray_hits.reshape(-1, 3)
             self.marker.visualize(pos)
+
+
+# class feet_height_map(Observation):
+#     def __init__(
+#         self, 
+#         env, 
+#         feet_names=".*_foot", 
+#         nomial_height=0.3,
+#         resolution: float=0.1,
+#         size=[0.15, 0.15],
+#     ):
+#         super().__init__(env)
+#         self.nominal_height = nomial_height
+#         self.asset: Articulation = self.env.scene["robot"]
+#         self.body_ids, self.body_names = self.asset.find_bodies(feet_names)
+#         self.num_feet = len(self.body_ids)
+        
+#         self.ray_starts = torch.tensor(
+#             [
+#                 [0., 0., 10.], 
+#                 # [0., 0.1, 10.],
+#                 # [0., -0.1, 10.],
+#                 # [0.1, 0., 10.],
+#                 # [-0.1, 0., 10.],
+#                 [0.1, 0.1, 10.],
+#                 [0.1, -.1, 10.],
+#                 [-.1, -.1, 10.],
+#                 [-.1, 0.1, 10.],
+#             ],
+#             device=self.device
+#         )
+#         self.num_rays = len(self.ray_starts)
+
+#         shape = (self.num_envs, self.num_feet, self.num_rays)
+#         self.ray_hits_w = torch.zeros(*shape, 3, device=self.device)
+#         self.feet_height_map = torch.zeros(shape, device=self.device)
+#         self.asset.data.feet_height = self.feet_height_map[:, :, 0]
+#         self.asset.data.feet_height_map = self.feet_height_map
+    
+#     def update(self):
+#         self.feet_pos_w = self.asset.data.body_pos_w[:, self.body_ids]
+#         self.feet_quat_w = self.asset.data.body_quat_w[:, self.body_ids]
+#         if self.mesh is not None:
+#             shape = (self.num_envs, self.num_feet, self.num_rays, -1)
+#             ray_starts_w = quat_apply_yaw(
+#                 self.feet_quat_w.unsqueeze(-2).expand(shape),
+#                 self.ray_starts.reshape(1, 1, -1, 3).expand(shape),
+#             )
+#             ray_starts_w += self.feet_pos_w.unsqueeze(-2)
+#             self.ray_hits_w[:] = raycast_mesh(
+#                 ray_starts_w,
+#                 self.ray_directions.expand_as(ray_starts_w).clone(),
+#                 max_dist=100.,
+#                 mesh=self.mesh,
+#             )[0]
+
+#             self.feet_height_map[:] = (self.feet_pos_w.unsqueeze(-2)[..., 2] - self.ray_hits_w[..., 2]).nan_to_num(nan=0., posinf=0., neginf=0.)
+#         else:
+#             self.feet_height_map[:] = self.feet_pos_w.unsqueeze(-2)[..., 2]
+
+#     def compute(self):
+#         return self.feet_height_map.reshape(self.num_envs, -1) / self.nominal_height

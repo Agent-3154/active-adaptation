@@ -22,6 +22,15 @@ if active_adaptation.get_backend() == "isaac":
     from pxr import UsdGeom, UsdPhysics
 
 
+class root_pose_w(Observation):
+    def __init__(self, env):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+
+    def compute(self):
+        return self.asset.data.root_link_pose_w.reshape(self.num_envs, -1)
+
+
 class root_linacc_b(Observation):
     def __init__(self, env):
         super().__init__(env)
@@ -532,42 +541,6 @@ class applied_torque(Observation):
         return transform
 
 
-class contact_indicator(Observation):
-    def __init__(self, env, body_names: str, timing: bool=True):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
-        
-        self.artc_ids, names = self.asset.find_bodies(body_names)
-        self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names, preserve_order=True)
-        self.timing = timing
-        
-        self.default_mass_total = self.asset.data.default_mass[0].sum()
-        self.giravity = self.default_mass_total.to(self.env.device) * 9.81
-        self.force_substep = torch.zeros(self.num_envs, self.env.decimation, len(self.body_ids), 3, device=self.device)
-
-    def post_step(self, substep):
-        force = self.contact_sensor.data.net_forces_w[:, self.body_ids]
-        self.force_substep[:, substep] = force
-
-    def compute(self):
-        forces = (self.force_substep.mean(1).norm(dim=-1) > 2.).float()
-        return forces.reshape(self.num_envs, -1)
-
-    def symmetry_transforms(self):
-        assert not self.timing
-        transform = sym_utils.cartesian_space_symmetry(self.asset, self.body_names, sign=(1,))
-        return transform
-
-    # def debug_draw(self):
-    #     if self.env.sim.has_gui() and self.env.backend == "isaac":
-    #         self.env.debug_draw.vector(
-    #             self.asset.data.body_pos_w[:, self.artc_ids],
-    #             self.force_substep.mean(1) / self.giravity,
-    #             color=(1., 1., 1., 1.)
-    #         )
-
-
 class motor_params(Observation):
     def __init__(self, env, actuator_name: str, homogeneous: bool=False):
         super().__init__(env)
@@ -644,21 +617,6 @@ class external_torques(Observation):
         return sym_utils.cartesian_space_symmetry(self.asset, self.body_names, (-1, 1, -1))
 
 
-class contact_forces(Observation):
-    def __init__(self, env, body_names, divide_by_mass: bool=True):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.default_mass_total = self.asset.root_physx_view.get_masses()[0].sum() * 9.81
-        self.denom = self.default_mass_total if divide_by_mass else 1.
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
-        self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
-
-    def compute(self) -> torch.Tensor:
-        contact_forces = self.contact_sensor.data.net_forces_w_history.mean(1)
-        force = contact_forces[:, self.body_ids] / self.denom
-        return force.view(self.num_envs, -1)
-
-
 class body_materials(Observation):
     def __init__(self, env, body_names, homogeneous: bool=False):
         super().__init__(env)
@@ -727,200 +685,6 @@ class body_momentum(Observation):
         return momentum.reshape(self.num_envs, -1)
 
 
-class feet_height_map(Observation):
-    def __init__(
-        self, 
-        env, 
-        feet_names=".*_foot", 
-        nomial_height=0.3,
-        resolution: float=0.1,
-        size=[0.15, 0.15],
-    ):
-        super().__init__(env)
-        self.nominal_height = nomial_height
-        self.asset: Articulation = self.env.scene["robot"]
-        self.body_ids, self.body_names = self.asset.find_bodies(feet_names)
-        self.num_feet = len(self.body_ids)
-        
-        self.ray_starts = torch.tensor(
-            [
-                [0., 0., 10.], 
-                # [0., 0.1, 10.],
-                # [0., -0.1, 10.],
-                # [0.1, 0., 10.],
-                # [-0.1, 0., 10.],
-                [0.1, 0.1, 10.],
-                [0.1, -.1, 10.],
-                [-.1, -.1, 10.],
-                [-.1, 0.1, 10.],
-            ],
-            device=self.device
-        )
-        self.num_rays = len(self.ray_starts)
-
-        shape = (self.num_envs, self.num_feet, self.num_rays)
-        self.ray_hits_w = torch.zeros(*shape, 3, device=self.device)
-        self.feet_height_map = torch.zeros(shape, device=self.device)
-        self.asset.data.feet_height = self.feet_height_map[:, :, 0]
-        self.asset.data.feet_height_map = self.feet_height_map
-        if active_adaptation.get_backend() == "isaac":
-            self._init_raycaster(resolution, size)
-        else:
-            self.mesh = None
-    
-    def _init_raycaster(self, resolution, size):
-        self.mesh = _initialize_warp_meshes("/World/ground", "cuda")
-
-        # pattern_cfg = patterns.GridPatternCfg(resolution=resolution, size=size)
-        # self.ray_starts, self.ray_directions = pattern_cfg.func(pattern_cfg, self.device)
-        # self.ray_starts[:, 2] += 10.
-        self.ray_directions = torch.tensor([0., 0., -1.], device=self.device)
-    
-    def update(self):
-        self.feet_pos_w = self.asset.data.body_pos_w[:, self.body_ids]
-        self.feet_quat_w = self.asset.data.body_quat_w[:, self.body_ids]
-        if self.mesh is not None:
-            shape = (self.num_envs, self.num_feet, self.num_rays, -1)
-            ray_starts_w = quat_apply_yaw(
-                self.feet_quat_w.unsqueeze(-2).expand(shape),
-                self.ray_starts.reshape(1, 1, -1, 3).expand(shape),
-            )
-            ray_starts_w += self.feet_pos_w.unsqueeze(-2)
-            self.ray_hits_w[:] = raycast_mesh(
-                ray_starts_w,
-                self.ray_directions.expand_as(ray_starts_w).clone(),
-                max_dist=100.,
-                mesh=self.mesh,
-            )[0]
-
-            self.feet_height_map[:] = (self.feet_pos_w.unsqueeze(-2)[..., 2] - self.ray_hits_w[..., 2]).nan_to_num(nan=0., posinf=0., neginf=0.)
-        else:
-            self.feet_height_map[:] = self.feet_pos_w.unsqueeze(-2)[..., 2]
-
-    def compute(self):
-        return self.feet_height_map.reshape(self.num_envs, -1) / self.nominal_height
-    
-    def fliplr(self, obs: torch.Tensor) -> torch.Tensor:
-        obs = obs.reshape(self.num_envs, self.num_feet, 5)[:, [1, 0, 3, 2]]
-        obs = obs[:, :, [0, 2, 1, 4, 3]]
-        return obs.reshape(self.num_envs, -1)
-    
-    # def debug_draw(self):
-    #     if self.env.sim.has_gui() and self.env.backend == "isaac":
-    #         x = self.ray_hits_w.clone()
-    #         x[..., 2] = self.feet_pos_w.unsqueeze(-2)[..., 2]
-    #         d = self.ray_hits_w - x
-    #         self.env.debug_draw.vector(x, d)
-
-
-class head_height(Observation):
-    def __init__(self, env):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.head_id = self.asset.find_bodies("Head_lower")[0][0]
-        
-        self.head_height = torch.zeros(self.num_envs, 1, device=self.device)
-        self.asset.data.head_height = self.head_height
-        self.mesh = _initialize_warp_meshes("/World/ground", "cuda")
-        self.ray_direction = torch.tensor([0., 0., -1.], device=self.device).expand(self.num_envs, 3)
-
-    def update(self):
-        self.ray_start_w = self.asset.data.body_pos_w[:, self.head_id]
-        self.ray_hit_w = raycast_mesh(
-            self.ray_start_w,
-            self.ray_direction,
-            max_dist=100.,
-            mesh=self.mesh,
-        )[0]
-        self.head_height[:] = (self.ray_start_w[:, 2] - self.ray_hit_w[:, 2]).nan_to_num(nan=0., posinf=0., neginf=0.).unsqueeze(1)
-
-    def compute(self):
-        return self.head_height.reshape(self.num_envs, -1)
-
-    def debug_draw(self):
-        self.env.debug_draw.vector(self.ray_start_w, self.ray_hit_w - self.ray_start_w, color=(1., 0., 1., 1.))
-
-
-class path_integrator(Observation):
-    
-    decimation: int = 3
-
-    def __init__(self, env):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        _initialize_warp_meshes("/World/ground", "cuda")
-        with torch.device(self.device):
-            self.ray_starts = torch.tensor(
-                [
-                    [0., 0., 10.], 
-                    [0.1, 0.1, 10.],
-                    [0.1, -.1, 10.],
-                    [-.1, -.1, 10.],
-                    [-.1, 0.1, 10.],
-                ],
-                device=self.device
-            )
-            self.ray_directions = torch.tensor([0., 0., -1.], device=self.device)
-            
-            self.target_pos_w = torch.zeros(self.num_envs, 3)
-            self.target_pos_w_hist = torch.zeros(self.num_envs, 3, 40)
-            self.pos_w_hist = torch.zeros(self.num_envs, 3, 40)
-
-            self.ray_hits_height = torch.zeros(self.num_envs)
-        
-        self.num_rays = len(self.ray_starts)
-        self.command_manager = self.env.command_manager
-        self.step_cnt = 0
-
-    def reset(self, env_ids: torch.Tensor):
-        root_pos_w = self.asset.data.root_pos_w[env_ids]
-        self.target_pos_w[env_ids] = root_pos_w
-        self.target_pos_w_hist[env_ids, :, :] = root_pos_w.unsqueeze(2)
-        self.pos_w_hist[env_ids, :, :] = root_pos_w.unsqueeze(2)
-
-    def update(self):
-        root_quat = yaw_quat(self.asset.data.root_quat_w)
-        command_linvel_b = self.command_manager.command_linvel
-        command_linvel_w = quat_rotate(root_quat, command_linvel_b)
-        
-        ray_starts_w = self.target_pos_w.unsqueeze(1) + self.ray_starts
-        ray_hits_w = raycast_mesh(
-            ray_starts_w,
-            self.ray_directions.expand_as(ray_starts_w).clone(),
-            max_dist=100.,
-            mesh=RayCaster.meshes["/World/ground"],
-        )[0]
-        self.ray_hits_height[:] = ray_hits_w[:, :, 2].mean(1)
-
-        self.target_pos_w.add_(command_linvel_w * self.env.step_dt)
-        self.target_pos_w[:, 2] = self.ray_hits_height + 0.35
-        self.target_pos_w[:, :2].lerp_(self.asset.data.root_pos_w[:, :2], 0.01)
-        if self.step_cnt % self.decimation == 0:
-            self.target_pos_w_hist[:, :, 1:] = self.target_pos_w_hist[:, :, :-1]
-            self.target_pos_w_hist[:, :, 0] = self.target_pos_w
-            self.pos_w_hist[:, :, 1:] = self.pos_w_hist[:, :, :-1]
-            self.pos_w_hist[:, :, 0] = self.asset.data.root_pos_w
-        self.step_cnt += 1
-    
-    def compute(self) -> torch.Tensor:
-        return torch.zeros(self.num_envs, 1, device=self.device)
-    
-    def debug_draw(self):
-        if self.env.sim.has_gui() and self.env.backend == "isaac":
-            mix = self.pos_w_hist.lerp(self.target_pos_w_hist, 0.5)
-            for x in self.target_pos_w_hist.unbind(0):
-                self.env.debug_draw.plot(
-                    x.T,
-                    color=(0., 1., 1., 1.)
-                )
-            for x in mix.unbind(0):
-                # use purple
-                self.env.debug_draw.plot(
-                    x.T,
-                    color=(1., 0., 1., 1.)
-                )
-
-
 
 class prev_actions(Observation):
     def __init__(self, env, steps: int=1, flatten: bool=True):
@@ -939,48 +703,6 @@ class prev_actions(Observation):
     def symmetry_transforms(self):
         transform = self.action_manager.symmetry_transforms()
         return transform.repeat(self.steps)
-
-
-class last_contact(Observation):
-    def __init__(self, env, body_names: str):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
-        self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
-
-        self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
-
-        with torch.device(self.device):
-            self.body_ids = torch.as_tensor(self.body_ids)
-            self.has_contact = torch.zeros(self.num_envs, len(self.body_ids), 1, dtype=bool)
-            self.last_contact_pos_w = torch.zeros(self.num_envs, len(self.body_ids), 3)
-        self.body_pos_w = self.asset.data.body_pos_w[:, self.articulation_body_ids]
-        
-    def reset(self, env_ids: torch.Tensor):
-        self.has_contact[env_ids] = False
-    
-    def update(self):
-        first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[:, self.body_ids].unsqueeze(-1)
-        self.has_contact.logical_or_(first_contact)
-        self.body_pos_w = self.asset.data.body_pos_w[:, self.articulation_body_ids]
-        self.last_contact_pos_w = torch.where(
-            first_contact,
-            self.body_pos_w,
-            self.last_contact_pos_w
-        )
-    
-    def compute(self):
-        distance_xy = (self.body_pos_w[:, :, :2] - self.last_contact_pos_w[:, :, :2]).norm(dim=-1)
-        distance_z = self.body_pos_w[:, :, 2] - self.last_contact_pos_w[:, :, 2]
-        distance = torch.stack([distance_xy, distance_z], dim=-1)
-        return (distance * self.has_contact).reshape(self.num_envs, -1)
-
-    def debug_draw(self):
-        if self.env.sim.has_gui() and self.env.backend == "isaac":
-            self.env.debug_draw.vector(
-                self.body_pos_w,
-                torch.where(self.has_contact, self.last_contact_pos_w, self.body_pos_w) - self.body_pos_w
-            )
 
 
 class body_scale(Observation):
@@ -1036,18 +758,6 @@ class incoming_wrench(Observation):
                 color=(0., 0., 1., 1.),
                 size=10.
             )
-
-class applied_action(Observation):
-    def __init__(self, env):
-        super().__init__(env)
-        self.action_manager = self.env.action_manager
-
-    def compute(self) -> torch.Tensor:
-        return self.action_manager.applied_action
-
-    def symmetry_transforms(self):
-        transform = self.action_manager.symmetry_transforms()
-        return transform
 
 
 class jacobians_b(Observation):
@@ -1166,37 +876,6 @@ def random_noise(x: torch.Tensor, std: float):
 
 meshes = {}
 
-def _initialize_warp_meshes(mesh_prim_path, device):
-    if mesh_prim_path in meshes:
-        return meshes[mesh_prim_path]
-
-    # check if the prim is a plane - handle PhysX plane as a special case
-    # if a plane exists then we need to create an infinite mesh that is a plane
-    mesh_prim = sim_utils.get_first_matching_child_prim(
-        mesh_prim_path, lambda prim: prim.GetTypeName() == "Plane"
-    )
-    # if we did not find a plane then we need to read the mesh
-    if mesh_prim is None:
-        # obtain the mesh prim
-        mesh_prim = sim_utils.get_first_matching_child_prim(
-            mesh_prim_path, lambda prim: prim.GetTypeName() == "Mesh"
-        )
-        # check if valid
-        if mesh_prim is None or not mesh_prim.IsValid():
-            raise RuntimeError(f"Invalid mesh prim path: {mesh_prim_path}")
-        # cast into UsdGeomMesh
-        mesh_prim = UsdGeom.Mesh(mesh_prim)
-        # read the vertices and faces
-        points = np.asarray(mesh_prim.GetPointsAttr().Get())
-        indices = np.asarray(mesh_prim.GetFaceVertexIndicesAttr().Get())
-        wp_mesh = convert_to_warp_mesh(points, indices, device=device)
-    else:
-        mesh = make_plane(size=(2e6, 2e6), height=0.0, center_zero=True)
-        wp_mesh = convert_to_warp_mesh(mesh.vertices, mesh.faces, device=device)
-    # add the warp mesh to the list
-    meshes[mesh_prim_path] = wp_mesh
-    return wp_mesh
-
 
 class root_pos_w(Observation):
     def __init__(self, env):
@@ -1205,16 +884,6 @@ class root_pos_w(Observation):
 
     def compute(self):
         return self.asset.data.root_pos_w
-
-
-class impact_point_w(Observation):
-    def __init__(self, env):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-
-    def compute(self):
-        impact_point = self.asset.impact_point_w.reshape(self.num_envs, -1)
-        return torch.cat([impact_point, self.asset.impact], dim=1)
 
 
 class feet_orientation(Observation):
@@ -1307,16 +976,6 @@ class feet_contact_multistep(Observation):
     
     def compute(self):
         return self.contact.reshape(self.num_envs, -1)
-
-
-class actuator_type(Observation):
-    def __init__(self, env):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.actuator = self.asset.actuators["base_legs"]
-
-    def compute(self):
-        return self.actuator.implicit.reshape(self.num_envs, -1)
 
 
 class cartesian_force(Observation):

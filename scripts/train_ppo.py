@@ -124,14 +124,14 @@ def main(cfg: DictConfig):
                 td = td.exclude(*private_keys)
                 
                 data.append(td.to(policy.device))
-        data = torch.stack(data, dim=1)
-        policy.critic(data)
-        values = data["state_value"]
-        data["next", "state_value"] = torch.where(
-            data["next", "done"],
-            values, # a walkaround to avoid storing the next states
-            torch.cat([values[:, 1:], policy.critic(carry.copy())["state_value"].unsqueeze(1)], dim=1)
-        )
+            data = torch.stack(data, dim=1)
+            policy.critic(data)
+            values = data["state_value"]
+            data["next", "state_value"] = torch.where(
+                data["next", "done"],
+                values, # a walkaround to avoid storing the next states
+                torch.cat([values[:, 1:], policy.critic(carry.copy())["state_value"].unsqueeze(1)], dim=1)
+            )
         return data
     
     env_frames = 0
