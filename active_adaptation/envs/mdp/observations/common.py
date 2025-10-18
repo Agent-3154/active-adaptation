@@ -100,17 +100,15 @@ class root_linacc_debug(Observation):
         return torch.cat([lin_acc_b0, lin_acc_b1, lin_acc_b2, lin_acc_b3], dim=-1)
 
 
-# class root_angvel_debug(Observation):
-#     def __init__(self, env):
-#         super().__init__(env)
-#         self.asset: Articulation = self.env.scene["robot"]
-#         self.rpy_w = torch.zeros(self.num_envs, 3, device=self.env.device)
-#         self.angvel_w = torch.zeros(self.num_envs, 3, device=self.env.device)
-
-#     def update(self):
-#         rpy_w = rpy_from_quat(self.asset.data.root_quat_w)
-#         self.angvel_w = (rpy_w - self.rpy_w) / self.env.step_dt
-#         self.rpy_w = rpy_w
+class body_pos_w(Observation):
+    def __init__(self, env, body_names: str):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.body_indices, self.body_names = self.asset.find_bodies(body_names)
+        self.body_indices = torch.tensor(self.body_indices, device=self.device)
+    
+    def compute(self):
+        return self.asset.data.body_pos_w[:, self.body_indices].reshape(self.num_envs, -1)
 
 
 class body_pos_b(Observation):
@@ -119,6 +117,7 @@ class body_pos_b(Observation):
         self.asset: Articulation = self.env.scene["robot"]
         self.yaw_only = yaw_only
         self.body_indices, self.body_names = self.asset.find_bodies(body_names)
+        self.body_indices = torch.tensor(self.body_indices, device=self.device)
         self.update()
         if self.env.backend == "mujoco":
             self.feet_marker_0 = self.env.scene.create_sphere_marker(0.05, [1, 0, 0, 0.5])

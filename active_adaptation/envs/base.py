@@ -127,6 +127,7 @@ class _Env(EnvBase):
             run_type_checks=False,
         )
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=int, device=self.device)
+        self.episode_id = torch.zeros(self.num_envs, dtype=int, device=self.device)
         self.episode_count = 0
 
         # parse obs and reward functions
@@ -331,17 +332,23 @@ class _Env(EnvBase):
         if tensordict is not None:
             env_mask = tensordict.get("_reset").reshape(self.num_envs)
             env_ids = env_mask.nonzero().squeeze(-1)
-            self.episode_count += env_ids.numel()
         else:
             env_ids = torch.arange(self.num_envs, device=self.device)
+        
         if len(env_ids):
+            num_envs = env_ids.numel()
+            self.episode_length_buf[env_ids] = 0
+            self.episode_id[env_ids] = self.episode_count + torch.arange(num_envs, device=self.device)
+            self.episode_count += num_envs
+
             self._reset_idx(env_ids)
             self.scene.reset(env_ids)
-        self.episode_length_buf[env_ids] = 0
-        for callback in self._reset_callbacks:
-            callback(env_ids)
+            for callback in self._reset_callbacks:
+                callback(env_ids)
+        
         tensordict = TensorDict({}, self.num_envs, device=self.device)
         tensordict.update(self.observation_spec.zero())
+        tensordict.set("episode_id", self.episode_id.clone())
         # self._compute_observation(tensordict)
         return tensordict
 
@@ -432,6 +439,7 @@ class _Env(EnvBase):
 
         self.command_time = self.command_time * EMA_DECAY + (end - start)
         self._compute_observation(tensordict)
+        tensordict.set("episode_id", self.episode_id.clone())
         terminated = self._compute_termination()
         truncated = (self.episode_length_buf >= self.max_episode_length).unsqueeze(1)
         tensordict.set("terminated", terminated)
