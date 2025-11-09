@@ -934,9 +934,9 @@ class lateral_swing_height(Reward):
 
 class action_rate_l2(Reward):
     """Penalize the rate of change of the action"""
-    def __init__(self, env, weight: float):
+    def __init__(self, env, weight: float, key: str="action"):
         super().__init__(env, weight)
-        self.action_manager = self.env.action_manager
+        self.action_manager = self.env.input_managers[key]
         assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
     
     def compute(self) -> torch.Tensor:
@@ -948,9 +948,9 @@ class action_rate_l2(Reward):
 
 class action_rate2_l2(Reward):
     """Penalize the second order rate of change of the action"""
-    def __init__(self, env, weight: float):
+    def __init__(self, env, weight: float, key: str="action"):
         super().__init__(env, weight)
-        self.action_manager = self.env.action_manager
+        self.action_manager = self.env.input_managers[key]
         assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
     
     def compute(self) -> torch.Tensor:

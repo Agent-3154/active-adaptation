@@ -35,6 +35,12 @@ class SymmetryTransform(nn.Module):
             signs.append(t.signs)
             num += t.perm.shape[0]
         return SymmetryTransform(torch.cat(perm), torch.cat(signs))
+    
+    def permutation(self):
+        """
+        Return the permutation part of the symmetry transform.
+        """
+        return SymmetryTransform(self.perm.clone(), torch.ones_like(self.signs))
 
 
 def mirrored(symmetry_mapping: dict):

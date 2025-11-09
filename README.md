@@ -27,10 +27,10 @@ Meanwhile, the code for the live demo (runinng Mujoco in browsers) is here [http
       IsaacLab/
         _isaac_sim/
    ```
-2. Install [Isaac Sim 4.5.0](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/download.html) by downloading the latest release and unzip it to a desired location `$ISAACSIM_PATH`.
+2. Install [Isaac Sim 5.1.0](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/download.html) by downloading the latest release and unzip it to a desired location `$ISAACSIM_PATH`.
 3. Install [Isaac Lab](https://github.com/isaac-sim/IsaacLab) and setup a conda environment:
    ```bash
-   conda create -n lab python=3.10
+   conda create -n lab python=3.11
    conda activate lab
    # install IsaacLab to the exisiting conda environment
    # git clone https://github.com/isaac-sim/IsaacLab.git
@@ -49,7 +49,7 @@ Meanwhile, the code for the live demo (runinng Mujoco in browsers) is here [http
    ```bash
    cd $ISAACSIM_PATH/exts/omni.isaac.ml_archive
    mv pip_prebundle pip_prebundle.back # backup the packages shipped with Isaac Sim
-   ln -s $CONDA_PREFIX/lib/python3.10/site-packages
+   ln -s $CONDA_PREFIX/lib/python3.11/site-packages
    ```
 5. [**Optional**] VSCode setup. This enables the Python extension for code analysis to provide auto-completiong and linting. Edit `.vscode/settings.json` on demand:
    ```json

@@ -2,8 +2,8 @@ import os
 import copy
 import torch
 
-from .quadruped import *
-from .humanoid import *
+from .quadruped import UNITREE_GO2_CFG, UNITREE_ALIENGO_CFG, UNITREE_B1Z1_CFG
+from .humanoid import G1_WAIST_UNLOCKED_CFG
 from .scene import *
 from active_adaptation.registry import Registry
 
@@ -11,6 +11,8 @@ registry = Registry.instance()
 registry.register("asset", "go2", UNITREE_GO2_CFG)
 registry.register("asset", "aliengo", UNITREE_ALIENGO_CFG)
 registry.register("asset", "b1z1", UNITREE_B1Z1_CFG)
+registry.register("asset", "g1_waist_unlocked", G1_WAIST_UNLOCKED_CFG)
+
 
 def get_asset_meta(asset: Articulation):
     if not asset.is_initialized:

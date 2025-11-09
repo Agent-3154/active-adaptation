@@ -1,4 +1,5 @@
 from collections import defaultdict
+import inspect
 
 class Registry:
     """
@@ -7,6 +8,8 @@ class Registry:
     """
     _instance = None
     _configs = defaultdict(dict)  # Stores configurations with unique names as keys
+    _call_locations = defaultdict(dict)  # Stores where each config was registered
+    verbose: bool = True
 
     def __new__(cls):
         """Ensure only one instance of GlobalRegistry exists (singleton)"""
@@ -40,7 +43,21 @@ class Registry:
         """
         if name in self._configs[group_name]:
             raise ValueError(f"Configuration {name} already registered in group {group_name}")
+        
+        # Record where this registration was called from
+        frame = inspect.currentframe()
+        caller_frame = frame.f_back
+        caller_filename = caller_frame.f_code.co_filename
+        caller_lineno = caller_frame.f_lineno
+        
         self._configs[group_name][name] = config
+        self._call_locations[group_name][name] = {
+            'file': caller_filename,
+            'line': caller_lineno,
+            'function': caller_frame.f_code.co_name
+        }
+        if self.verbose:
+            print(f"Registered '{name}' in '{group_name}' from {caller_filename}:{caller_lineno}.")
         return True
 
     def get(self, group_name: str, name: str):

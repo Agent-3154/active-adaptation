@@ -14,6 +14,7 @@ from tqdm import tqdm
 from setproctitle import setproctitle
 
 import active_adaptation as aa
+from active_adaptation.utils.profiling import ScopedTimer
 from isaaclab.app import AppLauncher
 from torchrl.envs.utils import set_exploration_type, ExplorationType
 from tensordict.nn import TensorDictModuleBase
@@ -63,7 +64,7 @@ def main(cfg: DictConfig):
         run.save(os.path.join(run.dir, "config.yaml"), policy="now")
 
     from helpers import make_env_policy, EpisodeStats, evaluate
-    env, policy, vecnorm = make_env_policy(cfg)
+    env, policy = make_env_policy(cfg)
 
     frames_per_batch = env.num_envs * cfg.algo.train_every
     total_frames = cfg.get("total_frames", -1) // aa.get_world_size()
@@ -87,8 +88,6 @@ def main(cfg: DictConfig):
         state_dict["policy"] = policy.state_dict()
         state_dict["env"] = env.state_dict()
         state_dict["cfg"] = cfg
-        if "vecnorm" in locals():
-            state_dict["vecnorm"] = vecnorm.state_dict()
         torch.save(state_dict, ckpt_path)
         run.save(ckpt_path, policy="now", base_path=run.dir)
         logging.info(f"Saved checkpoint to {str(ckpt_path)}")
@@ -113,32 +112,34 @@ def main(cfg: DictConfig):
     @set_exploration_type(ExplorationType.RANDOM)
     def collect(carry):
         data = []
-        torch.compiler.cudagraph_mark_step_begin() # for compiled policy
-        with torch.autocast("cuda"):
-            for _ in range(cfg.algo.train_every):
-                carry = rollout_policy(carry)
-                td, carry = env.step_and_maybe_reset(carry)
-                td["next"] = td["next"].exclude(*rollout_policy.in_keys)
+        # torch.compiler.cudagraph_mark_step_begin() # for compiled policy
+        # with torch.autocast("cuda"):
+        for _ in range(cfg.algo.train_every):
+            carry = rollout_policy(carry)
+            td, carry = env.step_and_maybe_reset(carry)
+            # td["next"] = td["next"].exclude(*rollout_policy.in_keys)
 
-                private_keys = [key for key in td.keys(True, True) if isinstance(key, str) and key.startswith('_')]
-                td = td.exclude(*private_keys)
-                
-                data.append(td.to(policy.device))
-            data = torch.stack(data, dim=1)
-            policy.critic(data)
-            values = data["state_value"]
-            data["next", "state_value"] = torch.where(
-                data["next", "done"],
-                values, # a walkaround to avoid storing the next states
-                torch.cat([values[:, 1:], policy.critic(carry.copy())["state_value"].unsqueeze(1)], dim=1)
-            )
-        return data
+            private_keys = [key for key in td.keys(True, True) if isinstance(key, str) and key.startswith('_')]
+            td = td.exclude(*private_keys)
+            
+            data.append(td.to(policy.device))
+        data = torch.stack(data, dim=1)
+        # if data.get("state_value") is None:
+        #     policy.critic(data)
+        # values = data["state_value"]
+        # data["next", "state_value"] = torch.where(
+        #     data["next", "done"],
+        #     values, # a walkaround to avoid storing the next states
+        #     torch.cat([values[:, 1:], policy.critic(carry.copy())["state_value"].unsqueeze(1)], dim=1)
+        # )
+        return data, carry
     
     env_frames = 0
     for i in progress:
-        rollout_start = time.perf_counter()
-        data = collect(carry)
-        rollout_time = time.perf_counter() - rollout_start
+        with ScopedTimer("rollout"):
+            rollout_start = time.perf_counter()
+            data, carry = collect(carry)
+            rollout_time = time.perf_counter() - rollout_start
 
         episode_stats.add(data)
         env_frames += data.numel()
@@ -149,9 +150,11 @@ def main(cfg: DictConfig):
                 key = "train/" + ("/".join(k) if isinstance(k, tuple) else k)
                 info[key] = torch.mean(v.float()).item()
         
-        training_start = time.perf_counter()
-        info.update(policy.train_op(data))
-        training_time = time.perf_counter() - training_start
+        with ScopedTimer("training"):
+            training_start = time.perf_counter()
+            info.update(policy.train_op(data))
+            training_time = time.perf_counter() - training_start
+        
         info.update(env.extra)
         info.update(env.stats_ema) # step-wise exponential moving average of stats
         
@@ -167,6 +170,7 @@ def main(cfg: DictConfig):
             ckpt_path = save(policy, f"checkpoint_{i}")
 
         if aa.is_main_process():
+            ScopedTimer.print_summary(clear=True)
             print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, (float, int))}))
             print(f"Latest checkpoint: {ckpt_path}")
             run.log(info)

@@ -90,6 +90,10 @@ class MJArticulationData:
     def root_quat_w(self):
         return self.body_quat_w[..., 0, :]
     
+    @property
+    def root_link_pose_w(self):
+        return torch.cat([self.body_pos_w[:, 0, :], self.body_quat_w[:, 0, :]], dim=-1)
+    
     # @property
     # def root_lin_vel_w(self):
     #     return self.body_vel_w[..., 0, :3]
@@ -177,10 +181,8 @@ class MJArticulation:
         # read/write mujoco data in isaac order
         self.body_adrs_read = self.body_adrs[self._body_mjc2isaac]
         self.body_adrs_write = self.body_adrs[self._body_isaac2mjc]
-        self.joint_qposadr_read = self.joint_qposadr[self._jnt_mjc2isaac]
-        self.joint_qveladr_read = self.joint_qveladr[self._jnt_mjc2isaac]
-        self.joint_qposadr_write = self.joint_qposadr[self._jnt_isaac2mjc]
-        self.joint_qveladr_write = self.joint_qveladr[self._jnt_isaac2mjc]
+        self.joint_qposadr = self.joint_qposadr[self._jnt_mjc2isaac]
+        self.joint_qveladr = self.joint_qveladr[self._jnt_mjc2isaac]
 
         joint_ids, joint_names, joint_pos = string_utils.resolve_matching_names_values(self.cfg.init_state["joint_pos"], self.joint_names_isaac)
         if len(joint_names) < len(self.joint_names_isaac):
@@ -193,12 +195,20 @@ class MJArticulation:
 
         joint_stiffness = torch.zeros(self.num_joints)
         joint_damping = torch.zeros(self.num_joints)
+        joint_armature = torch.zeros(self.num_joints)
         
         for actuator_name, actuator_cfg in self.cfg.actuators.items():
-            ids, _, values = string_utils.resolve_matching_names_values(actuator_cfg["stiffness"], self.joint_names_isaac)
+            stiffness_cfg = actuator_cfg.get("stiffness")
+            damping_cfg = actuator_cfg.get("damping")
+            armature_cfg = actuator_cfg.get("armature", {".*": 0.0})
+            ids, _, values = string_utils.resolve_matching_names_values(stiffness_cfg, self.joint_names_isaac)
             joint_stiffness[ids] = torch.as_tensor(values)
-            ids, _, values = string_utils.resolve_matching_names_values(actuator_cfg["damping"], self.joint_names_isaac)
+            ids, _, values = string_utils.resolve_matching_names_values(damping_cfg, self.joint_names_isaac)
             joint_damping[ids] = torch.as_tensor(values)
+            ids, _, values = string_utils.resolve_matching_names_values(armature_cfg, self.joint_names_isaac)
+            joint_armature[ids] = torch.as_tensor(values)
+        
+        self.mj_model.dof_armature[self.joint_qveladr] = joint_armature
 
         diag_inertia = torch.as_tensor(self.mj_model.body_inertia[self.body_adrs], dtype=torch.float32)
         self._data = MJArticulationData(
@@ -286,8 +296,8 @@ class MJArticulation:
         self.update(0.0)
 
     def update(self, dt: float):
-        jpos = self.mj_data.qpos[self.joint_qposadr_read]
-        jvel = self.mj_data.qvel[self.joint_qveladr_read]
+        jpos = self.mj_data.qpos[self.joint_qposadr]
+        jvel = self.mj_data.qvel[self.joint_qveladr]
         body_pos_w = self.mj_data.xpos[self.body_adrs_read]
         # body_ang_vel_w = self.mj_data.cvel[self.body_adrs_read, :3]
         # body_lin_vel_w = self.mj_data.cvel[self.body_adrs_read, 3:]
@@ -342,8 +352,8 @@ class MJArticulation:
             self._data.joint_vel_target[0, joint_ids] = target
     
     def write_data_to_sim(self):
-        pos_error = self._data.joint_pos_target - self.mj_data.qpos[None, self.joint_qposadr_read]
-        vel_error = self._data.joint_vel_target - self.mj_data.qvel[None, self.joint_qveladr_read]
+        pos_error = self._data.joint_pos_target - self.mj_data.qpos[None, self.joint_qposadr]
+        vel_error = self._data.joint_vel_target - self.mj_data.qvel[None, self.joint_qveladr]
         
         torque = (self._data.joint_stiffness * pos_error + self._data.joint_damping * vel_error)
         self._data.applied_torque = torque.float()
@@ -358,11 +368,11 @@ class MJArticulation:
         if joint_pos is not None:
             joint_pos_all = self._data.joint_pos[0].clone()
             joint_pos_all[joint_ids] = joint_pos[0]
-            self.mj_data.qpos[self.joint_qposadr_read] = joint_pos_all
+            self.mj_data.qpos[self.joint_qposadr] = joint_pos_all
         if joint_vel is not None:
             joint_vel_all = self._data.joint_vel[0].clone()
             joint_vel_all[joint_ids] = joint_vel[0]
-            self.mj_data.qvel[self.joint_qveladr_read] = joint_vel_all
+            self.mj_data.qvel[self.joint_qveladr] = joint_vel_all
 
 
 @dataclass

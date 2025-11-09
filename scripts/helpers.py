@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import hydra
 import numpy as np
 import time
@@ -11,7 +10,6 @@ import datetime
 from typing import Sequence
 from tensordict import TensorDictBase, TensorDict
 from tensordict.nn import TensorDictModuleBase as ModBase
-from torchrl.envs.transforms import VecNorm, VecNormV2
 
 from termcolor import colored
 from collections import OrderedDict
@@ -87,27 +85,7 @@ def make_env_policy(cfg: DictConfig):
             cfg.task.observation.pop(obs_group_key)
             print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
     
-    obs_keys = [
-        key for key, spec in base_env.observation_spec.items(True, True) 
-        if not (spec.dtype == bool or key.endswith("_"))
-    ]
     transform = Compose(InitTracker(), StepCounter())
-
-    assert cfg.vecnorm in ("train", "eval", None)
-    print(colored(f"[Info]: create VecNorm for keys: {obs_keys}", "green"))
-    vecnorm = VecNormV2(obs_keys, decay=0.999, reduce_batch_dims=True)
-
-    if "vecnorm" in state_dict.keys():
-        print(colored("[Info]: Load VecNorm from checkpoint.", "green"))
-        vecnorm.load_state_dict(state_dict["vecnorm"])
-    if cfg.vecnorm == "train":
-        print(colored("[Info]: Updating obervation normalizer.", "green"))
-        transform.append(vecnorm)
-    elif cfg.vecnorm == "eval":
-        print(colored("[Info]: Not updating obervation normalizer.", "green"))
-        transform.append(vecnorm.to_observation_norm())
-    elif cfg.vecnorm is not None:
-        raise ValueError
 
     env = TransformedEnv(base_env, transform)
     env.set_seed(cfg.seed)
@@ -134,7 +112,7 @@ def make_env_policy(cfg: DictConfig):
         transform.append(primer)
         env = TransformedEnv(env.base_env, transform)
 
-    return env, policy, vecnorm
+    return env, policy
 
 
 from torchrl.envs import TransformedEnv, ExplorationType, set_exploration_type

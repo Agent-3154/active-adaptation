@@ -27,6 +27,8 @@ torch.backends.cudnn.benchmark = False
 FILE_PATH = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(FILE_PATH, "..", "cfg")
 
+aa.import_algorithms()
+
 @hydra.main(config_path=CONFIG_PATH, config_name="train", version_base=None)
 def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
@@ -59,7 +61,7 @@ def main(cfg: DictConfig):
     run.save(os.path.join(run.dir, "config.yaml"), policy="now")
 
     from helpers import make_env_policy, EpisodeStats, evaluate
-    env, policy, vecnorm = make_env_policy(cfg)
+    env, policy = make_env_policy(cfg)
 
     frames_per_batch = env.num_envs * cfg.algo.train_every
     total_frames = cfg.get("total_frames", -1) // aa.get_world_size()
@@ -94,8 +96,6 @@ def main(cfg: DictConfig):
         state_dict["policy"] = policy.state_dict()
         state_dict["env"] = env.state_dict()
         state_dict["cfg"] = cfg
-        if "vecnorm" in locals():
-            state_dict["vecnorm"] = vecnorm.state_dict()
         torch.save(state_dict, ckpt_path)
         run.save(ckpt_path, policy="now", base_path=run.dir)
         logging.info(f"Saved checkpoint to {str(ckpt_path)}")
@@ -125,7 +125,7 @@ def main(cfg: DictConfig):
                 key = "train/" + ("/".join(k) if isinstance(k, tuple) else k)
                 info[key] = torch.mean(v.float()).item()
         
-        info.update(policy.train_op(data))
+        info.update(policy.train_op(data.copy()))
         info.update(env.extra)
         info.update(env.stats_ema)
         if hasattr(policy, "step_schedule"):

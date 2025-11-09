@@ -24,9 +24,6 @@ class SimpleEnv(_Env):
                 ViewerCfg(self.cfg.viewer.eye, self.cfg.viewer.lookat, origin_type="env")
             )
 
-        self.action_buf: torch.Tensor = self.action_manager.action_buf
-        self.last_action: torch.Tensor = self.action_manager.applied_action
-
     def setup_scene(self):
         if active_adaptation.get_backend() == "isaac":
             self.setup_scene_isaac()
@@ -118,6 +115,7 @@ class SimpleEnv(_Env):
             json.dump(asset_meta, f, indent=4)
     
     def setup_scene_mujoco(self):
+        import active_adaptation.assets_mjcf
         from active_adaptation.envs.mujoco import MJScene, MJSim
         from active_adaptation.registry import Registry
         from active_adaptation.envs.terrain import TERRAINS_MUJOCO

@@ -1,22 +1,21 @@
 import torch
 import hydra
-import numpy as np
-import einops
 import itertools
-import os
 import datetime
+from pathlib import Path
 from omegaconf import OmegaConf
 
 from isaaclab.app import AppLauncher
 
 from torchrl.envs.utils import set_exploration_type, ExplorationType
-from tensordict.nn import TensorDictSequential
 
 import active_adaptation
 from active_adaptation.utils.export import export_onnx
-from active_adaptation.utils.torchrl import ObsNorm
+
 
 active_adaptation.import_algorithms()
+FILE_PATH = Path(__file__).parent
+
 
 @hydra.main(config_path="../cfg", config_name="play", version_base=None)
 def main(cfg):
@@ -27,7 +26,7 @@ def main(cfg):
     simulation_app = app_launcher.app
 
     from helpers import EpisodeStats, make_env_policy
-    env, policy, vecnorm = make_env_policy(cfg)
+    env, policy = make_env_policy(cfg)
     
     if cfg.export_policy:
         import time
@@ -44,25 +43,15 @@ def main(cfg):
                 m(x)
             return (time.perf_counter() - start) / 1000
         
-        FILE_PATH = os.path.dirname(__file__)
-        
-        deploy_policy = copy.deepcopy(policy.get_rollout_policy("deploy"))
-        obs_norm = ObsNorm.from_vecnorm(vecnorm, deploy_policy.in_keys)
-        _policy = TensorDictSequential(obs_norm, deploy_policy).cpu()
-        
-        print(f"Inference time of policy: {test(_policy, fake_input)}")
+        deploy_policy = copy.deepcopy(policy.get_rollout_policy("deploy")).cpu()
+        print(f"Inference time of policy: {test(deploy_policy, fake_input)}")
 
         time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
-        os.makedirs(os.path.join(FILE_PATH, "exports", cfg.task.name), exist_ok=True)
-        path = os.path.join(FILE_PATH, "exports", cfg.task.name, f"policy-{time_str}.pt")
-        torch.save(_policy, path)
+        export_dir = FILE_PATH / "exports" / str(cfg.task.name)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        path = export_dir / f"policy-{time_str}.onnx"
 
-        meta = {}
-        # meta["action_scaling"] = dict(cfg.task.action.get("action_scaling"))
-        # meta["stiffness"] = dict(cfg.task.robot.stiffness)
-        # meta["damping"] = dict(cfg.task.robot.damping)
-        # meta["effort_limit"] = dict(cfg.task.robot.effort_limit)
-        export_onnx(_policy, fake_input, path.replace(".pt", ".onnx"), meta)
+        export_onnx(deploy_policy, fake_input, str(path))
 
     stats_keys = [
         k for k in env.reward_spec.keys(True, True) 
@@ -72,13 +61,13 @@ def main(cfg):
     policy = policy.get_rollout_policy("eval")
     
     env.base_env.eval()
-    td_ = env.reset()
+    carry = env.reset()
     assert not env.base_env.training
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
         torch.compiler.cudagraph_mark_step_begin()
         for i in itertools.count():
-            td_ = policy(td_)
-            td, td_ = env.step_and_maybe_reset(td_)
+            carry = policy(carry)
+            td, carry = env.step_and_maybe_reset(carry)
             # td_.update(td["next"])
             episode_stats.add(td)
 

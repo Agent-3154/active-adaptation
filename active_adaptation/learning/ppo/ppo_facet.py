@@ -24,7 +24,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributions as D
 import warnings
 import functools
 import einops
@@ -41,47 +40,42 @@ from tensordict.nn import (
     TensorDictSequential as Seq
 )
 from hydra.core.config_store import ConfigStore
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Union, Tuple
 from collections import OrderedDict
 
-from ..utils.valuenorm import ValueNorm1, ValueNormFake
-from ..modules.distributions import IndependentNormal
-from ..modules.rnn import GRU, set_recurrent_mode, recurrent_mode
+from active_adaptation.learning.modules import IndependentNormal, VecNorm
+from active_adaptation.learning.modules.rnn import set_recurrent_mode, recurrent_mode
 from .common import *
+from .ppo_base import PPOBase
 
 torch.set_float32_matmul_precision('high')
 
 @dataclass
 class PPOConfig:
-    _target_: str = "active_adaptation.learning.ppo.ppo_facet.PPODICPolicy"
+    _target_: str = "active_adaptation.learning.ppo.ppo_facet.PPOPolicy"
     name: str = "ppo_facet"
     train_every: int = 32
     ppo_epochs: int = 4
-    num_minibatches: int = 8
+    num_minibatches: int = 4
     lr: float = 5e-4
     clip_param: float = 0.2
-    entropy_coef_start: float = 0.006
-    entropy_coef_end: float = 0.000
-    compile: bool = False
+    entropy_coef: float = 0.002
 
-    reg_lambda: float = 0.0
-    layer_norm: Union[str, None] = "before"
-    value_norm: bool = False
+    compile: bool = False # slightly improve speed on some devices
 
-    grad_pen: bool = False
-
+    # symmetry augmentation produces better gait and enhance efficiency
     symaug: bool = True
     phase: str = "train"
-    short_history: int = 0
-    vecnorm: Union[str, None] = None
-    checkpoint_path: Union[str, None] = None
-    in_keys: Tuple[str, ...] = ("command", OBS_KEY, OBS_PRIV_KEY, "ext", "ext_")
+    in_keys: Tuple[str, ...] = (OBS_KEY, OBS_PRIV_KEY, "ext", "ext_")
 
 cs = ConfigStore.instance()
-cs.store("ppo_facet_train", node=PPOConfig(phase="train", vecnorm="train"), group="algo")
-cs.store("ppo_facet_adapt", node=PPOConfig(phase="adapt", vecnorm="eval"), group="algo")
-cs.store("ppo_facet_finetune", node=PPOConfig(phase="finetune", vecnorm="eval"), group="algo")
+cs.store("ppo_facet_train", node=PPOConfig(phase="train"), group="algo")
+# there is no symmetry transform for RNN states (adapt_hx)
+# so we don't use symmetry augmentation in adapt and finetune phases
+cs.store("ppo_facet_adapt", node=PPOConfig(phase="adapt", symaug=False), group="algo")
+cs.store("ppo_facet_finetune", node=PPOConfig(phase="finetune", symaug=False), group="algo")
+
 
 class GRU(nn.Module):
     def __init__(
@@ -135,93 +129,13 @@ class GRUModule(nn.Module):
         return out + (hx.contiguous(),)
 
 
-class PolicyUpdateInferenceMod:
-    def __init__(
-        self, 
-        actor: ProbabilisticActor, 
-        encoder: Mod=None,
-    ) -> None:
-        self.actor = actor
-        self.encoder = encoder
-    
-    def __call__(self, tensordict: TensorDictBase, grad_pen: bool=False):
-        # TODO@botian: write to tensordict?
-        if self.encoder is not None:
-            self.encoder(tensordict)
-        for k in self.actor.in_keys:
-            tensordict[k].requires_grad_(True)
-        if grad_pen:
-            dist = self.actor.get_dist(tensordict)
-            log_probs = dist.log_prob(tensordict[ACTION_KEY])
-            entropy = dist.entropy().mean()
-            grad = torch.autograd.grad(
-                outputs=log_probs,
-                inputs=[tensordict[k] for k in self.actor.in_keys],
-                grad_outputs=torch.ones_like(log_probs),
-                retain_graph=True,
-                create_graph=True,
-            )
-            grad = torch.cat(grad, dim=-1)
-        else:
-            dist = self.actor.get_dist(tensordict)
-            log_probs = dist.log_prob(tensordict[ACTION_KEY])
-            entropy = dist.entropy().mean()
-            with torch.no_grad():
-                grad = torch.autograd.grad(
-                    outputs=log_probs,
-                    inputs=[tensordict[k] for k in self.actor.in_keys],
-                    grad_outputs=torch.ones_like(log_probs),
-                    retain_graph=True,
-                )
-                grad = torch.cat(grad, dim=-1)
-        return log_probs, entropy, grad
+class PPOPolicy(PPOBase):
 
-
-class ContinuityLoss:
-    def __init__(self, module: ModBase,in_keys, out_key):
-        self.module = module
-        self.in_keys = in_keys
-        self.out_key = out_key
-    
-    def __call__(self, tensordict: TensorDictBase):
-        for in_key in self.in_keys:
-            tensordict[in_key].requires_grad_(True)
-        out = self.module(tensordict)[self.out_key]
-        gradient = torch.autograd.grad(
-            outputs=out,
-            inputs=[tensordict[in_key] for in_key in self.in_keys],
-            grad_outputs=torch.ones_like(out),
-            retain_graph=True,
-            create_graph=True,
-        )
-        gradient = torch.cat(gradient, dim=-1)
-        gradient_penalty = gradient.square().sum(-1).mean()
-        return gradient_penalty
-
-
-class PPODICPolicy(TensorDictModuleBase):
-    """
-    
-    version: 0.1.0, 2024.9.22 @botian
-    * cleanup imitation stuff
-    * add finetune phase
-    * report ext_rec_error instead of ext_rec_loss
-    * fix explicit force est
-
-    version: 0.1.1, 2024.10.29 @botian
-    * fix loss func reduction following torch update
-    * default reg_lambda = 0.0
-    * increase rec_lambda to 0.1
-
-    version: 0.1.2, 2024.11.4 @botian
-    * reorganized structure
-    * fix bug in checkpoint loading
-    * tried ActorCov
-
-    """
-
-    train_in_keys = [CMD_KEY, OBS_KEY, OBS_PRIV_KEY, ACTION_KEY, "ext",
-                     "adv", "ret", "is_init", "sample_log_prob", "step_count"]
+    train_in_keys = [
+        "_obs_normed", "_priv_normed", "_ext_normed",
+        ACTION_KEY, "action_log_prob",
+        "adv", "ret", "is_init", "step_count"
+    ]
     
     def __init__(
         self, 
@@ -233,104 +147,91 @@ class PPODICPolicy(TensorDictModuleBase):
         env
     ):
         super().__init__()
-        self.cfg = cfg
+        self.cfg = PPOConfig(**cfg)
         self.device = device
         self.observation_spec = observation_spec
         assert self.cfg.phase in ["train", "adapt", "finetune"]
 
-        self.entropy_coef = self.cfg.get("entropy_coef_start", 0.001)
         self.max_grad_norm = 1.0
         self.clip_param = self.cfg.clip_param
         self.critic_loss_fn = nn.MSELoss(reduction="none")
         self.adapt_loss_fn = nn.MSELoss(reduction="none")
-        self.rec_loss = nn.MSELoss(reduction="none")
-        self.action_dim = action_spec.shape[-1]
         self.gae = GAE(0.99, 0.95)
-        self.reg_lambda = 0.0
         
-        self.value_norm = ValueNormFake(input_shape=1).to(self.device)
-
         fake_input = observation_spec.zero()
-        
-        self.encoder_priv = Seq(
-            Mod(nn.Sequential(make_mlp([128]), nn.LazyLinear(128)), [OBS_PRIV_KEY], ["_priv_feature"]),
-            Mod(nn.Sequential(make_mlp([32]), nn.LazyLinear(32)), ["ext"], ["ext_feature"]),
-        ).to(self.device)
 
-        if observation_spec.get("command_", None) is not None:
-            global CMD_KEY
-            CMD_KEY = "command_"
+        obs_dim = fake_input[OBS_KEY].shape[-1]
+        priv_dim = fake_input[OBS_PRIV_KEY].shape[-1]
+        ext_dim = fake_input["ext"].shape[-1]
+        self.action_dim = env.action_manager.action_dim
         
-        self.symaug = self.cfg.symaug
-        if self.symaug:
-            self.cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transforms().to(self.device)
+        if self.cfg.symaug:
             self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transforms().to(self.device)
             self.priv_transform = env.observation_funcs[OBS_PRIV_KEY].symmetry_transforms().to(self.device)
             self.ext_transform = env.observation_funcs["ext"].symmetry_transforms().to(self.device)
             self.act_transform = env.action_manager.symmetry_transforms().to(self.device)
+        
+        self.vecnorm = Seq(
+            Mod(VecNorm(obs_dim, obs_dim, decay=1.0), [OBS_KEY], ["_obs_normed"]),
+            Mod(VecNorm(priv_dim, priv_dim, decay=1.0), [OBS_PRIV_KEY], ["_priv_normed"]),
+            Mod(VecNorm(ext_dim, ext_dim, decay=1.0), ["ext"], ["_ext_normed"]),
+        ).to(self.device)
+
+        self.encoder_priv = Seq(
+            Mod(nn.Sequential(make_mlp([128]), nn.LazyLinear(128)), ["_priv_normed"], ["_priv_feature"]),
+            Mod(nn.Sequential(make_mlp([32]), nn.LazyLinear(32)), ["_ext_normed"], ["ext_feature"]),
+        ).to(self.device)
 
         ext_dim = observation_spec["ext"].shape[-1]
         self.adapt_module =  Mod(
             GRUModule(128 + 32 + ext_dim, split=[128, 32, ext_dim]), 
-            [OBS_KEY, "is_init", "adapt_hx"], 
+            ["_obs_normed", "is_init", "adapt_hx"], 
             ["_priv_pred", "ext_pred", ("info", "ext_rec"), ("next", "adapt_hx")]
         ).to(self.device)
         
-        in_keys = [CMD_KEY, OBS_KEY, "_priv_feature", "ext_feature"]
-        self.actor: ProbabilisticActor = ProbabilisticActor(
-            module=Seq(
-                CatTensors(in_keys, "_actor_inp", del_keys=False, sort=False),
-                Mod(make_mlp([512, 256, 256]), ["_actor_inp"], ["_actor_feature"]),
-                Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"]),
-                Mod(nn.LazyLinear(1), ["_actor_feature"], ["flag"])
-            ),
-            in_keys=["loc", "scale"],
-            out_keys=[ACTION_KEY],
-            distribution_class=IndependentNormal,
-            return_log_prob=True
-        ).to(self.device)
-
-        in_keys = [CMD_KEY, OBS_KEY, "_priv_pred", "ext_pred"]
-        self.actor_adapt: ProbabilisticActor = ProbabilisticActor(
-            module=Seq(
-                CatTensors(in_keys, "_actor_inp", del_keys=False, sort=False),
-                Mod(make_mlp([512, 256, 256]), ["_actor_inp"], ["_actor_feature"]),
-                Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"]),
-                Mod(nn.LazyLinear(1), ["_actor_feature"], ["flag"])
-            ),
-            in_keys=["loc", "scale"],
-            out_keys=[ACTION_KEY],
-            distribution_class=IndependentNormal,
-            return_log_prob=True
-        ).to(self.device)
+        def make_actor(in_keys) -> ProbabilisticActor:
+            return ProbabilisticActor(
+                module=Seq(
+                    CatTensors(in_keys, "_actor_inp", del_keys=False, sort=False),
+                    Mod(make_mlp([256, 256, 256]), ["_actor_inp"], ["_actor_feature"]),
+                    Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"]),
+                ),
+                in_keys=["loc", "scale"],
+                out_keys=[ACTION_KEY],
+                distribution_class=IndependentNormal,
+                return_log_prob=True
+            ).to(self.device)
         
-        _critic = nn.Sequential(make_mlp([512, 256, 128]), nn.LazyLinear(1))
+        teacher_in_keys = ["_obs_normed", "_priv_feature", "ext_feature"]
+        self.actor_teacher = make_actor(teacher_in_keys)
+        
+        student_in_keys = ["_obs_normed", "_priv_pred", "ext_pred"]
+        self.actor_student = make_actor(student_in_keys)
+        
+        critic_in_keys = ["_obs_normed", "_priv_normed", "_ext_normed"]
+        critic_mlp = nn.Sequential(make_mlp([512, 256, 128]), nn.LazyLinear(1))
         self.critic = Seq(
-            CatTensors([CMD_KEY, OBS_KEY, OBS_PRIV_KEY, "ext"], "_critic_input", del_keys=False),
-            Mod(_critic, ["_critic_input"], ["state_value"])
+            CatTensors(critic_in_keys, "_critic_input", del_keys=False),
+            Mod(critic_mlp, ["_critic_input"], ["state_value"])
         ).to(self.device)
 
         with torch.device(self.device):
             fake_input["is_init"] = torch.ones(fake_input.shape[0], 1, dtype=torch.bool)
             fake_input["adapt_hx"] = torch.zeros(fake_input.shape[0], 128)
-            fake_input["prev_action"] = torch.zeros(fake_input.shape[0], self.action_dim)
-            fake_input["prev_loc"] = torch.zeros(fake_input.shape[0], self.action_dim)
 
+        self.vecnorm(fake_input)
         self.encoder_priv(fake_input)
-        self.actor(fake_input)
-        self.critic(fake_input)
+        self.actor_teacher(fake_input)
         self.adapt_module(fake_input)
-        self.actor_adapt(fake_input)
+        self.actor_student(fake_input)
+        self.critic(fake_input)
 
-        self.policy_train_inference = PolicyUpdateInferenceMod(self.actor, self.encoder_priv)
-        self.policy_adapt_inference = PolicyUpdateInferenceMod(self.actor_adapt, None)
-        
         self.adapt_ema = copy.deepcopy(self.adapt_module)
         self.adapt_ema.requires_grad_(False)
 
-        self.opt = torch.optim.Adam(
+        self.opt_teacher = torch.optim.Adam(
             [
-                {"params": self.actor.parameters()},
+                {"params": self.actor_teacher.parameters()},
                 {"params": self.critic.parameters()},
                 {"params": self.encoder_priv.parameters()},
             ],
@@ -346,7 +247,7 @@ class PPODICPolicy(TensorDictModuleBase):
 
         self.opt_finetune = torch.optim.Adam(
             [
-                {"params": self.actor_adapt.parameters()},
+                {"params": self.actor_student.parameters()},
                 {"params": self.critic.parameters()},
             ],
             lr=cfg.lr
@@ -357,47 +258,51 @@ class PPODICPolicy(TensorDictModuleBase):
                 nn.init.orthogonal_(module.weight, 0.01)
                 nn.init.constant_(module.bias, 0.)
         
-        self.actor.apply(init_)
+        self.actor_teacher.apply(init_)
+        # self.actor_student.apply(init_) # no need to initialize the student actor
         self.critic.apply(init_)
         self.encoder_priv.apply(init_)
         self.adapt_module.apply(init_)
 
         self.update = self._update
-        # if self.cfg.compile:
-        #     self.update = torch.compile(self.update)
-        
+        if self.cfg.compile:
+            self.update = torch.compile(self.update)
         self.num_updates = 0
     
     def make_tensordict_primer(self):
+        # initialize the input for recurrent policies
         num_envs = self.observation_spec.shape[0]
         spec = Unbounded((num_envs, 128), device=self.device)
-        return TensorDictPrimer({"adapt_hx": spec}, reset_key="done")
+        return TensorDictPrimer({"adapt_hx": spec}, reset_key="done", expand_specs=False)
 
     def get_rollout_policy(self, mode: str="train"):
-        modules = []
+        modules = [self.vecnorm]
         
         if self.cfg.phase == "train":
             modules.append(self.encoder_priv)
-            modules.append(self.actor)
+            modules.append(self.actor_teacher)
+            # modules.append(self.adapt_module) # not used in train phase
+        elif self.cfg.phase == "adapt": # this phase can be skipped
             modules.append(self.adapt_module)
-        elif self.cfg.phase == "adapt":
-            modules.append(self.adapt_module)
-            modules.append(self.actor_adapt)
+            modules.append(self.actor_student)
         elif self.cfg.phase == "finetune":
+            # modules.append(self.adapt_module) # we use its EMA for better stability
             modules.append(self.adapt_ema)
-            modules.append(self.actor_adapt)
+            modules.append(self.actor_student)
         
         policy = Seq(*modules)
         return policy
-    
-    def step_schedule(self, progress: float):
-        self.reg_lambda = progress * self.cfg.reg_lambda
-        self.entropy_coef = self.cfg.entropy_coef_start + (self.cfg.entropy_coef_end - self.cfg.entropy_coef_start) * progress
-        self.rec_rew = min(progress * 2, 1.)
 
+    @VecNorm.freeze()
     def train_op(self, tensordict: TensorDict):
+        assert VecNorm.FROZEN, "VecNorm must be frozen before training"
         info = {}
         tensordict = tensordict.exclude(("next", "stats"))
+        
+        # apply vecnorm once
+        self.vecnorm(tensordict)
+        self.vecnorm(tensordict["next"])
+
         if self.cfg.phase == "train":
             info.update(self.train_policy(tensordict.copy()))
             if self.num_updates % 2 == 0:
@@ -412,24 +317,23 @@ class PPODICPolicy(TensorDictModuleBase):
     
     def train_policy(self, tensordict: TensorDict):    
         infos = []
-        self._compute_advantage(tensordict, self.critic, "adv", "ret", update_value_norm=True)
-        tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
-        reward_sum = tensordict[REWARD_KEY].sum(-1)
-        tensordict = tensordict.select(*self.train_in_keys)
+        
+        tensordict = self.compute_advantage(tensordict, self.critic, "adv", "ret")
 
-        policy_inference = self.policy_train_inference if self.cfg.phase == "train" else self.policy_adapt_inference
-        opt = self.opt if self.cfg.phase == "train" else self.opt_finetune
+        reward = tensordict[REWARD_KEY].sum(-1)
+        tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
+        tensordict = tensordict.select(*self.train_in_keys)
             
         for epoch in range(self.cfg.ppo_epochs):
             batch = make_batch(tensordict, self.cfg.num_minibatches)
             for minibatch in batch:
-                info = self._update(minibatch, policy_inference, opt)
+                info = self._update(minibatch)
                 infos.append(info)
 
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
         infos["critic/value_mean"] = tensordict["ret"].mean().item()
         infos["critic/value_std"] = tensordict["ret"].std().item()
-        infos["critic/neg_rew_ratio"] = (reward_sum <= 0.).float().mean().item()
+        infos["critic/neg_rew_ratio"] = (reward <= 0.).float().mean().item()
         return dict(sorted(infos.items()))
     
     @set_recurrent_mode(True)
@@ -459,89 +363,58 @@ class PPODICPolicy(TensorDictModuleBase):
         infos = {k: v.mean().item() for k, v in sorted(torch.stack(infos).items())}
         return infos
 
-    @torch.no_grad()
-    def _compute_advantage(
-        self, 
-        tensordict: TensorDict,
-        critic: Mod, 
-        adv_key: str="adv",
-        ret_key: str="ret",
-        update_value_norm: bool=True,
-    ):
-        keys = tensordict.keys(True, True)
-        if not ("state_value" in keys and ("next", "state_value") in keys):
-            with tensordict.view(-1) as tensordict_flat:
-                critic(tensordict_flat)
-                critic(tensordict_flat["next"])
-
-        values = tensordict["state_value"]
-        next_values = tensordict["next", "state_value"]
-
-        rewards = tensordict[REWARD_KEY].sum(-1, keepdim=True).clamp_min(0.)
-        discount = tensordict["next", "discount"]
-        terms = tensordict[TERM_KEY]
-        dones = tensordict[DONE_KEY]
-        values = self.value_norm.denormalize(values)
-        next_values = self.value_norm.denormalize(next_values)
-
-        adv, ret = self.gae(rewards, terms, dones, values, next_values, discount)
-        if update_value_norm:
-            self.value_norm.update(ret)
-        ret = self.value_norm.normalize(ret)
-
-        tensordict.set(adv_key, adv)
-        tensordict.set(ret_key, ret)
-        return tensordict
-
     # @torch.compile
-    def _update(self, tensordict: TensorDict, policy_inference: PolicyUpdateInferenceMod, opt: torch.optim.Optimizer):
+    def _update(self, tensordict: TensorDict):
         bsize = tensordict.shape[0]
         symmetry = tensordict.empty()
-        symmetry[CMD_KEY] = self.cmd_transform(tensordict[CMD_KEY])
-        symmetry[OBS_KEY] = self.obs_transform(tensordict[OBS_KEY])
-        symmetry[OBS_PRIV_KEY] = self.priv_transform(tensordict[OBS_PRIV_KEY])
-        symmetry["ext"] = self.ext_transform(tensordict["ext"])
+        symmetry["_obs_normed"] = self.obs_transform(tensordict["_obs_normed"])
+        symmetry["_priv_normed"] = self.priv_transform(tensordict["_priv_normed"])
+        symmetry["_ext_normed"] = self.ext_transform(tensordict["_ext_normed"])
         symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
-        symmetry["sample_log_prob"] = tensordict["sample_log_prob"]
+        symmetry["action_log_prob"] = tensordict["action_log_prob"]
         symmetry["is_init"] = tensordict["is_init"]
         symmetry["step_count"] = tensordict["step_count"]
         symmetry["ret"] = tensordict["ret"]
         symmetry["adv"] = tensordict["adv"]
-        if self.symaug:
+        if self.cfg.symaug:
             tensordict = torch.cat([tensordict, symmetry], dim=0)
+        
+        valid = (tensordict["step_count"] > 1)
+        valid_cnt = valid.sum()
 
-        log_probs, entropy, grad = policy_inference(tensordict, grad_pen=self.cfg.grad_pen)
-
+        action = tensordict[ACTION_KEY]
         if self.cfg.phase == "train":
-            valid = (tensordict["step_count"] > 1)
-        else:
-            valid = (tensordict["step_count"] > 5)
+            actor = self.actor_teacher
+            opt = self.opt_teacher
+            self.encoder_priv(tensordict)
+            self.actor_teacher(tensordict)
+        elif self.cfg.phase == "finetune":
+            actor = self.actor_student
+            opt = self.opt_finetune
+            self.actor_student(tensordict)
+
+        dist = IndependentNormal(tensordict["loc"], tensordict["scale"])
+        log_probs = dist.log_prob(action)
+        entropy = (dist.entropy().reshape_as(valid) * valid).sum() / valid_cnt
+
         adv = tensordict["adv"]
-        log_ratio = (log_probs - tensordict["sample_log_prob"]).unsqueeze(-1)
+        log_ratio = (log_probs - tensordict["action_log_prob"]).unsqueeze(-1)
         ratio = torch.exp(log_ratio)
         surr1 = adv * ratio
         surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
-        policy_loss = - torch.mean(torch.min(surr1, surr2) * valid)
-        entropy_loss = - self.entropy_coef * entropy
-
-        gradient_penalty = grad.square().sum(-1).mean()
+        policy_loss = - (torch.min(surr1, surr2).reshape_as(valid) * valid).sum() / valid_cnt
+        entropy_loss = - self.cfg.entropy_coef * entropy
 
         b_returns = tensordict["ret"]
         values = self.critic(tensordict)["state_value"]
         value_loss = self.critic_loss_fn(b_returns, values)
-        value_loss = (value_loss * (~tensordict["is_init"])).mean()
-
-        if self.cfg.phase == "train" and self.reg_lambda > 0:
-            reg_loss = self.adapt_loss_fn(tensordict["_priv_feature"], tensordict["_priv_pred"])
-            reg_loss = self.reg_lambda * (reg_loss * (~tensordict["is_init"])).mean()
-        else:
-            reg_loss = torch.tensor(0., device=self.device)
+        value_loss = (value_loss.reshape_as(valid) * valid).sum() / valid_cnt
         
-        loss = policy_loss + entropy_loss + value_loss + reg_loss + 0.002 * gradient_penalty
+        loss = policy_loss + entropy_loss + value_loss
         
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        actor_grad_norm = nn.utils.clip_grad_norm_(policy_inference.actor.parameters(), self.max_grad_norm)
+        actor_grad_norm = nn.utils.clip_grad_norm_(actor.parameters(), self.max_grad_norm)
         critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         opt.step()
         
@@ -557,10 +430,8 @@ class PPODICPolicy(TensorDictModuleBase):
             "actor/entropy": entropy.detach(),
             "actor/grad_norm": actor_grad_norm,
             'actor/approx_kl': ((ratio - 1) - log_ratio).mean(),
-            "actor/gradient_penalty": gradient_penalty.detach(),
             "actor/clamp_ratio": clipfrac.detach(),
             "actor/symmetry_loss": symmetry_loss.detach(),
-            "adapt/reg_loss": reg_loss,
             "critic/value_loss": value_loss,
             "critic/grad_norm": critic_grad_norm,
             "critic/explained_var": explained_var,
@@ -568,24 +439,12 @@ class PPODICPolicy(TensorDictModuleBase):
         return info
     
     def state_dict(self):
-        state_dict = OrderedDict()
-        for name, module in self.named_children():
-            state_dict[name] = module.state_dict()
+        state_dict = super().state_dict()
         state_dict["last_phase"] = self.cfg.phase
         return state_dict
     
     def load_state_dict(self, state_dict, strict=True):
-        succeed_keys = []
-        failed_keys = []
-        for name, module in self.named_children():
-            _state_dict = state_dict.get(name, {})
-            try:
-                module.load_state_dict(_state_dict, strict=strict)
-                succeed_keys.append(name)
-            except Exception as e:
-                warnings.warn(f"Failed to load state dict for {name}: {str(e)}")
-                failed_keys.append(name)
-        print(f"Successfully loaded {succeed_keys}.")
+        failed_keys = super().load_state_dict(state_dict, strict)
         if state_dict.get("last_phase", "train") == "train":
             # only copy to initialize the actor once
             hard_copy_(self.actor, self.actor_adapt)

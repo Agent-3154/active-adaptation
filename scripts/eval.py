@@ -4,6 +4,8 @@ import numpy as np
 import einops
 import time
 import sys
+import av
+
 from omegaconf import OmegaConf
 
 from isaaclab.app import AppLauncher
@@ -12,19 +14,19 @@ import os
 import datetime
 import termcolor
 
-import active_adaptation.learning
-
+import active_adaptation
+active_adaptation.import_algorithms()
 
 @hydra.main(config_path="../cfg", config_name="eval", version_base=None)
 def main(cfg):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
     
-    app_launcher = AppLauncher(OmegaConf.to_container(cfg.app))
+    app_launcher = AppLauncher(cfg.app)
     simulation_app = app_launcher.app
 
     from scripts.helpers import make_env_policy, evaluate
-    env, agent, vecnorm = make_env_policy(cfg)
+    env, agent = make_env_policy(cfg)
     
     keys = [
         ("next", "stats"),

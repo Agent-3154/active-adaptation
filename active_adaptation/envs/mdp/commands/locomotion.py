@@ -22,125 +22,7 @@ if TYPE_CHECKING:
     from isaaclab.assets import Articulation
 
 
-class Command1(Command):
-    """
-    Generate commands of liner velocity in body frame, angular velocity, and base height.
-    """
-
-    command_dim: int = 4
-
-    def __init__(
-        self,
-        env,
-        speed_range=(0.5, 2.0),
-        angvel_range=(-1.0, 1.0),
-        base_height_range=(0.2, 0.4),
-        resample_interval: int = 300,
-        resample_prob: float = 0.75,
-        stand_prob=0.2,
-    ):
-        super().__init__(env)
-        self.robot: Articulation = env.scene["robot"]
-        self.height_scanner = env.scene.sensors.get("height_scanner", None)
-        self.speed_range = speed_range
-        self.base_height_range = base_height_range
-        self.angvel_range = angvel_range
-
-        self.resample_interval = resample_interval
-        self.resample_prob = resample_prob
-        self.stand_prob = stand_prob
-
-        with torch.device(env.device):
-            self.target_pos_w = torch.zeros(self.num_envs, 3)
-            self.target_yaw = torch.zeros(self.num_envs, 1)
-            self.ref_yaw = torch.zeros(self.num_envs, 1)
-            self.yaw_stiffness = torch.zeros(self.num_envs, 1)
-
-            self.command = torch.zeros(self.num_envs, self.command_dim)
-            self.command_linvel_w = torch.zeros(self.num_envs, 3)
-            self.command_linvel_b = torch.zeros(self.num_envs, 3)
-            self.command_linvel = self.command_linvel_b
-            self.command_angvel = torch.zeros(self.num_envs, 1)
-            self.max_speed = torch.zeros(self.num_envs, 1)
-            self.command_speed = torch.zeros(self.num_envs, 1)
-
-            self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=bool)
-
-            self._cum_error = torch.zeros(self.num_envs, 2)
-            self._cum_linvel_error = self._cum_error[:, 0].unsqueeze(1)
-            self._cum_angvel_error = self._cum_error[:, 1].unsqueeze(1)
-
-    def reset(self, env_ids: torch.Tensor):
-        self.target_pos_w[env_ids] = self.asset.data.root_pos_w[env_ids]
-        self.target_yaw[env_ids] = self.asset.data.heading_w[env_ids].unsqueeze(1)
-        self.max_speed[env_ids] = 0.6 + torch.rand(len(env_ids), 1, device=self.device) * 0.8
-
-    def update(self):
-        yaw = self.asset.data.heading_w.unsqueeze(1)
-        pos = self.asset.data.root_pos_w
-        yaw_diff = self.target_yaw - yaw
-        self.command_angvel[:] = self.yaw_stiffness * wrap_to_pi(yaw_diff)
-        self.command_angvel.clamp_(-2., 2.)
-
-        max_speed = (self.max_speed - self.command_angvel.abs()).clamp(0.)
-        self.command_linvel_w[:] = quat_rotate(self.asset.data.root_quat_w, self.command_linvel_b)
-        self.command[:, :2] = self.command_linvel_b[:, :2]
-        self.command[:, 2:3] = wrap_to_pi(self.target_yaw - yaw)
-        self.command[:, 3:4] = self.command_angvel
-        self.command_speed = self.command_linvel_w.norm(dim=-1, keepdim=True)
-        
-        resample = ((self.env.episode_length_buf - 40) % self.resample_interval == 0)
-        if resample.any():
-            self._resample(resample.nonzero().squeeze(-1))
-        self.ref_yaw.add_(self.command_angvel * self.env.step_dt)
-    
-    # def _from_world(self, max_speed):
-    #     pos_diff = self.target_pos_w - self.asset.data.root_pos_w
-    #     pos_diff[:, 2] = 0.0
-    #     command_linvel_w = torch.zeros(self.num_envs, 3, device=self.device)
-    #     command_linvel_w[:, :2] = clamp_norm(pos_diff[:, :2], max=max_speed)
-    #     command_linvel_b = quat_rotate_inverse(self.asset.data.root_quat_w, self.command_linvel_w)
-    #     return command_linvel_w, command_linvel_b
-    
-    # def _from_body(self, max_speed):
-    #     command_linvel_w = quat_rotate(self.asset.data.root_quat_w, self.command_linvel_b)
-    #     return command_linvel_w, self.command_linvel_b
-
-    def _resample(self, env_ids):
-        self.target_pos_w[env_ids] = self.target_pos_w[env_ids] + torch.tensor([8., 0., 0.], device=self.device)
-        yaw = self.asset.data.heading_w[env_ids].unsqueeze(1)
-        command_linvel_b = torch.rand(len(env_ids), 3, device=self.device)
-        command_linvel_b[:, 0].uniform_(0.4, 1.2)
-        command_linvel_b[:, 1].uniform_(-0.2, 0.2).mul_(command_linvel_b[:, 0])
-        command_linvel_b = torch.where(yaw.abs() < 0.2, command_linvel_b, command_linvel_b * 0.5)
-        self.command_linvel_b[env_ids] = command_linvel_b
-
-        self.target_yaw[env_ids] = torch.rand(len(env_ids), 1, device=self.device) * torch.pi / 3 - torch.pi / 6
-        self.ref_yaw[env_ids] = self.asset.data.heading_w[env_ids].unsqueeze(1)
-        self.yaw_stiffness[env_ids] = 1. + torch.rand(len(env_ids), 1, device=self.device)
-    
-    def debug_draw(self):
-        ref_vec = torch.cat([self.ref_yaw.cos(), self.ref_yaw.sin(), torch.zeros_like(self.ref_yaw)], 1)
-        yaw = self.asset.data.heading_w.unsqueeze(1)
-        vec = torch.cat([yaw.cos(), yaw.sin(), torch.zeros_like(yaw)], 1).squeeze([])
-        self.env.debug_draw.vector(
-            self.asset.data.root_pos_w + torch.tensor([0.0, 0.0, 0.2], device=self.device),
-            # self.target_pos_w - self.asset.data.root_pos_w,
-            # self.command_linvel_w,
-            # ref_vec,
-            vec,
-            color=(0.5, 1.0, 0.5, 1.0),
-        )
-        self.env.debug_draw.vector(
-            self.asset.data.root_pos_w + torch.tensor([0.0, 0.0, 0.2], device=self.device),
-            # self.target_pos_w - self.asset.data.root_pos_w,
-            self.command_linvel_w,
-            # ref_vec,
-            color=(1.0, 0.5, 0.5, 1.0),
-        )
-
-
-class Command2(Command):
+class Twist(Command):
 
     def __init__(
         self,
@@ -247,12 +129,11 @@ class Command2(Command):
         self.is_standing_env[env_ids] = True
     
     def sample_init(self, env_ids):
-        if self.curriculum and self.env.episode_count > 1 and self.env.training:
-            time_remaining = (self.env.max_episode_length - self.env.episode_length_buf[env_ids, None]) * self.env.step_dt
-            distance_commanded = (self.distance_commanded[env_ids] + self.command_speed[env_ids] * time_remaining)
-            distance_commanded = distance_commanded.clamp_min(0.5)
-            move_up = self.distance_traveled[env_ids] > distance_commanded * 0.8
-            move_down = self.distance_traveled[env_ids] < distance_commanded * 0.4
+        if self.curriculum and self.env.episode_count > 1: # and self.env.training:
+            distance_traveled = self.distance_traveled[env_ids]
+            distance_commanded = self.distance_commanded[env_ids].clamp_min(1.0)
+            move_up = distance_traveled > distance_commanded * 0.8
+            move_down = distance_traveled < distance_commanded * 0.4
             move_up = move_up & ~move_down
             self.terrain.update_env_origins(env_ids, move_up.squeeze(-1), move_down.squeeze(-1))
             self._origins = self.terrain.env_origins.clone()

@@ -47,7 +47,7 @@ from collections import OrderedDict
 
 from ..utils.valuenorm import ValueNorm1, ValueNormFake
 from ..modules.distributions import IndependentNormal
-from ..modules.rnn import GRU, set_recurrent_mode, recurrent_mode
+from ..modules.rnn import set_recurrent_mode, recurrent_mode
 from .common import *
 
 torch.set_float32_matmul_precision('high')

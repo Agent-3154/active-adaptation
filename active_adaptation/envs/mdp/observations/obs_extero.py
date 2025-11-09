@@ -28,8 +28,7 @@ class height_scan(Observation):
         env,
         x_range: Tuple[float, float],
         y_range: Tuple[float, float],
-        x_resolution: float,
-        y_resolution: float,
+        resolution: Tuple[float, float],
         include_xy: bool=False,
         flatten: bool=False,
         noise_scale = 0.005
@@ -40,8 +39,8 @@ class height_scan(Observation):
         self.noise_scale = noise_scale
         self.include_xy = include_xy
         
-        x = torch.linspace(x_range[0], x_range[1], int((x_range[1] - x_range[0]) / x_resolution)+1)
-        y = torch.linspace(y_range[0], y_range[1], int((y_range[1] - y_range[0]) / y_resolution)+1)
+        x = torch.linspace(x_range[0], x_range[1], int((x_range[1] - x_range[0]) / resolution[0])+1)
+        y = torch.linspace(y_range[0], y_range[1], int((y_range[1] - y_range[0]) / resolution[1])+1)
         xx, yy = torch.meshgrid(x, y, indexing="ij")
         self.pos = torch.stack([xx, yy, torch.zeros_like(xx)], dim=-1).to(self.device)
         self.shape = self.pos.shape[:2]
@@ -84,11 +83,14 @@ class height_scan(Observation):
             self.marker.visualize(pos.reshape(-1, 3))
 
     def symmetry_transforms(self):
-        assert not self.flatten
-        return SymmetryTransform(
-            perm=torch.arange(self.shape[1]).flip(0), # (D, X, Y), flip Y
-            signs=torch.ones(self.shape[1])
-        )
+        if self.flatten:
+            assert not self.include_xy
+            perm = torch.arange(self.shape.numel()).reshape(self.shape).flip((1,)).reshape(-1)
+            signs = torch.ones(self.shape.numel())
+        else:
+            perm = torch.arange(self.shape[1]).flip(0) # (N, C, X, Y), flip Y
+            signs = torch.ones(self.shape[1])
+        return SymmetryTransform(perm=perm, signs=signs)
 
 
 

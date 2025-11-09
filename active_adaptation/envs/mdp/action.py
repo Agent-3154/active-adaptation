@@ -12,6 +12,7 @@ from active_adaptation.utils.math import (
     quat_rotate_inverse,
     quat_rotate,
     yaw_quat,
+    clamp_norm
 )
 import active_adaptation.utils.symmetry as symmetry_utils
 
@@ -19,7 +20,6 @@ if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from active_adaptation.envs.base import _Env
 
-TENSORLIKE = Union[torch.Tensor, TensorDictBase]
 
 class ActionManager:
 
@@ -36,10 +36,10 @@ class ActionManager:
     def debug_draw(self):
         pass
     
-    def process_action(self, action: TENSORLIKE):
+    def process_action(self, action: torch.Tensor):
         pass
 
-    def apply_action(self, tensordict: TENSORLIKE, substep: int):
+    def apply_action(self, action: torch.Tensor, substep: int):
         pass
 
     @property
@@ -62,8 +62,8 @@ class ConcatenatedAction(ActionManager):
     def action_buf(self):
         return torch.cat([action_manager.action_buf for action_manager in self.action_managers], dim=1)
 
-    def apply_action(self, tensordict: TENSORLIKE, substep: int):
-        actions = torch.split(tensordict["action"], self.action_dims, dim=-1)
+    def apply_action(self, action: torch.Tensor, substep: int):
+        actions = torch.split(action, self.action_dims, dim=-1)
         for action_manager, action in zip(self.action_managers, actions):
             action_manager.apply_action(action, substep)
     
@@ -131,8 +131,7 @@ class JointPosition(ActionManager):
         alpha.uniform_(self.alpha_range[0], self.alpha_range[1])
         self.alpha[env_ids] = alpha
 
-    def process_action(self, action: TENSORLIKE):
-        action = action["action"]
+    def process_action(self, action: torch.Tensor):
         self.action_buf = self.action_buf.roll(1, dims=1)
         self.action_buf[:, 0] = action
         self.action_queue = torch.where(
@@ -141,7 +140,7 @@ class JointPosition(ActionManager):
             action.unsqueeze(1)
         )
 
-    def apply_action(self, action: TENSORLIKE, substep: int):
+    def apply_action(self, action: torch.Tensor, substep: int):
         # deplay model: each substep, the first action in queue is consumed
         self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
         self.action_queue = self.action_queue.roll(-1, dims=1)
@@ -198,6 +197,43 @@ class LegWheel(ActionManager):
         ])
     
 
-def clamp_norm(x: torch.Tensor, max_norm: float):
-    norm = x.norm(dim=-1, keepdim=True)
-    return x * (max_norm / norm.clamp(min=1e-6)).clamp(max=1.0)
+class Marker(ActionManager):
+    def __init__(self, env, num_markers: int = 1, world_frame: bool = False):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.num_markers = num_markers
+        self.world_frame = world_frame
+        self.has_gui = self.env.sim.has_gui()
+        self.action_dim = 3 * self.num_markers
+
+        if self.has_gui and self.env.backend == "isaac":
+            from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, sim_utils
+            self.marker = VisualizationMarkers(
+                VisualizationMarkersCfg(
+                    prim_path="/Visuals/Input/Marker",
+                    markers={
+                        "marker": sim_utils.SphereCfg(
+                            radius=0.05,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+                        ),
+                    },
+                )
+            )
+            self.marker.set_visibility(True)
+
+    def process_action(self, action: torch.Tensor):
+        if not self.has_gui or action is None:
+            return
+        
+        if not self.world_frame:
+            pos = self.asset.data.root_link_pos_w.reshape(self.num_envs, 1, 3)
+            quat = self.asset.data.root_link_quat_w.reshape(self.num_envs, 1, 4)
+            translations = pos + quat_rotate(quat, action.reshape(self.num_envs, self.num_markers, 3))
+        else:
+            translations = action
+        translations = translations.reshape(self.num_envs * self.num_markers, 3)
+        self.marker.visualize(
+            translations=translations,
+            scales=torch.ones(3, device=self.device).expand_as(translations)
+        )
+

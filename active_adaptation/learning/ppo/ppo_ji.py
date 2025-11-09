@@ -43,7 +43,6 @@ from typing import Union, Tuple
 
 from ..utils.valuenorm import ValueNorm1, ValueNormFake
 from ..modules.distributions import IndependentNormal
-from ..modules.temporal import GRU, TConv
 from .common import *
 
 

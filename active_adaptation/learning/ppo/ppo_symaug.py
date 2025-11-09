@@ -35,9 +35,8 @@ from torchrl.envs.transforms import CatTensors, VecNorm
 from tensordict import TensorDict
 from tensordict.nn import (
     TensorDictModuleBase,
-    TensorDictModule,
-    TensorDictSequential,
-    CudaGraphModule
+    TensorDictModule as Mod,
+    TensorDictSequential as Seq,
 )
 
 from hydra.core.config_store import ConfigStore
@@ -45,8 +44,8 @@ from dataclasses import dataclass, field
 from typing import Union, Tuple
 from collections import OrderedDict
 
+from active_adaptation.learning.modules import VecNorm, IndependentNormal
 from ..utils.valuenorm import ValueNorm1, ValueNormFake
-from ..modules.distributions import IndependentNormal
 from .common import *
 
 torch.set_float32_matmul_precision('high')
@@ -66,7 +65,7 @@ class PPOConfig:
     lr: float = 5e-4
     desired_kl: Union[float, None] = None
     clip_param: float = 0.2
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.002
     layer_norm: Union[str, None] = "before"
     value_norm: bool = False
     compile: bool = False
@@ -98,7 +97,6 @@ class PPOPolicy(TensorDictModuleBase):
         self.desired_kl = self.cfg.desired_kl
         self.clip_param = self.cfg.clip_param
         self.critic_loss_fn = nn.MSELoss(reduction="none")
-        self.action_dim = action_spec.shape[-1]
         self.gae = GAE(0.99, 0.95)
         
         if cfg.value_norm:
@@ -113,10 +111,18 @@ class PPOPolicy(TensorDictModuleBase):
         self.act_transform = env.action_manager.symmetry_transforms()
         self.obs_transform = self.obs_transform.to(self.device)
         self.act_transform = self.act_transform.to(self.device)
+        self.action_dim = env.action_manager.action_dim
 
-        actor_module = TensorDictSequential(
-            TensorDictModule(make_mlp([256, 256, 128]), [OBS_KEY], ["_actor_feature"]),
-            TensorDictModule(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
+        vecnorm = VecNorm(
+            input_shape=observation_spec[OBS_KEY].shape[-1:],
+            stats_shape=observation_spec[OBS_KEY].shape[-1:],
+            decay=1.0
+        )
+        
+        actor_module = Seq(
+            Mod(vecnorm, [OBS_KEY], ["_obs_normed"]),
+            Mod(make_mlp([256, 256, 128]), ["_obs_normed"], ["_actor_feature"]),
+            Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
         )
         self.actor: ProbabilisticActor = ProbabilisticActor(
             module=actor_module,
@@ -126,9 +132,10 @@ class PPOPolicy(TensorDictModuleBase):
             return_log_prob=True
         ).to(self.device)
         
-        self.critic = TensorDictSequential(
-            TensorDictModule(make_mlp([256, 256, 128]), [OBS_KEY], ["_critic_feature"]),
-            TensorDictModule(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
+        self.critic = Seq(
+            Mod(vecnorm, [OBS_KEY], ["_obs_normed"]),
+            Mod(make_mlp([256, 256, 128]), ["_obs_normed"], ["_critic_feature"]),
+            Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 
         self.actor(fake_input)
@@ -173,16 +180,21 @@ class PPOPolicy(TensorDictModuleBase):
             # self.update = CudaGraphModule(self.update)
     
     def get_rollout_policy(self, mode: str="train"):
-        policy = TensorDictSequential(self.actor)
+        policy = self.actor
         if self.cfg.compile:
-            policy = torch.compile(policy)
-            # policy = CudaGraphModule(policy)
+            policy = torch.compile(policy, fullgraph=True)
         return policy
 
+    @VecNorm.freeze()
     def train_op(self, tensordict: TensorDict):
+        assert VecNorm.FROZEN, "VecNorm must be frozen before training"
+
         tensordict = tensordict.exclude("stats")
         infos = []
         self._compute_advantage(tensordict, self.critic, "adv", "ret", update_value_norm=True)
+        action = tensordict[ACTION_KEY]
+        adv_unnormalized = tensordict["adv"]
+        log_probs_before = tensordict["action_log_prob"]
         tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
 
         for epoch in range(self.cfg.ppo_epochs):
@@ -198,9 +210,18 @@ class PPOPolicy(TensorDictModuleBase):
                     elif kl < self.desired_kl / 2.0 and kl > 0.0:
                         actor_lr = min(1e-2, actor_lr * 1.5)
                     self.opt.param_groups[0]["lr"] = actor_lr
+        
+        with torch.no_grad():
+            tensordict_ = self.actor(tensordict.copy())
+            dist = IndependentNormal(tensordict_["loc"], tensordict_["scale"])
+            log_probs_after = dist.log_prob(action)
+            pg_loss_after = log_probs_after.reshape_as(adv_unnormalized) * adv_unnormalized
+            pg_loss_before = log_probs_before.reshape_as(adv_unnormalized) * adv_unnormalized
                 
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
         infos["actor/lr"] = self.opt.param_groups[0]["lr"]
+        infos["actor/pg_loss_raw_after"] = pg_loss_after.mean().item()
+        infos["actor/pg_loss_raw_before"] = pg_loss_before.mean().item()
         infos["critic/value_mean"] = tensordict["ret"].mean().item()
         infos["critic/value_std"] = tensordict["ret"].std().item()
         infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
@@ -210,7 +231,7 @@ class PPOPolicy(TensorDictModuleBase):
     def _compute_advantage(
         self, 
         tensordict: TensorDict,
-        critic: TensorDictModule, 
+        critic: Mod, 
         adv_key: str="adv",
         ret_key: str="ret",
         update_value_norm: bool=True,
