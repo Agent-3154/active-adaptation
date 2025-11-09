@@ -49,7 +49,7 @@ from active_adaptation.learning.modules.rnn import set_recurrent_mode, recurrent
 from .common import *
 from .ppo_base import PPOBase
 
-torch.set_float32_matmul_precision('high')
+
 
 @dataclass
 class PPOConfig:

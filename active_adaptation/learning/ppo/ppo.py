@@ -51,8 +51,6 @@ from active_adaptation.learning.modules import (
 from .common import *
 from .ppo_base import PPOBase
 
-torch.set_float32_matmul_precision('high')
-
 import active_adaptation
 import torch.distributed as distr
 from torch.nn.parallel import DistributedDataParallel as DDP

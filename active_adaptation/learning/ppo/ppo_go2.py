@@ -47,7 +47,7 @@ from ..utils.valuenorm import ValueNorm1, ValueNormFake
 from ..modules.distributions import IndependentNormal
 from .common import *
 
-torch.set_float32_matmul_precision('high')
+
 
 CMD_KEY = "command_"
 

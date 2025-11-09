@@ -48,7 +48,6 @@ from active_adaptation.learning.modules import VecNorm, IndependentNormal
 from ..utils.valuenorm import ValueNorm1, ValueNormFake
 from .common import *
 
-torch.set_float32_matmul_precision('high')
 USE_DDP = True
 
 import active_adaptation

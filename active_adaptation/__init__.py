@@ -43,8 +43,9 @@ if is_distributed():
 if is_distributed() and _OMP_NUM_THREADS <= 1:
     raise ValueError("Please set OMP_NUM_THREADS to a value greater than 1 when using distributed training.")
 
-
-ASSET_PATH = os.path.join(os.path.dirname(__file__), "assets")
+CONFIG_PATH = Path(__file__).parent.parent / "cfg"
+ASSET_PATH = Path(__file__).parent / "assets"
+SCRIPT_PATH = Path(__file__).parent.parent / "scripts"
 
 def set_backend(backend: str):
     if not backend in ("isaac", "mujoco"):
