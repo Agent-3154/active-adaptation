@@ -71,5 +71,6 @@ class quadruped_trot(Reward):
         FL_RR = in_contact[:, [0, 3]].all(dim=1)
         FR_RL = in_contact[:, [1, 2]].all(dim=1)
         rew = torch.logical_xor(FL_RR, FR_RL)
-        return rew.reshape(self.num_envs, 1)
+        active = ~self.command_manager.is_standing_env
+        return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 

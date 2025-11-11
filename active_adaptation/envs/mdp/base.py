@@ -241,14 +241,29 @@ class Termination(Generic[CT], _RegistryMixin):
         return self.env.num_envs
 
 
-def reward(func):
-    func.is_reward = True
-    return func
+class Randomization(_RegistryMixin):
+    def __init__(self, env):
+        self.env: _Env = env
 
-def observation(func):
-    func.is_observation = True
-    return func
+    @property
+    def num_envs(self):
+        return self.env.num_envs
+    
+    @property
+    def device(self):
+        return self.env.device
+    
+    def startup(self):
+        pass
+    
+    def reset(self, env_ids: torch.Tensor):
+        pass
+    
+    def step(self, substep):
+        pass
 
-def termination(func):
-    func.is_termination = True
-    return func
+    def update(self):
+        pass
+
+    def debug_draw(self):
+        pass

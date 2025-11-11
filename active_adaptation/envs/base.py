@@ -149,7 +149,6 @@ class _Env(EnvBase):
             shape=[self.num_envs]
         ).to(self.device)
 
-        members = dict(inspect.getmembers(self.__class__, inspect.isclass))
         if self.cfg.command.get("_target_") is not None:
             self.command_manager: mdp.Command = hydra.utils.instantiate(self.cfg.command, env=self)
         else:
@@ -157,8 +156,6 @@ class _Env(EnvBase):
             class_name = command_cfg.pop("class")
             self.command_manager: mdp.Command = mdp.Command.registry[class_name](self, **command_cfg)
 
-        RAND_FUNCS = mdp.RAND_FUNCS
-        RAND_FUNCS.update(mdp.get_obj_by_class(members, mdp.Randomization))
         ADDONS = mdp.ADDONS
 
         self.addons = OrderedDict()
@@ -205,9 +202,11 @@ class _Env(EnvBase):
             self._update_callbacks.append(addon.update)
             self._debug_draw_callbacks.append(addon.debug_draw)
         
-        for key, params in self.cfg.randomization.items():
-            rand = RAND_FUNCS[key](self, **params if params is not None else {})
-            self.randomizations[key] = rand
+        for rand_spec, params in self.cfg.randomization.items():
+            rand_name, cls_name = parse_name_and_class(rand_spec)
+            rand_cls = mdp.Randomization.registry[cls_name]
+            rand: mdp.Randomization = rand_cls(self, **params if params is not None else {})
+            self.randomizations[rand_name] = rand
             self._startup_callbacks.append(rand.startup)
             self._reset_callbacks.append(rand.reset)
             self._debug_draw_callbacks.append(rand.debug_draw)

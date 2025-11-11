@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
 
-from active_adaptation.envs.mdp import Command, reward, observation
+from active_adaptation.envs.mdp import Command
 from active_adaptation.utils.motion import MotionDataset
 from active_adaptation.utils.math import (
     quat_rotate_inverse,
@@ -96,35 +96,35 @@ class MotionTrackingCommand(Command):
             self.relative_quat.reshape(self.num_envs, -1),
         ], dim=-1)
     
-    @reward
-    def root_pos_tracking(self):
-        diff = self.target_pos_w[:, 0] - self.asset.data.root_pos_w
-        error = diff.square().sum(-1, keepdim=True)
-        return torch.exp(- error / 0.25)
+    # @reward
+    # def root_pos_tracking(self):
+    #     diff = self.target_pos_w[:, 0] - self.asset.data.root_pos_w
+    #     error = diff.square().sum(-1, keepdim=True)
+    #     return torch.exp(- error / 0.25)
 
-    @reward
-    def keypoint_tracking(self):
-        diff = self.target_keypoints_w[:, 0] - self.asset.data.body_pos_w[:, self.keypoint_idx_asset]
-        error = diff.square().sum(-1, keepdim=True)
-        return torch.exp(- error / 0.1).mean(1)
+    # @reward
+    # def keypoint_tracking(self):
+    #     diff = self.target_keypoints_w[:, 0] - self.asset.data.body_pos_w[:, self.keypoint_idx_asset]
+    #     error = diff.square().sum(-1, keepdim=True)
+    #     return torch.exp(- error / 0.1).mean(1)
 
-    @reward
-    def orientation_tracking(self):
-        error = torch.norm(axis_angle_from_quat(self.relative_quat[:, 0]), dim=-1, keepdim=True)
-        return torch.exp(- error)
+    # @reward
+    # def orientation_tracking(self):
+    #     error = torch.norm(axis_angle_from_quat(self.relative_quat[:, 0]), dim=-1, keepdim=True)
+    #     return torch.exp(- error)
     
-    @reward
-    def joint_pos_tracking(self):
-        error = (self.target_joint_pos - self.asset.data.joint_pos[:, self.joint_idx_asset]).square()
-        return torch.exp(- error / 0.5).mean(1, True)
+    # @reward
+    # def joint_pos_tracking(self):
+    #     error = (self.target_joint_pos - self.asset.data.joint_pos[:, self.joint_idx_asset]).square()
+    #     return torch.exp(- error / 0.5).mean(1, True)
 
-    @reward
-    def feet_tracking(self):
-        # in_contact = self.contact_forces.data.current_contact_time[:, self.feet_ids_sensor] > 0.01
-        first_contact = self.contact_forces.compute_first_contact(0.02)[:, self.feet_ids_sensor]
-        diff = self.target_feet_pos_w - self.asset.data.body_pos_w[:, self.feet_ids_asset]
-        error = diff.square().sum(-1)
-        return - (error * first_contact).sum(1, True)
+    # @reward
+    # def feet_tracking(self):
+    #     # in_contact = self.contact_forces.data.current_contact_time[:, self.feet_ids_sensor] > 0.01
+    #     first_contact = self.contact_forces.compute_first_contact(0.02)[:, self.feet_ids_sensor]
+    #     diff = self.target_feet_pos_w - self.asset.data.body_pos_w[:, self.feet_ids_asset]
+    #     error = diff.square().sum(-1)
+    #     return - (error * first_contact).sum(1, True)
 
     def update(self):
         self._motion = self.dataset.get_slice(self.motion_ids, self.t, steps=self.future_steps)

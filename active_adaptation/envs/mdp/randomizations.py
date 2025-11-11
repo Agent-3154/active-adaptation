@@ -19,34 +19,7 @@ if active_adaptation.get_backend() == "isaac":
     from isaaclab.actuators import DCMotor, ImplicitActuator
     from active_adaptation.envs.actuator import HybridActuator
 
-
-class Randomization:
-    def __init__(self, env):
-        self.env: _Env = env
-
-    @property
-    def num_envs(self):
-        return self.env.num_envs
-    
-    @property
-    def device(self):
-        return self.env.device
-    
-    def startup(self):
-        pass
-    
-    def reset(self, env_ids: torch.Tensor):
-        pass
-    
-    def step(self, substep):
-        pass
-
-    def update(self):
-        pass
-
-    def debug_draw(self):
-        pass
-
+from .base import Randomization
 
 RangeType = Tuple[float, float]
 NestedRangeType = Union[RangeType, Dict[str, RangeType]]
@@ -309,10 +282,6 @@ class perturb_body_materials(Randomization):
         self.restitution_range = restitution_range
         self.homogeneous = homogeneous
         
-        self.default_materials = (
-            self.asset.root_physx_view.get_material_properties()
-        )
-        
         num_shapes_per_body = []
         for link_path in self.asset.root_physx_view.link_paths[0]:
             link_physx_view = self.asset._physics_sim_view.create_rigid_body_view(link_path)  # type: ignore
@@ -323,14 +292,14 @@ class perturb_body_materials(Randomization):
             for i in self.body_ids
         ])
         self.num_buckets = 64
-        self.static_friction_buckets = sample_uniform((self.num_buckets,), *self.static_friction_range)
-        self.dynamic_friction_buckets = sample_uniform((self.num_buckets,), *self.dynamic_friction_range)
-        self.restitution_buckets = sample_uniform((self.num_buckets,), *self.restitution_range)
+        self.static_friction_buckets = torch.linspace(*self.static_friction_range, self.num_buckets)
+        self.dynamic_friction_buckets = torch.linspace(*self.dynamic_friction_range, self.num_buckets)
+        self.restitution_buckets = torch.linspace(*self.restitution_range, self.num_buckets)
 
     def startup(self):
         logging.info(f"Randomize body materials of {self.body_names} upon startup.")
 
-        materials = self.default_materials.clone()
+        materials = self.asset.root_physx_view.get_material_properties().clone()
         if self.homogeneous:
             shape = (self.num_envs, 1)
         else:
@@ -479,26 +448,6 @@ class push_by_setting_velocity(Randomization):
             push_velocity[:, 5].uniform_(*self.velocity_range) * 0.78
             self.push_velocity = torch.where(i, vel_w + push_velocity, vel_w)
         self.asset.write_root_velocity_to_sim(self.push_velocity)
-
-
-class JointFriction(Randomization):
-    def __init__(
-        self,
-        env,
-        friction_range=(0.01, 0.1),
-    ):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.friction_range = friction_range
-
-    def startup(self):
-        logging.info("Randomize joint frictions upon starup.")
-        frictions = torch.zeros(self.env.num_envs, 1)
-        frictions.uniform_(*self.friction_range)
-        self.asset.root_physx_view.set_dof_friction_coefficients(
-            frictions.expand(-1, self.asset.num_joints), 
-            indices=self.asset._ALL_INDICES.cpu()
-        )
 
 
 class reset_joint_states_uniform(Randomization):
@@ -687,20 +636,6 @@ class stumble(Randomization):
         )
 
 
-class random_joint_friction(Randomization):
-    def __init__(self, env, actuator_name: str, friction_range):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.joints = self.asset.actuators[actuator_name]
-        self.friction_range = friction_range
-    
-    def startup(self):
-        print(f"Randomize joint friction of joints {self.joints.joint_names}, {self.joints.joint_indices}")
-        friction = torch.zeros_like(self.joints.friction)
-        friction.uniform_(*self.friction_range)
-        self.asset.write_joint_friction_to_sim(friction, joint_ids=self.joints.joint_indices)
-
-
 class pull(Randomization):
     def __init__(
         self, 
@@ -750,95 +685,6 @@ class pull(Randomization):
         )
 
 
-class external_force(Randomization):
-    def __init__(self, env):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-
-        with torch.device(self.device):
-            self.large_force_mode = torch.zeros(self.num_envs, 1, dtype=bool)
-            self.spring_force_max_range = (80., 120.)
-            self.spring_force_max = torch.zeros(self.num_envs, 1)
-            self.spring_force = torch.zeros(self.num_envs, 3)
-            self.spring_force_duration = torch.zeros(self.num_envs, 1)
-            self.spring_force_time = torch.zeros(self.num_envs, 1)
-            self.spring_force_setpoint = torch.zeros(self.num_envs, 1)
-            self.spring_force_kp = torch.zeros(self.num_envs, 1)
-            self.spring_force_kd = torch.zeros(self.num_envs, 1)
-            self.spring_end_mass = torch.zeros(self.num_envs, 1)
-            self.spring_end_vel = torch.zeros(self.num_envs, 1)
-    
-    def reset(self, env_ids):
-        self.large_force_mode[env_ids] = torch.rand(len(env_ids), 1, device=self.device) < 0.5
-        self.spring_force_duration[env_ids] = -1.
-        self.spring_end_mass[env_ids] = 250.
-
-    def step(self, substep):
-        self.asset._external_force_b[:, 0] += quat_rotate_inverse(
-            self.asset.data.root_quat_w, 
-            self.spring_force
-        )
-        self.asset.has_external_wrench = True
-    
-    def update(self):
-        expire = self.spring_force_time > self.spring_force_duration - 1e-4
-        sample = (torch.rand(self.num_envs, 1, device=self.device) < 0.1) & expire & self.large_force_mode
-        scalar = torch.zeros(self.num_envs, 1, device=self.device)
-        self.spring_end_mass = torch.where(
-            sample,
-            torch.randint(1, 4, (self.num_envs, 1), device=self.device) * 250.,
-            self.spring_end_mass
-        )
-        self.spring_end_vel = torch.where(
-            sample,
-            0.,
-            self.spring_end_vel.mul_(0.98) - (self.spring_force / self.spring_end_mass) * self.env.step_dt
-        )
-        self.spring_force_setpoint = torch.where(
-            sample,
-            self.asset.data.root_pos_w + torch.tensor([-0.5, 0., 0.], device=self.device),
-            self.spring_force_setpoint + self.spring_end_vel * self.env.step_dt
-        )
-        self.spring_force_kp = torch.where(
-            sample,
-            scalar.uniform_(80., 120.),
-            self.spring_force_kp,
-        )
-        self.spring_force_kd = torch.where(
-            sample,
-            scalar.uniform_(10., 20.),
-            self.spring_force_kd,
-        )
-        self.spring_force_duration = torch.where(
-            sample,
-            scalar.uniform_(2., 4.),
-            self.spring_force_duration
-        )
-        self.spring_force_time = torch.where(
-            sample,
-            0.,
-            self.spring_force_time + self.env.step_dt
-        )
-        self.spring_force_max = torch.where(
-            sample,
-            scalar.uniform_(*self.spring_force_max_range),
-            self.spring_force_max
-        )
-        self.spring_force = (
-            self.spring_force_kp * (self.spring_force_setpoint - self.asset.data.root_pos_w)
-            + self.spring_force_kd * (0. - self.asset.data.root_lin_vel_w)    
-        ) * (self.spring_force_time < self.spring_force_duration)
-        self.spring_force = clamp_norm(self.spring_force, max=self.spring_force_max)
-
-    def debug_draw(self):
-        self.env.debug_draw.vector(
-            self.asset.data.root_pos_w,
-            self.spring_force / (20 * 9.81),
-            color=(1.0, 0.5, 0.0, 1.0),
-            size=3.0,
-        )
-
-
 class random_joint_offset(Randomization):
     def __init__(self, env, **offset_range: Tuple[float, float]):
         super().__init__(env)
@@ -853,52 +699,6 @@ class random_joint_offset(Randomization):
     def reset(self, env_ids: torch.Tensor):
         offset = uniform(self.offset_range[:, 0], self.offset_range[:, 1])
         self.action_manager.offset[env_ids.unsqueeze(1), self.joint_ids] = offset
-
-
-class random_pull(Randomization):
-    def __init__(self, env, force_xy_range, force_z_range, prob=0.01, duration = (0.5, 0.5)):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.force_xy_range = force_xy_range
-        self.force_z_range = force_z_range
-        self.prob = prob
-        self.duration = (duration, duration) if isinstance(duration, (int, float)) else duration
-        self.mass_total = self.asset.root_physx_view.get_masses()[0].sum().to(self.device)
-
-        self.force_w = torch.zeros(self.num_envs, 3, device=self.device)
-        self.offset_b = torch.zeros(self.num_envs, 3, device=self.device)
-        self.time_remaining = torch.zeros(self.num_envs, 1, device=self.device)
-
-    def step(self, substep):
-        force_w = self.force_w * (self.time_remaining > 0)
-        self.asset._external_force_b[:, 0] += quat_rotate_inverse(self.asset.data.root_quat_w, force_w)
-        self.asset._external_torque_b[:, 0] += self.offset_b.cross(force_w, dim=-1)
-        self.asset.has_external_wrench = True
-    
-    def update(self):
-        sample_force = (torch.rand(self.num_envs, device=self.device) < self.prob).nonzero().squeeze(-1)
-        if len(sample_force) > 0:
-            force_w = torch.zeros(len(sample_force), 3, device=self.device)
-            force_w[:, 0].uniform_(*self.force_xy_range)
-            force_w[:, 1].uniform_(*self.force_xy_range)
-            force_w[:, 2].uniform_(*self.force_z_range) 
-            offset_b = torch.zeros(len(sample_force), 3, device=self.device)
-            offset_b[:, 0].uniform_(-0.25, 0.25)
-            offset_b[:, 1].uniform_(-0.15, 0.15)
-            offset_b[:, 2].uniform_(-0.15, 0.15)
-            self.offset_b[sample_force] = offset_b
-            self.force_w[sample_force] = force_w
-            duration = torch.zeros(len(sample_force), 1, device=self.device)
-            duration.uniform_(*self.duration)
-            self.time_remaining[sample_force] = duration / self.env.step_dt
-        self.time_remaining -= 1.
-
-    def debug_draw(self):
-        self.env.debug_draw.vector(
-            self.asset.data.root_pos_w, 
-            (self.force_w / self.mass_total) * (self.time_remaining > 0), 
-            color=(0.6, 0.8, 0.6, 1.)
-        )
 
 
 class spring_grf(Randomization):
@@ -945,30 +745,49 @@ class spring_grf(Randomization):
 
 
 from active_adaptation.envs.mdp.utils.forces import ImpulseForce, ConstantForce
-class impulse(Randomization):
-    def __init__(self, env):
+class random_impulse(Randomization):
+    def __init__(
+        self,
+        env,
+        prob: float = 0.005,
+        body_name: str = None,
+        x_range: Tuple[float, float] = (20., 80.),
+        y_range: Tuple[float, float] = (20., 80.),
+        z_range: Tuple[float, float] = (0., 20.),
+        # x_offset_range: Tuple[float, float] = (-0.1, 0.1),
+        # y_offset_range: Tuple[float, float] = (-0.1, 0.1),
+        # z_offset_range: Tuple[float, float] = (-0.1, 0.1),
+    ):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
-        self.impulse_force = ImpulseForce.sample(self.num_envs, device=self.device)
+        self.prob = prob
+        if body_name is not None:
+            self.body_id = self.asset.find_bodies(body_name)[0][0]
+        else:
+            self.body_id = 0 # apply to the root link
+        self.x_range = x_range
+        self.y_range = y_range
+        self.z_range = z_range
+        self.impulse_force = ImpulseForce.zero(self.num_envs, device=self.device)
         
     def step(self, substep):
         forces_b = self.asset._external_force_b
-        impulse_force = self.impulse_force.get_force()
-        forces_b[:, 0] += quat_rotate_inverse(self.asset.data.root_quat_w, impulse_force)
+        impulse_force = self.impulse_force.get_force(None, None)
+        forces_b[:, self.body_id] += quat_rotate_inverse(self.asset.data.root_link_quat_w, impulse_force)
         self.asset.has_external_wrench = True
 
     def update(self):
         expire = self.impulse_force.time > self.impulse_force.duration
-        r = (torch.rand(self.num_envs, 1, device=self.device) < 0.005)
+        r = (torch.rand(self.num_envs, 1, device=self.device) < self.prob)
         sample = r & expire
-        impulse_force = ImpulseForce.sample(self.num_envs, self.device)
+        impulse_force = ImpulseForce.sample(self.num_envs, self.device, self.x_range, self.y_range, self.z_range)
         self.impulse_force.time.add_(self.env.step_dt)
         self.impulse_force: ImpulseForce = impulse_force.where(sample, self.impulse_force)
 
     def debug_draw(self):
         self.env.debug_draw.vector(
-            self.asset.data.root_pos_w,
-            self.impulse_force.get_force() /  9.81,
+            self.asset.data.body_pos_w[:, self.body_id],
+            self.impulse_force.get_force(None, None) /  9.81,
             color=(1.0, 0.6, 0.0, 1.0),
             size=3.0,
         )
