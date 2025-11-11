@@ -98,13 +98,13 @@ class impedance_vel_error(Reward[Impedance]):
         return error_l2.mean(1)
 
 
-class impedance_acc_error(Reward[Impedance]):
-    def __init__(self, env, weight: float):
-        super().__init__(env, weight)
-        self.impedance: Impedance = self.env.command_manager
+# class impedance_acc_error(Reward[Impedance]):
+#     def __init__(self, env, weight: float):
+#         super().__init__(env, weight)
+#         self.impedance: Impedance = self.env.command_manager
 
-    def compute(self) -> torch.Tensor:
-        diff = self.impedance.ref_lin_acc_w[:, 0] - self.impedance.asset.data.body_acc_w[:, 0, :3]
-        error_l2 = diff[:, :2].square().sum(dim=-1, keepdim=True)
-        return error_l2
+#     def compute(self) -> torch.Tensor:
+#         diff = self.impedance.ref_lin_acc_w[:, 0] - self.impedance.asset.data.body_acc_w[:, 0, :3]
+#         error_l2 = diff[:, :2].square().sum(dim=-1, keepdim=True)
+#         return error_l2
 

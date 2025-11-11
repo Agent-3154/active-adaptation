@@ -57,7 +57,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 @dataclass
 class PPOConfig:
     _target_: str = "active_adaptation.learning.ppo.ppo_symaug.PPOPolicy"
-    name: str = "ppo"
+    name: str = "ppo_symaug"
     train_every: int = 32
     ppo_epochs: int = 4
     num_minibatches: int = 8
@@ -106,8 +106,8 @@ class PPOPolicy(TensorDictModuleBase):
 
         fake_input = observation_spec.zero()
         
-        self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transforms()
-        self.act_transform = env.action_manager.symmetry_transforms()
+        self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform()
+        self.act_transform = env.action_manager.symmetry_transform()
         self.obs_transform = self.obs_transform.to(self.device)
         self.act_transform = self.act_transform.to(self.device)
         self.action_dim = env.action_manager.action_dim

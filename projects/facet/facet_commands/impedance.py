@@ -360,7 +360,7 @@ class Impedance(Command):
         self.update_command()
         self.update_forces()
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return symmetry_utils.SymmetryTransform(
             perm=torch.arange(15), 
             signs=[1, -1, 
