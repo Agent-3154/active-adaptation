@@ -28,7 +28,7 @@ class joint_pos(Observation):
             joint_pos = normal_noise(joint_pos, self.noise_std)
         return joint_pos.reshape(self.num_envs, -1)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transform = joint_space_symmetry(self.asset, self.joint_names)
         return transform
 
@@ -47,7 +47,7 @@ class joint_vel(Observation):
             joint_vel = normal_noise(joint_vel, self.noise_std)
         return joint_vel.reshape(self.num_envs, -1)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transform = joint_space_symmetry(self.asset, self.joint_names)
         return transform
 
@@ -93,7 +93,7 @@ class joint_pos_multistep(Observation):
             joint_pos = random_noise(joint_pos, self.noise_std)
         return joint_pos.reshape(self.num_envs, -1)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transform = joint_space_symmetry(self.asset, self.joint_names)
         return transform.repeat(self.steps)
 
@@ -150,7 +150,7 @@ class joint_vel_multistep(Observation):
         joint_vel = random_noise(joint_vel, self.noise_std.unsqueeze(1))
         return joint_vel.reshape(self.num_envs, -1)
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transform = joint_space_symmetry(self.asset, self.joint_names)
         return transform.repeat(self.steps)
 

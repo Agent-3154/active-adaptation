@@ -58,7 +58,7 @@ class SplineCommand(Command):
             # quat_rotate_inverse(self.asset.data.root_quat_w, self.target_ang_vel_w),
         )
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return SymmetryTransform(
             perm=torch.arange(6),
             signs=torch.tensor([1, -1, 1, 1, -1, 1]),

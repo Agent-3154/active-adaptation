@@ -135,7 +135,7 @@ class body_pos_b(Observation):
         body_pos_b = quat_rotate_inverse(self.root_quat_w, self.body_pos_w - self.root_pos_w)
         return body_pos_b.reshape(self.num_envs, -1)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return sym_utils.cartesian_space_symmetry(self.asset, self.body_names)
     
     def debug_draw(self):
@@ -164,7 +164,7 @@ class body_vel_b(Observation):
         body_ang_vel_b = quat_rotate_inverse(self.root_quat_w, self.body_vel_w[:, :, 3:])
         return body_lin_vel_b.reshape(self.num_envs, -1)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return sym_utils.cartesian_space_symmetry(self.asset, self.body_names)
 
 
@@ -234,8 +234,8 @@ class command(Observation):
     def compute(self):
         return self.command_manager.command
     
-    def symmetry_transforms(self):
-        return self.command_manager.symmetry_transforms()
+    def symmetry_transform(self):
+        return self.command_manager.symmetry_transform()
 
 
 class command_hidden(Observation):
@@ -246,7 +246,7 @@ class command_hidden(Observation):
     def compute(self):
         return self.command_manager.command_hidden
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transform = sym_utils.SymmetryTransform(
             perm=torch.arange(3), 
             signs=[1, -1, 1]
@@ -299,7 +299,7 @@ class root_angvel_b(Observation):
     def compute(self) -> torch.Tensor:
         return self.buffer.reshape(self.num_envs, -1)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         # left-right symmetry: flip only roll and yaw
         transform = sym_utils.SymmetryTransform(perm=torch.arange(3), signs=[-1., 1., -1.])
         return transform.repeat(self.steps)
@@ -353,7 +353,7 @@ class projected_gravity_b(Observation):
         projected_gravity_b += noise
         return projected_gravity_b / projected_gravity_b.norm(dim=-1, keepdim=True)
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transform = sym_utils.SymmetryTransform(perm=torch.arange(3), signs=[1, -1, 1])
         return transform
     
@@ -383,7 +383,7 @@ class gravity_multistep(Observation):
         gravity_vector = self.gravity_multistep[:, ::self.interval]
         return gravity_vector.reshape(self.num_envs, -1)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transform = sym_utils.SymmetryTransform(
             perm=torch.arange(3),
             signs=[1, -1, 1]
@@ -437,7 +437,7 @@ class root_linvel_b(Observation):
         linvel = quat_rotate_inverse(self.quat, linvel)
         return linvel.reshape(self.num_envs, -1)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transform = sym_utils.SymmetryTransform(perm=torch.arange(3), signs=[1, -1, 1])
         return transform
 
@@ -535,7 +535,7 @@ class applied_torque(Observation):
         applied_efforts = self.asset.data.applied_torque
         return applied_efforts[:, self.joint_ids]
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transform = sym_utils.joint_space_symmetry(self.asset, self.joint_names)
         return transform
 
@@ -590,7 +590,7 @@ class external_forces(Observation):
     def compute(self) -> torch.Tensor:
         return self.forces_b
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return sym_utils.cartesian_space_symmetry(self.asset, self.body_names)
 
 
@@ -612,7 +612,7 @@ class external_torques(Observation):
     def compute(self) -> torch.Tensor:
         return self.torques_b
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return sym_utils.cartesian_space_symmetry(self.asset, self.body_names, (-1, 1, -1))
 
 
@@ -699,8 +699,8 @@ class prev_actions(Observation):
         else:
             return action_buf
 
-    def symmetry_transforms(self):
-        transform = self.action_manager.symmetry_transforms()
+    def symmetry_transform(self):
+        transform = self.action_manager.symmetry_transform()
         return transform.repeat(self.steps)
 
 
@@ -1023,7 +1023,7 @@ class body_height(Observation):
         body_height = body_pos_w[:, :, 2] - self.env.get_ground_height_at(body_pos_w)
         return body_height.reshape(self.num_envs, -1)
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return sym_utils.cartesian_space_symmetry(self.asset, self.body_names, sign=(1,))
 
 

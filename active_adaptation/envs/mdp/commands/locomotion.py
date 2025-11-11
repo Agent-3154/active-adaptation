@@ -262,7 +262,7 @@ class Twist(Command):
         #     color=(1.0, 0.2, 0.2, 2.0),
         # )
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         # left-right symmetry: flip y velocity and yaw velocity
         transform = symmetry_utils.SymmetryTransform(perm=torch.arange(4), signs=[1, -1, -1, 1])
         return transform

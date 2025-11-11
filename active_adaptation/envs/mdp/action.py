@@ -67,9 +67,9 @@ class ConcatenatedAction(ActionManager):
         for action_manager, action in zip(self.action_managers, actions):
             action_manager.apply_action(action, substep)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return symmetry_utils.SymmetryTransform.cat(
-            [action_manager.symmetry_transforms() for action_manager in self.action_managers]
+            [action_manager.symmetry_transform() for action_manager in self.action_managers]
         )
 
 
@@ -115,7 +115,7 @@ class JointPosition(ActionManager):
     def resolve(self, spec):
         return string_utils.resolve_matching_names_values(dict(spec), self.asset.joint_names)
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transform = symmetry_utils.joint_space_symmetry(self.asset, self.joint_names)
         return transform
 
@@ -190,7 +190,7 @@ class LegWheel(ActionManager):
         wheel_vel_target = self.wheel_scaling * wheel_action
         self.asset.set_joint_velocity_target(wheel_vel_target, self.wheel_ids)
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return symmetry_utils.SymmetryTransform.cat([
             symmetry_utils.joint_space_symmetry(self.asset, self.leg_names),
             symmetry_utils.joint_space_symmetry(self.asset, self.wheel_names),

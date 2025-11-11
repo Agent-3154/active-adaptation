@@ -82,7 +82,7 @@ class height_scan(Observation):
             pos[:, :, :, 2] = self.height_map_w
             self.marker.visualize(pos.reshape(-1, 3))
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         if self.flatten:
             assert not self.include_xy
             perm = torch.arange(self.shape.numel()).reshape(self.shape).flip((1,)).reshape(-1)
@@ -157,7 +157,7 @@ class forward_scan(Observation):
         else:
             return ray_distance.reshape(self.num_envs, 1, *self.shape)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         if self.flatten:
             perm = torch.arange(self.shape.numel())
             perm = perm.reshape(self.shape).flip(1)

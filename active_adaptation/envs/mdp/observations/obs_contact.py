@@ -74,7 +74,7 @@ class contact_indicator(Observation):
     def compute(self):
         return self.contact_sensor.data.current_contact_time[:, self.body_ids] > 0.0
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return cartesian_space_symmetry(self.asset, self.body_names, sign=(1,))
 
 
@@ -97,6 +97,6 @@ class contact_forces(Observation):
             )
         return contact_forces.reshape(self.num_envs, -1)
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return cartesian_space_symmetry(self.asset, self.body_names)
 

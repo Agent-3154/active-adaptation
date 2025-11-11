@@ -85,10 +85,10 @@ class ObsGroup:
             tensors.append(tensor)
         return torch.cat(tensors, dim=-1)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         transforms = []
         for obs_key, func in self.funcs.items():
-            transform = func.symmetry_transforms()
+            transform = func.symmetry_transform()
             transforms.append(transform)
         transform = symmetry_utils.SymmetryTransform.cat(transforms)
         return transform

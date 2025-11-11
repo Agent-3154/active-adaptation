@@ -45,7 +45,7 @@ class Game(Command):
     def command_mode(self):
         return self.role.reshape(self.num_envs, 1)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return SymmetryTransform(
             perm=torch.arange(8),
             signs=torch.tensor([1, -1, 1, 1, -1, 1, 1, 1])

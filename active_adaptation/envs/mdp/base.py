@@ -168,7 +168,7 @@ class Observation(Generic[CT], _RegistryMixin):
         """Called at each step **after** simulation, if GUI is enabled"""
         pass
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         """Called to apply symmetry transformations to the observation"""
         pass
 
