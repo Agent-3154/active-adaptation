@@ -22,37 +22,26 @@ class linvel_z_l2(Reward):
     def __init__(self, env, weight: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
+        self.linvel_z = torch.zeros(self.num_envs, 1, device=self.device)
+
+    def update(self):
+        self.linvel_z = self.asset.data.root_lin_vel_b[:, 2].unsqueeze(1)
 
     def compute(self) -> torch.Tensor:
-        linvel_z = self.asset.data.root_lin_vel_b[:, 2].unsqueeze(1)
-        return -linvel_z.square()
+        return -self.linvel_z.square()
 
 
 class angvel_xy_l2(Reward):
-    def __init__(self, env, weight: float, body_names: str = None):
+    def __init__(self, env, weight: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
-        if body_names is not None:
-            self.body_ids, self.body_names = self.asset.find_bodies(body_names)
-            self.body_ids = torch.tensor(self.body_ids, device=self.device)
-        else:
-            self.body_ids = None
+        self.angvel = torch.zeros(self.num_envs, 3, device=self.device)
 
     def update(self):
-        if self.body_ids is not None:
-            angvel = quat_rotate_inverse(
-                self.asset.data.body_quat_w[:, self.body_ids],
-                self.asset.data.body_ang_vel_w[:, self.body_ids]
-            )
-        else:
-            angvel = self.asset.data.root_ang_vel_b
-        self.angvel = angvel
+        self.angvel = self.asset.data.root_ang_vel_b
 
     def compute(self) -> torch.Tensor:
-        if self.body_ids is not None:
-            r = -self.angvel[:, :, :2].square().sum(-1).mean(1)
-        else:
-            r = -self.angvel[:, :2].square().sum(-1)
+        r = -self.angvel[:, :2].square().sum(-1)
         return r.reshape(self.num_envs, 1)
 
 
@@ -330,7 +319,7 @@ class root_upright(Reward):
     def __init__(self, env, weight: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
-        self.update()
+        self.projected_gravity_b = torch.zeros(self.num_envs, 3, device=self.device)
     
     def update(self):
         self.projected_gravity_b = self.asset.data.projected_gravity_b

@@ -112,6 +112,7 @@ class _Env(EnvBase):
         self.sim: SimulationContext
         self.setup_scene()
 
+        self.terrain_type = self.scene.terrain.cfg.terrain_type
         self._ground_mesh = None
         
         self.max_episode_length = self.cfg.max_episode_length
@@ -475,6 +476,8 @@ class _Env(EnvBase):
         return self._ground_mesh
         
     def get_ground_height_at(self, pos: torch.Tensor) -> torch.Tensor:
+        if self.terrain_type == "plane":
+            return torch.zeros(pos.shape[:-1], device=self.device)
         bshape = pos.shape[:-1]
         ray_starts = pos.reshape(-1, 3)
         ray_directions = torch.tensor([0., 0., -1.], device=self.device)

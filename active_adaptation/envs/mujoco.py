@@ -91,8 +91,24 @@ class MJArticulationData:
         return self.body_quat_w[..., 0, :]
     
     @property
+    def root_link_pos_w(self):
+        return self.body_pos_w[:, 0, :]
+    
+    @property
+    def root_link_quat_w(self):
+        return self.body_quat_w[:, 0, :]
+    
+    @property
     def root_link_pose_w(self):
         return torch.cat([self.body_pos_w[:, 0, :], self.body_quat_w[:, 0, :]], dim=-1)
+    
+    @property
+    def root_link_lin_vel_w(self):
+        return self.root_lin_vel_w
+    
+    @property
+    def root_link_ang_vel_w(self):
+        return self.root_ang_vel_w
     
     # @property
     # def root_lin_vel_w(self):
