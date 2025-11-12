@@ -112,7 +112,10 @@ class _Env(EnvBase):
         self.sim: SimulationContext
         self.setup_scene()
 
-        self.terrain_type = self.scene.terrain.cfg.terrain_type
+        if hasattr(self.scene, "terrain") and self.scene.terrain is not None:
+            self.terrain_type = self.scene.terrain.cfg.terrain_type
+        else:
+            self.terrain_type = "plane"
         self._ground_mesh = None
         
         self.max_episode_length = self.cfg.max_episode_length
@@ -401,8 +404,9 @@ class _Env(EnvBase):
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
         
         with ScopedTimer("simulation", sync=False):
-            for input_key, input_manager in self.input_managers.items():
-                input_manager.process_action(tensordict.get(input_key))
+            with ScopedTimer("process_action", sync=False):
+                for input_key, input_manager in self.input_managers.items():
+                    input_manager.process_action(tensordict.get(input_key))
             for substep in range(self.decimation):
                 with ScopedTimer("simulation_pre_step", sync=False):
                     for asset in self.scene.articulations.values():
@@ -420,8 +424,9 @@ class _Env(EnvBase):
                     self.scene.update(self.physics_dt)
                     for callback in self._post_step_callbacks:
                         callback(substep)
-            for callback in self._update_callbacks:
-                callback()
+            with ScopedTimer("update_callbacks", sync=False):
+                for callback in self._update_callbacks:
+                    callback()
         
         if self.sim.has_gui():
             self.sim.render()

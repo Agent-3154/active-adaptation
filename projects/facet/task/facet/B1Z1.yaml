@@ -63,7 +63,7 @@ reward:
     impedance_yaw_vel:      {weight: 1.0}
     impedance_pos:      {weight: 0.75}
     impedance_vel:      {weight: 1.5}
-    base_height_l1:     {weight: 3.0, target_height: 0.4}
+    base_height_exp:    {weight: 2.0, target_height: 0.5}
   arm:
     # impedance_ee_pos:      {weight: 1.0}
     # impedance_ee_vel:      {weight: 1.0}

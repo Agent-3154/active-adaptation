@@ -31,6 +31,11 @@ if active_adaptation.get_backend() == "isaac":
     )
 
 
+def saturate(x: torch.Tensor, a: float):
+    norm = x.norm(dim=-1, keepdim=True)
+    return (x /norm.clamp_min(1e-6)) * torch.log1p(norm / a) * a
+
+
 class ImpedanceCommand(TensorClass):
     setpoint: torch.Tensor
     setpoint_eef: torch.Tensor
@@ -108,8 +113,10 @@ class State(TensorClass):
             batch_size=shape,
         )
 
-    def integrate(self, dt: float, mask: torch.Tensor):
+    def integrate(self, dt: float, mask: torch.Tensor, vel_clamp: Optional[float]=None):
         self.vel_w.add_(self.acc_w * dt * mask)
+        if vel_clamp is not None:
+            self.vel_w = clamp_norm(self.vel_w, 0.0, vel_clamp)
         self.pos_w.add_(self.vel_w * dt * mask)
     
     def roll(self, steps: int, dims: int=1):
@@ -268,8 +275,11 @@ class ImpedanceCommandManager(Command):
 
         self.pos_base.acc_w.copy_(base_lin_acc)
         self.rot_base.acc_w.copy_(base_ang_acc)
-        self.pos_base.integrate(dt, torch.tensor([1., 1., 0.], device=self.device)) # integrate only in xy plane
-        self.rot_base.integrate(dt, torch.tensor([0., 0., 1.], device=self.device)) # integrate only in yaw direction
+        
+        mask_xy = torch.tensor([1., 1., 0.], device=self.device)
+        mask_yaw = torch.tensor([0., 0., 1.], device=self.device)
+        self.pos_base.integrate(dt, mask_xy, vel_clamp=2.0) # integrate only in xy plane
+        self.rot_base.integrate(dt, mask_yaw, vel_clamp=2.0) # integrate only in yaw direction
         
         if self.has_eef:
             eef_kp, eef_kd = self.cmd.kp_eef, self.cmd.kd_eef
