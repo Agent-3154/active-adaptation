@@ -16,7 +16,7 @@ from active_adaptation.utils.math import (
 
 from tensordict import TensorClass
 from pathlib import Path
-from active_adaptation.envs.mdp.utils.forces import ConstantForce, SpringForce
+from active_adaptation.envs.mdp.utils.forces import ConstantForce, SpringForce, ImpulseForce
 from active_adaptation.utils.symmetry import SymmetryTransform
 
 
@@ -146,7 +146,8 @@ def sample_command_world(
     ang_kp = lin_kp
     ang_kd = lin_kd
     
-    virtual_mass = wp.randf(seed_, 2.0, 4.0)
+    virtual_mass = 2.0 ** wp.float32(wp.randi(seed_, 1, 4))
+
     pos_offset_xy = wp.sample_unit_ring(seed_) * wp.randf(seed_, 0.5, 1.5)
     setpoint_pos_w[tid] = root_link_pos_w[tid] + wp.vec3(pos_offset_xy.x, pos_offset_xy.y, 0.0)
     setpoint_rpy_w[tid] = wp.vec3(0., 0., 0.)
@@ -228,6 +229,9 @@ class ImpedanceCommandManager(Command):
             # for gait control
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
         
+        self.force_impulse = ImpulseForce.zeros(self.num_envs, device=self.device)
+        # self.force_pull = ConstantForce.zeros(self.num_envs, device=self.device)
+        
         if self.has_eef:
             path = Path(__file__).parent / "target_archive.pt"
             self.ee_target_archive = torch.load(path)["target_pos"].to(self.device)
@@ -249,6 +253,8 @@ class ImpedanceCommandManager(Command):
         base_lin_force = (
             lin_kp.reshape(self.num_envs, 1, 1) * base_pos_error
             + lin_kd.reshape(self.num_envs, 1, 1) * base_vel_error
+            # + self.force_pull.get_force(None, None).unsqueeze(1) # for state-dependent force, unused here
+            + self.force_impulse.get_force(None, None).unsqueeze(1) # for state-dependent force, unused here
         )
         base_lin_acc = base_lin_force / self.cmd.virtual_mass_base.unsqueeze(1)
         
@@ -327,16 +333,16 @@ class ImpedanceCommandManager(Command):
             raise ValueError(f"Invalid input dimension: {x.ndim}")
         return quat_rotate(quat, x)
 
-    # def step(self, substep: int):
-    #     self.asset._external_force_b[:, self.eef_body_id] += quat_rotate_inverse(
-    #         self.asset.data.body_quat_w[:, self.eef_body_id],
-    #         self.get_eef_force(self.asset.data.body_pos_w[:, self.eef_body_id], self.asset.data.body_lin_vel_w[:, self.eef_body_id])
-    #     )
-    #     self.asset._external_force_b[:, 0] += quat_rotate_inverse(
-    #         self.asset.data.root_quat_w,
-    #         self.base_const_force.get_force()
-    #     )
-    #     self.asset.has_external_wrench = True
+    def step(self, substep: int):
+        # self.asset._external_force_b[:, self.eef_body_id] += quat_rotate_inverse(
+        #     self.asset.data.body_quat_w[:, self.eef_body_id],
+        #     self.get_eef_force(self.asset.data.body_pos_w[:, self.eef_body_id], self.asset.data.body_lin_vel_w[:, self.eef_body_id])
+        # )
+        self.asset._external_force_b[:, 0] += quat_rotate_inverse(
+            self.asset.data.root_link_quat_w,
+            self.force_impulse.get_force(None, None)
+        )
+        self.asset.has_external_wrench = True
 
     def reset(self, env_ids: torch.Tensor):
         root_link_pos = self.asset.data.root_link_pos_w[env_ids]
@@ -408,7 +414,12 @@ class ImpedanceCommandManager(Command):
             self.pos_eef = self.pos_eef.roll(1, 1)
             self.pos_eef.pos_w[:, 0] = self.asset.data.body_pos_w[:, self.eef_body_id]
             self.pos_eef.vel_w[:, 0] = self.asset.data.body_lin_vel_w[:, self.eef_body_id]
-                
+
+        self.force_impulse.time.add_(self.env.step_dt)
+        resample = self.force_impulse.expired & (torch.rand(self.num_envs, 1, device=self.device) < 0.003)
+        impulse_force = ImpulseForce.sample(self.num_envs, self.device, (40., 200.), (40., 200.), (0., 20.))
+        self.force_impulse = impulse_force.where(resample, self.force_impulse)
+
         self.reference_dynamics(self.env.step_dt)
 
         self.surr_pos_target = self.pos_base.pos_w[:, self.ref_steps]
@@ -440,4 +451,11 @@ class ImpedanceCommandManager(Command):
             orientations=quat_from_euler_xyz(self.rot_base.pos_w[:, self.ref_steps].reshape(-1, 3)),
         )
         self.setpoint_marker.visualize(self.setpoint_w[:, :3])
+        # external forces
+        self.env.debug_draw.vector(
+            self.asset.data.root_link_pos_w,
+            self.force_impulse.get_force(None, None) / 9.81,
+            color=(1.0, 0.6, 0.0, 1.0), # orange
+            size=3.0,
+        )
 

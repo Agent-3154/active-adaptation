@@ -768,7 +768,7 @@ class random_impulse(Randomization):
         self.x_range = x_range
         self.y_range = y_range
         self.z_range = z_range
-        self.impulse_force = ImpulseForce.zero(self.num_envs, device=self.device)
+        self.impulse_force = ImpulseForce.zeros(self.num_envs, device=self.device)
         
     def step(self, substep):
         forces_b = self.asset._external_force_b
@@ -777,12 +777,10 @@ class random_impulse(Randomization):
         self.asset.has_external_wrench = True
 
     def update(self):
-        expire = self.impulse_force.time > self.impulse_force.duration
-        r = (torch.rand(self.num_envs, 1, device=self.device) < self.prob)
-        sample = r & expire
-        impulse_force = ImpulseForce.sample(self.num_envs, self.device, self.x_range, self.y_range, self.z_range)
         self.impulse_force.time.add_(self.env.step_dt)
-        self.impulse_force: ImpulseForce = impulse_force.where(sample, self.impulse_force)
+        resample = self.impulse_force.expired & (torch.rand(self.num_envs, 1, device=self.device) < self.prob)
+        impulse_force = ImpulseForce.sample(self.num_envs, self.device, self.x_range, self.y_range, self.z_range)
+        self.impulse_force = impulse_force.where(resample, self.impulse_force)
 
     def debug_draw(self):
         self.env.debug_draw.vector(

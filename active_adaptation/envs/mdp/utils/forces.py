@@ -45,10 +45,23 @@ class SpringForce(TensorClass):
 
 
 class ConstantForce(TensorClass):
+    """
+    A constant pushing/pulling force applied for a certain duration.
+    """
     duration: torch.Tensor
     time: torch.Tensor # the time elapsed since the start of the force
     offset: torch.Tensor
     force: torch.Tensor
+
+    @classmethod
+    def zeros(cls, size: int, device: str):
+        return cls(
+            duration=torch.zeros(size, 1, device=device),
+            time=torch.zeros(size, 1, device=device),
+            offset=torch.zeros(size, 3, device=device),
+            force=torch.zeros(size, 3, device=device),
+            batch_size=size,
+        )
     
     @classmethod
     def sample(
@@ -72,19 +85,26 @@ class ConstantForce(TensorClass):
             batch_size=size,
         )
 
-    def get_force(self):
+    def get_force(self, pos: torch.Tensor, vel: torch.Tensor):
         """Return the world-frame force."""
         return self.force * (self.time < self.duration)
 
 
 class ImpulseForce(TensorClass):
+    """
+    A linear impulse force applied for a certain duration with a peak value.
+    """
     duration: torch.Tensor
     time: torch.Tensor # the time elapsed since the start of the force
     peak: torch.Tensor
     # offset: torch.Tensor
 
+    @property
+    def expired(self):
+        return self.time >= self.duration - 1e-4
+
     @classmethod
-    def zero(cls, size: int, device: str):
+    def zeros(cls, size: int, device: str):
         return cls(
             duration=torch.zeros(size, 1, device=device),
             time=torch.zeros(size, 1, device=device),
