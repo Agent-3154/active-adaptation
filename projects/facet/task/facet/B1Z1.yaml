@@ -24,7 +24,7 @@ action:
   action_scaling:
     (F|R)(L|R)_(thigh|calf)_joint: 0.5
     (F|R)(L|R)_hip_joint: 0.5
-    # arm_joint[1-5]: 1.0
+    arm_joint[1-5]: 1.0
   alpha: [0.75, 0.95]
   max_delay: 1
 
@@ -43,12 +43,13 @@ observation:
     joint_pos_multistep: {steps: 4, noise_std: 0.05}
     joint_vel_multistep: {steps: 4, noise_std: 0.2}
     prev_actions: {steps: 3}
+    body_pos_b:       {body_names: "gripperMover", yaw_only: true}
   # priv:
     command_hidden:
     root_linvel_b:    {yaw_only: true}
     root_angvel_b:
     contact_indicator: {body_names: [".*_foot"]}
-    # body_vel:       {body_names: "gripperMover", yaw_only: true}
+    body_vel_b:       {body_names: "gripperMover", yaw_only: true}
   ext:
     external_forces:  {body_names: ["base", "gripperMover"]}
     external_torques: {body_names: ["base"]}
@@ -65,8 +66,8 @@ reward:
     impedance_vel:      {weight: 1.5}
     base_height_exp:    {weight: 2.0, target_height: 0.5}
   arm:
-    # impedance_ee_pos:      {weight: 1.0}
-    # impedance_ee_vel:      {weight: 1.0}
+    impedance_eef_pos:      {weight: 1.0}
+    impedance_eef_vel:      {weight: 1.0}
     # ee_angvel_penalty:    {weight: 0.01}
     joint_vel_l2:       {weight: 0.002, joint_names: .*arm_joint.*}
   regularization:
@@ -81,10 +82,11 @@ reward:
     feet_air_time:      {weight: 0.5, body_names: .*_foot, thres: 0.3}
     # feet_slip:          {weight: 0.5, body_names: .*_foot}
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 1.0}
-  # metrics:
-  #   _enabled_: false
-  #   impedance_acc_error: {weight: 1.0}
-  #   impedance_pos_error: {weight: 1.0}
+  metrics:
+    _enabled_: false
+    # impedance_acc_error: {weight: 1.0} # not implemented
+    impedance_vel_error: {weight: 1.0}
+    impedance_pos_error: {weight: 1.0}
 
 termination:
   crash: {body_names_expr: ["base", ".*calf.*", "arm_link[1-6]"], t_thres: 0.05}

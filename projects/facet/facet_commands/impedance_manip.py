@@ -41,8 +41,8 @@ class ImpedanceCommand(TensorClass):
     setpoint_eef: torch.Tensor
     kp_base: torch.Tensor # [*, 2] for lin and ang
     kd_base: torch.Tensor # [*, 2] for lin and ang
-    kp_eef: torch.Tensor
-    kd_eef: torch.Tensor
+    kp_eef: torch.Tensor # [*, 1] for lin
+    kd_eef: torch.Tensor # [*, 1] for lin
     virtual_mass_base: torch.Tensor
     virtual_mass_eef: torch.Tensor
     mode: torch.Tensor # 0: world; 1: set lin vel
@@ -167,15 +167,31 @@ def sample_command_world(
     virtual_mass_base[tid] = virtual_mass
 
 
-class ImpedanceCommandManager(Command):
+@wp.kernel(enable_backward=False)
+def sample_command_eef(
+    # input
+    mask: wp.array(dtype=wp.bool),
+    target_archive: wp.array(dtype=wp.vec3),
+    seed: wp.int32,
+    # output
+    setpoint_eef_pos_b: wp.array(dtype=wp.vec3),
+    kp_eef: wp.array(dtype=wp.float32),
+    kd_eef: wp.array(dtype=wp.float32),
+    virtual_mass_eef: wp.array(dtype=wp.float32),
+):
+    tid = wp.tid()
+    if not mask[tid]:
+        return
     
-    # training
-    MODE0_PROB = 0.5
-    FORCE_PROB = 0.5
+    seed_ = wp.rand_init(seed, tid)
+    setpoint_eef_pos_b[tid] = target_archive[wp.randi(seed_, 0, target_archive.shape[0])]
 
-    # evaluation
-    # MODE0_PROB = 0.0
-    # FORCE_PROB = 1.0
+    kp_eef[tid] = wp.float32(wp.randf(seed_, 4.0, 30.0))
+    kd_eef[tid] = 1.8 * wp.sqrt(kp_eef[tid])
+    virtual_mass_eef[tid] = 2.0
+
+
+class ImpedanceCommandManager(Command):
 
     def __init__(
         self,
@@ -196,9 +212,13 @@ class ImpedanceCommandManager(Command):
         else:
             self.has_eef = False
         
+        if max(ref_steps) > temporal_smoothing:
+            raise ValueError(f"`ref_steps` must be less than or equal to `temporal_smoothing`")
         self.temporal_smoothing = temporal_smoothing
-        self.base_kp_range = (4., 40.)
-        self.eef_kp_range = (4., 40.)
+        
+        # currently hardcoded in the kernels
+        # self.base_kp_range = (4., 40.)
+        # self.eef_kp_range = (4., 40.)
         # self.base_kp_range = (24., 60.)
         # self.eef_kp_range = (24., 60.)
         
@@ -221,8 +241,8 @@ class ImpedanceCommandManager(Command):
             self.setpoint_b = torch.zeros(self.num_envs, 3 + 3) # translation and rotation
             
             # we only control the translation of the eef
-            self.setpoint_eef_w = torch.zeros(self.num_envs, 3) # translation only
             self.setpoint_eef_b = torch.zeros(self.num_envs, 3) # translation only
+            # self.setpoint_eef_w is derived from self.setpoint_eef_b
 
             # surrogate targets
             self.surr_pos_target = torch.zeros(self.num_envs, len(self.ref_steps), 3)
@@ -249,6 +269,7 @@ class ImpedanceCommandManager(Command):
         if self.env.sim.has_gui() and self.env.backend == "isaac":
             self.ref_pos_marker = make_frame_marker("ref_pos")
             self.setpoint_marker = make_point_marker("setpoint", (0.8, 0.0, 0.0))
+            self.setpoint_eef_marker = make_point_marker("setpoint_eef", (0.0, 0.8, 0.0))
             # self.spring_marker = make_point_marker("spring", (0.0, 0.0, 0.8))
             
 
@@ -275,7 +296,7 @@ class ImpedanceCommandManager(Command):
 
         self.pos_base.acc_w.copy_(base_lin_acc)
         self.rot_base.acc_w.copy_(base_ang_acc)
-        
+
         mask_xy = torch.tensor([1., 1., 0.], device=self.device)
         mask_yaw = torch.tensor([0., 0., 1.], device=self.device)
         self.pos_base.integrate(dt, mask_xy, vel_clamp=2.0) # integrate only in xy plane
@@ -283,8 +304,16 @@ class ImpedanceCommandManager(Command):
         
         if self.has_eef:
             eef_kp, eef_kd = self.cmd.kp_eef, self.cmd.kd_eef
-            eef_pos_error = self.setpoint_eef_w.unsqueeze(1) - self.pos_eef.pos_w
-            eef_lin_vel_error = 0.0 - self.pos_eef.vel_w
+            # we fix reference base_height to 0.5m
+            pos_base_w = self.pos_base.pos_w.clone(); pos_base_w[:, :, 2] = 0.5
+            setpoint_eef_w = (
+                pos_base_w
+                + yaw_rotate(self.rot_base.pos_w[:, :, 2], self.setpoint_eef_b.unsqueeze(1))
+            )
+            eef_pos_error = setpoint_eef_w - self.pos_eef.pos_w
+            coriolis_vel = self.rot_base.vel_w.cross(self.pos_eef.pos_w - self.pos_base.pos_w, dim=-1)
+            eef_lin_vel_error = self.pos_base.vel_w + coriolis_vel - self.pos_eef.vel_w
+            
             eef_lin_acc = (
                 eef_kp.reshape(self.num_envs, 1, 1) * eef_pos_error
                 + eef_kd.reshape(self.num_envs, 1, 1) * eef_lin_vel_error
@@ -299,6 +328,9 @@ class ImpedanceCommandManager(Command):
         result.append(self.setpoint_b)
         result.append(self.setpoint_b[:, 0:3] * self.cmd.kp_base[:, 0:1])
         result.append(self.setpoint_b[:, 3:6] * self.cmd.kp_base[:, 1:2])
+        if self.has_eef:
+            result.append(self.setpoint_eef_b)
+            result.append(self.setpoint_eef_b * self.cmd.kp_eef)
         result = torch.cat(result, dim=1)
         return result
     
@@ -316,13 +348,17 @@ class ImpedanceCommandManager(Command):
 
     @property
     def command_hidden(self):
-        result =  torch.cat([
+        result = [
             self.w2b(self.pos_base.pos_w[:, self.ref_steps] - self.asset.data.root_link_pos_w.unsqueeze(1)).reshape(self.num_envs, -1),
             self.w2b(self.pos_base.vel_w[:, self.ref_steps]).reshape(self.num_envs, -1),
             wrap_to_pi(self.rot_base.pos_w[:, self.ref_steps] - self.root_link_rpy_w.unsqueeze(1)).reshape(self.num_envs, -1),
             self.w2b(self.rot_base.vel_w[:, self.ref_steps]).reshape(self.num_envs, -1),
-            # self.w2b(self.pos_eef.vel[:, self.ref_steps]).reshape(self.num_envs, -1),
-        ], dim=1)
+        ]
+        if self.has_eef:
+            root_pos_w = self.asset.data.root_link_pos_w.clone(); root_pos_w[:, 2] = 0.5
+            result.append(self.w2b(self.pos_eef.pos_w[:, self.ref_steps] - root_pos_w.unsqueeze(1)).reshape(self.num_envs, -1))
+            result.append(self.w2b(self.pos_eef.vel_w[:, self.ref_steps]).reshape(self.num_envs, -1))
+        result = torch.cat(result, dim=1)
         return result
     
     def w2b(self, x: torch.Tensor) -> torch.Tensor:
@@ -348,9 +384,10 @@ class ImpedanceCommandManager(Command):
         #     self.asset.data.body_quat_w[:, self.eef_body_id],
         #     self.get_eef_force(self.asset.data.body_pos_w[:, self.eef_body_id], self.asset.data.body_lin_vel_w[:, self.eef_body_id])
         # )
+        force_base_w = self.force_impulse.get_force(None, None)
         self.asset._external_force_b[:, 0] += quat_rotate_inverse(
             self.asset.data.root_link_quat_w,
-            self.force_impulse.get_force(None, None)
+            force_base_w
         )
         self.asset.has_external_wrench = True
 
@@ -362,6 +399,11 @@ class ImpedanceCommandManager(Command):
         self.rot_base.pos_w[env_ids] = root_link_rpy.unsqueeze(1)
         self.rot_base.vel_w[env_ids] = self.asset.data.root_link_ang_vel_w[env_ids].unsqueeze(1)
         self.root_link_rpy_w[env_ids] = root_link_rpy
+        
+        if self.has_eef:
+            self.setpoint_eef_b[env_ids] = torch.tensor([0.60, 0.0, 0.25], device=self.device)
+            self.pos_eef.pos_w[env_ids] = self.asset.data.body_pos_w[env_ids, self.eef_body_id].unsqueeze(1)
+            self.pos_eef.vel_w[env_ids] = self.asset.data.body_lin_vel_w[env_ids, self.eef_body_id].unsqueeze(1)
 
         mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         mask[env_ids] = True
@@ -411,6 +453,33 @@ class ImpedanceCommandManager(Command):
         )
         self.setpoint_w[:, :3] += self.setpoint_vel_w * self.env.step_dt
         
+        if self.has_eef:
+            self.eef_pos_w = self.asset.data.body_pos_w[:, self.eef_body_id]
+            self.eef_lin_vel_w = self.asset.data.body_lin_vel_w[:, self.eef_body_id]
+
+            root_pos_w = self.asset.data.root_link_pos_w.clone(); root_pos_w[:, 2] = 0.5
+            self.eef_pos_b = quat_rotate_inverse(
+                yaw_quat(self.asset.data.root_quat_w),
+                self.eef_pos_w - root_pos_w
+            )
+            
+            mask_eef = self.env.episode_length_buf % 80 == 0
+            wp.launch(
+                sample_command_eef,
+                device=wp.get_device(str(self.device)),
+                dim=[self.num_envs],
+                inputs=[
+                    wp.from_torch(mask_eef, dtype=wp.bool, return_ctype=True),
+                    wp.from_torch(self.ee_target_archive, dtype=wp.vec3, return_ctype=True),
+                    self.seed,
+                ],
+                outputs=[
+                    wp.from_torch(self.setpoint_eef_b, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(self.cmd.kp_eef, dtype=wp.float32, return_ctype=True),
+                    wp.from_torch(self.cmd.kd_eef, dtype=wp.float32, return_ctype=True),
+                    wp.from_torch(self.cmd.virtual_mass_eef, dtype=wp.float32, return_ctype=True),
+                ],
+            )
 
         self.pos_base = self.pos_base.roll(1, 1)
         self.pos_base.pos_w[:, 0] = self.asset.data.root_link_pos_w
@@ -422,8 +491,8 @@ class ImpedanceCommandManager(Command):
 
         if self.has_eef:
             self.pos_eef = self.pos_eef.roll(1, 1)
-            self.pos_eef.pos_w[:, 0] = self.asset.data.body_pos_w[:, self.eef_body_id]
-            self.pos_eef.vel_w[:, 0] = self.asset.data.body_lin_vel_w[:, self.eef_body_id]
+            self.pos_eef.pos_w[:, 0] = self.eef_pos_w
+            self.pos_eef.vel_w[:, 0] = self.eef_lin_vel_w
 
         self.force_impulse.time.add_(self.env.step_dt)
         resample = self.force_impulse.expired & (torch.rand(self.num_envs, 1, device=self.device) < 0.003)
@@ -436,6 +505,10 @@ class ImpedanceCommandManager(Command):
         self.surr_lin_vel_target = self.pos_base.vel_w[:, self.ref_steps]
         self.surr_yaw_target = self.rot_base.pos_w[:, self.ref_steps, 2:3]
         self.surr_yaw_vel_target = self.rot_base.vel_w[:, self.ref_steps, 2:3]
+
+        if self.has_eef:
+            self.surr_eef_pos_target = self.pos_eef.pos_w[:, self.ref_steps]
+            self.surr_eef_lin_vel_target = self.pos_eef.vel_w[:, self.ref_steps]
 
         self.setpoint_b[:, :3] = quat_rotate_inverse(
             self.asset.data.root_quat_w,
@@ -460,7 +533,27 @@ class ImpedanceCommandManager(Command):
             translations=self.pos_base.pos_w[:, self.ref_steps].reshape(-1, 3),
             orientations=quat_from_euler_xyz(self.rot_base.pos_w[:, self.ref_steps].reshape(-1, 3)),
         )
+        # setpoints (base and eef)
         self.setpoint_marker.visualize(self.setpoint_w[:, :3])
+        if self.has_eef:
+            base_pos_w = self.asset.data.root_link_pos_w.clone(); base_pos_w[:, 2] = 0.5
+            setpoint_eef_w = (
+                base_pos_w 
+                + yaw_rotate(self.asset.data.heading_w, self.setpoint_eef_b)
+            )
+            self.setpoint_eef_marker.visualize(setpoint_eef_w)
+            self.env.debug_draw.vector(
+                self.asset.data.body_pos_w[:, self.eef_body_id],
+                setpoint_eef_w - self.asset.data.body_pos_w[:, self.eef_body_id],
+                color=(1.0, 0.0, 0.0, 1.0),
+                size=5.0,
+            )
+            self.env.debug_draw.vector( # reference lin vel, green
+                self.asset.data.body_pos_w[:, self.eef_body_id],
+                self.pos_eef.vel_w[:, -2],
+                color=(0.0, 1.0, 0.0, 1.0),
+                size=5.0,
+            )
         # external forces
         self.env.debug_draw.vector(
             self.asset.data.root_link_pos_w,
