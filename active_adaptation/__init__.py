@@ -3,10 +3,12 @@ import active_adaptation.learning
 import builtins
 import importlib.metadata
 import importlib.util
+import inspect
 from pathlib import Path
 
 _BACKEND = None
 _BACKEND_SET = False
+_CALLED_AT = None
 
 _LOCAL_RANK = os.getenv("LOCAL_RANK", "0")
 _LOCAL_RANK = int(_LOCAL_RANK)
@@ -50,13 +52,22 @@ SCRIPT_PATH = Path(__file__).parent.parent / "scripts"
 
 
 def set_backend(backend: str):
-    global _BACKEND, _BACKEND_SET
+    global _BACKEND, _BACKEND_SET, _CALLED_AT
     if _BACKEND_SET:
-        raise RuntimeError("set_backend() can only be called once globally")
+        raise RuntimeError(f"set_backend() already called at {_CALLED_AT['filename']}:{_CALLED_AT['lineno']} in {_CALLED_AT['function']}")
     if not backend in ("isaac", "mujoco", "mjlab"):
         raise ValueError(f"backend must be either 'isaac' or 'mujoco' or 'mjlab', got {backend}")
+    # Record the call site
+    stack = inspect.stack()
+    caller = stack[1]
     _BACKEND = backend
     _BACKEND_SET = True
+    _CALLED_AT = {
+        'filename': caller.filename,
+        'lineno': caller.lineno,
+        'function': caller.function,
+        'code_context': caller.code_context[0].strip() if caller.code_context else None,
+    }
 
 
 def get_backend():

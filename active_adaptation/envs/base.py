@@ -3,6 +3,7 @@ import numpy as np
 import hydra
 import inspect
 import re
+import warnings
 import warp as wp
 
 from tensordict.tensordict import TensorDictBase, TensorDict
@@ -15,20 +16,19 @@ from torchrl.data import (
 from collections import OrderedDict
 
 from abc import abstractmethod
-from typing import NamedTuple, Dict
+from typing import Dict, cast
 
 import active_adaptation
 import active_adaptation.envs.mdp as mdp
 import active_adaptation.utils.symmetry as symmetry_utils
 from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.envs.adapters import wrap_sim, wrap_scene
 from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
 
 if active_adaptation.get_backend() == "isaac":
     import isaacsim.core.utils.torch as torch_utils
     import isaaclab.sim as sim_utils
     from isaaclab.terrains.trimesh.utils import make_plane
-    from isaaclab.scene import InteractiveScene
-    from isaaclab.sim import SimulationContext
     from pxr import UsdGeom, UsdPhysics
 
 
@@ -95,22 +95,23 @@ class ObsGroup:
 
 
 class _Env(EnvBase):
-    """
-    
-    2024.10.10
-    - disable delay
-    - refactor flipping
-    - no longer recompute observation upon reset
-
-    """
     def __init__(self, cfg):
-        self.cfg = cfg
         self.backend = active_adaptation.get_backend()
-        # self._set_seed(cfg.seed)
+        if self.backend in ("isaac", "mjlab"):
+            device = f"cuda:{active_adaptation.get_local_rank()}"
+        else:
+            device = "cpu"
+        self.cfg = cfg
+        super().__init__(
+            device=device,
+            batch_size=[self.cfg.num_envs],
+            run_type_checks=False,
+        )
 
-        self.scene: InteractiveScene
-        self.sim: SimulationContext
         self.setup_scene()
+        # Wrap sim and scene with adapters for unified API
+        self.sim = wrap_sim(self.sim, self.backend)
+        self.scene = wrap_scene(self.scene, self.backend)
 
         if hasattr(self.scene, "terrain") and self.scene.terrain is not None:
             self.terrain_type = self.scene.terrain.cfg.terrain_type
@@ -125,11 +126,6 @@ class _Env(EnvBase):
         
         print(f"Step dt: {self.step_dt}, physics dt: {self.physics_dt}, decimation: {self.decimation}")
 
-        super().__init__(
-            device=self.sim.device,
-            batch_size=[self.num_envs],
-            run_type_checks=False,
-        )
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=int, device=self.device)
         self.episode_id = torch.zeros(self.num_envs, dtype=int, device=self.device)
         self.episode_count = 0
@@ -153,14 +149,12 @@ class _Env(EnvBase):
             shape=[self.num_envs]
         ).to(self.device)
 
-        if self.cfg.command.get("_target_") is not None:
-            self.command_manager: mdp.Command = hydra.utils.instantiate(self.cfg.command, env=self)
-        else:
-            command_cfg = dict(self.cfg.command)
-            class_name = command_cfg.pop("class")
-            self.command_manager: mdp.Command = mdp.Command.registry[class_name](self, **command_cfg)
-
-        ADDONS = mdp.ADDONS
+        command_cfg = dict(self.cfg.command)
+        class_name = command_cfg.pop("class")
+        command = mdp.Command.make(class_name, self, **command_cfg)
+        if not command:
+            raise ValueError(f"Command class '{class_name}' not found")
+        self.command_manager = cast(mdp.Command, command)
 
         self.addons = OrderedDict()
         self.randomizations = OrderedDict()
@@ -197,19 +191,13 @@ class _Env(EnvBase):
         
         self.action_spec = Composite(action_spec, shape=[self.num_envs], device=self.device)
         
-        addons = self.cfg.get("addons", {})
-        print(f"Addons: {ADDONS.keys()}")
-        for key, params in addons.items():
-            addon = ADDONS[key](self, **params if params is not None else {})
-            self.addons[key] = addon
-            self._reset_callbacks.append(addon.reset)
-            self._update_callbacks.append(addon.update)
-            self._debug_draw_callbacks.append(addon.debug_draw)
-        
         for rand_spec, params in self.cfg.randomization.items():
             rand_name, cls_name = parse_name_and_class(rand_spec)
-            rand_cls = mdp.Randomization.registry[cls_name]
-            rand: mdp.Randomization = rand_cls(self, **params if params is not None else {})
+            rand = mdp.Randomization.make(cls_name, self, **(params if params is not None else {}))
+            if not rand:
+                continue
+            
+            rand = cast(mdp.Randomization, rand)
             self.randomizations[rand_name] = rand
             self._startup_callbacks.append(rand.startup)
             self._reset_callbacks.append(rand.reset)
@@ -221,10 +209,11 @@ class _Env(EnvBase):
             funcs = OrderedDict()            
             for obs_spec, kwargs in params.items():
                 obs_name, obs_cls_name = parse_name_and_class(obs_spec)
-                obs_cls = mdp.Observation.registry[obs_cls_name]
-                obs: mdp.Observation = obs_cls(self, **(kwargs if kwargs is not None else {}))
+                obs = mdp.Observation.make(obs_cls_name, self, **(kwargs if kwargs is not None else {}))
+                if not obs:
+                    continue
+                obs = cast(mdp.Observation, obs)
                 funcs[obs_name] = obs
-
                 self._startup_callbacks.append(obs.startup)
                 self._update_callbacks.append(obs.update)
                 self._reset_callbacks.append(obs.reset)
@@ -255,10 +244,10 @@ class _Env(EnvBase):
 
             for rew_spec, params in func_specs.items():
                 rew_name, cls_name = parse_name_and_class(rew_spec)
-                rew_cls = mdp.Reward.registry[cls_name]
-                if "enabled" in params:
-                    params.pop("enabled")
-                reward: mdp.Reward = rew_cls(self, **params)
+                reward = mdp.Reward.make(cls_name, self, **(params if params is not None else {}))
+                if not reward:
+                    continue
+                reward = cast(mdp.Reward, reward)
                 funcs[rew_name] = reward
                 reward_spec["stats", group_name, rew_name] = Unbounded(1, device=self.device)
                 self._update_callbacks.append(reward.update)
@@ -297,8 +286,10 @@ class _Env(EnvBase):
         self.termination_funcs = OrderedDict()
         for key, params in self.cfg.termination.items():
             term_name, cls_name = parse_name_and_class(key)
-            term_cls = mdp.Termination.registry[cls_name]
-            term: mdp.Termination = term_cls(self, **params)
+            term = mdp.Termination.make(cls_name, self, **(params if params is not None else {}))
+            if not term:
+                continue
+            term = cast(mdp.Termination, term)
             self.termination_funcs[term_name] = term
             self._update_callbacks.append(term.update)
             self._reset_callbacks.append(term.reset)
@@ -409,11 +400,11 @@ class _Env(EnvBase):
                     input_manager.process_action(tensordict.get(input_key))
             for substep in range(self.decimation):
                 with ScopedTimer("simulation_pre_step", sync=False):
-                    for asset in self.scene.articulations.values():
-                        if asset.has_external_wrench:
-                            asset._external_force_b.zero_()
-                            asset._external_torque_b.zero_()
-                            asset.has_external_wrench = False
+                    # for asset in self.scene.articulations.values():
+                    #     if asset.has_external_wrench:
+                    #         asset._external_force_b.zero_()
+                    #         asset._external_torque_b.zero_()
+                    #         asset.has_external_wrench = False
                     self.apply_action(tensordict, substep)
                     for callback in self._pre_step_callbacks:
                         callback(substep)

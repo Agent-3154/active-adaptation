@@ -53,9 +53,9 @@ class SplineCommand(Command):
     @property
     def command(self):
         return torch.cat(
-            quat_rotate_inverse(self.asset.data.root_quat_w, self.target_pos_w - self.asset.data.root_pos_w),
-            quat_rotate_inverse(self.asset.data.root_quat_w, self.target_lin_vel_w),
-            # quat_rotate_inverse(self.asset.data.root_quat_w, self.target_ang_vel_w),
+            quat_rotate_inverse(self.asset.data.root_link_quat_w, self.target_pos_w - self.asset.data.root_pos_w),
+            quat_rotate_inverse(self.asset.data.root_link_quat_w, self.target_lin_vel_w),
+            # quat_rotate_inverse(self.asset.data.root_link_quat_w, self.target_ang_vel_w),
         )
     
     def symmetry_transform(self):

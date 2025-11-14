@@ -26,7 +26,7 @@ class feet_clearance(Reward):
         self.thres = 0.16
     
     def compute(self) -> torch.Tensor:
-        feet_pos_w = self.asset.data.body_pos_w[:, self.feet_id]
+        feet_pos_w = self.asset.data.body_link_pos_w[:, self.feet_id]
         distance_xy = (feet_pos_w[:, 0, :2] - feet_pos_w[:, 1, :2]).norm(dim=-1, keepdim=True)
         return (- self.thres + distance_xy).clamp_max(0.) / self.thres
 
@@ -60,7 +60,7 @@ class feet_swing(Reward):
         phase_sin = self.phase.sin()
         swing_vel[:, 0] *= (phase_sin > +0.15).float().unsqueeze(1)
         swing_vel[:, 1] *= (phase_sin < -0.15).float().unsqueeze(1)
-        swing_vel = quat_rotate(yaw_quat(self.asset.data.root_quat_w).unsqueeze(1), swing_vel)
+        swing_vel = quat_rotate(yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1), swing_vel)
         # reward = torch.exp(- 2 * (feet_linvel - swing_vel).abs().sum(-1)).sum(1, True)
 
         max_speed = self.command_manager.command_speed.unsqueeze(1)
@@ -69,13 +69,13 @@ class feet_swing(Reward):
         return reward.reshape(self.num_envs, 1) * (~self.command_manager.is_standing_env)
     
     def debug_draw(self):
-        feet_pos = self.asset.data.body_pos_w[:, self.feet_id]
+        feet_pos = self.asset.data.body_link_pos_w[:, self.feet_id]
         feet_linvel = self.feet_vel_buf.mean(-1)
         swing_vel = torch.zeros_like(feet_pos)
         swing_vel[:] = self.command_manager.command_linvel.unsqueeze(1)
         swing_vel[:, 0] *= (self.phase.sin() > +0.15).float().unsqueeze(1)
         swing_vel[:, 1] *= (self.phase.sin() < -0.15).float().unsqueeze(1)
-        swing_vel = quat_rotate(yaw_quat(self.asset.data.root_quat_w).unsqueeze(1), swing_vel)
+        swing_vel = quat_rotate(yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1), swing_vel)
         self.env.debug_draw.vector(feet_pos.reshape(-1, 3), swing_vel.reshape(-1, 3))
         self.env.debug_draw.vector(feet_pos.reshape(-1, 3), feet_linvel.reshape(-1, 3), color=(1., 0., 0.2, 1.))
 
@@ -123,7 +123,7 @@ class feet_orientation(Reward):
         if self.body_id is not None:
             quat_body = yaw_quat(self.asset.data.body_quat_w[:, self.body_id]).unsqueeze(1)
         else:
-            quat_body = yaw_quat(self.asset.data.root_quat_w).unsqueeze(1)
+            quat_body = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
         self.body_fwd = quat_rotate(quat_body, self.heading_root)
 
     def compute(self) -> torch.Tensor:
@@ -132,7 +132,7 @@ class feet_orientation(Reward):
         return (reward_alignment).sum(1, True)
 
     # def debug_draw(self):
-    #     feet_pos = self.asset.data.body_pos_w[:, self.feet_id]
+    #     feet_pos = self.asset.data.body_link_pos_w[:, self.feet_id]
     #     self.env.debug_draw.vector(
     #         feet_pos.reshape(-1, 3),
     #         self.feet_fwd.reshape(-1, 3),
@@ -168,10 +168,10 @@ class feet_step(Reward):
         print(f"Feet names: {feet_names}, be aware of the order!")
     
     def compute(self) -> torch.Tensor:
-        quat_root = yaw_quat(self.asset.data.root_quat_w)
+        quat_root = yaw_quat(self.asset.data.root_link_quat_w)
         feet_displacement = (
-            - self.asset.data.body_pos_w[:, self.feet_id[0]]
-            + self.asset.data.body_pos_w[:, self.feet_id[1]]
+            - self.asset.data.body_link_pos_w[:, self.feet_id[0]]
+            + self.asset.data.body_link_pos_w[:, self.feet_id[1]]
         )
         feet_displacement = dot(quat_rotate(quat_root, self.heading_root), feet_displacement)
         phase_cos = self.phase.cos()
@@ -179,22 +179,22 @@ class feet_step(Reward):
         return reward.reshape(self.num_envs, 1) * (~self.command_manager.is_standing_env)
 
     def debug_draw(self):
-        quat_root = yaw_quat(self.asset.data.root_quat_w)
+        quat_root = yaw_quat(self.asset.data.root_link_quat_w)
         feet_displacement = (
-            - self.asset.data.body_pos_w[:, self.feet_id[0]]
-            + self.asset.data.body_pos_w[:, self.feet_id[1]]
+            - self.asset.data.body_link_pos_w[:, self.feet_id[0]]
+            + self.asset.data.body_link_pos_w[:, self.feet_id[1]]
         )
         feet_displacement_projected = dot(quat_rotate(quat_root, self.heading_root), feet_displacement)
         phase_cos = self.phase.cos()
         reward = phase_cos.sign() * feet_displacement_projected.squeeze(1)
         positive = reward > 0
         self.env.debug_draw.vector(
-            self.asset.data.body_pos_w[positive][:, self.feet_id[0]],
+            self.asset.data.body_link_pos_w[positive][:, self.feet_id[0]],
             feet_displacement[positive],
             color=(0., 1., 0., 1.)
         )
         self.env.debug_draw.vector(
-            self.asset.data.body_pos_w[~positive][:, self.feet_id[0]],
+            self.asset.data.body_link_pos_w[~positive][:, self.feet_id[0]],
             feet_displacement[~positive],
             color=(1., 0., 0., 1.)
         )
@@ -213,7 +213,7 @@ class body_orientation(Reward):
     
     def update(self):
         body_yaw_quat = yaw_quat(self.asset.data.body_quat_w[:, self.body_id])
-        root_yaw_quat = yaw_quat(self.asset.data.root_quat_w)
+        root_yaw_quat = yaw_quat(self.asset.data.root_link_quat_w)
         self.body_heading_vec[:] = quat_rotate(body_yaw_quat, self.y_vec)
         self.root_heading_vec[:] = quat_rotate(root_yaw_quat, self.x_vec)
     
@@ -223,7 +223,7 @@ class body_orientation(Reward):
 
     # def debug_draw(self):
     #     self.env.debug_draw.vector(
-    #         self.asset.data.body_pos_w[:, self.body_id],
+    #         self.asset.data.body_link_pos_w[:, self.body_id],
     #         self.body_heading_vec
     #     )
 
@@ -272,7 +272,7 @@ class arm_swing(Reward):
         phase_sin = self.phase.sin()
         swing_vel[:, 0] *= (phase_sin < +0.15).float().unsqueeze(1)
         swing_vel[:, 1] *= (phase_sin > -0.15).float().unsqueeze(1)
-        swing_vel = quat_rotate(yaw_quat(self.asset.data.root_quat_w).unsqueeze(1), swing_vel)
+        swing_vel = quat_rotate(yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1), swing_vel)
         
         reward = (normalize(swing_vel) * arm_linvel).sum(-1)
         reward = reward.clamp(max=self.command_manager.command_speed).sum(1, True)
@@ -288,7 +288,7 @@ class arm_velocity(Reward):
     
     def compute(self) -> torch.Tensor:
         arm_linvel = self.asset.data.body_lin_vel_w[:, self.body_ids]
-        root_linvel = self.asset.data.root_lin_vel_w
+        root_linvel = self.asset.data.root_link_lin_vel_w
         d = (arm_linvel - root_linvel.unsqueeze(1)).square().sum(-1)
         return - d.mean(1, True)
 
@@ -302,9 +302,9 @@ class arm_well_being(Reward):
         # self.target_y = torch.tensor([0.21, -0.21], device=self.device)
     
     def update(self):
-        self.arm_pos = self.asset.data.body_pos_w[:, self.body_ids]
+        self.arm_pos = self.asset.data.body_link_pos_w[:, self.body_ids]
         self.root_pos = self.asset.data.root_pos_w
-        self.root_quat = self.asset.data.root_quat_w
+        self.root_quat = self.asset.data.root_link_quat_w
     
     def compute(self) -> torch.Tensor:
         arm_pos_b = quat_rotate_inverse(
@@ -339,7 +339,7 @@ class feet_impact(Reward):
     
     def update(self):
         self.contact_force = self.contact_sensor.data.net_forces_w_history[:, :, self.body_ids]
-        feet_pos_w = self.asset.data.body_pos_w[:, self.asset_body_ids]
+        feet_pos_w = self.asset.data.body_link_pos_w[:, self.asset_body_ids]
         in_contact = (self.contact_force.norm(dim=-1) > 0.01).any(dim=1)
         self.impact = (~self.in_contact) & in_contact
         self.detach = self.in_contact & (~in_contact)
@@ -366,11 +366,11 @@ class angular_momentum(Reward):
         self.body_mass_weight = self.body_mass / self.body_mass.sum(1, keepdim=True)
 
     def update(self):
-        self.body_pos = self.asset.data.body_pos_w
+        self.body_pos = self.asset.data.body_link_pos_w
         self.body_lin_vel = self.asset.data.body_lin_vel_w
         self.body_ang_vel = self.asset.data.body_ang_vel_w
         self.root_pos = self.asset.data.root_pos_w
-        self.root_lin_vel = self.asset.data.root_lin_vel_w
+        self.root_lin_vel = self.asset.data.root_link_lin_vel_w
     
     def compute(self):
         body_com_pos = self.body_pos + quat_rotate(
@@ -401,18 +401,18 @@ class com_pos(Reward):
         self.com_offset = self.asset.root_physx_view.get_coms()[:, self.body_ids, :3].to(self.device)
 
     def update(self):
-        self.body_pos_w = self.asset.data.body_pos_w[:, self.body_ids]
+        self.body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
         self.body_quat_w = self.asset.data.body_quat_w[:, self.body_ids]
         self.root_pos_w = self.asset.data.root_pos_w
     
     def compute(self):
-        self.body_com_pos = self.body_pos_w + quat_rotate(
+        self.body_com_pos = self.body_link_pos_w + quat_rotate(
             self.body_quat_w,
             self.com_offset
         )
         self.com_pos_w = (self.body_com_pos * self.mass_weight).sum(1)
         self.com_pos_b = quat_rotate_inverse(
-            self.asset.data.root_quat_w,
+            self.asset.data.root_link_quat_w,
             self.com_pos_w - self.root_pos_w
         )
         return self.com_pos_b[:, 0].clamp_max(0.).unsqueeze(1)

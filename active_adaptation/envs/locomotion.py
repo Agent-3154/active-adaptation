@@ -9,6 +9,8 @@ from active_adaptation.asset import AssetCfg
 from active_adaptation.registry import Registry
 from typing import cast
 
+import active_adaptation.assets
+
 
 class SimpleEnv(_Env):
     def __init__(self, cfg):
@@ -38,7 +40,33 @@ class SimpleEnv(_Env):
             raise NotImplementedError
 
     def setup_scene_mjlab(self):
-        pass
+        from mjlab.scene import Scene
+        from mjlab.scene.scene import SceneCfg
+        from mjlab.sim import Simulation
+        from mjlab.sim.sim import SimulationCfg
+
+        registry = Registry.instance()
+        asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
+        # Initialize scene and simulation.
+        scene_cfg = SceneCfg(
+            num_envs=self.cfg.num_envs,
+            env_spacing=2.5,
+            entities={"robot": asset_cfg.mjlab()},
+            # sensors=(self.cfg.sensors.mjlab(),),
+        )
+        self.scene = Scene(scene_cfg, device=str(self.device))
+        self.sim = Simulation(
+            num_envs=self.scene.num_envs,
+            cfg=SimulationCfg(),
+            model=self.scene.compile(),
+            device=str(self.device),
+        )
+
+        self.scene.initialize(
+            mj_model=self.sim.mj_model,
+            model=self.sim.model,
+            data=self.sim.data,
+        )
     
     def setup_scene_isaac(self):
         import active_adaptation.envs.scene as scene

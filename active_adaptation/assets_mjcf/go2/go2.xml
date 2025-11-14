@@ -44,17 +44,9 @@
     <mesh name="foot" file="foot.stl"/>
     <mesh name="thigh_mirror" file="thigh_mirror.stl"/>
     <mesh name="calf_mirror" file="calf_mirror.stl"/>
-
-    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
-    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
-      markrgb="0.8 0.8 0.8" width="300" height="300"/>
-    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
   </asset>
 
   <worldbody>
-    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
-    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
-
     <body name="base" pos="0 0 0.445">
       <inertial pos="0.0201531 0 -0.00510896" quat="-0.000484971 0.713304 -0.00161969 0.700853" mass="7.279" diaginertia="0.112836 0.103121 0.0257104"/>
       <joint name="floating_base_joint" type="free" limited="false" actuatorfrclimited="false"/>
@@ -173,7 +165,7 @@
     </body>
   </worldbody>
 
-  <actuator>
+  <!-- <actuator>
     <motor class="abduction" name="FL_hip_joint" joint="FL_hip_joint" />
     <motor class="hip" name="FL_thigh_joint" joint="FL_thigh_joint" />
     <motor class="knee" name="FL_calf_joint" joint="FL_calf_joint" />
@@ -186,5 +178,5 @@
     <motor class="abduction" name="RR_hip_joint" joint="RR_hip_joint" />
     <motor class="hip" name="RR_thigh_joint" joint="RR_thigh_joint" />
     <motor class="knee" name="RR_calf_joint" joint="RR_calf_joint" />
-  </actuator>
+  </actuator> -->
 </mujoco>

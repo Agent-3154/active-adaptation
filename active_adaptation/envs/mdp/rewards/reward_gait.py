@@ -25,7 +25,7 @@ class max_feet_height(Reward):
         self.max_height[env_ids] = 0.
     
     def update(self):
-        feet_height = self.asset.data.body_pos_w[:, self.body_ids, 2]
+        feet_height = self.asset.data.body_link_pos_w[:, self.body_ids, 2]
         in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.0
         self.max_height = torch.maximum(self.max_height, feet_height)
         self.rew = self.max_height.clamp_max(self.target_height)
@@ -48,7 +48,7 @@ class feet_sliding(Reward):
     def compute(self) -> torch.Tensor:
         in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.005 
         feet_vel_b = quat_rotate_inverse(
-            yaw_quat(self.asset.data.root_quat_w).unsqueeze(1),
+            yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1),
             self.asset.data.body_lin_vel_w[:, self.body_ids]
         )
         slip = (in_contact * feet_vel_b[:, :, 1].square()).sum(dim=1)

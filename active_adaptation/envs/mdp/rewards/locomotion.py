@@ -25,7 +25,7 @@ class linvel_z_l2(Reward):
         self.linvel_z = torch.zeros(self.num_envs, 1, device=self.device)
 
     def update(self):
-        self.linvel_z = self.asset.data.root_lin_vel_b[:, 2].unsqueeze(1)
+        self.linvel_z = self.asset.data.root_link_lin_vel_b[:, 2].unsqueeze(1)
 
     def compute(self) -> torch.Tensor:
         return -self.linvel_z.square()
@@ -38,7 +38,7 @@ class angvel_xy_l2(Reward):
         self.angvel = torch.zeros(self.num_envs, 3, device=self.device)
 
     def update(self):
-        self.angvel = self.asset.data.root_ang_vel_b
+        self.angvel = self.asset.data.root_link_ang_vel_b
 
     def compute(self) -> torch.Tensor:
         r = -self.angvel[:, :2].square().sum(-1)
@@ -46,6 +46,7 @@ class angvel_xy_l2(Reward):
 
 
 class undesired_contact(Reward):
+    supported_backends = ("isaac",)
     def __init__(self, env, body_names, weight: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
@@ -66,7 +67,7 @@ class undesired_contact(Reward):
     # def debug_draw(self):
     #     self.env.debug_draw.point(
     #         # self.contact_sensor.data.pos_w[:, self.body_ids],
-    #         self.asset.data.body_pos_w[:, self.articulation_body_ids],
+    #         self.asset.data.body_link_pos_w[:, self.articulation_body_ids],
     #         color=(1., .6, .4, 1.),
     #         size=20,
     #     )
@@ -133,7 +134,7 @@ class linvel_exp(Reward[Twist]):
         # draw smoothed lin vel (purple)
         linvel_w = self.linvel_w_sum / self.count.clamp_min(1.0)
         self.env.debug_draw.vector(
-            self.asset.data.root_pos_w
+            self.asset.data.root_link_pos_w
             + torch.tensor([0.0, 0.0, 0.2], device=self.device),
             linvel_w,
             color=(0.8, 0.1, 0.8, 1.0),
@@ -176,9 +177,9 @@ class angvel_z_exp(Reward[Twist]):
 
     def update(self):
         if self.world_frame:
-            angvel = self.asset.data.root_ang_vel_w
+            angvel = self.asset.data.root_link_ang_vel_w
         else:
-            angvel = self.asset.data.root_ang_vel_b
+            angvel = self.asset.data.root_link_ang_vel_b
         self.angvel_sum.mul_(self.gamma).add_(angvel)
         self.count.mul_(self.gamma).add_(1)
 
@@ -204,7 +205,7 @@ class tracking_lin_vel(Reward):
         self.cnt[env_ids] = 0.0
         
     def update(self):
-        self.lin_vel_w.mul_(self.decay).add_(self.asset.data.root_lin_vel_w.unsqueeze(-1))
+        self.lin_vel_w.mul_(self.decay).add_(self.asset.data.root_link_lin_vel_w.unsqueeze(-1))
         self.cnt.mul_(self.decay).add_(1.0)
     
     def compute(self):
@@ -235,9 +236,9 @@ class angvel_z_exp_shaped(Reward):
 
     def compute(self) -> torch.Tensor:
         if self.world_frame:
-            angvel_z = self.asset.data.root_ang_vel_w[:, 2]
+            angvel_z = self.asset.data.root_link_ang_vel_w[:, 2]
         else:
-            angvel_z = self.asset.data.root_ang_vel_b[:, 2]
+            angvel_z = self.asset.data.root_link_ang_vel_b[:, 2]
         angvel_error = (self.target_angvel - angvel_z).unsqueeze(1)
         angvel_error = shaped_error(angvel_error)
         r = torch.exp(-angvel_error / 0.25)
@@ -257,15 +258,16 @@ class linacc_z_l2(Reward):
 
     def update(self):
         self.linacc_z[:] = (
-            self.asset.data.root_lin_vel_b[:, 2] - self.prev_linvel_z
+            self.asset.data.root_link_lin_vel_b[:, 2] - self.prev_linvel_z
         ) / self.env.step_dt
-        self.prev_linvel_z[:] = self.asset.data.root_lin_vel_b[:, 2]
+        self.prev_linvel_z[:] = self.asset.data.root_link_lin_vel_b[:, 2]
 
     def compute(self) -> torch.Tensor:
         return -self.linacc_z.square().unsqueeze(1)
 
 
 class feet_air_time(Reward):
+    supported_backends = ("isaac",)
     def __init__(self, env, body_names: str, thres: float, weight: float, condition_on_linvel: bool = False):
         super().__init__(env, weight)
         self.thres = thres
@@ -296,6 +298,7 @@ class feet_air_time(Reward):
 
 
 class feet_contact_count(Reward):
+    supported_backends = ("isaac",)
     def __init__(self, env, body_names: str, weight: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
@@ -340,8 +343,8 @@ class base_height_l1(Reward[Twist]):
             target_height = self.command_manager.cmd_base_height
         else:
             target_height = self.target_height
-        root_pos_w = self.asset.data.root_pos_w
-        height = root_pos_w[:, 2] - self.env.get_ground_height_at(root_pos_w)
+        root_link_pos_w = self.asset.data.root_link_pos_w
+        height = root_link_pos_w[:, 2] - self.env.get_ground_height_at(root_link_pos_w)
         error_l1 = (height.unsqueeze(1) - target_height).abs()
         return - error_l1.reshape(self.num_envs, 1)
 
@@ -357,8 +360,8 @@ class base_height_exp(Reward[Twist]):
             target_height = self.command_manager.cmd_base_height
         else:
             target_height = self.target_height
-        root_pos_w = self.asset.data.root_pos_w
-        height = root_pos_w[:, 2] - self.env.get_ground_height_at(root_pos_w)
+        root_link_pos_w = self.asset.data.root_link_pos_w
+        height = root_link_pos_w[:, 2] - self.env.get_ground_height_at(root_link_pos_w)
         error_l2 = (height.unsqueeze(1) - target_height).square()
         rew = torch.exp(-error_l2 / 0.2)
         return rew.reshape(self.num_envs, 1)
@@ -409,35 +412,31 @@ class stance_width(Reward):
         return -(self.target_width - width).clamp_min(0.0).sum(1, keepdim=True)
 
 
-class feet_swing_height(Reward):
-    def __init__(self, env, target_height: float, weight: float):
-        super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.target_height = target_height
-        self.feet_ids = self.asset.find_bodies(".*foot.*")[0]
+# class feet_swing_height(Reward):
+#     def __init__(self, env, target_height: float, weight: float):
+#         super().__init__(env, weight)
+#         self.asset: Articulation = self.env.scene["robot"]
+#         self.target_height = target_height
+#         self.feet_ids = self.asset.find_bodies(".*foot.*")[0]
 
-    def update(self):
-        self.feet_pos_b = quat_rotate_inverse(
-            self.asset.data.root_quat_w.unsqueeze(1),
-            self.asset.data.body_pos_w[:, self.feet_ids]
-            - self.asset.data.root_pos_w.unsqueeze(1),
-        )
-        self.feet_vel_b = quat_rotate_inverse(
-            self.asset.data.root_quat_w.unsqueeze(1),
-            self.asset.data.body_lin_vel_w[:, self.feet_ids],
-        )
-        if not hasattr(self.asset, "feet_height"):
-            self.feet_height = self.asset.data.body_pos_w[:, self.feet_ids, 2]
-        else:
-            self.feet_height = self.asset.data.feet_height
+#     def update(self):
+#         self.feet_pos_b = quat_rotate_inverse(
+#             self.asset.data.root_link_quat_w.unsqueeze(1),
+#             self.asset.data.body_link_pos_w[:, self.feet_ids]
+#             - self.asset.data.root_link_pos_w.unsqueeze(1),
+#         )
+#         self.feet_vel_b = quat_rotate_inverse(
+#             self.asset.data.root_link_quat_w.unsqueeze(1),
+#             self.asset.data.body_lin_vel_w[:, self.feet_ids],
+#         )
 
-    def compute(self) -> torch.Tensor:
-        hight_error = (self.feet_height - self.target_height).abs()
-        lateral_speed = (
-            self.feet_vel_b[:, :, :2].square().sum(-1)
-            + self.asset.data.body_ang_vel_w[:, self.feet_ids, 2].square()
-        )
-        return -(hight_error * lateral_speed).sum(1, keepdim=True)
+#     def compute(self) -> torch.Tensor:
+#         hight_error = (self.feet_height - self.target_height).abs()
+#         lateral_speed = (
+#             self.feet_vel_b[:, :, :2].square().sum(-1)
+#             + self.asset.data.body_ang_vel_w[:, self.feet_ids, 2].square()
+#         )
+#         return -(hight_error * lateral_speed).sum(1, keepdim=True)
 
 
 class head_clearance(Reward):
@@ -458,9 +457,9 @@ class com_support(Reward):
         self.feet_ids = self.asset.find_bodies(".*foot")[0]
 
     def compute(self) -> torch.Tensor:
-        feet_center = self.asset.data.body_pos_w[:, self.feet_ids].mean(1)
+        feet_center = self.asset.data.body_link_pos_w[:, self.feet_ids].mean(1)
         error = (
-            (self.asset.data.root_pos_w[:, :2] - feet_center[:, :2])
+            (self.asset.data.root_link_pos_w[:, :2] - feet_center[:, :2])
             .square()
             .sum(1, keepdim=True)
         )
@@ -605,10 +604,10 @@ class quadruped_stand(Reward):
 
     def compute(self):
         jpos_errors = (self.asset.data.joint_pos - self.asset.data.default_joint_pos).abs()
-        feet_pos_w = self.asset.data.body_pos_w[:, self.feet_ids]
+        feet_pos_w = self.asset.data.body_link_pos_w[:, self.feet_ids]
         feet_pos_b = quat_rotate_inverse(
-            self.asset.data.root_quat_w.unsqueeze(1),
-            feet_pos_w - self.asset.data.root_pos_w.unsqueeze(1)
+            self.asset.data.root_link_quat_w.unsqueeze(1),
+            feet_pos_w - self.asset.data.root_link_pos_w.unsqueeze(1)
         )
         front_symmetry = feet_pos_b[:, [0, 1], 1].sum(dim=1, keepdim=True).abs()
         back_symmetry = feet_pos_b[:, [2, 3], 1].sum(dim=1, keepdim=True).abs()
@@ -625,10 +624,10 @@ class lateral_swing_height(Reward):
         self.target_height = target_height
         
     def compute(self):
-        feet_pos_w = self.asset.data.body_pos_w[:, self.feet_ids]
+        feet_pos_w = self.asset.data.body_link_pos_w[:, self.feet_ids]
         feet_lin_vel_w = self.asset.data.body_lin_vel_w[:, self.feet_ids]
         feet_lin_vel_b = quat_rotate_inverse(
-            self.asset.data.root_quat_w.unsqueeze(1),
+            self.asset.data.root_link_quat_w.unsqueeze(1),
             feet_lin_vel_w
         )
         feet_height_w = feet_pos_w[:, :, 2] - self.env.get_ground_height_at(feet_pos_w) # [N, 4]
@@ -686,11 +685,11 @@ class support_polygon(Reward):
     def update(self):
         # self.com_pos_w = (self.asset.data.body_com_pos_w * self.body_mass_ratio.unsqueeze(-1)).sum(dim=1)
         self.com_pos_w = self.asset.data.root_com_pos_w
-        self.feet_pos_w = self.asset.data.body_pos_w[:, self.feet_ids]
+        self.feet_pos_w = self.asset.data.body_link_pos_w[:, self.feet_ids]
     
     def compute(self):
         feet_pos_b = quat_rotate_inverse(
-            self.asset.data.root_quat_w.unsqueeze(1),
+            self.asset.data.root_link_quat_w.unsqueeze(1),
             self.feet_pos_w - self.com_pos_w.unsqueeze(1)
         )        
         in_contact = self.contact_sensor.data.net_forces_w[:, self.feet_ids_contact].norm(dim=-1, keepdim=True) > 0.1

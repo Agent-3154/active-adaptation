@@ -35,16 +35,16 @@ class root_linacc_b(Observation):
     def __init__(self, env):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
-        self.lin_vel_w = self.asset.data.root_lin_vel_w.clone()
+        self.lin_vel_w = self.asset.data.root_link_lin_vel_w.clone()
         self.lin_acc_w = torch.zeros(self.num_envs, 3, device=self.env.device)
 
     def update(self):
-        lin_vel_w = self.asset.data.root_lin_vel_w
+        lin_vel_w = self.asset.data.root_link_lin_vel_w
         self.lin_acc_w = (lin_vel_w - self.lin_vel_w) / self.env.step_dt
         self.lin_vel_w = lin_vel_w
 
     def compute(self):
-        lin_acc_b = quat_rotate_inverse(self.asset.data.root_quat_w, self.lin_acc_w)
+        lin_acc_b = quat_rotate_inverse(self.asset.data.root_link_quat_w, self.lin_acc_w)
         return lin_acc_b.reshape(self.num_envs, -1)
 
 
@@ -59,9 +59,9 @@ class root_linacc_substep(Observation):
         self.lin_acc_substep = torch.zeros(shape, device=self.env.device)
 
     def post_step(self, substep):
-        root_quat_w = self.asset.data.root_quat_w
+        root_link_quat_w = self.asset.data.root_link_quat_w
         self.lin_acc_substep[:, substep] = quat_rotate_inverse(
-            root_quat_w,
+            root_link_quat_w,
             self.asset.data.body_lin_vel_w[:, 0]
         )
 
@@ -76,31 +76,31 @@ class root_linacc_debug(Observation):
     def __init__(self, env):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
-        self.lin_vel_w = self.asset.data.root_lin_vel_w.clone()
+        self.lin_vel_w = self.asset.data.root_link_lin_vel_w.clone()
         self.lin_acc_w = torch.zeros(self.num_envs, 3, device=self.env.device)
         self.root_vel_w_substep = torch.zeros(self.num_envs, self.env.decimation, 3, device=self.env.device)
         self.body_acc_w_substep = torch.zeros(self.num_envs, self.env.decimation, 3, device=self.env.device)
 
     def post_step(self, substep):
-        self.root_vel_w_substep[:, substep] = self.asset.data.root_lin_vel_w
+        self.root_vel_w_substep[:, substep] = self.asset.data.root_link_lin_vel_w
         self.body_acc_w_substep[:, substep] = self.asset.data.body_acc_w[:, 0, :3]
 
     def update(self):
-        lin_vel_w = self.asset.data.root_lin_vel_w
+        lin_vel_w = self.asset.data.root_link_lin_vel_w
         self.lin_acc_w = (lin_vel_w - self.lin_vel_w) / self.env.step_dt
         self.lin_vel_w = lin_vel_w
 
     def compute(self):
-        print(self.asset.data.root_lin_vel_w[0], self.asset.data.body_lin_vel_w[0, 0])
+        print(self.asset.data.root_link_lin_vel_w[0], self.asset.data.body_lin_vel_w[0, 0])
 
-        lin_acc_b0 = quat_rotate_inverse(self.asset.data.root_quat_w, self.lin_acc_w)
-        lin_acc_b1 = quat_rotate_inverse(self.asset.data.root_quat_w, self.root_vel_w_substep.diff(dim=1).mean(1) / self.env.physics_dt)
-        lin_acc_b2 = quat_rotate_inverse(self.asset.data.root_quat_w, self.asset.data.body_acc_w[:, 0, :3])
-        lin_acc_b3 = quat_rotate_inverse(self.asset.data.root_quat_w, self.body_acc_w_substep.mean(1))
+        lin_acc_b0 = quat_rotate_inverse(self.asset.data.root_link_quat_w, self.lin_acc_w)
+        lin_acc_b1 = quat_rotate_inverse(self.asset.data.root_link_quat_w, self.root_vel_w_substep.diff(dim=1).mean(1) / self.env.physics_dt)
+        lin_acc_b2 = quat_rotate_inverse(self.asset.data.root_link_quat_w, self.asset.data.body_acc_w[:, 0, :3])
+        lin_acc_b3 = quat_rotate_inverse(self.asset.data.root_link_quat_w, self.body_acc_w_substep.mean(1))
         return torch.cat([lin_acc_b0, lin_acc_b1, lin_acc_b2, lin_acc_b3], dim=-1)
 
 
-class body_pos_w(Observation):
+class body_link_pos_w(Observation):
     def __init__(self, env, body_names: str):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
@@ -108,7 +108,7 @@ class body_pos_w(Observation):
         self.body_indices = torch.tensor(self.body_indices, device=self.device)
     
     def compute(self):
-        return self.asset.data.body_pos_w[:, self.body_indices].reshape(self.num_envs, -1)
+        return self.asset.data.body_link_pos_w[:, self.body_indices].reshape(self.num_envs, -1)
 
 
 class body_pos_b(Observation):
@@ -125,14 +125,14 @@ class body_pos_b(Observation):
 
     def update(self):
         if self.yaw_only:
-            self.root_quat_w = yaw_quat(self.asset.data.root_quat_w).unsqueeze(1)
+            self.root_link_quat_w = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
         else:
-            self.root_quat_w = self.asset.data.root_quat_w.unsqueeze(1)
+            self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
         self.root_pos_w = self.asset.data.root_pos_w.unsqueeze(1)
-        self.body_pos_w = self.asset.data.body_pos_w[:, self.body_indices]
+        self.body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_indices]
         
     def compute(self):
-        body_pos_b = quat_rotate_inverse(self.root_quat_w, self.body_pos_w - self.root_pos_w)
+        body_pos_b = quat_rotate_inverse(self.root_link_quat_w, self.body_link_pos_w - self.root_pos_w)
         return body_pos_b.reshape(self.num_envs, -1)
     
     def symmetry_transform(self):
@@ -140,8 +140,8 @@ class body_pos_b(Observation):
     
     def debug_draw(self):
         if self.env.backend == "mujoco":
-            self.feet_marker_0.geom.pos = self.asset.data.body_pos_w[0, self.body_indices[0]]
-            self.feet_marker_1.geom.pos = self.asset.data.body_pos_w[0, self.body_indices[1]]
+            self.feet_marker_0.geom.pos = self.asset.data.body_link_pos_w[0, self.body_indices[0]]
+            self.feet_marker_1.geom.pos = self.asset.data.body_link_pos_w[0, self.body_indices[1]]
 
 
 class body_vel_b(Observation):
@@ -154,14 +154,14 @@ class body_vel_b(Observation):
     
     def update(self):
         if self.yaw_only:
-            self.root_quat_w = yaw_quat(self.asset.data.root_quat_w).unsqueeze(1)
+            self.root_link_quat_w = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
         else:
-            self.root_quat_w = self.asset.data.root_quat_w.unsqueeze(1)
+            self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
         self.body_vel_w = self.asset.data.body_vel_w[:, self.body_indices]
         
     def compute(self):
-        body_lin_vel_b = quat_rotate_inverse(self.root_quat_w, self.body_vel_w[:, :, :3])
-        body_ang_vel_b = quat_rotate_inverse(self.root_quat_w, self.body_vel_w[:, :, 3:])
+        body_lin_vel_b = quat_rotate_inverse(self.root_link_quat_w, self.body_vel_w[:, :, :3])
+        body_ang_vel_b = quat_rotate_inverse(self.root_link_quat_w, self.body_vel_w[:, :, 3:])
         return body_lin_vel_b.reshape(self.num_envs, -1)
     
     def symmetry_transform(self):
@@ -180,9 +180,9 @@ class body_acc(Observation):
 
     def update(self):
         if self.yaw_only:
-            quat = yaw_quat(self.asset.data.root_quat_w).unsqueeze(1)
+            quat = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
         else:
-            quat = self.asset.data.root_quat_w.unsqueeze(1)
+            quat = self.asset.data.root_link_quat_w.unsqueeze(1)
         body_acc_w = self.asset.data.body_lin_acc_w[:, self.body_indices]
         self.body_acc_b[:] = quat_rotate_inverse(quat, body_acc_w)
         
@@ -287,10 +287,10 @@ class root_angvel_b(Observation):
     
     def update(self):
         if self.yaw_only:
-            self.quat = yaw_quat(self.asset.data.root_quat_w)
+            self.quat = yaw_quat(self.asset.data.root_link_quat_w)
         else:
-            self.quat = self.asset.data.root_quat_w
-        self.root_angvel_w = self.asset.data.root_ang_vel_w.clone()
+            self.quat = self.asset.data.root_link_quat_w
+        self.root_angvel_w = self.asset.data.root_link_ang_vel_w.clone()
         ang_vel_w = random_noise(self.root_angvel_w, self.noise_std) 
         ang_vel_b = quat_rotate_inverse(self.quat, ang_vel_w)
         self.buffer = self.buffer.roll(1, dims=1)
@@ -316,7 +316,7 @@ class root_gyro_substep(Observation):
         self.flatten = flatten
 
     def post_step(self, substep):
-        self.gyro[:, substep] = self.asset.data.root_ang_vel_b
+        self.gyro[:, substep] = self.asset.data.root_link_ang_vel_b
     
     def compute(self):
         if self.flatten:
@@ -333,7 +333,7 @@ class root_gyro_multistep(Observation):
     
     def update(self):
         self.gyro_multistep = self.gyro_multistep.roll(1, dims=1)
-        self.gyro_multistep[:, 0] = random_noise(self.asset.data.root_ang_vel_b, self.noise_std)
+        self.gyro_multistep[:, 0] = random_noise(self.asset.data.root_link_ang_vel_b, self.noise_std)
     
     def compute(self):
         return self.gyro_multistep.reshape(self.num_envs, -1)
@@ -343,7 +343,7 @@ class projected_gravity_b(Observation):
     def __init__(self, env, noise_std: float=0.):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
-        self.init_quat = self.asset.data.root_quat_w.clone()
+        self.init_quat = self.asset.data.root_link_quat_w.clone()
         self.noise_std = noise_std
     
     def compute(self):
@@ -416,24 +416,24 @@ class root_linvel_b(Observation):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.yaw_only = yaw_only
-        self.ema = EMA(self.asset.data.root_lin_vel_w, gammas=gammas)
-        self.ema.update(self.asset.data.root_lin_vel_w)
+        self.vel_ema = EMA(self.asset.data.root_link_lin_vel_w, gammas=gammas)
+        self.vel_ema.update(self.asset.data.root_link_lin_vel_w)
         self.update()
     
     def reset(self, env_ids: torch.Tensor):
-        self.ema.reset(env_ids)
+        self.vel_ema.reset(env_ids)
     
     def post_step(self, substep):
-        self.ema.update(self.asset.data.root_lin_vel_w)
+        self.vel_ema.update(self.asset.data.root_link_lin_vel_w)
     
     def update(self):
         if self.yaw_only:
-            self.quat = yaw_quat(self.asset.data.root_quat_w).unsqueeze(1)
+            self.quat = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
         else:
-            self.quat = self.asset.data.root_quat_w.unsqueeze(1)
+            self.quat = self.asset.data.root_link_quat_w.unsqueeze(1)
 
     def compute(self) -> torch.Tensor:
-        linvel = self.ema.ema
+        linvel = self.vel_ema.ema
         linvel = quat_rotate_inverse(self.quat, linvel)
         return linvel.reshape(self.num_envs, -1)
     
@@ -444,7 +444,7 @@ class root_linvel_b(Observation):
     # def debug_draw(self):
     #     if self.env.sim.has_gui() and self.env.backend == "isaac":
     #         if self.body_ids is None:
-    #             linvel = self.asset.data.root_lin_vel_w
+    #             linvel = self.asset.data.root_link_lin_vel_w
     #         else:
     #             linvel = (self.asset.data.body_lin_vel_w[:, self.body_ids] * self.body_masses).mean(1)
     #         self.env.debug_draw.vector(
@@ -526,6 +526,7 @@ class joint_acc(Observation):
 
 
 class applied_torque(Observation):
+    supported_backends = ("isaac",)
     def __init__(self, env, joint_names: str=".*"):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
@@ -561,59 +562,6 @@ class motor_params(Observation):
         stiffness = (self.stiffness / self.defalut_stiffness) - 1.
         damping  = (self.damping / self.default_damping) - 1.
         return torch.cat([stiffness, damping], dim=-1)
-
-
-class external_forces(Observation):
-    def __init__(self, env, body_names, divide_by_mass: bool=True, scale: float = 1.0):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.body_indices, self.body_names = self.asset.find_bodies(body_names)
-        self.forces_w = torch.zeros(self.env.num_envs, len(self.body_indices) * 3, device=self.device)
-        self.forces_b = torch.zeros(self.env.num_envs, len(self.body_indices) * 3, device=self.device)
-
-        default_mass_total = self.asset.data.default_mass[0].sum() * 9.81
-        self.denom = default_mass_total if divide_by_mass else torch.tensor(scale, device=self.device)
-
-    def update(self):
-        forces_b = self.asset._external_force_b[:, self.body_indices]
-        forces_w = quat_rotate(self.asset.data.body_quat_w[:, self.body_indices], forces_b)
-        forces_b = quat_rotate_inverse(
-            self.asset.data.root_quat_w.unsqueeze(1),
-            forces_w
-        )
-        forces_b /= self.denom
-        self.forces_w[:] = forces_w.reshape(self.env.num_envs, -1)
-        self.forces_b[:] = forces_b.reshape(self.env.num_envs, -1)
-
-        # print("forces:", self.forces_b.abs().mean(0))
-
-    def compute(self) -> torch.Tensor:
-        return self.forces_b
-
-    def symmetry_transform(self):
-        return sym_utils.cartesian_space_symmetry(self.asset, self.body_names)
-
-
-class external_torques(Observation):
-    def __init__(self, env, body_names, divide_by_mass: bool=True, scale: float = 0.2):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.body_indices, self.body_names = self.asset.find_bodies(body_names)
-        self.torques_b = torch.zeros(self.env.num_envs, len(self.body_indices) * 3, device=self.device)
-        default_inertia = self.asset.data.default_inertia[0, 0, [0, 4, 8]].to(self.device)
-        self.denom = default_inertia if divide_by_mass else torch.tensor(scale, device=self.device)
-    
-    def update(self):
-        torques_b = self.asset._external_torque_b[:, self.body_indices]
-        torques_b = torques_b / self.denom
-        self.torques_b[:] = torques_b.reshape(self.env.num_envs, -1)
-        # print("torque:", self.torques_b.abs().mean(0))
-    
-    def compute(self) -> torch.Tensor:
-        return self.torques_b
-
-    def symmetry_transform(self):
-        return sym_utils.cartesian_space_symmetry(self.asset, self.body_names, (-1, 1, -1))
 
 
 class body_materials(Observation):
@@ -680,7 +628,7 @@ class body_momentum(Observation):
     
     def compute(self) -> torch.Tensor:
         velocity = self.asset.data.body_lin_vel_w[:, self.body_ids]
-        momentum = self.masses * quat_rotate_inverse(self.asset.data.root_quat_w.unsqueeze(1), velocity)
+        momentum = self.masses * quat_rotate_inverse(self.asset.data.root_link_quat_w.unsqueeze(1), velocity)
         return momentum.reshape(self.num_envs, -1)
 
 
@@ -751,7 +699,7 @@ class incoming_wrench(Observation):
     def debug_draw(self):
         if self.env.sim.has_gui() and self.env.backend == "isaac":
             self.env.debug_draw.vector(
-                # self.asset.data.body_pos_w[:, self.child_ids],
+                # self.asset.data.body_link_pos_w[:, self.child_ids],
                 self.asset.data.root_pos_w,
                 self.child_forces.sum(1),
                 color=(0., 0., 1., 1.),
@@ -776,10 +724,10 @@ class jacobians_b(Observation):
     def compute(self) -> torch.Tensor:
         jacobian_all = self.asset.root_physx_view.get_jacobians() # [N, B, 6, J]
         jacobian = jacobian_all[:, self.body_ids.unsqueeze(1), :, self.joint_ids.unsqueeze(0)].permute(2, 0, 3, 1) # [N, b, j, 6]
-        root_quat_w = self.asset.data.root_quat_w # [N, 4]
+        root_link_quat_w = self.asset.data.root_link_quat_w # [N, 4]
         # [N, b, 6, j] -> [N, b, j, 6] -> [N, b * j * 2, 3] then rotate
         jacobian_b = jacobian.permute(0, 1, 3, 2).reshape(self.num_envs, -1, 3)
-        jacobian_b = quat_rotate_inverse(root_quat_w.unsqueeze(1), jacobian_b)
+        jacobian_b = quat_rotate_inverse(root_link_quat_w.unsqueeze(1), jacobian_b)
 
         # # [N, b * j * 2, 3] -> [N, b * j, 6] -> [N, b, j, 6] -> [N, b, 6, j]
         # jacobian_b = jacobian_b.reshape(self.num_envs, len(self.body_ids), -1, 6).permute(0, 1, 3, 2)
@@ -1003,7 +951,7 @@ class cartesian_force(Observation):
         return self.force_w[:, :, 2].reshape(self.num_envs, -1)
 
     # def debug_draw(self):
-    #     self.feet_pos_w = self.asset.data.body_pos_w[:, self.feet_ids]
+    #     self.feet_pos_w = self.asset.data.body_link_pos_w[:, self.feet_ids]
     #     self.env.debug_draw.vector(
     #         self.feet_pos_w,
     #         - self.force_w / 9.81,
@@ -1019,8 +967,8 @@ class body_height(Observation):
         self.body_ids = torch.as_tensor(self.body_ids, device=self.device)
     
     def compute(self):
-        body_pos_w = self.asset.data.body_pos_w[:, self.body_ids]
-        body_height = body_pos_w[:, :, 2] - self.env.get_ground_height_at(body_pos_w)
+        body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
+        body_height = body_link_pos_w[:, :, 2] - self.env.get_ground_height_at(body_link_pos_w)
         return body_height.reshape(self.num_envs, -1)
 
     def symmetry_transform(self):

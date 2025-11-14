@@ -25,7 +25,7 @@ class ee_pose_tracking(Reward):
         self.ee_upward_w[:] = quat_rotate(ee_quat_w, upward)
 
     def compute(self) -> torch.Tensor:
-        ee_pos = self.asset.data.body_pos_w[:, self.ee_id]
+        ee_pos = self.asset.data.body_link_pos_w[:, self.ee_id]
         # r_linvel = torch.exp(-self.asset.data.body_lin_vel_w.square().sum(1, True) / 0.25)
         pos_error = (ee_pos - self.command_manager.command_ee_pos_w).square().sum(1, True)
         r_pos = torch.exp(- pos_error / 0.25)
@@ -35,12 +35,12 @@ class ee_pose_tracking(Reward):
 
     def debug_draw(self):
         self.env.debug_draw.vector(
-            self.asset.data.body_pos_w[:, self.ee_id],
+            self.asset.data.body_link_pos_w[:, self.ee_id],
             self.ee_forward_w * 0.2,
             color=(1., 0.1, 0.1, 1.)
         )
         self.env.debug_draw.vector(
-            self.asset.data.body_pos_w[:, self.ee_id],
+            self.asset.data.body_link_pos_w[:, self.ee_id],
             self.ee_upward_w * 0.2,
             color=(1., 0.1, 0.1, 1.)
         )

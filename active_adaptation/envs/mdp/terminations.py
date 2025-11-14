@@ -11,6 +11,7 @@ from .base import Termination
 
 
 class crash(Termination):
+    supported_backends = ("isaac",)
     def __init__(self, env, body_names_expr: str, t_thres: float = 0.):
         super().__init__(env)
         self.t_thres = t_thres
@@ -24,6 +25,7 @@ class crash(Termination):
 
 
 class soft_contact(Termination):
+    supported_backends = ("isaac",)
     def __init__(self, env, body_names: str):
         super().__init__(env)
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]

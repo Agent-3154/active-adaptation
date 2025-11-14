@@ -21,7 +21,7 @@ class impedance_ee_pos(Reward):
     def compute(self) -> torch.Tensor:
         diff = (
             self.command_manager.command_pos_ee_w
-            - self.asset.data.body_pos_w[:, self.body_id]
+            - self.asset.data.body_link_pos_w[:, self.body_id]
         )
         r = torch.exp(-diff.norm(dim=-1, keepdim=True) / self.l)
         return r
@@ -57,7 +57,7 @@ class impedance_ee_pos_err(Reward):
     def compute(self) -> torch.Tensor:
         diff = (
             self.command_manager.command_pos_ee_w
-            - self.asset.data.body_pos_w[:, self.body_id]
+            - self.asset.data.body_link_pos_w[:, self.body_id]
         )
         r = diff.norm(dim=-1, keepdim=True)
         return r
