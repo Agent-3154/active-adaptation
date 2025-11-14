@@ -12,8 +12,9 @@ from torchrl.envs.utils import set_exploration_type, ExplorationType
 import active_adaptation
 from active_adaptation.utils.export import export_onnx
 
-
+active_adaptation.set_backend("isaac")
 active_adaptation.import_algorithms()
+
 FILE_PATH = Path(__file__).parent
 
 

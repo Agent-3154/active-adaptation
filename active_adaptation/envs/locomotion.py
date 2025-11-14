@@ -4,8 +4,11 @@ import torch
 from isaaclab.utils import configclass
 
 import active_adaptation
-import active_adaptation.envs.mdp as mdp
 from active_adaptation.envs.base import _Env
+from active_adaptation.asset import AssetCfg
+from active_adaptation.registry import Registry
+from typing import cast
+
 
 class SimpleEnv(_Env):
     def __init__(self, cfg):
@@ -25,10 +28,17 @@ class SimpleEnv(_Env):
             )
 
     def setup_scene(self):
-        if active_adaptation.get_backend() == "isaac":
+        if self.backend == "isaac":
             self.setup_scene_isaac()
-        else:
+        elif self.backend == "mujoco":
             self.setup_scene_mujoco()
+        elif self.backend == "mjlab":
+            self.setup_scene_mjlab()
+        else:
+            raise NotImplementedError
+
+    def setup_scene_mjlab(self):
+        pass
     
     def setup_scene_isaac(self):
         import active_adaptation.envs.scene as scene
@@ -37,8 +47,6 @@ class SimpleEnv(_Env):
         from isaaclab.assets import AssetBaseCfg
         from isaaclab.sensors import ContactSensorCfg
         from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
-        from active_adaptation.assets import get_asset_meta
-        from active_adaptation.registry import Registry
         
         registry = Registry.instance()
         
@@ -50,7 +58,9 @@ class SimpleEnv(_Env):
                 texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
             ),
         )
-        scene_cfg.robot = registry.get("asset", self.cfg.robot.name)
+        asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
+        
+        scene_cfg.robot = asset_cfg.isaaclab()
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
         scene_cfg.terrain = registry.get("terrain", self.cfg.terrain)
 
@@ -108,11 +118,11 @@ class SimpleEnv(_Env):
         except ModuleNotFoundError:
             print()
         
-        asset_meta = get_asset_meta(self.scene["robot"])
-        path = os.path.join(os.getcwd(), "asset_meta.json")
-        print(f"Saving asset meta to {path}")
-        with open(path, "w") as f:
-            json.dump(asset_meta, f, indent=4)
+        # asset_meta = get_asset_meta(self.scene["robot"])
+        # path = os.path.join(os.getcwd(), "asset_meta.json")
+        # print(f"Saving asset meta to {path}")
+        # with open(path, "w") as f:
+        #     json.dump(asset_meta, f, indent=4)
     
     def setup_scene_mujoco(self):
         import active_adaptation.assets_mjcf

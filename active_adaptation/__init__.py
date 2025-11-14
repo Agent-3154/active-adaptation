@@ -5,7 +5,8 @@ import importlib.metadata
 import importlib.util
 from pathlib import Path
 
-_BACKEND = "isaac"
+_BACKEND = None
+_BACKEND_SET = False
 
 _LOCAL_RANK = os.getenv("LOCAL_RANK", "0")
 _LOCAL_RANK = int(_LOCAL_RANK)
@@ -47,14 +48,20 @@ CONFIG_PATH = Path(__file__).parent.parent / "cfg"
 ASSET_PATH = Path(__file__).parent / "assets"
 SCRIPT_PATH = Path(__file__).parent.parent / "scripts"
 
+
 def set_backend(backend: str):
-    if not backend in ("isaac", "mujoco"):
-        raise ValueError(f"backend must be either 'isaac' or 'mujoco', got {backend}")
-    global _BACKEND
+    global _BACKEND, _BACKEND_SET
+    if _BACKEND_SET:
+        raise RuntimeError("set_backend() can only be called once globally")
+    if not backend in ("isaac", "mujoco", "mjlab"):
+        raise ValueError(f"backend must be either 'isaac' or 'mujoco' or 'mjlab', got {backend}")
     _BACKEND = backend
+    _BACKEND_SET = True
 
 
 def get_backend():
+    if not _BACKEND_SET:
+        raise RuntimeError("set_backend() must be called before get_backend()")
     return _BACKEND
 
 
