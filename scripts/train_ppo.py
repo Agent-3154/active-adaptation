@@ -64,12 +64,14 @@ def main(cfg: DictConfig):
             pass
     
     print(f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}")
-    app_launcher = AppLauncher(
-        OmegaConf.to_container(cfg.app),
-        distributed=aa.is_distributed(),
-        device=f"cuda:{aa.get_local_rank()}"
-    )
-    simulation_app = app_launcher.app
+    
+    if aa.get_backend() == "isaac":
+        app_launcher = AppLauncher(
+            OmegaConf.to_container(cfg.app),
+            distributed=aa.is_distributed(),
+            device=f"cuda:{aa.get_local_rank()}"
+        )
+        simulation_app = app_launcher.app
 
     if aa.is_main_process():
         run = wandb.init(

@@ -35,3 +35,7 @@ find = { where = ["."], include = ["active_adaptation*", "scripts*", "projects.f
 [tool.setuptools.package-data]
 "*" = ["**/*"]
 
+[tool.pyright]
+typeCheckingMode = "strict"
+reportIncompatibleMethodOverride = "error"
+

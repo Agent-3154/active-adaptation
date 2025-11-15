@@ -131,8 +131,8 @@ class Twist(Command):
 
     def update(self):
         self.body_heading_w = self.asset.data.heading_w.unsqueeze(1)
-        self.lin_vel_w = self.asset.data.root_link_lin_vel_w
-        self.ang_vel_w = self.asset.data.root_link_ang_vel_w
+        self.lin_vel_w = self.asset.data.root_com_lin_vel_w
+        self.ang_vel_w = self.asset.data.root_com_ang_vel_w
         self.quat_w = self.asset.data.root_link_quat_w
 
         # this is used for terminating episodes where the robot is inactive due to whatever reason

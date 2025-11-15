@@ -215,10 +215,14 @@ class _Env(EnvBase):
                 obs = cast(mdp.Observation, obs)
                 funcs[obs_name] = obs
                 self._startup_callbacks.append(obs.startup)
-                self._update_callbacks.append(obs.update)
-                self._reset_callbacks.append(obs.reset)
-                self._debug_draw_callbacks.append(obs.debug_draw)
-                self._post_step_callbacks.append(obs.post_step)
+                if mdp.is_method_implemented(obs, mdp.Observation, "update"):
+                    self._update_callbacks.append(obs.update)
+                if mdp.is_method_implemented(obs, mdp.Observation, "reset"):
+                    self._reset_callbacks.append(obs.reset)
+                if mdp.is_method_implemented(obs, mdp.Observation, "debug_draw"):
+                    self._debug_draw_callbacks.append(obs.debug_draw)
+                if mdp.is_method_implemented(obs, mdp.Observation, "post_step"):
+                    self._post_step_callbacks.append(obs.post_step)
             
             self.observation_funcs[group_key] = ObsGroup(group_key, funcs)
         
@@ -250,11 +254,16 @@ class _Env(EnvBase):
                 reward = cast(mdp.Reward, reward)
                 funcs[rew_name] = reward
                 reward_spec["stats", group_name, rew_name] = Unbounded(1, device=self.device)
-                self._update_callbacks.append(reward.update)
-                self._reset_callbacks.append(reward.reset)
-                self._debug_draw_callbacks.append(reward.debug_draw)
-                self._pre_step_callbacks.append(reward.step)
-                self._post_step_callbacks.append(reward.post_step)
+                if mdp.is_method_implemented(reward, mdp.Reward, "update"):
+                    self._update_callbacks.append(reward.update)
+                if mdp.is_method_implemented(reward, mdp.Reward, "reset"):
+                    self._reset_callbacks.append(reward.reset)
+                if mdp.is_method_implemented(reward, mdp.Reward, "debug_draw"):
+                    self._debug_draw_callbacks.append(reward.debug_draw)
+                if mdp.is_method_implemented(reward, mdp.Reward, "step"):
+                    self._pre_step_callbacks.append(reward.step)
+                if mdp.is_method_implemented(reward, mdp.Reward, "post_step"):
+                    self._post_step_callbacks.append(reward.post_step)
                 print(f"\t{rew_name}: \t{reward.weight:.2f}")
                 self._stats_ema[group_name][rew_name] = (torch.tensor(0., device=self.device), torch.tensor(0., device=self.device))
 

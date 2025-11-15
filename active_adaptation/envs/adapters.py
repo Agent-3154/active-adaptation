@@ -168,8 +168,20 @@ class IsaacSceneAdapter:
         self._scene.write_data_to_sim()
     
     @property
-    def articulations(self) -> dict:
+    def articulations(self):
         return self._scene.articulations
+    
+    @property
+    def rigid_objects(self):
+        return self._scene.rigid_objects
+    
+    @property
+    def terrain(self):
+        return self._scene.terrain
+    
+    @property
+    def sensors(self):
+        return self._scene.sensors
     
     @property
     def env_origins(self) -> torch.Tensor:

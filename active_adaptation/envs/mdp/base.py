@@ -29,6 +29,39 @@ def sample_quat_yaw(size, yaw_range=(0, torch.pi * 2), device: torch.device = "c
     return quat
 
 
+def is_method_implemented(obj, base_class, method_name: str):
+    """Check if a method is actually implemented (not just the base class pass).
+    
+    This function checks if a subclass has overridden a method from the base class.
+    It compares the underlying function objects to determine if the method was
+    actually overridden, even if the override just contains `pass`.
+    
+    Args:
+        obj: Instance to check
+        base_class: Base class that defines the default method
+        method_name: Name of the method to check (e.g., 'post_step', 'update', etc.)
+        
+    Returns:
+        True if the method is overridden in the subclass, False otherwise
+    """
+    # Get the method from the instance's class (not the instance itself)
+    obj_method = getattr(type(obj), method_name, None)
+    base_method = getattr(base_class, method_name, None)
+    
+    if obj_method is None or base_method is None:
+        return False
+    
+    # Get the underlying function objects
+    # In Python 3, accessing from class gives a function directly
+    # In some cases it might be a method, so we handle both
+    obj_func = getattr(obj_method, '__func__', obj_method)
+    base_func = getattr(base_method, '__func__', base_method)
+    
+    # Compare the underlying function objects
+    # If they're the same, it means the method wasn't overridden
+    return obj_func is not base_func
+
+
 class _RegistryMixin:
     # Class variable: list of supported backends
     # Subclasses should override this to declare which backends they support
