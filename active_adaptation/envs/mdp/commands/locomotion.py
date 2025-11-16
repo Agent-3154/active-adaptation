@@ -4,7 +4,8 @@ import torch.nn.functional as F
 import torch.distributions as D
 import math
 import warp as wp
-from typing import Sequence, TYPE_CHECKING
+from typing import Sequence
+from typing_extensions import override
 
 from active_adaptation.utils.math import (
     quat_rotate, 
@@ -103,6 +104,7 @@ class Twist(Command):
             self.cmd_base_height.reshape(self.num_envs, 1),
         ], dim=-1)
 
+    @override
     def reset(self, env_ids):
         self.next_command_linvel[env_ids] = 0.0
         self.cmd_linvel_b[env_ids] = 0.0
@@ -113,6 +115,7 @@ class Twist(Command):
         self._cum_angvel_error[env_ids] = 0.0
         self.is_standing_env[env_ids] = True
     
+    @override
     def sample_init(self, env_ids):
         if self.curriculum and self.env.episode_count > 1: # and self.env.training:
             distance_traveled = self.distance_traveled[env_ids]
@@ -129,6 +132,7 @@ class Twist(Command):
         self.distance_traveled[env_ids] = 0.0
         return super().sample_init(env_ids)
 
+    @override
     def update(self):
         self.body_heading_w = self.asset.data.heading_w.unsqueeze(1)
         self.lin_vel_w = self.asset.data.root_com_lin_vel_w
@@ -202,6 +206,7 @@ class Twist(Command):
     def with_prob(self, n, p):
         return torch.rand(n, device=self.device) < p
     
+    @override
     def debug_draw(self):
         if self.env.backend == "isaac":
             self.env.debug_draw.vector(
@@ -245,20 +250,6 @@ class Twist(Command):
 
 def sample_uniform(size, low: float, high: float, device: torch.device = "cpu"):
     return torch.rand(size, device=device) * (high - low) + low
-
-
-def sample_quat_yaw(size, yaw_range=(0, torch.pi * 2), device: torch.device = "cpu"):
-    yaw = torch.rand(size, device=device).uniform_(*yaw_range)
-    quat = torch.cat(
-        [
-            torch.cos(yaw / 2).unsqueeze(-1),
-            torch.zeros_like(yaw).unsqueeze(-1),
-            torch.zeros_like(yaw).unsqueeze(-1),
-            torch.sin(yaw / 2).unsqueeze(-1),
-        ],
-        dim=-1,
-    )
-    return quat
 
 
 def quat_to_yaw(quat: torch.Tensor):

@@ -10,6 +10,7 @@ from active_adaptation.registry import Registry
 from typing import cast
 
 import active_adaptation.assets
+from active_adaptation.viewer import MjLabViewer
 
 
 class SimpleEnv(_Env):
@@ -40,10 +41,9 @@ class SimpleEnv(_Env):
             raise NotImplementedError
 
     def setup_scene_mjlab(self):
-        from mjlab.scene import Scene
-        from mjlab.scene.scene import SceneCfg
-        from mjlab.sim import Simulation
-        from mjlab.sim.sim import SimulationCfg
+        from mjlab.scene import Scene, SceneCfg
+        from mjlab.sim import Simulation, SimulationCfg, MujocoCfg
+        from mjlab.terrains import TerrainImporterCfg
 
         registry = Registry.instance()
         asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
@@ -53,11 +53,20 @@ class SimpleEnv(_Env):
             env_spacing=2.5,
             entities={"robot": asset_cfg.mjlab()},
             # sensors=(self.cfg.sensors.mjlab(),),
+            terrain=TerrainImporterCfg(terrain_type="plane"),
         )
         self.scene = Scene(scene_cfg, device=str(self.device))
         self.sim = Simulation(
             num_envs=self.scene.num_envs,
-            cfg=SimulationCfg(),
+            cfg=SimulationCfg(
+                nconmax=35,
+                njmax=300,
+                mujoco=MujocoCfg(
+                    timestep=0.005,
+                    iterations=10,
+                    ls_iterations=20,
+                ),
+            ),
             model=self.scene.compile(),
             device=str(self.device),
         )
@@ -67,6 +76,7 @@ class SimpleEnv(_Env):
             model=self.sim.model,
             data=self.sim.data,
         )
+        # MjLabViewer(self).run_async()
     
     def setup_scene_isaac(self):
         import active_adaptation.envs.scene as scene

@@ -86,12 +86,12 @@ class _RegistryMixin:
     def make(cls, class_name, env: "_Env", **kwargs):
         if class_name not in cls.registry:
             raise ValueError(f"Class '{class_name}' not found in {cls.__name__}.registry")
-        cls = cls.registry[class_name]
-        if aa.get_backend() not in cls.supported_backends:
-            warnings.warn(f"Class '{class_name}' does not support backend '{cls.supported_backends}'. "
-                          f"Supported backends: {cls.supported_backends}")
+        instance_cls = cls.registry[class_name]
+        if aa.get_backend() not in instance_cls.supported_backends:
+            warnings.warn(f"Class '{class_name}' does not support backend '{aa.get_backend()}'. "
+                          f"Supported backends: {instance_cls.supported_backends}")
             return None
-        return cls(env, **kwargs)
+        return instance_cls(env, **kwargs)
 
 
 class Command(_RegistryMixin):
