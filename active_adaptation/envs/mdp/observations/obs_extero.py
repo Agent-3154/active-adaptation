@@ -88,8 +88,8 @@ class height_scan(Observation):
         x = torch.linspace(x_range[0], x_range[1], int((x_range[1] - x_range[0]) / resolution[0])+1)
         y = torch.linspace(y_range[0], y_range[1], int((y_range[1] - y_range[0]) / resolution[1])+1)
         xx, yy = torch.meshgrid(x, y, indexing="ij")
-        self.pos = torch.stack([xx, yy, torch.zeros_like(xx)], dim=-1).to(self.device)
-        self.shape = self.pos.shape[:2]
+        self.scan_pos_b = torch.stack([xx, yy, torch.zeros_like(xx)], dim=-1).to(self.device)
+        self.shape = self.scan_pos_b.shape[:2]
         
         if self.env.backend == "isaac" and self.env.sim.has_gui():
             self.marker = VisualizationMarkers(
@@ -106,13 +106,15 @@ class height_scan(Observation):
             self.marker.set_visibility(True)
 
     def compute(self):
-        root_pos_w = self.asset.data.root_pos_w.reshape(self.num_envs, 1, 1, 3)
+        root_pos_w = self.asset.data.root_com_pos_w.reshape(self.num_envs, 1, 1, 3)
         root_quat = yaw_quat(self.asset.data.root_link_quat_w).reshape(self.num_envs, 1, 1, 4)
-        self.offset = quat_rotate(root_quat, self.pos.unsqueeze(0))
-        self.height_map_w = self.env.get_ground_height_at(root_pos_w + self.offset)
+        
+        self.scan_pos_w = root_pos_w + quat_rotate(root_quat, self.scan_pos_b.unsqueeze(0))
+        self.height_map_w = self.env.get_ground_height_at(self.scan_pos_w)
+        
         height_map = (root_pos_w[:, :, :, 2] - self.height_map_w).clamp(-1., 1.)
         if self.include_xy:
-            xy = einops.rearrange(self.pos[..., :2], "X Y C -> C X Y")
+            xy = einops.rearrange(self.scan_pos_b[..., :2], "X Y C -> C X Y")
             height_map = torch.cat([
                 xy.expand(self.num_envs, *xy.shape),
                 height_map.reshape(self.num_envs, 1, *self.shape)
@@ -124,7 +126,7 @@ class height_scan(Observation):
     
     def debug_draw(self):
         if self.env.backend == "isaac":
-            pos = self.asset.data.root_pos_w.reshape(self.num_envs, 1, 1, 3) + self.offset
+            pos = self.scan_pos_w.clone()
             pos[:, :, :, 2] = self.height_map_w
             self.marker.visualize(pos.reshape(-1, 3))
 

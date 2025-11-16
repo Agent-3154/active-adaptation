@@ -48,18 +48,19 @@ class SimpleEnv(_Env):
         registry = Registry.instance()
         asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
         # Initialize scene and simulation.
+        sensors = tuple(sensor.mjlab() for sensor in asset_cfg.sensors_mjlab)
         scene_cfg = SceneCfg(
             num_envs=self.cfg.num_envs,
             env_spacing=2.5,
             entities={"robot": asset_cfg.mjlab()},
-            # sensors=(self.cfg.sensors.mjlab(),),
+            sensors=sensors,
             terrain=TerrainImporterCfg(terrain_type="plane"),
         )
         self.scene = Scene(scene_cfg, device=str(self.device))
         self.sim = Simulation(
             num_envs=self.scene.num_envs,
             cfg=SimulationCfg(
-                nconmax=35,
+                nconmax=50,
                 njmax=300,
                 mujoco=MujocoCfg(
                     timestep=0.005,
@@ -102,11 +103,9 @@ class SimpleEnv(_Env):
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
         scene_cfg.terrain = registry.get("terrain", self.cfg.terrain)
 
-        scene_cfg.contact_forces = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/.*", 
-            history_length=3,
-            track_air_time=True
-        )
+        for sensor_cfg in asset_cfg.sensors_isaaclab:
+            setattr(scene_cfg, sensor_cfg.name, sensor_cfg.isaaclab())
+
         sim_cfg = sim_utils.SimulationCfg(
             dt=self.cfg.sim.isaac_physics_dt,
             render=sim_utils.RenderCfg(

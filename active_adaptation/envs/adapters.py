@@ -1,6 +1,6 @@
 """Adapter classes to provide a unified API for different simulation backends."""
 
-from typing import Protocol, TYPE_CHECKING
+from typing import Protocol, TYPE_CHECKING, Union
 import torch
 
 if TYPE_CHECKING:
@@ -42,28 +42,39 @@ class SceneAdapter(Protocol):
     
     This Protocol is used only for type checking - it has zero runtime overhead.
     """
+    _scene: Union["InteractiveScene", "Scene"]
     
     @property
     def num_envs(self) -> int:
         """Number of environments."""
-        ...
+        return self._scene.num_envs
     
     def reset(self, env_ids: torch.Tensor) -> None:
         """Reset environments."""
-        ...
+        self._scene.reset(env_ids)
     
     def update(self, dt: float) -> None:
         """Update scene state."""
-        ...
+        self._scene.update(dt)
     
     def write_data_to_sim(self) -> None:
         """Write data to simulation."""
-        ...
+        self._scene.write_data_to_sim()
     
     @property
     def articulations(self) -> dict:
         """Dictionary of articulations (robots)."""
         ...
+
+    @property
+    def sensors(self) -> dict:
+        """Dictionary of sensors."""
+        return self._scene.sensors
+    
+    @property
+    def env_origins(self) -> torch.Tensor:
+        """Origins of the environments."""
+        return self._scene.env_origins
 
 
 class IsaacSimAdapter:
@@ -148,24 +159,11 @@ class MjlabSimAdapter:
         return getattr(self._sim, name)
 
 
-class IsaacSceneAdapter:
+class IsaacSceneAdapter(SceneAdapter):
     """Adapter for IsaacLab InteractiveScene."""
     
     def __init__(self, scene: "InteractiveScene"):
         self._scene = scene
-    
-    @property
-    def num_envs(self) -> int:
-        return self._scene.num_envs
-    
-    def reset(self, env_ids: torch.Tensor) -> None:
-        self._scene.reset(env_ids)
-    
-    def update(self, dt: float) -> None:
-        self._scene.update(dt)
-    
-    def write_data_to_sim(self) -> None:
-        self._scene.write_data_to_sim()
     
     @property
     def articulations(self):
@@ -178,20 +176,12 @@ class IsaacSceneAdapter:
     @property
     def terrain(self):
         return self._scene.terrain
-    
-    @property
-    def sensors(self):
-        return self._scene.sensors
-    
-    @property
-    def env_origins(self) -> torch.Tensor:
-        return self._scene.env_origins
 
     def __getitem__(self, name):
         return self._scene[name]
 
 
-class MujocoSceneAdapter:
+class MujocoSceneAdapter(SceneAdapter):
     """Adapter for MuJoCo MJScene."""
     
     def __init__(self, scene):
@@ -218,28 +208,11 @@ class MujocoSceneAdapter:
         return self._scene[name]
 
 
-class MjlabSceneAdapter:
+class MjlabSceneAdapter(SceneAdapter):
     """Adapter for mjlab Scene."""
     
     def __init__(self, scene: "Scene"):
         self._scene = scene
-    
-    @property
-    def num_envs(self) -> int:
-        return self._scene.num_envs
-    
-    def reset(self, env_ids: torch.Tensor) -> None:
-        self._scene.reset(env_ids)
-    
-    def update(self, dt: float) -> None:
-        self._scene.update(dt)
-    
-    def write_data_to_sim(self) -> None:
-        self._scene.write_data_to_sim()
-    
-    @property
-    def env_origins(self) -> torch.Tensor:
-        return self._scene.env_origins
     
     @property
     def articulations(self) -> dict:

@@ -7,6 +7,7 @@ if TYPE_CHECKING:
 
 from active_adaptation.envs.mdp.base import Reward
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
+from isaaclab.utils.string import resolve_matching_names
 
 
 class max_feet_height(Reward):
@@ -38,12 +39,15 @@ class max_feet_height(Reward):
 
 
 class feet_sliding(Reward):
+    supported_backends = ("isaac",)
     def __init__(self, env, body_names: str, weight: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.body_ids = self.asset.find_bodies(body_names)[0]
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
         self.body_contact_ids = self.contact_sensor.find_bodies(body_names)[0]
+        self.body_contact_ids = torch.tensor(self.body_contact_ids, device=self.device)
 
     def compute(self) -> torch.Tensor:
         in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.005 
@@ -62,9 +66,21 @@ class quadruped_trot(Reward):
     def __init__(self, env, weight: float, body_names: str):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.body_ids, self.body_names = self.asset.find_bodies(body_names)
-        self.body_contact_ids = self.contact_sensor.find_bodies(body_names)[0]
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
+
+        if self.env.backend == "isaac":
+            self.body_contact_ids = self.contact_sensor.find_bodies(body_names)[0]
+        elif self.env.backend == "mjlab":
+            # TODO: a better way to get the body contact ids for mjlab
+            body_names = []
+            for slot in self.contact_sensor._slots:
+                name = slot.primary_name
+                if name not in body_names:
+                    body_names.append(name)
+            self.body_contact_ids = resolve_matching_names(body_names, self.body_names)[0]
+        self.body_contact_ids = torch.tensor(self.body_contact_ids, device=self.device)
     
     def compute(self) -> torch.Tensor:
         in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.005

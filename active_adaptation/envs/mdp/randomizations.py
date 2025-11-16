@@ -11,8 +11,6 @@ import isaaclab.utils.string as string_utils
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
-    from isaaclab.sensors import RayCaster
-    from active_adaptation.envs.base import _Env
 
 
 if active_adaptation.get_backend() == "isaac":
@@ -131,6 +129,7 @@ class motor_params(Randomization):
 
 
 class motor_params_implicit(Randomization):
+    supported_backends = ("isaac",)
     def __init__(
         self,
         env,
@@ -227,6 +226,7 @@ class motor_params_armature(Randomization):
 
 
 class random_motor_failure(Randomization):
+    supported_backends = ("isaac",)
     def __init__(
         self,
         env,
@@ -265,6 +265,7 @@ class random_motor_failure(Randomization):
 
 
 class perturb_body_materials(Randomization):
+    supported_backends = ("isaac",)
     def __init__(
         self,
         env,
@@ -395,6 +396,7 @@ class perturb_body_mass(Randomization):
 
 
 class perturb_body_com(Randomization):
+    supported_backends = ("isaac",)
     def __init__(
         self, env, body_names, pos_range = (-0.05, 0.05)
     ):
@@ -456,7 +458,13 @@ class push_by_setting_velocity(Randomization):
 
 
 class reset_joint_states_uniform(Randomization):
-    def __init__(self, env, pos_ranges: Dict[str, tuple], vel_ranges: Dict[str, tuple]=None, rel: bool=False):
+    def __init__(
+        self,
+        env,
+        pos_ranges: Dict[str, tuple],
+        vel_ranges: Dict[str, tuple]=None,
+        rel: bool=False,
+    ):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.rel = rel
@@ -474,7 +482,7 @@ class reset_joint_states_uniform(Randomization):
             self.vel_ranges = None
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
         self.default_joint_vel = self.asset.data.default_joint_vel[:, self.joint_ids]
-        self.joint_limits = self.asset.data.joint_limits[0, self.joint_ids].unbind(-1)
+        self.joint_limits = self.asset.data.joint_pos_limits[0, self.joint_ids].unbind(-1)
 
     def reset(self, env_ids: torch.Tensor):
         shape = (len(env_ids), len(self.joint_ids))

@@ -23,8 +23,11 @@ def main(cfg):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
     
-    app_launcher = AppLauncher(cfg.app)
-    simulation_app = app_launcher.app
+    if active_adaptation.get_backend() == "isaac":
+        app_launcher = AppLauncher(OmegaConf.to_container(cfg.app))
+        simulation_app = app_launcher.app
+    else:
+        simulation_app = None
 
     from helpers import EpisodeStats, make_env_policy
     env, policy = make_env_policy(cfg)
@@ -63,9 +66,12 @@ def main(cfg):
     
     env.base_env.eval()
     carry = env.reset()
+    
     assert not env.base_env.training
+
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
-        torch.compiler.cudagraph_mark_step_begin()
+        # torch.compiler.cudagraph_mark_step_begin()
+        
         for i in itertools.count():
             carry = policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
