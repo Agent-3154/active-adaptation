@@ -5,7 +5,6 @@ import mujoco.viewer
 import time
 import warnings
 import trimesh
-import zmq
 
 from pathlib import Path
 from typing import Sequence, Union, Any, Dict, Optional
@@ -14,12 +13,8 @@ from dataclasses import dataclass, replace
 from isaaclab.utils import string as string_utils
 from scipy.spatial.transform import Rotation as sRot
 
-import active_adaptation
-from active_adaptation.envs.base import _Env
 from active_adaptation.utils.math import quat_rotate_inverse, quat_rotate
-from active_adaptation.utils.timerfd import Timer
-from tensordict import TensorClass
-
+# from active_adaptation.utils.timerfd import Timer
 
 ArrayType = Union[np.ndarray, torch.Tensor]
 
@@ -53,8 +48,9 @@ class MJArticulationData:
     joint_damping: ArrayType = None
     joint_pos_limits: ArrayType = None
 
-    body_pos_w: ArrayType = None
-    body_quat_w: ArrayType = None
+    body_link_pos_w: ArrayType = None # from data.xpos
+    body_link_quat_w: ArrayType = None # from data.xquat
+    body_com_pos_w: ArrayType = None # from data.xipos
     
     joint_pos: ArrayType = None
     joint_pos_target: ArrayType = None
@@ -65,62 +61,66 @@ class MJArticulationData:
     applied_torque: ArrayType = None
     projected_gravity_b: ArrayType = None
     
-    body_vel_w: ArrayType = None
+    body_com_vel_w: ArrayType = None # from data.cvel
     # body_lin_vel_w: ArrayType = None
     # body_ang_vel_w: ArrayType = None
-    root_lin_vel_w: ArrayType = None
-    root_ang_vel_w: ArrayType = None
-    root_ang_vel_b: ArrayType = None
-    root_lin_vel_b: ArrayType = None
+    # root_lin_vel_w: ArrayType = None
+    # root_ang_vel_w: ArrayType = None
+    # root_ang_vel_b: ArrayType = None
+    # root_lin_vel_b: ArrayType = None
     heading_w: ArrayType = None
 
     @property
     def body_lin_vel_w(self):
-        return self.body_vel_w[..., 3:]
+        return self.body_com_vel_w[..., 3:]
     
     @property
     def body_ang_vel_w(self):
-        return self.body_vel_w[..., :3]
+        return self.body_com_vel_w[..., :3]
 
     @property
     def root_pos_w(self):
-        return self.body_pos_w[..., 0, :]
+        return self.body_link_pos_w[..., 0, :]
     
     @property
     def root_quat_w(self):
-        return self.body_quat_w[..., 0, :]
+        return self.body_link_quat_w[..., 0, :]
     
     @property
     def root_link_pos_w(self):
-        return self.body_pos_w[:, 0, :]
+        return self.body_link_pos_w[:, 0, :]
+    
+    @property
+    def root_com_pos_w(self):
+        return self.body_com_pos_w[:, 0, :]
     
     @property
     def root_link_quat_w(self):
-        return self.body_quat_w[:, 0, :]
+        return self.body_link_quat_w[:, 0, :]
     
     @property
     def root_link_pose_w(self):
-        return torch.cat([self.body_pos_w[:, 0, :], self.body_quat_w[:, 0, :]], dim=-1)
+        return torch.cat([self.body_link_pos_w[:, 0, :], self.body_link_quat_w[:, 0, :]], dim=-1)
     
     @property
-    def root_link_lin_vel_w(self):
-        return self.root_lin_vel_w
+    def root_com_lin_vel_w(self):
+        return self.body_com_vel_w[:, 0, 3:]
     
     @property
-    def root_link_ang_vel_w(self):
-        return self.root_ang_vel_w
+    def root_com_ang_vel_w(self):
+        return self.body_com_vel_w[:, 0, :3]
     
-    # @property
-    # def root_lin_vel_w(self):
-    #     return self.body_vel_w[..., 0, :3]
+    @property
+    def root_com_lin_vel_b(self):
+        return quat_rotate_inverse(self.body_link_quat_w[:, 0, :], self.root_com_lin_vel_w)
     
-    # @property
-    # def root_ang_vel_w(self):
-    #     return self.body_vel_w[..., 0, 3:]
+    @property
+    def root_com_ang_vel_b(self):
+        return quat_rotate_inverse(self.body_link_quat_w[:, 0, :], self.root_com_ang_vel_w)
     
     @property
     def root_state_w(self):
-        return torch.cat([self.body_pos_w[:, 0, :], self.body_quat_w[:, 0, :]], dim=-1)
+        return torch.cat([self.body_link_pos_w[:, 0, :], self.body_link_quat_w[:, 0, :]], dim=-1)
 
 
 class MJPhysicsView:
@@ -136,6 +136,17 @@ class MJArticulation:
     def __init__(self, cfg: MJArticulationCfg):
         self.cfg = cfg
         self.spec = mujoco.MjSpec.from_file(cfg.mjcf_path)
+        
+        # Add a motor actuator for each joint, with the actuator name matching the joint name
+        for joint in self.spec.joints:
+            actuator = self.spec.add_actuator(name=joint.name, target=joint.name)
+            actuator.trntype = mujoco.mjtTrn.mjTRN_JOINT
+            actuator.dyntype = mujoco.mjtDyn.mjDYN_NONE
+            actuator.gaintype = mujoco.mjtGain.mjGAIN_FIXED
+            actuator.biastype = mujoco.mjtBias.mjBIAS_NONE
+            actuator.gear[0] = 1.0
+            actuator.forcelimited = False
+            actuator.ctrllimited = False
     
     def _initialize(self, mj_model: mujoco.MjModel, mj_data: mujoco.MjData):
         self.mj_model = mj_model
@@ -235,7 +246,7 @@ class MJArticulation:
             default_inertia=diag_inertia.diag_embed().flatten(1)[None],
             joint_stiffness=joint_stiffness[None],
             joint_damping=joint_damping[None],
-            joint_pos_limits=self.joint_pos_limits[None],
+            joint_pos_limits=torch.from_numpy(self.joint_pos_limits[None]),
             applied_torque=torch.zeros(1, self.num_joints),
             # batch_size=[1]
         )
@@ -314,14 +325,15 @@ class MJArticulation:
     def update(self, dt: float):
         jpos = self.mj_data.qpos[self.joint_qposadr]
         jvel = self.mj_data.qvel[self.joint_qveladr]
-        body_pos_w = self.mj_data.xpos[self.body_adrs_read]
+        body_link_pos_w = self.mj_data.xpos[self.body_adrs_read]
+        body_com_pos_w = self.mj_data.xipos[self.body_adrs_read]
         # body_ang_vel_w = self.mj_data.cvel[self.body_adrs_read, :3]
         # body_lin_vel_w = self.mj_data.cvel[self.body_adrs_read, 3:]
-        body_vel_w = self.mj_data.cvel[self.body_adrs_read]
-        body_quat_w = self.mj_data.xquat[self.body_adrs_read] # wxyz
+        body_com_vel_w = self.mj_data.cvel[self.body_adrs_read]
+        body_link_quat_w = self.mj_data.xquat[self.body_adrs_read] # wxyz
         
         # rot = sRot.from_quat(self.mj_data.qpos[3:7], scalar_first=True)
-        rot = sRot.from_quat(body_quat_w[0], scalar_first=True)
+        rot = sRot.from_quat(body_link_quat_w[0], scalar_first=True)
         projected_gravity_b = rot \
             .inv() \
             .apply(np.array([0., 0., -1.]))
@@ -329,11 +341,12 @@ class MJArticulation:
 
         self._data = replace(
             self._data,
-            body_pos_w=torch.as_tensor(body_pos_w, dtype=torch.float32)[None],
-            body_quat_w=torch.as_tensor(body_quat_w, dtype=torch.float32)[None],
+            body_link_pos_w=torch.as_tensor(body_link_pos_w, dtype=torch.float32)[None],
+            body_com_pos_w=torch.as_tensor(body_com_pos_w, dtype=torch.float32)[None],
+            body_link_quat_w=torch.as_tensor(body_link_quat_w, dtype=torch.float32)[None],
             # body_lin_vel_w=torch.as_tensor(body_lin_vel_w, dtype=torch.float32)[None],
             # body_ang_vel_w=torch.as_tensor(body_ang_vel_w, dtype=torch.float32)[None],
-            body_vel_w=torch.as_tensor(body_vel_w, dtype=torch.float32)[None],
+            body_com_vel_w=torch.as_tensor(body_com_vel_w, dtype=torch.float32)[None],
             joint_pos=torch.as_tensor(jpos, dtype=torch.float32)[None],
             joint_pos_target=self._data.joint_pos_target.clone(),
             joint_vel=torch.as_tensor(jvel, dtype=torch.float32)[None],
@@ -341,12 +354,8 @@ class MJArticulation:
             projected_gravity_b=torch.as_tensor(projected_gravity_b, dtype=torch.float32)[None],
             heading_w=torch.as_tensor(heading_w, dtype=torch.float32)[None],
         )
-        # self._data.root_lin_vel_w = torch.as_tensor(self.mj_data.qvel[:3], dtype=torch.float32)[None]
-        # self._data.root_ang_vel_w = torch.as_tensor(self.mj_data.qvel[3:6], dtype=torch.float32)[None]
-        self._data.root_lin_vel_w = self._data.body_lin_vel_w[:, 0]
-        self._data.root_ang_vel_w = self._data.body_ang_vel_w[:, 0]
-        self._data.root_ang_vel_b = quat_rotate_inverse(self._data.root_quat_w, self._data.root_ang_vel_w)
-        self._data.root_lin_vel_b = quat_rotate_inverse(self._data.root_quat_w, self._data.root_lin_vel_w)
+        # self._data.root_ang_vel_b = quat_rotate_inverse(self._data.root_quat_w, self._data.root_ang_vel_w)
+        # self._data.root_lin_vel_b = quat_rotate_inverse(self._data.root_quat_w, self._data.root_lin_vel_w)
 
     def write_root_state_to_sim(self, root_state: ArrayType, env_ids: ArrayType=None):
         self.mj_data.qpos[:3] = root_state[0, :3]
@@ -473,7 +482,6 @@ class MJScene:
         ground_meshes = []
 
         for asset_name, asset_cfg in self.cfg.__dict__.items():
-            print(asset_name, asset_cfg)
             if isinstance(asset_cfg, MJArticulationCfg):
                 articulation = MJArticulation(asset_cfg)
                 self.articulations[asset_name] = articulation
@@ -529,12 +537,6 @@ class MJScene:
         self.mj_data = self.articulations["robot"].mj_data
         self.env_origins = torch.zeros(1, 3)
 
-        self.zmq_context = zmq.Context()
-        self.zmq_socket = self.zmq_context.socket(zmq.PUB)
-        self.zmq_socket.bind("tcp://*:5555")
-        self.last_publish_time = 0.0
-        self.publish_interval = 0.02
-
     def reset(self, env_ids: torch.Tensor):
         for articulation in self.articulations.values():
             articulation.reset(env_ids)
@@ -544,16 +546,6 @@ class MJScene:
     def update(self, dt: float):
         for articulation in self.articulations.values():
             articulation.update(dt)
-            if self.mj_data.time - self.last_publish_time > self.publish_interval:
-                self.zmq_socket.send_pyobj({
-                    "sim_time": self.mj_data.time,
-                    "joint_names": articulation.joint_names,
-                    "joint_pos": articulation.data.joint_pos[0], # [num_joints]
-                    "joint_vel": articulation.data.joint_vel[0], # [num_joints]
-                    "computed_torque": articulation.data.applied_torque[0],
-                    "applied_torque": articulation.data.applied_torque[0], # [num_joints]
-                })
-                self.last_publish_time = self.mj_data.time
         for sensor in self.sensors.values():
             sensor.update(dt)
     
@@ -601,7 +593,7 @@ class MJSim:
         self.scene = scene
         self.mj_model = scene.mj_model
         self.mj_data = scene.mj_data
-        self.timer = Timer(self.get_physics_dt())
+        # self.timer = Timer(self.get_physics_dt())
 
     def render(self):
         self.scene.viewer.sync()
@@ -615,7 +607,7 @@ class MJSim:
     def step(self, render: bool=False):
         mujoco.mj_step(self.mj_model, self.mj_data)
         mujoco.mj_rnePostConstraint(self.mj_model, self.mj_data)
-        self.timer.sleep()
+        # self.timer.sleep()
 
 
 class MjvGeom:

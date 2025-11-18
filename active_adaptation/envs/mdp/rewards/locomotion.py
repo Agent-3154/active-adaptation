@@ -238,7 +238,7 @@ class feet_air_time(Reward):
 
 
 class feet_contact_count(Reward):
-    
+    supported_backends = ("isaac", "mjlab")
     def __init__(self, env, body_names: str, weight: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]

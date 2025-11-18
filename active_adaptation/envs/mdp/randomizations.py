@@ -480,9 +480,9 @@ class reset_joint_states_uniform(Randomization):
             self.vel_ranges = torch.as_tensor(self.vel_ranges, device=self.device).unbind(-1)
         else:
             self.vel_ranges = None
-        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
-        self.default_joint_vel = self.asset.data.default_joint_vel[:, self.joint_ids]
-        self.joint_limits = self.asset.data.joint_pos_limits[0, self.joint_ids].unbind(-1)
+        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].float()
+        self.default_joint_vel = self.asset.data.default_joint_vel[:, self.joint_ids].float()
+        self.joint_limits = self.asset.data.joint_pos_limits[0, self.joint_ids].float().unbind(-1)
 
     def reset(self, env_ids: torch.Tensor):
         shape = (len(env_ids), len(self.joint_ids))

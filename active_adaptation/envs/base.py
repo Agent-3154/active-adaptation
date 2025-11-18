@@ -95,18 +95,14 @@ class ObsGroup:
 
 
 class _Env(EnvBase):
-    def __init__(self, cfg):
-        self.backend = active_adaptation.get_backend()
-        if self.backend in ("isaac", "mjlab"):
-            device = f"cuda:{active_adaptation.get_local_rank()}"
-        else:
-            device = "cpu"
-        self.cfg = cfg
+    def __init__(self, cfg, device: str):
         super().__init__(
             device=device,
-            batch_size=[self.cfg.num_envs],
+            batch_size=[cfg.num_envs],
             run_type_checks=False,
         )
+        self.backend = active_adaptation.get_backend()
+        self.cfg = cfg
 
         self.setup_scene()
         # Wrap sim and scene with adapters for unified API
@@ -508,14 +504,21 @@ class _Env(EnvBase):
         if mode == "human":
             return None
         elif mode == "rgb_array":
-            # obtain the rgb data
-            rgb_data = self._rgb_annotator.get_data()
-            # convert to numpy array
-            rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape)
-            # return the rgb data
-            return rgb_data[:, :, :3]
+            # Backend-specific rendering - only Isaac supports rgb_array via replicator
+            if hasattr(self, "_rgb_annotator"):
+                # obtain the rgb data
+                rgb_data = self._rgb_annotator.get_data()
+                # convert to numpy array
+                rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape)
+                # return the rgb data
+                return rgb_data[:, :, :3]
+            else:
+                raise NotImplementedError(
+                    f"rgb_array mode not supported for backend '{self.backend}'. "
+                    "Only Isaac backend supports rgb_array rendering."
+                )
         else:
-            raise NotImplementedError
+            raise NotImplementedError(f"Render mode '{mode}' not supported.")
 
     def state_dict(self):
         sd = super().state_dict()

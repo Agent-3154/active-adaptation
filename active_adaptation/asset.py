@@ -51,7 +51,7 @@ elif aa.get_backend() == "mjlab":
 
 elif aa.get_backend() == "mujoco":
     import mujoco
-    pass
+    from active_adaptation.envs.mujoco import MJArticulationCfg
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -332,6 +332,56 @@ class AssetCfg:
             joint_names_mjlab=self.joint_names_mjlab,
             body_names_isaac=self.body_names_isaac,
             body_names_mjlab=self.body_names_mjlab,
+        )
+    
+    def mujoco(self):
+        joint_names_expr = ""
+        effort_limit = {}
+        velocity_limit = {}
+        stiffness = {}
+        damping = {}
+        friction = {}
+        armature = {}
+        
+        def get(expr, cfg):
+            if isinstance(cfg, float):
+                return {expr: cfg}
+            else:
+                return cfg
+        
+        # merge all actuator configurations into a single implicit actuator configuration
+        for _, actuator in self.actuators.items():
+            joint_names_expr += f"({actuator.joint_names_expr})|"
+            effort_limit.update(get(actuator.joint_names_expr, actuator.effort_limit))
+            velocity_limit.update(get(actuator.joint_names_expr, actuator.velocity_limit))
+            stiffness.update(get(actuator.joint_names_expr, actuator.stiffness))
+            damping.update(get(actuator.joint_names_expr, actuator.damping))
+            friction.update(get(actuator.joint_names_expr, actuator.friction))
+            armature.update(get(actuator.joint_names_expr, actuator.armature))
+        
+        return MJArticulationCfg(
+            mjcf_path=str(self.mjcf_path),
+            init_state={
+                "pos": self.init_state.pos,
+                "rot": self.init_state.rot,
+                "joint_pos": self.init_state.joint_pos,
+                "joint_vel": self.init_state.joint_vel,
+            },
+            actuators={
+                "all": {
+                    "joint_names_expr": joint_names_expr,
+                    # "effort_limit_sim": effort_limit, # TODO: add effort limit
+                    # "velocity_limit_sim": velocity_limit, # TODO: add velocity limit
+                    "stiffness": stiffness,
+                    "damping": damping,
+                    "friction": friction,
+                    "armature": armature,
+                }
+            },
+            body_names_isaac=self.body_names_isaac,
+            joint_names_isaac=self.joint_names_isaac,
+            joint_symmetry_mapping=self.joint_symmetry_mapping,
+            spatial_symmetry_mapping=self.spatial_symmetry_mapping,
         )
 
     def mjlab(self):

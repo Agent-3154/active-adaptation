@@ -11,13 +11,14 @@ from .base import Termination
 
 
 class crash(Termination):
-    supported_backends = ("isaac",)
+    
     def __init__(self, env, body_names_expr: str, t_thres: float = 0.):
         super().__init__(env)
         self.t_thres = t_thres
         self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.body_indices, self.body_names = self.contact_sensor.find_bodies(body_names_expr)
+        self.body_indices = torch.tensor(self.body_indices, device=self.env.device)
         
     def compute(self, termination: torch.Tensor):
         contact_time = self.contact_sensor.data.current_contact_time[:, self.body_indices]

@@ -9,10 +9,11 @@ from isaaclab.app import AppLauncher
 
 from torchrl.envs.utils import set_exploration_type, ExplorationType
 
-import active_adaptation
+import active_adaptation as aa
 from active_adaptation.utils.export import export_onnx
+from active_adaptation.utils.timerfd import Timer
 
-active_adaptation.import_algorithms()
+aa.import_algorithms()
 FILE_PATH = Path(__file__).parent
 
 @hydra.main(config_path="../cfg", config_name="play", version_base=None)
@@ -20,9 +21,13 @@ def main(cfg):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    active_adaptation.set_backend(cfg.backend)
+    aa.set_backend(cfg.backend)
+
+    if cfg.device == "auto":
+        cfg.device = "cuda" if aa.get_backend() == "mjlab" else "cpu"
+        print(f"Using device: {cfg.device}")
     
-    if active_adaptation.get_backend() == "isaac":
+    if aa.get_backend() == "isaac":
         app_launcher = AppLauncher(OmegaConf.to_container(cfg.app))
         simulation_app = app_launcher.app
     else:
@@ -68,6 +73,8 @@ def main(cfg):
     
     assert not env.base_env.training
 
+    timer = Timer(env.step_dt)
+
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
         # torch.compiler.cudagraph_mark_step_begin()
         
@@ -81,6 +88,8 @@ def main(cfg):
                 print("Step", i)
                 for k, v in sorted(episode_stats.pop().items(True, True)):
                     print(k, torch.mean(v).item())
+            
+            timer.sleep()
     
     env.close()
     simulation_app.close()
