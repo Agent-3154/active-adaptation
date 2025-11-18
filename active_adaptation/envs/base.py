@@ -156,8 +156,7 @@ class _Env(EnvBase):
             raise ValueError(f"Command class '{class_name}' not found")
         self.command_manager = cast(mdp.Command, command)
 
-        self.addons = OrderedDict()
-        self.randomizations = OrderedDict()
+        self.randomizations: Dict[str, mdp.Randomization] = OrderedDict()
         self.observation_funcs: Dict[str, ObsGroup] = OrderedDict()
         self.reward_groups: Dict[str, RewardGroup] = OrderedDict()
         self.input_managers: Dict[str, mdp.ActionManager] = OrderedDict()
@@ -169,7 +168,7 @@ class _Env(EnvBase):
         self._pre_step_callbacks = []
         self._post_step_callbacks = []
 
-        self._pre_step_callbacks.append(self.command_manager.step)
+        self._pre_step_callbacks.append(self.command_manager.pre_step)
         # self._update_callbacks.append(self.command_manager.update)
         self._reset_callbacks.append(self.command_manager.reset)
         self._debug_draw_callbacks.append(self.command_manager.debug_draw)
@@ -191,38 +190,26 @@ class _Env(EnvBase):
         
         self.action_spec = Composite(action_spec, shape=[self.num_envs], device=self.device)
         
-        for rand_spec, params in self.cfg.randomization.items():
+        for rand_spec, kwargs in self.cfg.randomization.items():
             rand_name, cls_name = parse_name_and_class(rand_spec)
-            rand = mdp.Randomization.make(cls_name, self, **(params if params is not None else {}))
+            rand = mdp.Randomization.make(cls_name, self, **(kwargs if kwargs is not None else {}))
             if not rand:
                 continue
             
             rand = cast(mdp.Randomization, rand)
             self.randomizations[rand_name] = rand
-            self._startup_callbacks.append(rand.startup)
-            self._reset_callbacks.append(rand.reset)
-            self._debug_draw_callbacks.append(rand.debug_draw)
-            self._pre_step_callbacks.append(rand.step)
-            self._update_callbacks.append(rand.update)
+            self._add_mdp_component(rand)
 
-        for group_key, params in self.cfg.observation.items():
+        for group_key, group_cfg in self.cfg.observation.items():
             funcs = OrderedDict()            
-            for obs_spec, kwargs in params.items():
+            for obs_spec, kwargs in group_cfg.items():
                 obs_name, obs_cls_name = parse_name_and_class(obs_spec)
                 obs = mdp.Observation.make(obs_cls_name, self, **(kwargs if kwargs is not None else {}))
                 if not obs:
                     continue
                 obs = cast(mdp.Observation, obs)
                 funcs[obs_name] = obs
-                self._startup_callbacks.append(obs.startup)
-                if mdp.is_method_implemented(obs, mdp.Observation, "update"):
-                    self._update_callbacks.append(obs.update)
-                if mdp.is_method_implemented(obs, mdp.Observation, "reset"):
-                    self._reset_callbacks.append(obs.reset)
-                if mdp.is_method_implemented(obs, mdp.Observation, "debug_draw"):
-                    self._debug_draw_callbacks.append(obs.debug_draw)
-                if mdp.is_method_implemented(obs, mdp.Observation, "post_step"):
-                    self._post_step_callbacks.append(obs.post_step)
+                self._add_mdp_component(obs)
             
             self.observation_funcs[group_key] = ObsGroup(group_key, funcs)
         
@@ -254,16 +241,7 @@ class _Env(EnvBase):
                 reward = cast(mdp.Reward, reward)
                 funcs[rew_name] = reward
                 reward_spec["stats", group_name, rew_name] = Unbounded(1, device=self.device)
-                if mdp.is_method_implemented(reward, mdp.Reward, "update"):
-                    self._update_callbacks.append(reward.update)
-                if mdp.is_method_implemented(reward, mdp.Reward, "reset"):
-                    self._reset_callbacks.append(reward.reset)
-                if mdp.is_method_implemented(reward, mdp.Reward, "debug_draw"):
-                    self._debug_draw_callbacks.append(reward.debug_draw)
-                if mdp.is_method_implemented(reward, mdp.Reward, "step"):
-                    self._pre_step_callbacks.append(reward.step)
-                if mdp.is_method_implemented(reward, mdp.Reward, "post_step"):
-                    self._post_step_callbacks.append(reward.post_step)
+                self._add_mdp_component(reward)
                 print(f"\t{rew_name}: \t{reward.weight:.2f}")
                 self._stats_ema[group_name][rew_name] = (torch.tensor(0., device=self.device), torch.tensor(0., device=self.device))
 
@@ -300,8 +278,7 @@ class _Env(EnvBase):
                 continue
             term = cast(mdp.Termination, term)
             self.termination_funcs[term_name] = term
-            self._update_callbacks.append(term.update)
-            self._reset_callbacks.append(term.reset)
+            self._add_mdp_component(term)
             self.reward_spec["stats", "termination", term_name] = Unbounded((self.num_envs, 1), device=self.device)
         
         self.timestamp: int = 0 # global timestamp in steps
@@ -328,6 +305,20 @@ class _Env(EnvBase):
             for rew_key, (sum, cnt) in group.items():
                 result[group_key][rew_key] = (sum / cnt).item()
         return result
+    
+    def _add_mdp_component(self, component: mdp.MDPComponent):
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "startup"):
+            self._startup_callbacks.append(component.startup)
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "reset"):
+            self._reset_callbacks.append(component.reset)
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "pre_step"):
+            self._pre_step_callbacks.append(component.pre_step)
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "post_step"):
+            self._post_step_callbacks.append(component.post_step)
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "update"):
+            self._update_callbacks.append(component.update)
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "debug_draw"):
+            self._debug_draw_callbacks.append(component.debug_draw)
     
     def setup_scene(self):
         raise NotImplementedError

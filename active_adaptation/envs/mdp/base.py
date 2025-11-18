@@ -1,12 +1,9 @@
 import torch
 import inspect
 import abc
-import weakref
-import carb
-import omni
 import warnings
+
 from typing import Tuple, TYPE_CHECKING, Generic, TypeVar
-from collections import defaultdict
 from isaaclab.utils.math import quat_mul
 import active_adaptation as aa
 
@@ -98,9 +95,75 @@ class _RegistryMixin:
         return instance_cls(env, **kwargs)
 
 
-class Command(_RegistryMixin):
+class MDPComponent:
+    """
+    Base class for all MDP components (Command, Observation, Reward, Termination, Randomization).
+    
+    Provides common initialization, properties, and lifecycle methods that are shared
+    across all component types.
+    
+    Note: This class does not include registry functionality. Use multiple inheritance
+    with `_RegistryMixin` if registry functionality is needed.
+    """
+    
+    def __init__(self, env: "_Env"):
+        """Initialize the MDP component with a reference to the environment.
+        
+        Args:
+            env: The environment instance this component belongs to.
+        """
+        self.env: _Env = env
+    
+    @property
+    def num_envs(self) -> int:
+        """Number of parallel environments."""
+        return self.env.num_envs
+    
+    @property
+    def device(self) -> torch.device:
+        """Device on which tensors are stored."""
+        return self.env.device
+    
+    def reset(self, env_ids: torch.Tensor) -> None:
+        """Called after episode termination.
+        
+        Args:
+            env_ids: Indices of environments that were reset.
+        """
+        pass
+    
+    def update(self) -> None:
+        """Called after all physics substeps are completed."""
+        pass
+    
+    def pre_step(self, substep: int) -> None:
+        """Called before each physics substep.
+        
+        Args:
+            substep: The current substep index.
+        """
+        pass
+    
+    def post_step(self, substep: int) -> None:
+        """Called after each physics substep.
+        
+        Args:
+            substep: The current substep index.
+        """
+        pass
+    
+    def startup(self) -> None:
+        """Called once upon initialization of the environment."""
+        pass
+    
+    def debug_draw(self) -> None:
+        """Called at each step **after** simulation, if GUI is enabled."""
+        pass
+
+
+class Command(MDPComponent, _RegistryMixin):
     def __init__(self, env: "_Env", teleop: bool=False) -> None:
-        self.env = env
+        super().__init__(env)
         self.asset: Articulation = env.scene["robot"]
         self.init_root_state = self.asset.data.default_root_state.clone()
         self.init_joint_pos = self.asset.data.default_joint_pos.clone()
@@ -109,38 +172,6 @@ class Command(_RegistryMixin):
         
         if self.env.terrain_type == "generator":
             self._origins = self.env.scene.terrain.terrain_origins.reshape(-1, 3).clone()
-
-        if self.teleop and self.env.backend == "isaac":
-            # acquire omniverse interfaces
-            self._appwindow = omni.appwindow.get_default_app_window()
-            self._input = carb.input.acquire_input_interface()
-            self._keyboard = self._appwindow.get_keyboard()
-            # note: Use weakref on callbacks to ensure that this object can be deleted when its destructor is called.
-            self._keyboard_sub = self._input.subscribe_to_keyboard_events(
-                self._keyboard,
-                lambda event, *args, obj=weakref.proxy(self): obj._on_keyboard_event(event, *args),
-            )
-            self.key_pressed = defaultdict(lambda: False)
-
-    @property
-    def num_envs(self):
-        return self.env.num_envs
-
-    @property
-    def device(self):
-        return self.env.device
-
-    def step(self, substep: int):
-        pass
-
-    def update(self):
-        pass
-
-    def reset(self, env_ids: torch.Tensor):
-        pass
-
-    def debug_draw(self):
-        pass
 
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -160,32 +191,18 @@ class Command(_RegistryMixin):
         )
         return init_root_state
 
-    def _on_keyboard_event(self, event, *args, **kwargs):
-        if event.type == carb.input.KeyboardEventType.KEY_PRESS:
-            self.key_pressed[event.input.name] = True
-        if event.type == carb.input.KeyboardEventType.KEY_RELEASE:
-            self.key_pressed[event.input.name] = False
-
 
 CT = TypeVar('CT', bound=Command)
 
 
-class Observation(Generic[CT], _RegistryMixin):
+class Observation(Generic[CT], MDPComponent, _RegistryMixin):
     """
     Base class for all observations.
     """
 
     def __init__(self, env):
-        self.env: _Env = env
+        super().__init__(env)
         self.command_manager: CT = env.command_manager
-
-    @property
-    def num_envs(self):
-        return self.env.num_envs
-    
-    @property
-    def device(self):
-        return self.env.device
 
     @abc.abstractmethod
     def compute(self) -> torch.Tensor:
@@ -194,60 +211,21 @@ class Observation(Generic[CT], _RegistryMixin):
     def __call__(self) ->  Tuple[torch.Tensor, torch.Tensor]:
         tensor = self.compute()
         return tensor
-    
-    def startup(self):
-        """Called once upon initialization of the environment"""
-        pass
-    
-    def post_step(self, substep: int):
-        """Called after each physics substep"""
-        pass
-
-    def update(self):
-        """Called after all physics substeps are completed"""
-        pass
-
-    def reset(self, env_ids: torch.Tensor):
-        """Called after episode termination"""
-
-    def debug_draw(self):
-        """Called at each step **after** simulation, if GUI is enabled"""
-        pass
 
     def symmetry_transform(self):
         """Called to apply symmetry transformations to the observation"""
         pass
 
 
-class Reward(Generic[CT], _RegistryMixin):
+class Reward(Generic[CT], MDPComponent, _RegistryMixin):
     def __init__(
         self,
         env,
         weight: float,
     ):
-        self.env: _Env = env
+        super().__init__(env)
         self.command_manager: CT = env.command_manager
         self.weight = weight
-
-    @property
-    def num_envs(self):
-        return self.env.num_envs
-
-    @property
-    def device(self):
-        return self.env.device
-
-    def step(self, substep: int):
-        pass
-
-    def post_step(self, substep: int):
-        pass
-
-    def update(self):
-        pass
-
-    def reset(self, env_ids: torch.Tensor):
-        pass
 
     def __call__(self) -> torch.Tensor:
         result = self.compute()
@@ -263,53 +241,18 @@ class Reward(Generic[CT], _RegistryMixin):
     def compute(self) -> torch.Tensor:
         raise NotImplementedError
 
-    def debug_draw(self):
-        pass
 
-
-class Termination(Generic[CT], _RegistryMixin):
+class Termination(Generic[CT], MDPComponent, _RegistryMixin):
     def __init__(self, env):
-        self.env: _Env = env
+        super().__init__(env)
         self.command_manager: CT = env.command_manager
-    
-    def update(self):
-        pass
-
-    def reset(self, env_ids):
-        pass
     
     @abc.abstractmethod
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
-    
-    @property
-    def num_envs(self) -> int:
-        return self.env.num_envs
 
 
-class Randomization(_RegistryMixin):
+class Randomization(MDPComponent, _RegistryMixin):
     def __init__(self, env):
-        self.env: _Env = env
+        super().__init__(env)
 
-    @property
-    def num_envs(self):
-        return self.env.num_envs
-    
-    @property
-    def device(self):
-        return self.env.device
-    
-    def startup(self):
-        pass
-    
-    def reset(self, env_ids: torch.Tensor):
-        pass
-    
-    def step(self, substep):
-        pass
-
-    def update(self):
-        pass
-
-    def debug_draw(self):
-        pass
