@@ -67,15 +67,19 @@ class _RegistryMixin:
     # Subclasses should override this to declare which backends they support
     supported_backends: tuple[str, ...] = ("isaac", "mujoco", "mjlab")
     
-    def __init_subclass__(cls) -> None:
+    def __init_subclass__(cls, namespace: str | None = None) -> None:
         """Put the subclass in the global registry"""
         if not hasattr(cls, 'registry'):
             cls.registry = {}
-            
-        cls_name = cls.__name__
-        cls._file = inspect.getfile(cls)
-        cls._line = inspect.getsourcelines(cls)[1]
+        
+        if namespace is None:
+            cls_name = cls.__name__
+        else:
+            cls_name = f"{namespace}.{cls.__name__}"
+        
         if cls_name not in cls.registry:
+            cls._file = inspect.getfile(cls)
+            cls._line = inspect.getsourcelines(cls)[1]
             cls.registry[cls_name] = cls    
         else:
             conflicting_cls = cls.registry[cls_name]
