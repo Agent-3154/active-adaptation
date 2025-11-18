@@ -12,16 +12,15 @@ from torchrl.envs.utils import set_exploration_type, ExplorationType
 import active_adaptation
 from active_adaptation.utils.export import export_onnx
 
-active_adaptation.set_backend("isaac")
 active_adaptation.import_algorithms()
-
 FILE_PATH = Path(__file__).parent
-
 
 @hydra.main(config_path="../cfg", config_name="play", version_base=None)
 def main(cfg):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
+
+    active_adaptation.set_backend(cfg.backend)
     
     if active_adaptation.get_backend() == "isaac":
         app_launcher = AppLauncher(OmegaConf.to_container(cfg.app))

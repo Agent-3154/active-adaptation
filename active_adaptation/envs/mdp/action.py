@@ -1,7 +1,7 @@
 import torch
-import einops
-import warnings
-from typing import Dict, Literal, Tuple, Union, TYPE_CHECKING, List
+from typing import Dict, Literal, Tuple, TYPE_CHECKING, List
+from typing_extensions import override
+
 from tensordict import TensorDictBase
 import isaaclab.utils.string as string_utils
 from active_adaptation.utils.math import (
@@ -14,7 +14,8 @@ from active_adaptation.utils.math import (
     yaw_quat,
     clamp_norm
 )
-import active_adaptation.utils.symmetry as symmetry_utils
+from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
+from active_adaptation.asset import get_input_joint_indexing
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -68,7 +69,7 @@ class ConcatenatedAction(ActionManager):
             action_manager.apply_action(action, substep)
     
     def symmetry_transform(self):
-        return symmetry_utils.SymmetryTransform.cat(
+        return SymmetryTransform.cat(
             [action_manager.symmetry_transform() for action_manager in self.action_managers]
         )
 
@@ -79,28 +80,27 @@ class JointPosition(ActionManager):
         env,
         action_scaling: Dict[str, float] = 0.5,
         max_delay: int = 2,  # delay in simulation steps
-        alpha: Union[float, Tuple[float, float]] = (0.5, 1.0),
+        alpha_range: Tuple[float, float] = (0.5, 1.0),
+        input_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
     ):
         super().__init__(env)
-        self.joint_ids, self.joint_names, self.action_scaling = (
-            string_utils.resolve_matching_names_values(
-                dict(action_scaling), self.asset.joint_names
-            )
-        )
+        action_scaling = dict(action_scaling)
+        self.joint_ids, self.joint_names, self.action_scaling = self.resolve(action_scaling)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
+        
+        # optionally convert the input order to the asset's order
+        self.indexing, self.input_joint_names = get_input_joint_indexing(
+            input_order=input_order,
+            asset_cfg=self.asset.cfg,
+            target_joint_names=self.joint_names,
+            device=self.device,
+        )
 
         self.action_scaling = torch.tensor(self.action_scaling, device=self.device)
         self.max_delay = max_delay
         self.action_dim = len(self.joint_ids)
 
-        if isinstance(alpha, float):
-            self.alpha_range = (alpha, alpha)
-        else:
-            try:
-                self.alpha_range = tuple(alpha)
-            except:
-                raise ValueError(f"Invalid alpha type: {type(alpha)}")
-
+        self.alpha_range = tuple(alpha_range)
         self.default_joint_pos = self.asset.data.default_joint_pos.clone()
         self.offset = torch.zeros_like(self.default_joint_pos)
         self.decimation = int(self.env.step_dt / self.env.physics_dt)
@@ -116,9 +116,10 @@ class JointPosition(ActionManager):
         return string_utils.resolve_matching_names_values(dict(spec), self.asset.joint_names)
 
     def symmetry_transform(self):
-        transform = symmetry_utils.joint_space_symmetry(self.asset, self.joint_names)
+        transform = joint_space_symmetry(self.asset, self.input_joint_names)
         return transform
 
+    @override
     def reset(self, env_ids: torch.Tensor):
         self.delay[env_ids] = torch.randint(0, self.max_delay + 1, (len(env_ids), 1), device=self.device)
         self.action_buf[env_ids] = 0
@@ -131,7 +132,9 @@ class JointPosition(ActionManager):
         alpha.uniform_(self.alpha_range[0], self.alpha_range[1])
         self.alpha[env_ids] = alpha
 
+    @override
     def process_action(self, action: torch.Tensor):
+        action = action[:, self.indexing]
         self.action_buf = self.action_buf.roll(1, dims=1)
         self.action_buf[:, 0] = action
         self.action_queue = torch.where(
@@ -140,6 +143,7 @@ class JointPosition(ActionManager):
             action.unsqueeze(1)
         )
 
+    @override
     def apply_action(self, action: torch.Tensor, substep: int):
         # deplay model: each substep, the first action in queue is consumed
         self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
@@ -191,9 +195,9 @@ class LegWheel(ActionManager):
         self.asset.set_joint_velocity_target(wheel_vel_target, self.wheel_ids)
 
     def symmetry_transform(self):
-        return symmetry_utils.SymmetryTransform.cat([
-            symmetry_utils.joint_space_symmetry(self.asset, self.leg_names),
-            symmetry_utils.joint_space_symmetry(self.asset, self.wheel_names),
+        return SymmetryTransform.cat([
+            joint_space_symmetry(self.asset, self.leg_names),
+            joint_space_symmetry(self.asset, self.wheel_names),
         ])
     
 

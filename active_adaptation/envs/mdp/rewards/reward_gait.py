@@ -70,16 +70,7 @@ class quadruped_trot(Reward):
         self.body_ids, self.body_names = self.asset.find_bodies(body_names)
         self.body_ids = torch.tensor(self.body_ids, device=self.device)
 
-        if self.env.backend == "isaac":
-            self.body_contact_ids = self.contact_sensor.find_bodies(body_names)[0]
-        elif self.env.backend == "mjlab":
-            # TODO: a better way to get the body contact ids for mjlab
-            body_names = []
-            for slot in self.contact_sensor._slots:
-                name = slot.primary_name
-                if name not in body_names:
-                    body_names.append(name)
-            self.body_contact_ids = resolve_matching_names(body_names, self.body_names)[0]
+        self.body_contact_ids = self.contact_sensor.find_bodies(body_names)[0]
         self.body_contact_ids = torch.tensor(self.body_contact_ids, device=self.device)
     
     def compute(self) -> torch.Tensor:

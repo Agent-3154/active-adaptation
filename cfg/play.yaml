@@ -4,6 +4,7 @@ hydra:
 
 headless: false
 
+backend: isaac
 app:
   headless: ${..headless}
   enable_cameras: false

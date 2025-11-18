@@ -209,12 +209,12 @@ class tracking_yaw(Reward):
 
 
 class feet_air_time(Reward):
-    supported_backends = ("isaac",)
+    
     def __init__(self, env, body_names: str, thres: float, weight: float, condition_on_linvel: bool = False):
         super().__init__(env, weight)
         self.thres = thres
         self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.condition_on_linvel = condition_on_linvel
 
         self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
@@ -227,9 +227,6 @@ class feet_air_time(Reward):
 
     @override
     def compute(self):
-        first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[
-            :, self.body_ids
-        ]
         last_air_time = self.contact_sensor.data.last_air_time[:, self.body_ids]
         contact = self.last_air_time != last_air_time
         self.last_air_time = last_air_time
@@ -241,11 +238,11 @@ class feet_air_time(Reward):
 
 
 class feet_contact_count(Reward):
-    supported_backends = ("isaac",)
+    
     def __init__(self, env, body_names: str, weight: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
 
         self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
         self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
@@ -256,7 +253,7 @@ class feet_contact_count(Reward):
 
     @override
     def compute(self):
-        self.first_contact[:] = self.contact_sensor.compute_first_contact(
+        self.first_contact = self.contact_sensor.compute_first_contact(
             self.env.step_dt
         )[:, self.body_ids]
         return self.first_contact.sum(1, keepdim=True)

@@ -60,30 +60,31 @@ command:
 #   adaptive: false
 
 observation:
-  command: # won't be normalized
-    command:
+  # command: # won't be normalized
   policy:
-    gravity_multistep: {steps: 3, noise_std: 0.05}
-    joint_pos_multistep: {steps: 3, noise_std: 0.05}
-    joint_vel_multistep: {steps: 3, noise_std: 0.2}
-    prev_actions: {steps: 1}
-  priv:
+    command:
+    gravity_multistep: {steps: 4, noise_std: 0.05}
+    joint_pos_multistep: {steps: 4, noise_std: 0.05}
+    joint_vel_multistep: {steps: 4, noise_std: 0.2}
+    prev_actions: {steps: 2}
+  # priv:
     root_linvel_b:    {yaw_only: true}
     root_angvel_b:
     body_height:      {body_names: .*_foot}
-    applied_torque:   {}
-    contact_indicator:  {body_names: [".*_foot", ".*_calf"]}
-  ext:
-    external_forces:  {body_names: ["base"]}
-    external_torques: {body_names: ["base"]}
-  aux_target_:
-    root_linvel_b:
-    root_angvel_b:
+    # applied_torque:   {}
+    # contact_indicator:  {body_names: [".*_foot", ".*_calf"]}
+  # ext:
+  #   external_forces:  {body_names: ["base"]}
+  #   external_torques: {body_names: ["base"]}
+  # aux_target_:
+  #   root_linvel_b:
+  #   root_angvel_b:
     # rewards: {}
 
 reward:
   loco:
-    linvel_exp:         {weight: 1.5, dim: 3}
+    linvel_exp:         {weight: 1.5, dim: 2}
+    linvel_projection:  {weight: 0.5}
     angvel_z_exp:       {weight: 0.8}
     angvel_xy_l2:       {weight: 0.02}
     linvel_z_l2:        {weight: 2.0}
@@ -101,7 +102,7 @@ reward:
     _enabled_: false
     linvel_projection:  {weight: 0.5}
     feet_contact_count: {weight: 1.0, body_names: .*_foot}
-    feet_swing_height:  {weight: 0.1, target_height: 0.1}
+    # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
   crash: {body_names_expr: [Head.*, base], t_thres: 0.06}
@@ -114,32 +115,32 @@ randomization:
     (?!(payload|base|Head.*)).*: [0.8, 1.2]
     base: [0.8, 1.4]
     # Head.*: [25.0, 250.0]
-  rand_body_materials:
-    static_friction_range:  {".*_foot": [0.5, 4.0]}
-    dynamic_friction_range: {".*_foot": [0.5, 4.0]}
-    restitution_range:      {".*_foot": [0.0, 0.5]}
-  motor_params:
-    actuator_name: base_legs
-    stiffness_range:  
-      F[L,R]_hip_joint:   [0.8, 1.2]
-      F[L,R]_thigh_joint: [0.8, 1.2]
-      F[L,R]_calf_joint:  [0.8, 1.2]
-      R[L,R]_hip_joint:   [0.8, 1.2]
-      R[L,R]_thigh_joint: [0.8, 1.2]
-      R[L,R]_calf_joint:  [0.8, 1.2]
-    damping_range:
-      F[L,R]_hip_joint:   [0.8, 1.2]
-      F[L,R]_thigh_joint: [0.8, 1.2]
-      F[L,R]_calf_joint:  [0.8, 1.2]
-      R[L,R]_hip_joint:   [0.8, 1.2]
-      R[L,R]_thigh_joint: [0.8, 1.2]
-      R[L,R]_calf_joint:  [0.8, 1.2]
-    scale_factor_range:
-      .*_hip_joint:   [0.8, 1.2]
-      .*_thigh_joint: [0.8, 1.2]
-      .*_calf_joint:  [0.8, 1.2]
-    armature_range:
-      .*: [0.0, 0.02]
+  # rand_body_materials:
+  #   static_friction_range:  {".*_foot": [0.5, 4.0]}
+  #   dynamic_friction_range: {".*_foot": [0.5, 4.0]}
+  #   restitution_range:      {".*_foot": [0.0, 0.5]}
+  # motor_params:
+  #   actuator_name: base_legs
+  #   stiffness_range:  
+  #     F[L,R]_hip_joint:   [0.8, 1.2]
+  #     F[L,R]_thigh_joint: [0.8, 1.2]
+  #     F[L,R]_calf_joint:  [0.8, 1.2]
+  #     R[L,R]_hip_joint:   [0.8, 1.2]
+  #     R[L,R]_thigh_joint: [0.8, 1.2]
+  #     R[L,R]_calf_joint:  [0.8, 1.2]
+  #   damping_range:
+  #     F[L,R]_hip_joint:   [0.8, 1.2]
+  #     F[L,R]_thigh_joint: [0.8, 1.2]
+  #     F[L,R]_calf_joint:  [0.8, 1.2]
+  #     R[L,R]_hip_joint:   [0.8, 1.2]
+  #     R[L,R]_thigh_joint: [0.8, 1.2]
+  #     R[L,R]_calf_joint:  [0.8, 1.2]
+  #   scale_factor_range:
+  #     .*_hip_joint:   [0.8, 1.2]
+  #     .*_thigh_joint: [0.8, 1.2]
+  #     .*_calf_joint:  [0.8, 1.2]
+  #   armature_range:
+  #     .*: [0.0, 0.02]
   reset_joint_states_scale:
     pos_scales:
       .*: [0.8, 1.2]

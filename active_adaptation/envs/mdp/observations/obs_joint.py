@@ -1,10 +1,11 @@
 import torch
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from typing_extensions import override
 from active_adaptation.envs.mdp.base import Observation
 from active_adaptation.utils.math import normal_noise
 from active_adaptation.utils.symmetry import joint_space_symmetry
+from active_adaptation.asset import get_output_joint_indexing
 
 
 if TYPE_CHECKING:
@@ -12,12 +13,25 @@ if TYPE_CHECKING:
 
 
 class joint_pos(Observation):
-    def __init__(self, env, joint_names: str=".*", noise_std: float=0., subtract_offset: bool=False):
+    def __init__(
+        self,
+        env,
+        joint_names: str=".*",
+        noise_std: float=0.,
+        subtract_offset: bool=False,
+        output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
+    ):
         super().__init__(env)
         self.noise_std = noise_std
         self.subtract_offset = subtract_offset
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
+        self.output_indexing, self.output_joint_names = get_output_joint_indexing(
+            output_order,
+            self.asset.cfg,
+            self.joint_names,
+            self.device,
+        )
         self.num_joints = len(self.joint_ids)
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
         
@@ -28,20 +42,32 @@ class joint_pos(Observation):
             joint_pos = joint_pos - self.default_joint_pos
         if self.noise_std > 0:
             joint_pos = normal_noise(joint_pos, self.noise_std)
-        return joint_pos.reshape(self.num_envs, -1)
+        return joint_pos[:, self.output_indexing].reshape(self.num_envs, -1)
     
     @override
     def symmetry_transform(self):
-        transform = joint_space_symmetry(self.asset, self.joint_names)
+        transform = joint_space_symmetry(self.asset, self.output_joint_names)
         return transform
 
 
 class joint_vel(Observation):
-    def __init__(self, env, joint_names: str=".*", noise_std: float=0.):
+    def __init__(
+        self,
+        env,
+        joint_names: str=".*",
+        noise_std: float=0.,
+        output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
+    ):
         super().__init__(env)
         self.noise_std = noise_std
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
+        self.output_indexing, self.output_joint_names = get_output_joint_indexing(
+            output_order,
+            self.asset.cfg,
+            self.joint_names,
+            self.device,
+        )
         self.num_joints = len(self.joint_ids)
         
     @override
@@ -53,7 +79,7 @@ class joint_vel(Observation):
     
     @override
     def symmetry_transform(self):
-        transform = joint_space_symmetry(self.asset, self.joint_names)
+        transform = joint_space_symmetry(self.asset, self.output_joint_names)
         return transform
 
 
@@ -65,6 +91,7 @@ class joint_pos_multistep(Observation):
         steps: int=4, 
         interval: int=1,
         noise_std: float=0.,
+        output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
     ):
         super().__init__(env)
         self.steps = steps
@@ -73,6 +100,12 @@ class joint_pos_multistep(Observation):
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
+        self.output_indexing, self.output_joint_names = get_output_joint_indexing(
+            output_order,
+            self.asset.cfg,
+            self.joint_names,
+            self.device,
+        )
         self.num_joints = len(self.joint_ids)
         
         self.noise_std = torch.zeros(self.num_envs, self.num_joints, device=self.device)
@@ -95,12 +128,12 @@ class joint_pos_multistep(Observation):
     
     @override
     def compute(self):
-        joint_pos = self.joint_pos_multistep[:, ::self.interval] # [num_envs, steps, joints]
+        joint_pos = self.joint_pos_multistep[:, ::self.interval, self.output_indexing] # [num_envs, steps, joints]
         return joint_pos.reshape(self.num_envs, -1)
     
     @override
     def symmetry_transform(self):
-        transform = joint_space_symmetry(self.asset, self.joint_names)
+        transform = joint_space_symmetry(self.asset, self.output_joint_names)
         return transform.repeat(self.steps)
 
 
@@ -112,6 +145,7 @@ class joint_vel_multistep(Observation):
         steps: int=4,
         interval: int=1,
         noise_std: float=0.,
+        output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
     ):
         super().__init__(env)
         self.steps = steps
@@ -121,6 +155,12 @@ class joint_vel_multistep(Observation):
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
+        self.output_indexing, self.output_joint_names = get_output_joint_indexing(
+            output_order,
+            self.asset.cfg,
+            self.joint_names,
+            self.device,
+        )
         self.num_joints = len(self.joint_ids)
 
         shape = (self.num_envs, steps * interval, self.num_joints)
@@ -157,12 +197,12 @@ class joint_vel_multistep(Observation):
     
     @override
     def compute(self):
-        joint_vel = self.joint_vel_multistep[:, ::self.interval].clone()
+        joint_vel = self.joint_vel_multistep[:, ::self.interval, self.output_indexing]
         return joint_vel.reshape(self.num_envs, -1)
 
     @override
     def symmetry_transform(self):
-        transform = joint_space_symmetry(self.asset, self.joint_names)
+        transform = joint_space_symmetry(self.asset, self.output_joint_names)
         return transform.repeat(self.steps)
 
 

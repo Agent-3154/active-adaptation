@@ -77,6 +77,7 @@ class SimpleEnv(_Env):
             model=self.sim.model,
             data=self.sim.data,
         )
+        self.sim.create_graph()
         # MjLabViewer(self).run_async()
     
     def setup_scene_isaac(self):
