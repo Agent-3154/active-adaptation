@@ -14,11 +14,11 @@ from collections import OrderedDict
 from tqdm import tqdm
 from setproctitle import setproctitle
 
-import active_adaptation as aa
-from active_adaptation.utils.profiling import ScopedTimer
-from isaaclab.app import AppLauncher
 from torchrl.envs.utils import set_exploration_type, ExplorationType
 from tensordict.nn import TensorDictModuleBase
+
+import active_adaptation as aa
+from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.command_history import CommandHistory
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -30,13 +30,15 @@ torch.backends.cudnn.benchmark = False
 FILE_PATH = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(FILE_PATH, "..", "cfg")
 
-aa.set_backend("isaac")
 aa.import_algorithms()
 
 @hydra.main(config_path=CONFIG_PATH, config_name="train", version_base=None)
 def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
+
+    aa.init(cfg)
+    
     # Record launch into command history (only on main process)
     if aa.is_main_process():
         try:
@@ -64,14 +66,6 @@ def main(cfg: DictConfig):
             pass
     
     print(f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}")
-    
-    if aa.get_backend() == "isaac":
-        app_launcher = AppLauncher(
-            OmegaConf.to_container(cfg.app),
-            distributed=aa.is_distributed(),
-            device=f"cuda:{aa.get_local_rank()}"
-        )
-        simulation_app = app_launcher.app
 
     if aa.is_main_process():
         run = wandb.init(
@@ -214,9 +208,6 @@ def main(cfg: DictConfig):
         wandb.finish()
         print(f"Final checkpoint: {ckpt_path}")
     exit(0)
-    
-    env.close()
-    simulation_app.close()
 
 
 if __name__ == "__main__":

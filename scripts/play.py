@@ -1,11 +1,13 @@
+"""
+This script is used to play and visualize a policy in the environment.
+"""
+
 import torch
 import hydra
 import itertools
 import datetime
 from pathlib import Path
 from omegaconf import OmegaConf
-
-from isaaclab.app import AppLauncher
 
 from torchrl.envs.utils import set_exploration_type, ExplorationType
 
@@ -21,18 +23,12 @@ def main(cfg):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    aa.set_backend(cfg.backend)
+    aa.init(cfg)
 
-    if cfg.device == "auto":
+    if cfg.get("device", "auto") == "auto":
         cfg.device = "cuda" if aa.get_backend() == "mjlab" else "cpu"
         print(f"Using device: {cfg.device}")
     
-    if aa.get_backend() == "isaac":
-        app_launcher = AppLauncher(OmegaConf.to_container(cfg.app))
-        simulation_app = app_launcher.app
-    else:
-        simulation_app = None
-
     from helpers import EpisodeStats, make_env_policy
     env, policy = make_env_policy(cfg)
     
@@ -66,7 +62,7 @@ def main(cfg):
         if isinstance(k, tuple) and k[0]=="stats"
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
-    policy = policy.get_rollout_policy("eval")
+    rollout_policy = policy.get_rollout_policy("eval")
     
     env.base_env.eval()
     carry = env.reset()
@@ -79,7 +75,7 @@ def main(cfg):
         # torch.compiler.cudagraph_mark_step_begin()
         
         for i in itertools.count():
-            carry = policy(carry)
+            carry = rollout_policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
             # td_.update(td["next"])
             episode_stats.add(td)
@@ -92,7 +88,6 @@ def main(cfg):
             timer.sleep()
     
     env.close()
-    simulation_app.close()
 
 
 if __name__ == "__main__":
