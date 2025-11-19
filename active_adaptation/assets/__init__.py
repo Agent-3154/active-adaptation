@@ -1,15 +1,24 @@
-import os
-import copy
-import torch
+from .asset_cfg import (
+    AssetCfg,
+    InitialStateCfg,
+    ActuatorCfg,
+    ContactSensorCfg,
+    get_input_joint_indexing,
+    get_output_joint_indexing,
+    get_output_body_indexing,
+)
+from . import quadruped
+from . import humanoid
 
-from .quadruped import UNITREE_GO2_CFG
-# from .humanoid import G1_WAIST_UNLOCKED_CFG
-from active_adaptation.registry import Registry
-
-registry = Registry.instance()
-registry.register("asset", "go2", UNITREE_GO2_CFG)
-# registry.register("asset", "b1z1", UNITREE_B1Z1_CFG)
-# registry.register("asset", "g1_waist_unlocked", G1_WAIST_UNLOCKED_CFG)
+__all__ = [
+    "AssetCfg",
+    "InitialStateCfg",
+    "ActuatorCfg",
+    "ContactSensorCfg",
+    "get_input_joint_indexing",
+    "get_output_joint_indexing",
+    "get_output_body_indexing",
+]
 
 
 # def get_asset_meta(asset: Articulation):

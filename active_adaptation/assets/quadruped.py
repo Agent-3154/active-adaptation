@@ -1,6 +1,9 @@
 import os
 from pathlib import Path
-from active_adaptation.asset import AssetCfg, InitialStateCfg, ActuatorCfg
+from active_adaptation.assets.asset_cfg import AssetCfg, InitialStateCfg, ActuatorCfg
+from active_adaptation.registry import Registry
+
+registry = Registry.instance()
 
 FILE_DIR = Path(__file__).parent
 
@@ -71,7 +74,7 @@ UNITREE_GO2_CFG = AssetCfg(
         "Head_lower": "Head_lower",
     }
 )
-
+registry.register("asset", "go2", UNITREE_GO2_CFG)
 
 # UNITREE_B1Z1_CFG = ArticulationCfg(
 #     spawn=sim_utils.UsdFileCfg(

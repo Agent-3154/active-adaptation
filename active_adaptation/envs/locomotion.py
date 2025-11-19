@@ -5,11 +5,10 @@ from isaaclab.utils import configclass
 
 import active_adaptation
 from active_adaptation.envs.base import _Env
-from active_adaptation.asset import AssetCfg
+from active_adaptation.assets import AssetCfg
 from active_adaptation.registry import Registry
 from typing import cast
 
-import active_adaptation.assets
 from active_adaptation.viewer import MjLabViewer
 
 

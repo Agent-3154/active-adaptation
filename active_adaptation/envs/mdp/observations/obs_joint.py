@@ -5,7 +5,7 @@ from typing_extensions import override
 from active_adaptation.envs.mdp.base import Observation
 from active_adaptation.utils.math import normal_noise
 from active_adaptation.utils.symmetry import joint_space_symmetry
-from active_adaptation.asset import get_output_joint_indexing
+from active_adaptation.assets import get_output_joint_indexing
 
 
 if TYPE_CHECKING:

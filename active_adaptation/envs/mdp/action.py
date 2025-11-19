@@ -15,7 +15,7 @@ from active_adaptation.utils.math import (
     clamp_norm
 )
 from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
-from active_adaptation.asset import get_input_joint_indexing
+from active_adaptation.assets import get_input_joint_indexing
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
