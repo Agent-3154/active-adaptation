@@ -57,148 +57,6 @@ class root_linacc_substep(Observation):
             return self.lin_acc_substep
 
 
-class body_link_pos_w(Observation):
-    def __init__(self, env, body_names: str):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.body_indices, self.body_names = self.asset.find_bodies(body_names)
-        self.body_indices = torch.tensor(self.body_indices, device=self.device)
-    
-    @override
-    def compute(self):
-        return self.asset.data.body_link_pos_w[:, self.body_indices].reshape(self.num_envs, -1)
-
-
-class body_pos_b(Observation):
-    def __init__(self, env, body_names: str, yaw_only: bool=False):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.yaw_only = yaw_only
-        self.body_indices, self.body_names = self.asset.find_bodies(body_names)
-        self.body_indices = torch.tensor(self.body_indices, device=self.device)
-        self.update()
-        if self.env.backend == "mujoco":
-            self.feet_marker_0 = self.env.scene.create_sphere_marker(0.05, [1, 0, 0, 0.5])
-            self.feet_marker_1 = self.env.scene.create_sphere_marker(0.05, [1, 0, 0, 0.5])
-
-    @override
-    def update(self):
-        if self.yaw_only:
-            self.root_link_quat_w = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
-        else:
-            self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
-        self.root_pos_w = self.asset.data.root_pos_w.unsqueeze(1)
-        self.body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_indices]
-        
-    @override
-    def compute(self):
-        body_pos_b = quat_rotate_inverse(self.root_link_quat_w, self.body_link_pos_w - self.root_pos_w)
-        return body_pos_b.reshape(self.num_envs, -1)
-    
-    @override
-    def symmetry_transform(self):
-        return sym_utils.cartesian_space_symmetry(self.asset, self.body_names)
-    
-    @override
-    def debug_draw(self):
-        if self.env.backend == "mujoco":
-            self.feet_marker_0.geom.pos = self.asset.data.body_link_pos_w[0, self.body_indices[0]]
-            self.feet_marker_1.geom.pos = self.asset.data.body_link_pos_w[0, self.body_indices[1]]
-
-
-class body_vel_b(Observation):
-    def __init__(self, env, body_names: str, yaw_only: bool=False):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.yaw_only = yaw_only
-        self.body_indices,         self.body_names = self.asset.find_bodies(body_names)
-        self.update()
-    
-    @override
-    def update(self):
-        if self.yaw_only:
-            self.root_link_quat_w = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
-        else:
-            self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
-        self.body_vel_w = self.asset.data.body_vel_w[:, self.body_indices]
-        
-    @override
-    def compute(self):
-        body_lin_vel_b = quat_rotate_inverse(self.root_link_quat_w, self.body_vel_w[:, :, :3])
-        body_ang_vel_b = quat_rotate_inverse(self.root_link_quat_w, self.body_vel_w[:, :, 3:])
-        return body_lin_vel_b.reshape(self.num_envs, -1)
-    
-    @override
-    def symmetry_transform(self):
-        return sym_utils.cartesian_space_symmetry(self.asset, self.body_names)
-
-
-class body_acc(Observation):
-    
-    def __init__(self, env, body_names, yaw_only: bool=False):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.yaw_only = yaw_only
-        self.body_indices, self.body_names = self.asset.find_bodies(body_names)
-        print(f"Track body acc for {self.body_names}")
-        self.body_acc_b = torch.zeros(self.env.num_envs, len(self.body_indices), 3, device=self.env.device)
-
-    @override
-    def update(self):
-        if self.yaw_only:
-            quat = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
-        else:
-            quat = self.asset.data.root_link_quat_w.unsqueeze(1)
-        body_acc_w = self.asset.data.body_lin_acc_w[:, self.body_indices]
-        self.body_acc_b[:] = quat_rotate_inverse(quat, body_acc_w)
-        
-    @override
-    def compute(self):
-        return self.body_acc_b.reshape(self.env.num_envs, -1)
-
-
-class imu_acc(Observation):
-    def __init__(self, env, smoothing_window: int=3):
-        super().__init__(env)
-        self.imu: Imu = self.env.scene["imu"]
-        self.smoothing_window = smoothing_window
-        self.acc_buf = torch.zeros(self.env.num_envs, 3, smoothing_window, device=self.env.device)
-
-    @override
-    def reset(self, env_ids):
-        self.acc_buf[env_ids] = 0.0
-
-    @override
-    def update(self):
-        self.acc_buf[:, :, 1:] = self.acc_buf[:, :, :-1]
-        self.acc_buf[:, :, 0] = self.imu.data.lin_acc_b
-
-    @override
-    def compute(self):
-        return self.acc_buf.mean(dim=2).view(self.env.num_envs, -1)
-    
-
-class imu_angvel(Observation):
-    def __init__(self, env, smoothing_window: int=3):
-        super().__init__(env)
-        self.imu: Imu = self.env.scene["imu"]
-        self.smoothing_window = smoothing_window
-        self.angvel_buf = torch.zeros(self.env.num_envs, 3, smoothing_window, device=self.env.device)
-    
-    @override
-    def reset(self, env_ids):
-        self.angvel_buf[env_ids] = 0.0
-
-    @override
-    def update(self):
-        self.angvel_buf[:, :, 1:] = self.angvel_buf[:, :, :-1]
-        self.angvel_buf[:, :, 0] = self.imu.data.ang_vel_b
-
-    @override
-    def compute(self):
-        return self.angvel_buf.mean(dim=2).view(self.env.num_envs, -1)
-
-
 class command(Observation):
     def __init__(self, env):
         super().__init__(env)
@@ -473,30 +331,6 @@ class body_mass(Observation):
     
     def compute(self) -> torch.Tensor:
         return self.masses.reshape(self.num_envs, -1)
-    
-
-class body_momentum(Observation):
-    def __init__(self, env, body_names, homogeneous: bool=False):
-        super().__init__(env)
-        self.homogeneous = homogeneous
-        self.asset: Articulation = self.env.scene["robot"]
-        self.body_ids, self.body_names = self.asset.find_bodies(body_names)
-        masses = self.asset.root_physx_view.get_masses()[0]
-        self.default_mass_total = masses.sum()
-        self.masses = torch.zeros_like(masses[self.body_ids], device=self.device)
-    
-    def startup(self):
-        self.masses = (
-            self.asset.root_physx_view.get_masses()[:, self.body_ids].unsqueeze(-1)
-            / self.default_mass_total.sum()
-        ).to(self.device)
-        self.body_ids = torch.tensor(self.body_ids, device=self.device)
-    
-    def compute(self) -> torch.Tensor:
-        velocity = self.asset.data.body_lin_vel_w[:, self.body_ids]
-        momentum = self.masses * quat_rotate_inverse(self.asset.data.root_link_quat_w.unsqueeze(1), velocity)
-        return momentum.reshape(self.num_envs, -1)
-
 
 
 class prev_actions(Observation):
@@ -549,34 +383,6 @@ class incoming_wrench(Observation):
             )
 
 
-class jacobians_b(Observation):
-    """The jacobians relative to the root link in body frame. The shape of returned jacobian is (num_envs, num_bodies * 6 * num_joints)"""
-    def __init__(self, env, body_names: str, joint_names: str):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.body_ids, self.body_names = self.asset.find_bodies(body_names)
-        self.body_ids = torch.tensor(self.body_ids, device=self.device)
-        self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
-        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-        if self.env.fix_root_link:
-            self.body_ids = self.body_ids - 1
-        else:
-            self.joint_ids = self.joint_ids + 6
-    
-    def compute(self) -> torch.Tensor:
-        jacobian_all = self.asset.root_physx_view.get_jacobians() # [N, B, 6, J]
-        jacobian = jacobian_all[:, self.body_ids.unsqueeze(1), :, self.joint_ids.unsqueeze(0)].permute(2, 0, 3, 1) # [N, b, j, 6]
-        root_link_quat_w = self.asset.data.root_link_quat_w # [N, 4]
-        # [N, b, 6, j] -> [N, b, j, 6] -> [N, b * j * 2, 3] then rotate
-        jacobian_b = jacobian.permute(0, 1, 3, 2).reshape(self.num_envs, -1, 3)
-        jacobian_b = quat_rotate_inverse(root_link_quat_w.unsqueeze(1), jacobian_b)
-
-        # # [N, b * j * 2, 3] -> [N, b * j, 6] -> [N, b, j, 6] -> [N, b, 6, j]
-        # jacobian_b = jacobian_b.reshape(self.num_envs, len(self.body_ids), -1, 6).permute(0, 1, 3, 2)
-        # arm_joint_ids, _ = self.asset.find_joints("arm_joint[1-6]")
-        # breakpoint()
-
-        return jacobian_b.reshape(self.num_envs, -1)
 
 class cum_error(Observation):
     def __init__(self, env):
@@ -799,22 +605,6 @@ class cartesian_force(Observation):
     #         - self.force_w / 9.81,
     #         color=(1., 0., 1., 1.)
     #     )
-
-
-class body_height(Observation):
-    def __init__(self, env, body_names: str):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.body_ids, self.body_names = self.asset.find_bodies(body_names)
-        self.body_ids = torch.as_tensor(self.body_ids, device=self.device)
-    
-    def compute(self):
-        body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
-        body_height = body_link_pos_w[:, :, 2] - self.env.get_ground_height_at(body_link_pos_w)
-        return body_height.reshape(self.num_envs, -1)
-
-    def symmetry_transform(self):
-        return sym_utils.cartesian_space_symmetry(self.asset, self.body_names, sign=(1,))
 
 
 class command_mode(Observation):

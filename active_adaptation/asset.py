@@ -470,6 +470,26 @@ def get_output_joint_indexing(
     return torch.tensor(indexing, device=device), target_joint_names
 
 
+def get_output_body_indexing(
+    output_order: Literal["isaac", "mujoco", "mjlab"],
+    asset_cfg: AssetCfg,
+    source_body_names: List[str],
+    device: str = "cpu",
+) -> Tuple[torch.Tensor, List[str]]:
+    if output_order == aa.get_backend() or output_order == "mujoco":
+        return slice(None), source_body_names
+    if output_order == "isaac":
+        target_body_names = [name for name in asset_cfg.body_names_isaac if name in source_body_names]
+    elif output_order == "mjlab":
+        target_body_names = [name for name in asset_cfg.body_names_mjlab if name in source_body_names]
+    else:
+        raise ValueError(f"Invalid output_order: {output_order}")
+    if not len(target_body_names) == len(source_body_names):
+        raise ValueError(f"Target body names {target_body_names} do not match source body names {source_body_names}")
+    indexing = [source_body_names.index(name) for name in target_body_names]
+    return torch.tensor(indexing, device=device), target_body_names
+
+
 if __name__ == "__main__":
     from active_adaptation.assets import UNITREE_GO2_CFG
     from mjlab.entity.entity import Entity

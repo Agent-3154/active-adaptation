@@ -12,7 +12,25 @@ if TYPE_CHECKING:
     from isaaclab.assets import Articulation
 
 
-class joint_pos(Observation):
+class joint_observation(Observation):
+    def __init__(self, env, joint_names: str, output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac"):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
+        self.joint_ids = torch.as_tensor(self.joint_ids, device=self.device)
+        self.output_indexing, self.output_joint_names = get_output_joint_indexing(
+            output_order,
+            self.asset.cfg,
+            self.joint_names,
+            self.device,
+        )
+    
+    @property
+    def num_joints(self):
+        return len(self.joint_ids)
+
+
+class joint_pos(joint_observation):
     def __init__(
         self,
         env,
@@ -21,18 +39,9 @@ class joint_pos(Observation):
         subtract_offset: bool=False,
         output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
     ):
-        super().__init__(env)
+        super().__init__(env, joint_names, output_order)
         self.noise_std = noise_std
         self.subtract_offset = subtract_offset
-        self.asset: Articulation = self.env.scene["robot"]
-        self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
-        self.output_indexing, self.output_joint_names = get_output_joint_indexing(
-            output_order,
-            self.asset.cfg,
-            self.joint_names,
-            self.device,
-        )
-        self.num_joints = len(self.joint_ids)
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
         
     @override
@@ -50,7 +59,7 @@ class joint_pos(Observation):
         return transform
 
 
-class joint_vel(Observation):
+class joint_vel(joint_observation):
     def __init__(
         self,
         env,
@@ -58,24 +67,16 @@ class joint_vel(Observation):
         noise_std: float=0.,
         output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
     ):
-        super().__init__(env)
+        super().__init__(env, joint_names, output_order)
         self.noise_std = noise_std
-        self.asset: Articulation = self.env.scene["robot"]
-        self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
-        self.output_indexing, self.output_joint_names = get_output_joint_indexing(
-            output_order,
-            self.asset.cfg,
-            self.joint_names,
-            self.device,
-        )
-        self.num_joints = len(self.joint_ids)
+        self.default_joint_vel = self.asset.data.default_joint_vel[:, self.joint_ids]
         
     @override
     def compute(self):
         joint_vel = self.asset.data.joint_vel[:, self.joint_ids]
         if self.noise_std > 0:
             joint_vel = normal_noise(joint_vel, self.noise_std)
-        return joint_vel.reshape(self.num_envs, -1)
+        return joint_vel[:, self.output_indexing].reshape(self.num_envs, -1)
     
     @override
     def symmetry_transform(self):
@@ -83,7 +84,7 @@ class joint_vel(Observation):
         return transform
 
 
-class joint_pos_multistep(Observation):
+class joint_pos_multistep(joint_observation):
     def __init__(
         self,
         env,
@@ -93,21 +94,10 @@ class joint_pos_multistep(Observation):
         noise_std: float=0.,
         output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
     ):
-        super().__init__(env)
+        super().__init__(env, joint_names, output_order)
         self.steps = steps
         self.interval = interval
         self.noise_std_max = max(noise_std, 0.)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
-        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-        self.output_indexing, self.output_joint_names = get_output_joint_indexing(
-            output_order,
-            self.asset.cfg,
-            self.joint_names,
-            self.device,
-        )
-        self.num_joints = len(self.joint_ids)
-        
         self.noise_std = torch.zeros(self.num_envs, self.num_joints, device=self.device)
         self.noise_std.uniform_(0., self.noise_std_max)
 
@@ -137,7 +127,7 @@ class joint_pos_multistep(Observation):
         return transform.repeat(self.steps)
 
 
-class joint_vel_multistep(Observation):
+class joint_vel_multistep(joint_observation):
     def __init__(
         self,
         env,
@@ -147,22 +137,11 @@ class joint_vel_multistep(Observation):
         noise_std: float=0.,
         output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
     ):
-        super().__init__(env)
+        super().__init__(env, joint_names, output_order)
         self.steps = steps
         self.interval = interval
         self.noise_std_max = max(noise_std, 0.)
         self.from_pos = True
-        self.asset: Articulation = self.env.scene["robot"]
-        self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
-        self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-        self.output_indexing, self.output_joint_names = get_output_joint_indexing(
-            output_order,
-            self.asset.cfg,
-            self.joint_names,
-            self.device,
-        )
-        self.num_joints = len(self.joint_ids)
-
         shape = (self.num_envs, steps * interval, self.num_joints)
         
         self.joint_vel_multistep = torch.zeros(shape, device=self.device)
@@ -206,57 +185,57 @@ class joint_vel_multistep(Observation):
         return transform.repeat(self.steps)
 
 
-class joint_pos_substep(Observation):
+class joint_pos_substep(joint_observation):
     """Only for debugging"""
-    def __init__(self, env):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        shape = (self.num_envs, self.env.decimation, self.asset.num_joints)
-        self.joint_pos = torch.zeros(shape, device=self.device)
+    def __init__(self, env, joint_names: str, output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac"):
+        super().__init__(env, joint_names, output_order)
+        shape = (self.num_envs, self.env.decimation, self.num_joints)
+        self.joint_pos_substep = torch.zeros(shape, device=self.device)
     
     @override
     def post_step(self, substep):
-        self.joint_pos[:, substep] = self.asset.data.joint_pos
+        self.joint_pos_substep[:, substep] = self.asset.data.joint_pos[:, self.joint_ids]
     
     @override
     def compute(self):
-        return self.joint_pos
+        return self.joint_pos_substep[:, :, self.output_indexing].reshape(self.num_envs, -1)
 
 
-class joint_vel_substep(Observation):
+class joint_vel_substep(joint_observation):
     """Only for debugging"""
-    def __init__(self, env):
+    def __init__(self, env, joint_names: str, output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac"):
+        super().__init__(env, joint_names, output_order)
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        shape = (self.num_envs, self.env.decimation, self.asset.num_joints)
-        self.joint_vel = torch.zeros(shape, device=self.device)
+        shape = (self.num_envs, self.env.decimation, self.num_joints)
+        self.joint_vel_substep = torch.zeros(shape, device=self.device)
 
     @override
     def post_step(self, substep):
-        self.joint_vel[:, substep] = self.asset.data.joint_vel
+        self.joint_vel_substep[:, substep] = self.asset.data.joint_vel[:, self.joint_ids]
     
     @override
     def compute(self):
-        return self.joint_vel
+        return self.joint_vel_substep[:, :, self.output_indexing].reshape(self.num_envs, -1)
 
 
-class joint_pos_target(Observation):
-    def __init__(self, env, subtract_offset: bool=False):
-        super().__init__(env)
+class joint_pos_target(joint_observation):
+    def __init__(self, env, joint_names: str, subtract_offset: bool=False, output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac"):
+        super().__init__(env, joint_names, output_order)
         self.subtract_offset = subtract_offset
-        self.asset: Articulation = self.env.scene["robot"]
-        self.default_joint_pos = self.asset.data.default_joint_pos.clone()
+        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
 
     @override
     def compute(self):
         joint_pos_target = self.asset.data.joint_pos_target
         if self.subtract_offset:
             joint_pos_target = joint_pos_target - self.default_joint_pos
-        return joint_pos_target.reshape(self.num_envs, -1)
+        return joint_pos_target[:, self.output_indexing].reshape(self.num_envs, -1)
 
 
-class applied_torque(Observation):
+class applied_torque(joint_observation):
+    
     supported_backends = ("isaac",)
+
     def __init__(self, env, joint_names: str=".*"):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
