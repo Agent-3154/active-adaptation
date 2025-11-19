@@ -5,6 +5,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 from pathlib import Path
+from omegaconf import DictConfig, OmegaConf
 
 _BACKEND = None
 _BACKEND_SET = False
@@ -95,7 +96,7 @@ for entry_point in importlib.metadata.entry_points(group="active_adaptation.lear
 from hydra_plugins.aa_searchpath_plugin.aa_searchpath_plugin import ActiveAdaptationSearchPathPlugin
 
 
-def import_projects():
+def _import_projects():
     for entry_point in _PROJECT_ENTRY_POINTS:
         print(f"Importing project {entry_point.name}")
         entry_point.load()
@@ -107,3 +108,12 @@ def import_algorithms():
         entry_point.load()
 
 
+def init(cfg: DictConfig, import_projects: bool = True):
+    set_backend(cfg.get("backend", "isaac"))
+    if get_backend() == "isaac":
+        from isaaclab.app import AppLauncher
+        AppLauncher(OmegaConf.to_container(cfg.app))
+    if import_projects:
+        _import_projects()
+    return cfg
+    
