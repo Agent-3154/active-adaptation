@@ -8,7 +8,7 @@ registry = Registry.instance()
 FILE_DIR = Path(__file__).parent
 
 UNITREE_GO2_CFG = AssetCfg(
-    mjcf_path=FILE_DIR.parent / "assets_mjcf" / "go2" / "go2.xml",
+    mjcf_path=FILE_DIR / "Go2" / "mjcf" / "go2.xml",
     usd_path=FILE_DIR / "Go2" / "go2.usd",
     init_state=InitialStateCfg(
         pos=(0.0, 0.0, 0.4),
@@ -81,7 +81,42 @@ UNITREE_GO2_CFG = AssetCfg(
             track_air_time=True,
             history_length=3
         ),
-    ]
+    ],
+    body_names_isaac=[
+        "base",
+        "FL_hip",
+        "FR_hip",
+        "Head_upper",
+        "RL_hip",
+        "RR_hip",
+        "FL_thigh",
+        "FR_thigh",
+        "Head_lower",
+        "RL_thigh",
+        "RR_thigh",
+        "FL_calf",
+        "FR_calf",
+        "RL_calf",
+        "RR_calf",
+        "FL_foot",
+        "FR_foot",
+        "RL_foot",
+        "RR_foot"
+    ],
+    joint_names_isaac=[
+        "FL_hip_joint",
+        "FR_hip_joint",
+        "RL_hip_joint",
+        "RR_hip_joint",
+        "FL_thigh_joint",
+        "FR_thigh_joint",
+        "RL_thigh_joint",
+        "RR_thigh_joint",
+        "FL_calf_joint",
+        "FR_calf_joint",
+        "RL_calf_joint",
+        "RR_calf_joint"
+    ],
 )
 registry.register("asset", "go2", UNITREE_GO2_CFG)
 

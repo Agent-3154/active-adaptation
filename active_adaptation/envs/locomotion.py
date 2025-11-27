@@ -9,8 +9,6 @@ from active_adaptation.assets import AssetCfg
 from active_adaptation.registry import Registry
 from typing import cast
 
-from active_adaptation.viewer import MjLabViewer
-
 
 class SimpleEnvIsaac(_Env):
     """Isaac Sim backend implementation."""
@@ -183,6 +181,7 @@ class SimpleEnvMjlab(_Env):
         from mjlab.scene import Scene, SceneCfg
         from mjlab.sim import Simulation, SimulationCfg, MujocoCfg
         from mjlab.terrains import TerrainImporterCfg
+        from active_adaptation.viewer import MjLabViewer
 
         registry = Registry.instance()
         asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
