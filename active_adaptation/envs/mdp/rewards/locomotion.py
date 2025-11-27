@@ -133,14 +133,15 @@ class linvel_exp(Reward[Twist]):
         return rew.reshape(self.num_envs, 1)
 
     def debug_draw(self):
-        # draw smoothed lin vel (purple)
-        linvel_w = self.linvel_w_sum / self.count.clamp_min(1.0)
-        self.env.debug_draw.vector(
-            self.asset.data.root_link_pos_w
-            + torch.tensor([0.0, 0.0, 0.2], device=self.device),
-            linvel_w,
-            color=(0.8, 0.1, 0.8, 1.0),
-        )
+        if self.env.backend == "isaac":
+            # draw smoothed lin vel (purple)
+            linvel_w = self.linvel_w_sum / self.count.clamp_min(1.0)
+            self.env.debug_draw.vector(
+                self.asset.data.root_link_pos_w
+                + torch.tensor([0.0, 0.0, 0.2], device=self.device),
+                linvel_w,
+                color=(0.8, 0.1, 0.8, 1.0),
+            )
 
 
 class linvel_projection(Reward[Twist]):
@@ -210,31 +211,23 @@ class tracking_yaw(Reward):
 
 class feet_air_time(Reward):
     
-    def __init__(self, env, body_names: str, thres: float, weight: float, condition_on_linvel: bool = False):
+    def __init__(self, env, body_names: str, thres: float, weight: float):
         super().__init__(env, weight)
         self.thres = thres
         self.asset: Articulation = self.env.scene["robot"]
         self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
-        self.condition_on_linvel = condition_on_linvel
 
         self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
         self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
         self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
-        self.reward = torch.zeros(self.num_envs, 1, device=self.env.device)
-        self.last_air_time = torch.zeros(
-            self.num_envs, len(self.body_ids), device=self.env.device
-        )
 
     @override
     def compute(self):
+        first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[:, self.body_ids]
         last_air_time = self.contact_sensor.data.last_air_time[:, self.body_ids]
-        contact = self.last_air_time != last_air_time
-        self.last_air_time = last_air_time
-        self.reward = torch.sum(
-            (last_air_time - self.thres).clamp_max(0.0) * contact, dim=1, keepdim=True
-        )
-        self.reward *= ~self.env.command_manager.is_standing_env
-        return self.reward
+        reward = ((last_air_time - self.thres).clamp_max(0.0) * first_contact).sum(1)
+        active = ~self.command_manager.is_standing_env
+        return reward.reshape(self.num_envs, 1), active
 
 
 class feet_contact_count(Reward):

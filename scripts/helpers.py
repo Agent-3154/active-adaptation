@@ -85,7 +85,7 @@ def make_env_policy(cfg: DictConfig):
     else:
         raise ValueError(f"Unknown backend: {backend}")
     
-    base_env = env_cls(cfg.task, str(cfg.device))
+    base_env = env_cls(cfg.task, str(cfg.device), headless=cfg.headless)
 
     checkpoint_path = parse_checkpoint_path(cfg.checkpoint_path)
     if checkpoint_path is not None:

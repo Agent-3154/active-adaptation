@@ -133,15 +133,16 @@ class MujocoSimAdapter:
 class MjlabSimAdapter:
     """Adapter for mjlab Simulation."""
     
-    def __init__(self, sim: "Simulation"):
+    def __init__(self, sim: "Simulation", viewer: bool = False):
         self._sim = sim
+        self._viewer = viewer
     
     def get_physics_dt(self) -> float:
         return self._sim.cfg.mujoco.timestep
     
     def has_gui(self) -> bool:
         # mjlab doesn't have GUI support yet
-        return False
+        return self._viewer is not None
     
     def step(self, render: bool = False) -> None:
         # mjlab's step doesn't take render parameter

@@ -7,14 +7,19 @@ import active_adaptation
 from active_adaptation.envs.base import _Env
 from active_adaptation.assets import AssetCfg
 from active_adaptation.registry import Registry
+from active_adaptation.envs.adapters import (
+    IsaacSimAdapter, IsaacSceneAdapter,
+    MujocoSimAdapter, MujocoSceneAdapter,
+    MjlabSimAdapter, MjlabSceneAdapter,
+)
 from typing import cast
 
 
 class SimpleEnvIsaac(_Env):
     """Isaac Sim backend implementation."""
     
-    def __init__(self, cfg, device: str):
-        super().__init__(cfg, device)
+    def __init__(self, cfg, device: str, headless: bool = True):
+        super().__init__(cfg, device, headless)
         self.robot = self.scene.articulations["robot"]
         
         if self.sim.has_gui():
@@ -126,12 +131,15 @@ class SimpleEnvIsaac(_Env):
         except ModuleNotFoundError as e:
             print("Set enable_cameras=true to use cameras.")            
 
+        self.sim = IsaacSimAdapter(self.sim)
+        self.scene = IsaacSceneAdapter(self.scene)
+
 
 class SimpleEnvMujoco(_Env):
     """MuJoCo backend implementation."""
     
-    def __init__(self, cfg, device: str):
-        super().__init__(cfg, device)
+    def __init__(self, cfg, device: str, headless: bool = True):
+        super().__init__(cfg, device, headless)
         self.robot = self.scene.articulations["robot"]
     
     def _reset_idx(self, env_ids: torch.Tensor):
@@ -157,15 +165,17 @@ class SimpleEnvMujoco(_Env):
             contact_forces = "robot"
             terrain = TERRAINS_MUJOCO.get(self.cfg.terrain, TERRAINS_MUJOCO["plane"])
         
-        self.scene = MJScene(SceneCfg())
-        self.sim = MJSim(self.scene)
+        scene = MJScene(SceneCfg())
+        sim = MJSim(scene)
+        self.scene = MujocoSceneAdapter(scene)
+        self.sim = MujocoSimAdapter(sim)
 
 
 class SimpleEnvMjlab(_Env):
     """MjLab backend implementation."""
     
-    def __init__(self, cfg, device: str):
-        super().__init__(cfg, device)
+    def __init__(self, cfg, device: str, headless: bool = True):
+        super().__init__(cfg, device, headless)
         self.robot = self.scene.articulations["robot"]
     
     def _reset_idx(self, env_ids: torch.Tensor):
@@ -194,9 +204,9 @@ class SimpleEnvMjlab(_Env):
             sensors=sensors,
             terrain=TerrainImporterCfg(terrain_type="plane"),
         )
-        self.scene = Scene(scene_cfg, device=str(self.device))
+        scene = Scene(scene_cfg, device=str(self.device))
         self.sim = Simulation(
-            num_envs=self.scene.num_envs,
+            num_envs=scene.num_envs,
             cfg=SimulationCfg(
                 nconmax=50,
                 njmax=300,
@@ -206,15 +216,18 @@ class SimpleEnvMjlab(_Env):
                     ls_iterations=20,
                 ),
             ),
-            model=self.scene.compile(),
+            model=scene.compile(),
             device=str(self.device),
         )
 
-        self.scene.initialize(
-            mj_model=self.sim.mj_model,
-            model=self.sim.model,
-            data=self.sim.data,
-        )
+        scene.initialize(self.sim.mj_model, self.sim.model, self.sim.data)
         self.sim.create_graph()
-        # MjLabViewer(self).run_async()
+
+        self.scene = MjlabSceneAdapter(scene)
+        if not self.headless:
+            viewer = MjLabViewer(self)
+            viewer.run_async()
+        else:
+            viewer = None
+        self.sim = MjlabSimAdapter(self.sim, viewer)
 

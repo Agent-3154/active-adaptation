@@ -22,7 +22,7 @@ import active_adaptation
 import active_adaptation.envs.mdp as mdp
 import active_adaptation.utils.symmetry as symmetry_utils
 from active_adaptation.utils.profiling import ScopedTimer
-from active_adaptation.envs.adapters import wrap_sim, wrap_scene
+from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
 from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
 
 if active_adaptation.get_backend() == "isaac":
@@ -95,7 +95,7 @@ class ObsGroup:
 
 
 class _Env(EnvBase):
-    def __init__(self, cfg, device: str):
+    def __init__(self, cfg, device: str, headless: bool = True):
         super().__init__(
             device=device,
             batch_size=[cfg.num_envs],
@@ -103,11 +103,11 @@ class _Env(EnvBase):
         )
         self.backend = active_adaptation.get_backend()
         self.cfg = cfg
+        self.headless = headless
 
         self.setup_scene()
-        # Wrap sim and scene with adapters for unified API
-        self.sim = wrap_sim(self.sim, self.backend)
-        self.scene = wrap_scene(self.scene, self.backend)
+        self.sim = cast(SimAdapter, self.sim)
+        self.scene = cast(SceneAdapter, self.scene)
 
         if hasattr(self.scene, "terrain") and self.scene.terrain is not None:
             self.terrain_type = self.scene.terrain.cfg.terrain_type

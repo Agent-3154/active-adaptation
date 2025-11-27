@@ -90,13 +90,13 @@ reward:
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 2.0, target_height: 0.35}
   reg:
-    energy_l1:          {weight: 0.0002}
+    energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7}
     joint_torques_l2:   {weight: 2.0e-4}
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
-    feet_air_time:      {weight: 0.2, body_names: .*_foot, thres: 0.4}
+    feet_air_time:      {weight: 0.4, body_names: .*_foot, thres: 0.4}
     undesired_contact:  {body_names: [.*_calf, .*thigh, Head.*], weight: 0.25}
   debug:
     _enabled_: false
