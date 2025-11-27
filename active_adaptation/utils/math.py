@@ -9,6 +9,7 @@ from isaaclab.utils.math import (
     quat_mul,
     quat_conjugate,
     axis_angle_from_quat,
+    matrix_from_quat,
     create_rotation_matrix_from_view,
     convert_camera_frame_orientation_convention
 )
