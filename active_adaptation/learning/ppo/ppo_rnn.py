@@ -60,8 +60,6 @@ class PPOConfig:
     hidden_size: int = 128
 
     checkpoint_path: Union[str, None] = None
-    actor_in_keys: list = field(default_factory=lambda: [OBS_KEY])
-    critic_in_keys: list = field(default_factory=lambda: [OBS_KEY, OBS_PRIV_KEY])
 
 cs = ConfigStore.instance()
 cs.store("ppo_gru", node=PPOConfig, group="algo")
@@ -119,7 +117,7 @@ class PPORNNPolicy(PPOBase):
             stats_shape=observation_spec[OBS_KEY].shape[-1:],
             decay=1.0
         )
-        self.vecnorm = Seq(Mod(vecnorm, [OBS_KEY], ["_obs_normed"])).to(self.device)
+        self.vecnorm = Mod(vecnorm, [OBS_KEY], ["_obs_normed"]).to(self.device)
         actor_module = Seq(
             Mod(
                 GRUEncoder(self.observation_spec[0], 128),
@@ -136,18 +134,18 @@ class PPORNNPolicy(PPOBase):
             return_log_prob=True
         ).to(self.device)
 
-        # self.critic = Seq(
-        #     Mod(
-        #         GRUEncoder(self.observation_spec[0], 128),
-        #         [OBS_KEY, "critic_hx", "is_init"],
-        #         ["_critic_feature", ("next", "critic_hx")]
-        #     ),
-        #     Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
-        # ).to(self.device)
         self.critic = Seq(
-            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_critic_feature"]),
+            Mod(
+                GRUEncoder(self.observation_spec[0], 128),
+                ["_obs_normed", "critic_hx", "is_init"],
+                ["_critic_feature", ("next", "critic_hx")]
+            ),
             Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
+        # self.critic = Seq(
+        #     Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_critic_feature"]),
+        #     Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
+        # ).to(self.device)
 
         self.vecnorm(fake_input)
         self.actor(fake_input)

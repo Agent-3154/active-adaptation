@@ -138,12 +138,21 @@ class MJArticulation:
         self.spec = mujoco.MjSpec.from_file(cfg.mjcf_path)
         
         # Add a motor actuator for each joint, with the actuator name matching the joint name
+        self.actuator_type = "position" # or motor
         for joint in self.spec.joints:
+            if joint.type != mujoco.mjtJoint.mjJNT_HINGE:
+                continue
             actuator = self.spec.add_actuator(name=joint.name, target=joint.name)
-            actuator.trntype = mujoco.mjtTrn.mjTRN_JOINT
-            actuator.dyntype = mujoco.mjtDyn.mjDYN_NONE
-            actuator.gaintype = mujoco.mjtGain.mjGAIN_FIXED
-            actuator.biastype = mujoco.mjtBias.mjBIAS_NONE
+            if self.actuator_type == "position":
+                actuator.trntype = mujoco.mjtTrn.mjTRN_JOINT
+                actuator.dyntype = mujoco.mjtDyn.mjDYN_NONE
+                actuator.gaintype = mujoco.mjtGain.mjGAIN_FIXED
+                actuator.biastype = mujoco.mjtBias.mjBIAS_AFFINE
+            elif self.actuator_type == "motor":
+                actuator.trntype = mujoco.mjtTrn.mjTRN_JOINT
+                actuator.dyntype = mujoco.mjtDyn.mjDYN_NONE
+                actuator.gaintype = mujoco.mjtGain.mjGAIN_FIXED
+                actuator.biastype = mujoco.mjtBias.mjBIAS_NONE
             actuator.gear[0] = 1.0
             actuator.forcelimited = False
             actuator.ctrllimited = False
@@ -234,6 +243,11 @@ class MJArticulation:
             joint_damping[ids] = torch.as_tensor(values)
             ids, _, values = string_utils.resolve_matching_names_values(armature_cfg, self.joint_names_isaac)
             joint_armature[ids] = torch.as_tensor(values)
+        
+        if self.actuator_type == "position":
+            self.mj_model.actuator_gainprm[:, 0] = joint_stiffness
+            self.mj_model.actuator_biasprm[:, 1] = -joint_stiffness
+            self.mj_model.actuator_biasprm[:, 2] = -joint_damping
         
         self.mj_model.dof_armature[self.joint_qveladr] = joint_armature
 
@@ -377,13 +391,18 @@ class MJArticulation:
             self._data.joint_vel_target[0, joint_ids] = target
     
     def write_data_to_sim(self):
-        pos_error = self._data.joint_pos_target - self.mj_data.qpos[None, self.joint_qposadr]
-        vel_error = self._data.joint_vel_target - self.mj_data.qvel[None, self.joint_qveladr]
-        
-        torque = (self._data.joint_stiffness * pos_error + self._data.joint_damping * vel_error)
-        self._data.applied_torque = torque.float()
+        if self.actuator_type == "position":
+            self.mj_data.ctrl[self._jnt_mjc2isaac] = self._data.joint_pos_target[0]
+        elif self.actuator_type == "motor":
+            pos_error = self._data.joint_pos_target - self.mj_data.qpos[None, self.joint_qposadr]
+            vel_error = self._data.joint_vel_target - self.mj_data.qvel[None, self.joint_qveladr]
+            
+            torque = (self._data.joint_stiffness * pos_error + self._data.joint_damping * vel_error)
+            self._data.applied_torque = torque.float()
 
-        self.mj_data.ctrl[self._jnt_mjc2isaac] = torque[0]
+            self.mj_data.ctrl[self._jnt_mjc2isaac] = torque[0]
+        else:
+            raise ValueError(f"Invalid actuator type: {self.actuator_type}")
 
         if self.has_external_wrench:
             self.mj_data.xfrc_applied[self.body_adrs_write, :3] = quat_rotate(self._data.root_quat_w, self._external_force_b)[0]
