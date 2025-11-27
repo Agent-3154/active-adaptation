@@ -22,6 +22,7 @@ class SimpleEnvIsaac(_Env):
         if self.sim.has_gui():
             from isaaclab.envs.ui import BaseEnvWindow, ViewportCameraController
             from isaaclab.envs import ViewerCfg
+            from active_adaptation.utils.debug import DebugDraw
             # hacks to make IsaacLab happy. we don't use them.
             self.cfg.viewer.env_index = 0
             self.manager_visualizers = {}
@@ -30,6 +31,7 @@ class SimpleEnvIsaac(_Env):
                 self,
                 ViewerCfg(self.cfg.viewer.eye, self.cfg.viewer.lookat, origin_type="env")
             )
+            self.debug_draw = DebugDraw()
     
     def _reset_idx(self, env_ids: torch.Tensor):
         init_root_state = self.command_manager.sample_init(env_ids)
@@ -41,9 +43,10 @@ class SimpleEnvIsaac(_Env):
         self.stats[env_ids] = 0.
     
     def setup_scene(self):
-        import active_adaptation.envs.scene as scene
         import isaaclab.sim as sim_utils
-        from isaaclab.scene import InteractiveSceneCfg
+        from isaaclab.sim import SimulationContext
+        from isaaclab.sim.utils.stage import attach_stage_to_usd_context, use_stage
+        from isaaclab.scene import InteractiveSceneCfg, InteractiveScene
         from isaaclab.assets import AssetBaseCfg
         from isaaclab.sensors import ContactSensorCfg
         from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
@@ -86,8 +89,24 @@ class SimpleEnvIsaac(_Env):
         # sim_cfg.physx.gpu_total_aggregate_pairs_capacity = 2**23
         # sim_cfg.physx.gpu_collision_stack_size = 2**25
         # sim_cfg.physx.gpu_heap_capacity = 2**24
+
+        # create a simulation context to control the simulator
+        if SimulationContext.instance() is None:
+            # the type-annotation is required to avoid a type-checking error
+            # since it gets confused with Isaac Sim's SimulationContext class
+            self.sim: SimulationContext = SimulationContext(sim_cfg)
+        else:
+            self.sim: SimulationContext = SimulationContext.instance()
         
-        self.sim, self.scene = scene.create_isaaclab_sim_and_scene(sim_cfg, scene_cfg)
+        with use_stage(self.sim.get_initial_stage()):
+            self.scene = InteractiveScene(scene_cfg)
+            attach_stage_to_usd_context()
+        
+        # TODO@btx0424: check if we need to perform startup randomizations before resetting 
+        # the simulation.
+        with use_stage(self.sim.get_initial_stage()):
+            self.sim.reset()
+        
         # set camera view for "/OmniverseKit_Persp" camera
         self.sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat)
         try:
@@ -107,20 +126,7 @@ class SimpleEnvIsaac(_Env):
             # for _ in range(4):
             #     self.sim.render()
         except ModuleNotFoundError as e:
-            print("Set enable_cameras=true to use cameras.")
-        
-        try:
-            from active_adaptation.utils.debug import DebugDraw
-            self.debug_draw = DebugDraw()
-            print("[INFO] Debug Draw API enabled.")
-        except ModuleNotFoundError:
-            print()
-        
-        # asset_meta = get_asset_meta(self.scene["robot"])
-        # path = os.path.join(os.getcwd(), "asset_meta.json")
-        # print(f"Saving asset meta to {path}")
-        # with open(path, "w") as f:
-        #     json.dump(asset_meta, f, indent=4)
+            print("Set enable_cameras=true to use cameras.")            
 
 
 class SimpleEnvMujoco(_Env):

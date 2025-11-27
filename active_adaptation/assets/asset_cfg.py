@@ -171,6 +171,7 @@ class ContactSensorCfg:
     """
     name: str = MISSING
     primary: str = MISSING
+    # for isaaclab, secondary is a list of strings
     secondary: str | Tuple[str, ...] = MISSING
 
     track_air_time: bool = False
@@ -276,7 +277,7 @@ class AssetCfg:
         friction = {}
         armature = {}
         
-        def get(expr, cfg):
+        def parse_cfg(expr, cfg):
             if isinstance(cfg, float):
                 return {expr: cfg}
             else:
@@ -284,13 +285,16 @@ class AssetCfg:
         
         # merge all actuator configurations into a single implicit actuator configuration
         for _, actuator in self.actuators.items():
-            joint_names_expr += f"({actuator.joint_names_expr})|"
-            effort_limit.update(get(actuator.joint_names_expr, actuator.effort_limit))
-            velocity_limit.update(get(actuator.joint_names_expr, actuator.velocity_limit))
-            stiffness.update(get(actuator.joint_names_expr, actuator.stiffness))
-            damping.update(get(actuator.joint_names_expr, actuator.damping))
-            friction.update(get(actuator.joint_names_expr, actuator.friction))
-            armature.update(get(actuator.joint_names_expr, actuator.armature))
+            expr = actuator.joint_names_expr
+            if not isinstance(expr, str):
+                expr = "|".join(expr)
+            joint_names_expr += f"({expr})|"
+            effort_limit.update(parse_cfg(expr, actuator.effort_limit))
+            velocity_limit.update(parse_cfg(expr, actuator.velocity_limit))
+            stiffness.update(parse_cfg(expr, actuator.stiffness))
+            damping.update(parse_cfg(expr, actuator.damping))
+            friction.update(parse_cfg(expr, actuator.friction))
+            armature.update(parse_cfg(expr, actuator.armature))
         
         return ArticulationCfg(
             spawn=sim_utils.UsdFileCfg(

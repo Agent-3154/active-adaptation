@@ -3,7 +3,7 @@ import time
 import threading
 
 from mjlab.sim import Simulation
-from mjlab.viewer.viser_scene import ViserMujocoScene
+from mjlab.viewer.viser import ViserMujocoScene
 from mjlab.viewer.base import Timer
 from active_adaptation.envs.base import _Env
 
