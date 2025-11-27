@@ -186,7 +186,8 @@ class _Env(EnvBase):
         
         self.action_spec = Composite(action_spec, shape=[self.num_envs], device=self.device)
         
-        for rand_spec, kwargs in self.cfg.randomization.items():
+        randomizations = self.cfg.get("randomization", {})
+        for rand_spec, kwargs in randomizations.items():
             rand_name, cls_name = parse_name_and_class(rand_spec)
             rand = mdp.Randomization.make(cls_name, self, **(kwargs if kwargs is not None else {}))
             if not rand:
@@ -347,10 +348,9 @@ class _Env(EnvBase):
     def _reset_idx(self, env_ids: torch.Tensor):
         raise NotImplementedError
     
-    def apply_action(self, tensordict: TensorDictBase, substep: int):
-        self.input_tensordict = tensordict
-        for input_key, input_manager in self.input_managers.items():
-            input_manager.apply_action(tensordict.get(input_key), substep)
+    def apply_action(self, substep: int):
+        for input_manager in self.input_managers.values():
+            input_manager.apply_action(substep)
 
     def _compute_observation(self, tensordict: TensorDictBase) -> TensorDictBase:
         for group_key, obs_group in self.observation_funcs.items():
@@ -401,7 +401,7 @@ class _Env(EnvBase):
                     #         asset._external_force_b.zero_()
                     #         asset._external_torque_b.zero_()
                     #         asset.has_external_wrench = False
-                    self.apply_action(tensordict, substep)
+                    self.apply_action(substep)
                     for callback in self._pre_step_callbacks:
                         callback(substep)
                     self.scene.write_data_to_sim()

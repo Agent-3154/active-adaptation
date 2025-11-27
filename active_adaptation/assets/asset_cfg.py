@@ -195,6 +195,7 @@ class ContactSensorCfg:
     def mjlab(self):
         return CfrcContactSensorCfg(
             name=self.name,
+            entity="robot",
             track_air_time=self.track_air_time,
         )
         return MjlabContactSensorCfg(

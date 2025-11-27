@@ -40,7 +40,7 @@ class ActionManager:
     def process_action(self, action: torch.Tensor):
         pass
 
-    def apply_action(self, action: torch.Tensor, substep: int):
+    def apply_action(self, substep: int):
         pass
 
     @property
@@ -144,7 +144,7 @@ class JointPosition(ActionManager):
         )
 
     @override
-    def apply_action(self, action: torch.Tensor, substep: int):
+    def apply_action(self, substep: int):
         # deplay model: each substep, the first action in queue is consumed
         self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
         self.action_queue = self.action_queue.roll(-1, dims=1)

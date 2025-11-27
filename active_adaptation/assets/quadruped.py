@@ -1,6 +1,11 @@
 import os
 from pathlib import Path
-from active_adaptation.assets.asset_cfg import AssetCfg, InitialStateCfg, ActuatorCfg, ContactSensorCfg
+from active_adaptation.assets.asset_cfg import (
+    AssetCfg,
+    InitialStateCfg,
+    ActuatorCfg,
+    ContactSensorCfg,
+)
 from active_adaptation.registry import Registry
 
 registry = Registry.instance()
@@ -74,6 +79,15 @@ UNITREE_GO2_CFG = AssetCfg(
         "Head_lower": "Head_lower",
     },
     sensors_isaaclab=[
+        ContactSensorCfg(
+            name="contact_forces",
+            primary=".*",
+            secondary=[],
+            track_air_time=True,
+            history_length=3
+        ),
+    ],
+    sensors_mjlab=[
         ContactSensorCfg(
             name="contact_forces",
             primary=".*",
