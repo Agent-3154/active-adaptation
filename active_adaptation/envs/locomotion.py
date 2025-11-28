@@ -4,7 +4,7 @@ import torch
 from isaaclab.utils import configclass
 
 import active_adaptation
-from active_adaptation.envs.base import _Env
+from active_adaptation.envs.env_base import _EnvBase
 from active_adaptation.assets import AssetCfg
 from active_adaptation.registry import Registry
 from active_adaptation.envs.adapters import (
@@ -15,7 +15,7 @@ from active_adaptation.envs.adapters import (
 from typing import cast
 
 
-class SimpleEnvIsaac(_Env):
+class SimpleEnvIsaac(_EnvBase):
     """Isaac Sim backend implementation."""
     
     def __init__(self, cfg, device: str, headless: bool = True):
@@ -135,7 +135,7 @@ class SimpleEnvIsaac(_Env):
         self.scene = IsaacSceneAdapter(self.scene)
 
 
-class SimpleEnvMujoco(_Env):
+class SimpleEnvMujoco(_EnvBase):
     """MuJoCo backend implementation."""
     
     def __init__(self, cfg, device: str, headless: bool = True):
@@ -171,7 +171,7 @@ class SimpleEnvMujoco(_Env):
         self.sim = MujocoSimAdapter(sim)
 
 
-class SimpleEnvMjlab(_Env):
+class SimpleEnvMjlab(_EnvBase):
     """MjLab backend implementation."""
     
     def __init__(self, cfg, device: str, headless: bool = True):

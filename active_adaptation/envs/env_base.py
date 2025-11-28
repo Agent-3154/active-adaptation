@@ -94,7 +94,7 @@ class ObsGroup:
         return transform
 
 
-class _Env(EnvBase):
+class _EnvBase(EnvBase):
     def __init__(self, cfg, device: str, headless: bool = True):
         super().__init__(
             device=device,
@@ -545,7 +545,7 @@ class _Env(EnvBase):
 class RewardGroup:
     def __init__(
         self,
-        env: _Env,
+        env: _EnvBase,
         name: str,
         funcs: OrderedDict[str, mdp.Reward],
         eval_func,

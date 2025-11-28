@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 import inspect
 import abc
@@ -9,7 +11,7 @@ import active_adaptation as aa
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
-    from active_adaptation.envs.base import _Env
+    from active_adaptation.envs.env_base import _EnvBase
 
 
 def sample_quat_yaw(size, yaw_range=(0, torch.pi * 2), device: torch.device = "cpu"):
@@ -84,7 +86,7 @@ class _RegistryMixin:
             raise ValueError(f"Term {cls_name} already registered in {location}")
     
     @classmethod
-    def make(cls, class_name, env: "_Env", **kwargs):
+    def make(cls, class_name, env: _EnvBase, **kwargs):
         if class_name not in cls.registry:
             raise ValueError(f"Class '{class_name}' not found in {cls.__name__}.registry")
         instance_cls = cls.registry[class_name]
@@ -106,13 +108,13 @@ class MDPComponent:
     with `_RegistryMixin` if registry functionality is needed.
     """
     
-    def __init__(self, env: "_Env"):
+    def __init__(self, env: _EnvBase):
         """Initialize the MDP component with a reference to the environment.
         
         Args:
             env: The environment instance this component belongs to.
         """
-        self.env: _Env = env
+        self.env: _EnvBase = env
     
     @property
     def num_envs(self) -> int:
@@ -162,7 +164,7 @@ class MDPComponent:
 
 
 class Command(MDPComponent, _RegistryMixin):
-    def __init__(self, env: "_Env", teleop: bool=False) -> None:
+    def __init__(self, env: _EnvBase, teleop: bool=False) -> None:
         super().__init__(env)
         self.asset: Articulation = env.scene["robot"]
         self.init_root_state = self.asset.data.default_root_state.clone()
@@ -200,7 +202,7 @@ class Observation(Generic[CT], MDPComponent, _RegistryMixin):
     Base class for all observations.
     """
 
-    def __init__(self, env):
+    def __init__(self, env: _EnvBase):
         super().__init__(env)
         self.command_manager: CT = env.command_manager
 
@@ -220,7 +222,7 @@ class Observation(Generic[CT], MDPComponent, _RegistryMixin):
 class Reward(Generic[CT], MDPComponent, _RegistryMixin):
     def __init__(
         self,
-        env,
+        env: _EnvBase,
         weight: float,
     ):
         super().__init__(env)
@@ -243,7 +245,7 @@ class Reward(Generic[CT], MDPComponent, _RegistryMixin):
 
 
 class Termination(Generic[CT], MDPComponent, _RegistryMixin):
-    def __init__(self, env):
+    def __init__(self, env: _EnvBase):
         super().__init__(env)
         self.command_manager: CT = env.command_manager
     
@@ -253,6 +255,6 @@ class Termination(Generic[CT], MDPComponent, _RegistryMixin):
 
 
 class Randomization(MDPComponent, _RegistryMixin):
-    def __init__(self, env):
+    def __init__(self, env: _EnvBase):
         super().__init__(env)
 

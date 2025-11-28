@@ -8,6 +8,7 @@ from typing import Sequence
 from typing_extensions import override
 
 from active_adaptation.utils.math import (
+    quat_from_euler_xyz,
     quat_rotate, 
     quat_rotate_inverse,
     clamp_norm,
@@ -95,6 +96,14 @@ class Twist(Command):
                     [0.0, self.linvel_y_range[0], 0.0], device=self.device
                 ),
             }
+        
+        if self.env.sim.has_gui():
+            if self.env.backend == "mjlab":
+                from active_adaptation.viewer import MjLabViewer
+                self.viewer: MjLabViewer = self.env.sim.viewer
+                self.axes_handle = self.viewer.add_batched_axes("target_yaw")
+                self.lines_handle = self.viewer.add_line_segments("cmd_linvel_w", (1., 0., 0.))
+                self.lines_handle.line_width = 2.0
     
     @property
     def command(self):
@@ -208,39 +217,32 @@ class Twist(Command):
     
     @override
     def debug_draw(self):
+        start = self.asset.data.root_link_pos_w + torch.tensor([0.0, 0.0, 0.2], device=self.device)
+        yaw_vec = torch.stack(
+            [
+                self.target_yaw.cos(),
+                self.target_yaw.sin(),
+                torch.zeros_like(self.target_yaw),
+            ],
+            1,
+        )
         if self.env.backend == "isaac":
             self.env.debug_draw.vector(
-                self.asset.data.root_link_pos_w
-                + torch.tensor([0.0, 0.0, 0.2], device=self.device),
+                start,
                 self.cmd_linvel_w,
                 color=(1.0, 1.0, 1.0, 1.0),
             )
             self.env.debug_draw.vector(
-                self.asset.data.root_link_pos_w
-                + torch.tensor([0.0, 0.0, 0.2], device=self.device),
-                torch.stack(
-                    [
-                        self.target_yaw.cos(),
-                        self.target_yaw.sin(),
-                        torch.zeros_like(self.target_yaw),
-                    ],
-                    1,
-                ),
+                start,
+                yaw_vec,
                 color=(0.2, 0.2, 1.0, 1.0),
             )
-        zeros = torch.zeros(self.num_envs, 1, device=self.device)
-        # self.env.debug_draw.vector(
-        #     self.robot.data.root_pos_w
-        #     + torch.tensor([0.0, 0.0, 0.2], device=self.device),
-        #     torch.stack([zeros, zeros, self._cum_linvel_error], 1),
-        #     color=(0.2, 1.0, 0.2, 1.0),
-        # )
-        # self.env.debug_draw.vector(
-        #     self.robot.data.root_pos_w
-        #     + torch.tensor([0.0, 0.0, 0.2], device=self.device),
-        #     torch.stack([zeros, zeros, self._cum_angvel_error], 1),
-        #     color=(1.0, 0.2, 0.2, 2.0),
-        # )
+        elif self.env.backend == "mjlab":
+            rpy = torch.zeros(self.num_envs, 3)
+            rpy[:, 2] = self.target_yaw.cpu()
+            self.axes_handle.batched_wxyzs = quat_from_euler_xyz(rpy)
+            self.axes_handle.batched_positions = start.cpu()
+            self.lines_handle.points = torch.stack([start, start + self.cmd_linvel_w], 1).cpu()
     
     def symmetry_transform(self):
         # left-right symmetry: flip y velocity and yaw velocity
