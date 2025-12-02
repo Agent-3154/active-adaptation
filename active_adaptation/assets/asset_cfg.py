@@ -270,32 +270,48 @@ class AssetCfg:
                 - Collision properties (contact/rest offsets)
                 - Initial state and actuator configurations
         """
-        joint_names_expr = ""
-        effort_limit = {}
-        velocity_limit = {}
-        stiffness = {}
-        damping = {}
-        friction = {}
-        armature = {}
-        
-        def parse_cfg(expr, cfg):
-            if isinstance(cfg, float):
-                return {expr: cfg}
-            else:
-                return cfg
-        
-        # merge all actuator configurations into a single implicit actuator configuration
-        for _, actuator in self.actuators.items():
-            expr = actuator.joint_names_expr
-            if not isinstance(expr, str):
-                expr = "|".join(expr)
-            joint_names_expr += f"({expr})|"
-            effort_limit.update(parse_cfg(expr, actuator.effort_limit))
-            velocity_limit.update(parse_cfg(expr, actuator.velocity_limit))
-            stiffness.update(parse_cfg(expr, actuator.stiffness))
-            damping.update(parse_cfg(expr, actuator.damping))
-            friction.update(parse_cfg(expr, actuator.friction))
-            armature.update(parse_cfg(expr, actuator.armature))
+        if len(self.actuators) > 1:
+            joint_names_expr = ""
+            effort_limit = {}
+            velocity_limit = {}
+            stiffness = {}
+            damping = {}
+            friction = {}
+            armature = {}
+            
+            def parse_cfg(expr, cfg):
+                if isinstance(cfg, float):
+                    return {expr: cfg}
+                else:
+                    return cfg
+            
+            # merge all actuator configurations into a single implicit actuator configuration
+            for _, actuator in self.actuators.items():
+                expr = actuator.joint_names_expr
+                if not isinstance(expr, str):
+                    expr = "|".join(expr)
+                joint_names_expr += f"({expr})|"
+                effort_limit.update(parse_cfg(expr, actuator.effort_limit))
+                velocity_limit.update(parse_cfg(expr, actuator.velocity_limit))
+                stiffness.update(parse_cfg(expr, actuator.stiffness))
+                damping.update(parse_cfg(expr, actuator.damping))
+                friction.update(parse_cfg(expr, actuator.friction))
+                armature.update(parse_cfg(expr, actuator.armature))
+            actuators = {
+                "all": ImplicitActuatorCfg(
+                    joint_names_expr=joint_names_expr,
+                    effort_limit_sim=effort_limit,
+                    velocity_limit_sim=velocity_limit,
+                    stiffness=stiffness,
+                    damping=damping,
+                    friction=friction,
+                    armature=armature,
+                )
+            }
+        else:
+            actuators = {
+                name: actuator.isaaclab() for name, actuator in self.actuators.items()
+            }
         
         return ArticulationCfg(
             spawn=sim_utils.UsdFileCfg(
@@ -321,15 +337,7 @@ class AssetCfg:
                 ),
             ),
             init_state=self.init_state.isaaclab(),
-            actuators={"all": ImplicitActuatorCfg(
-                joint_names_expr=joint_names_expr,
-                effort_limit_sim=effort_limit,
-                velocity_limit_sim=velocity_limit,
-                stiffness=stiffness,
-                damping=damping,
-                friction=friction,
-                armature=armature,
-            )},
+            actuators=actuators,
             soft_joint_pos_limit_factor=0.9,
             joint_symmetry_mapping=self.joint_symmetry_mapping,
             spatial_symmetry_mapping=self.spatial_symmetry_mapping,

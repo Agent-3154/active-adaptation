@@ -19,7 +19,7 @@ from active_adaptation.assets import get_input_joint_indexing
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
-    from active_adaptation.envs.base import _Env
+    from active_adaptation.envs.env_base import _EnvBase
 
 
 class ActionManager:
@@ -27,7 +27,7 @@ class ActionManager:
     action_dim: int
 
     def __init__(self, env):
-        self.env: _Env = env
+        self.env: _EnvBase = env
         self.asset: Articulation = self.env.scene["robot"]
         self.action_buf: torch.Tensor
 
@@ -134,6 +134,8 @@ class JointPosition(ActionManager):
 
     @override
     def process_action(self, action: torch.Tensor):
+        if action is None:
+            return
         action = action[:, self.indexing]
         self.action_buf = self.action_buf.roll(1, dims=1)
         self.action_buf[:, 0] = action
@@ -240,4 +242,42 @@ class Marker(ActionManager):
             translations=translations,
             scales=torch.ones(3, device=self.device).expand_as(translations)
         )
+
+
+class WriteRootPose(ActionManager):
+    """
+    Directly write the root pose to the simulation for debugging purposes.
+    """
+    def __init__(self, env):
+        super().__init__(env)
+        # self.asset: Articulation = self.env.scene["robot"]
+        self.action_dim = 7
+    
+    def process_action(self, action: torch.Tensor):
+        self.target_root_pose = action
+        self.target_root_pose[:, :3] += self.env.scene.env_origins
+    
+    @override
+    def apply_action(self, substep: int):
+        self.asset.write_root_pose_to_sim(self.target_root_pose)
+        self.asset.write_root_velocity_to_sim(torch.zeros(self.num_envs, 6, device=self.device))
+
+
+class WriteJointPosition(ActionManager):
+    """
+    Directly write the joint position (with zero velocity) to the simulation for debugging purposes.
+    """
+    def __init__(self, env):
+        super().__init__(env)
+        # self.asset: Articulation = self.env.scene["robot"]
+        self.action_dim = self.asset.data.default_joint_pos.shape[-1]
+
+    def process_action(self, action: torch.Tensor):
+        self.target_joint_pos = action
+    
+    @override
+    def apply_action(self, substep: int):
+        self.asset.set_joint_position_target(self.target_joint_pos)
+        self.asset.write_joint_position_to_sim(self.target_joint_pos)
+        self.asset.write_joint_velocity_to_sim(torch.zeros_like(self.target_joint_pos))
 

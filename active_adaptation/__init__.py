@@ -1,4 +1,7 @@
 import os
+import sys
+import json
+import datetime
 import active_adaptation.learning
 import builtins
 import importlib.metadata
@@ -109,6 +112,23 @@ def import_algorithms():
 
 
 def init(cfg: DictConfig, import_projects: bool = True):
+    # Store sys.argv to a local file
+    if _MAIN_PROCESS:
+        argv_file = SCRIPT_PATH / "command_history.json"
+        argv_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        if argv_file.exists():
+            history = json.loads(argv_file.read_text())
+        else:
+            history = []
+        
+        entry = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "args": sys.argv
+        }
+        history.append(entry)
+        argv_file.write_text(json.dumps(history, indent=2))
+
     set_backend(cfg.get("backend", "isaac"))
     if get_backend() == "isaac":
         from isaaclab.app import AppLauncher

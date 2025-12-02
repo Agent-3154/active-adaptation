@@ -37,33 +37,7 @@ def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    aa.init(cfg)
-    
-    # Record launch into command history (only on main process)
-    if aa.is_main_process():
-        try:
-            task_name = getattr(cfg.task, "name", None) or ""
-            algo_name = getattr(cfg.algo, "name", None) or ""
-            use_ddp = aa.is_distributed()
-            cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-            gpus = [g.strip() for g in cvd.split(",") if g.strip()] if cvd else []
-            cmd = ["python", "train_ppo.py"]
-            if task_name:
-                cmd.append(f"task={task_name}")
-            if algo_name:
-                cmd.append(f"algo={algo_name}")
-            entry = CommandHistory.make_entry(
-                task=task_name,
-                algo=algo_name,
-                use_ddp=use_ddp,
-                gpus=gpus,
-                cmd=cmd,
-                pid=os.getpid(),
-                cwd=os.getcwd(),
-            )
-            CommandHistory().add(entry)
-        except Exception:
-            pass
+    aa.init(cfg, import_projects=True)
     
     print(f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}")
 
