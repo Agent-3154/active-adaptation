@@ -19,7 +19,10 @@ import active_adaptation as aa
 if aa.get_backend() == "isaac":
     import isaaclab.sim as sim_utils
     from isaaclab.actuators import ImplicitActuatorCfg
-    from isaaclab.assets import ArticulationCfg as _ArticulationCfg
+    from isaaclab.assets import (
+        ArticulationCfg as _ArticulationCfg,
+        RigidObjectCfg as IsaaclabRigidObjectCfg,
+    )
     from isaaclab.utils import configclass
     from isaaclab.sensors import ContactSensorCfg as IsaaclabContactSensorCfg
 
@@ -443,6 +446,39 @@ class AssetCfg:
             body_names_isaac=self.body_names_isaac,
             body_names_mjlab=self.body_names_mjlab,
         )
+
+
+@dataclass(kw_only=True, frozen=True)
+class RigidObjectCfg:
+    
+    usd_path: str | Path = MISSING
+    activate_contact_sensors: bool = True
+    disable_gravity: bool = False
+
+    def isaaclab(self):
+        return IsaaclabRigidObjectCfg(
+            spawn=sim_utils.UsdFileCfg(
+                scale=(1.0, 1.0, 1.0),
+                usd_path=str(self.usd_path),
+                activate_contact_sensors=self.activate_contact_sensors,
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    disable_gravity=self.disable_gravity,
+                    retain_accelerations=False,
+                    linear_damping=0.0,
+                    angular_damping=0.0,
+                    max_linear_velocity=1000.0,
+                    max_angular_velocity=1000.0,
+                    max_depenetration_velocity=10.0,
+                    # enable_gyroscopic_forces=True,
+                ),
+            )
+        )
+    
+    def mujoco(self):
+        raise NotImplementedError("MuJoCo backend does not support rigid objects")
+
+    def mjlab(self):
+        raise NotImplementedError("MuJoCo Lab backend does not support rigid objects")
 
 
 def get_input_joint_indexing(

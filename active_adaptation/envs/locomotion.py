@@ -37,10 +37,12 @@ class SimpleEnvIsaac(_EnvBase):
             self.debug_draw = DebugDraw()
     
     def _reset_idx(self, env_ids: torch.Tensor):
-        init_root_state = self.command_manager.sample_init(env_ids)
-        if not self.robot.is_fixed_base:
-            self.robot.write_root_state_to_sim(
-                init_root_state, 
+        init_state = self.command_manager.sample_init(env_ids)
+        if isinstance(init_state, torch.Tensor):
+            init_state = {"robot": init_state}
+        for key, value in init_state.items():
+            self.scene[key].write_root_state_to_sim(
+                value, 
                 env_ids=env_ids
             )
         self.stats[env_ids] = 0.
@@ -69,6 +71,11 @@ class SimpleEnvIsaac(_EnvBase):
         scene_cfg.robot = asset_cfg.isaaclab()
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
         scene_cfg.terrain = registry.get("terrain", self.cfg.terrain)
+
+        for obj in self.cfg.get("objects", []):
+            obj_cfg = registry.get("asset", obj.name).isaaclab()
+            obj_cfg.prim_path = "{ENV_REGEX_NS}/" + obj.name
+            setattr(scene_cfg, obj.name, obj_cfg)
 
         for sensor_cfg in asset_cfg.sensors_isaaclab:
             setattr(scene_cfg, sensor_cfg.name, sensor_cfg.isaaclab())
@@ -143,10 +150,12 @@ class SimpleEnvMujoco(_EnvBase):
         self.robot = self.scene.articulations["robot"]
     
     def _reset_idx(self, env_ids: torch.Tensor):
-        init_root_state = self.command_manager.sample_init(env_ids)
-        if not self.robot.is_fixed_base:
-            self.robot.write_root_state_to_sim(
-                init_root_state, 
+        init_state = self.command_manager.sample_init(env_ids)
+        if isinstance(init_state, torch.Tensor):
+            init_state = {"robot": init_state}
+        for key, value in init_state.items():
+            self.scene[key].write_root_state_to_sim(
+                value, 
                 env_ids=env_ids
             )
         self.stats[env_ids] = 0.

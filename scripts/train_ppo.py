@@ -56,6 +56,7 @@ def main(cfg: DictConfig):
         run.name = f"{run_idx}-{default_run_name}"
         setproctitle(run.name)
 
+        os.makedirs(run.dir, exist_ok=True)
         cfg_save_path = os.path.join(run.dir, "cfg.yaml")
         OmegaConf.save(cfg, cfg_save_path)
         run.save(cfg_save_path, policy="now")

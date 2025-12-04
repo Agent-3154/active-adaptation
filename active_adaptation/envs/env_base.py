@@ -268,7 +268,7 @@ class _EnvBase(EnvBase):
         )
 
         self.termination_funcs = OrderedDict()
-        for key, params in self.cfg.termination.items():
+        for key, params in self.cfg.get("termination", {}).items():
             term_name, cls_name = parse_name_and_class(key)
             term = mdp.Termination.make(cls_name, self, **(params if params is not None else {}))
             if not term:
