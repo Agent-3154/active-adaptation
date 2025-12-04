@@ -393,7 +393,8 @@ class _EnvBase(EnvBase):
         with ScopedTimer("simulation", sync=False):
             with ScopedTimer("process_action", sync=False):
                 for input_key, input_manager in self.input_managers.items():
-                    input_manager.process_action(tensordict.get(input_key))
+                    if (action := tensordict.get(input_key)) is not None:
+                        input_manager.process_action(action)
             for substep in range(self.decimation):
                 with ScopedTimer("simulation_pre_step", sync=False):
                     # for asset in self.scene.articulations.values():

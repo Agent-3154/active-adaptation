@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 from typing import Dict, Literal, Tuple, TYPE_CHECKING, List
 from typing_extensions import override
@@ -16,18 +18,19 @@ from active_adaptation.utils.math import (
 )
 from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
 from active_adaptation.assets import get_input_joint_indexing
+from active_adaptation.envs.mdp.base import _RegistryMixin
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class ActionManager:
+class ActionManager(_RegistryMixin):
 
     action_dim: int
 
-    def __init__(self, env):
-        self.env: _EnvBase = env
+    def __init__(self, env: _EnvBase):
+        self.env = env
         self.asset: Articulation = self.env.scene["robot"]
         self.action_buf: torch.Tensor
 
@@ -204,11 +207,11 @@ class LegWheel(ActionManager):
     
 
 class Marker(ActionManager):
-    def __init__(self, env, num_markers: int = 1, world_frame: bool = False):
+    def __init__(self, env, num_markers: int = 1, body_frame: bool = False):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.num_markers = num_markers
-        self.world_frame = world_frame
+        self.body_frame = body_frame
         self.has_gui = self.env.sim.has_gui()
         self.action_dim = 3 * self.num_markers
 
@@ -231,12 +234,13 @@ class Marker(ActionManager):
         if not self.has_gui or action is None:
             return
         
-        if not self.world_frame:
+        if self.body_frame:
             pos = self.asset.data.root_link_pos_w.reshape(self.num_envs, 1, 3)
             quat = self.asset.data.root_link_quat_w.reshape(self.num_envs, 1, 4)
             translations = pos + quat_rotate(quat, action.reshape(self.num_envs, self.num_markers, 3))
         else:
-            translations = action
+            # environment frame
+            translations = action + self.env.scene.env_origins.unsqueeze(1)
         translations = translations.reshape(self.num_envs * self.num_markers, 3)
         self.marker.visualize(
             translations=translations,
@@ -244,23 +248,28 @@ class Marker(ActionManager):
         )
 
 
-class WriteRootPose(ActionManager):
+class WriteRootState(ActionManager):
     """
     Directly write the root pose to the simulation for debugging purposes.
     """
     def __init__(self, env):
         super().__init__(env)
         # self.asset: Articulation = self.env.scene["robot"]
-        self.action_dim = 7
+        self.action_dim = 7 + 6
+        self.target_root_pose = None
+        self.target_root_velocity = None
     
     def process_action(self, action: torch.Tensor):
-        self.target_root_pose = action
+        self.target_root_pose = action[:, :7]
         self.target_root_pose[:, :3] += self.env.scene.env_origins
-    
+        self.target_root_velocity = action[:, 7:]
+
     @override
     def apply_action(self, substep: int):
+        if self.target_root_pose is None:
+            return
         self.asset.write_root_pose_to_sim(self.target_root_pose)
-        self.asset.write_root_velocity_to_sim(torch.zeros(self.num_envs, 6, device=self.device))
+        self.asset.write_root_velocity_to_sim(self.target_root_velocity)
 
 
 class WriteJointPosition(ActionManager):
@@ -271,12 +280,15 @@ class WriteJointPosition(ActionManager):
         super().__init__(env)
         # self.asset: Articulation = self.env.scene["robot"]
         self.action_dim = self.asset.data.default_joint_pos.shape[-1]
+        self.target_joint_pos = None
 
     def process_action(self, action: torch.Tensor):
         self.target_joint_pos = action
     
     @override
     def apply_action(self, substep: int):
+        if self.target_joint_pos is None:
+            return
         self.asset.set_joint_position_target(self.target_joint_pos)
         self.asset.write_joint_position_to_sim(self.target_joint_pos)
         self.asset.write_joint_velocity_to_sim(torch.zeros_like(self.target_joint_pos))
