@@ -9,7 +9,10 @@ import time
 import sys
 import datetime
 
+from fractions import Fraction
 from omegaconf import OmegaConf, DictConfig
+OmegaConf.register_new_resolver("frac", lambda s: float(Fraction(s)))
+
 from collections import OrderedDict
 from tqdm import tqdm
 from setproctitle import setproctitle

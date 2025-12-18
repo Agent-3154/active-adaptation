@@ -292,6 +292,7 @@ class PPOPolicy(PPOBase):
         
         info = {
             "actor/policy_loss": policy_loss.detach(),
+            "actor/noise_std": tensordict["scale"].mean(),
             "actor/entropy": entropy.detach(),
             "actor/grad_norm": actor_grad_norm,
             "critic/value_loss": value_loss.detach(),

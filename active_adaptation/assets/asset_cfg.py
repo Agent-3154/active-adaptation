@@ -283,7 +283,7 @@ class AssetCfg:
             armature = {}
             
             def parse_cfg(expr, cfg):
-                if isinstance(cfg, float):
+                if isinstance(cfg, (float, int)):
                     return {expr: cfg}
                 else:
                     return cfg
