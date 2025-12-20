@@ -89,8 +89,7 @@ class SimpleEnvIsaac(_EnvBase):
                 # enable_reflections=True,
             ),
             physx=sim_utils.PhysxCfg(
-                gpu_max_rigid_patch_count=self.cfg.sim.gpu_max_rigid_patch_count,
-                enable_ccd=self.cfg.sim.enable_ccd,
+                **self.cfg.sim.physx,
             ),
             device=str(self.device)
         )
