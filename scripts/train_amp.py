@@ -20,21 +20,7 @@ def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    aa.init(cfg, import_projects=True)
-    if aa.is_main_process():
-        run = wandb.init(
-            job_type=cfg.wandb.job_type,
-            project=cfg.wandb.project,
-            mode=cfg.wandb.mode,
-            tags=cfg.wandb.tags,
-        )
-        run.config.update(OmegaConf.to_container(cfg))
-        run.config["world_size"] = aa.get_world_size()
-        
-        default_run_name = f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
-        run_idx = run.name.split("-")[-1]
-        run.name = f"{run_idx}-{default_run_name}"
-        setproctitle(run.name)
+    aa.init(cfg, import_projects=True)        
 
     from active_adaptation.envs.locomotion import (
         SimpleEnvIsaac,
@@ -85,6 +71,12 @@ def main(cfg: DictConfig):
             tags=cfg.wandb.tags,
         )
         run.config.update(OmegaConf.to_container(cfg))
+        run.config["world_size"] = aa.get_world_size()
+        
+        default_run_name = f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
+        run_idx = run.name.split("-")[-1]
+        run.name = f"{run_idx}-{default_run_name}"
+        setproctitle(run.name)
 
     from helpers import EpisodeStats
     stats_keys = [
