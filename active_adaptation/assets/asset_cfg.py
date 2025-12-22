@@ -323,8 +323,8 @@ class AssetCfg:
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
                     disable_gravity=False,
                     retain_accelerations=False,
-                    linear_damping=0.0,
-                    angular_damping=0.0,
+                    linear_damping=0.002,
+                    angular_damping=0.002,
                     max_linear_velocity=1000.0,
                     max_angular_velocity=1000.0,
                     max_depenetration_velocity=1.0,

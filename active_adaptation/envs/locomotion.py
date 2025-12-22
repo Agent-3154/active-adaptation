@@ -89,7 +89,7 @@ class SimpleEnvIsaac(_EnvBase):
                 # enable_reflections=True,
             ),
             physx=sim_utils.PhysxCfg(
-                **self.cfg.sim.physx,
+                **self.cfg.sim.get("physx", {}),
             ),
             device=str(self.device)
         )
