@@ -9,6 +9,10 @@ import importlib.util
 import inspect
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
+from fractions import Fraction
+
+OmegaConf.register_new_resolver("frac", lambda s: float(Fraction(s)))
+OmegaConf.register_new_resolver("eval", eval)
 
 _BACKEND = None
 _BACKEND_SET = False

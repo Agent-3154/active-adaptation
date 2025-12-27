@@ -10,8 +10,6 @@ from pathlib import Path
 
 from fractions import Fraction
 from omegaconf import OmegaConf, DictConfig
-OmegaConf.register_new_resolver("frac", lambda s: float(Fraction(s)))
-OmegaConf.register_new_resolver("eval", eval)
 
 from torchrl.envs.utils import set_exploration_type, ExplorationType
 

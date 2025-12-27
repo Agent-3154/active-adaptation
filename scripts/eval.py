@@ -8,8 +8,6 @@ import av
 
 from fractions import Fraction
 from omegaconf import OmegaConf
-OmegaConf.register_new_resolver("frac", lambda s: float(Fraction(s)))
-OmegaConf.register_new_resolver("eval", eval)
 
 from isaaclab.app import AppLauncher
 
