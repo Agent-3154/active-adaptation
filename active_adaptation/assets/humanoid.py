@@ -1,15 +1,17 @@
-import os
-import copy
-import isaaclab.sim as sim_utils
-import torch
-from isaaclab.actuators import ImplicitActuatorCfg
+from pathlib import Path
 import active_adaptation.utils.symmetry as symmetry_utils
 
-from .base import ArticulationCfg
+from active_adaptation.assets.asset_cfg import (
+    AssetCfg,
+    InitialStateCfg,
+    ActuatorCfg,
+    ContactSensorCfg,
+)
+from active_adaptation.registry import Registry
 
+registry = Registry.instance()
 
-ASSET_PATH = os.path.dirname(__file__)
-
+FILE_DIR = Path(__file__).parent
 
 ARMATURE_5020 = 0.003609725
 ARMATURE_7520_14 = 0.010177520
@@ -30,27 +32,11 @@ DAMPING_7520_22 = 2.0 * DAMPING_RATIO * ARMATURE_7520_22 * NATURAL_FREQ
 DAMPING_4010 = 2.0 * DAMPING_RATIO * ARMATURE_4010 * NATURAL_FREQ
 
 
-G1_WAIST_UNLOCKED_CFG = ArticulationCfg( # no wrist pitch and yaw
-    spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{ASSET_PATH}/G1/waist_unlocked.usd",
-        activate_contact_sensors=True,
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=False,
-            retain_accelerations=False,
-            linear_damping=0.0,
-            angular_damping=0.0,
-            max_linear_velocity=1000.0,
-            max_angular_velocity=1000.0,
-            max_depenetration_velocity=1.0,
-        ),
-        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False, 
-            solver_position_iteration_count=8,
-            solver_velocity_iteration_count=4
-        ),
-    ),
-    init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.75),
+G1_WAIST_UNLOCKED_CFG = AssetCfg( # no wrist pitch and yaw
+    mjcf_path=FILE_DIR / "G1" / "mjcf" / "g1.xml",
+    usd_path=FILE_DIR / "G1" / "waist_unlocked.usd",
+    init_state=InitialStateCfg(
+        pos=(0.0, 0.0, 0.85),
         joint_pos={
             ".*_hip_pitch_joint": -0.1,
             ".*_knee_joint": 0.3,
@@ -69,11 +55,11 @@ G1_WAIST_UNLOCKED_CFG = ArticulationCfg( # no wrist pitch and yaw
         },
         joint_vel={".*": 0.0},
     ),
-    soft_joint_pos_limit_factor=0.9,
+    self_collisions=False,
     actuators={
-        "base_legs": ImplicitActuatorCfg(
+        "base_legs": ActuatorCfg(
             joint_names_expr=".*",
-            effort_limit_sim={
+            effort_limit={
                 ".*_hip_yaw_joint.*": 88.0,
                 ".*_hip_roll_joint.*": 139.0,
                 ".*_hip_pitch_joint.*": 88.0,
@@ -86,7 +72,7 @@ G1_WAIST_UNLOCKED_CFG = ArticulationCfg( # no wrist pitch and yaw
                 ".*_wrist_yaw_joint": 5.0,
                 "waist.*": 50,
             },
-            velocity_limit_sim={
+            velocity_limit={
                 ".*_hip_yaw_joint": 32.0,
                 ".*_hip_roll_joint": 20.0,
                 ".*_hip_pitch_joint": 32.0,
@@ -185,6 +171,25 @@ G1_WAIST_UNLOCKED_CFG = ArticulationCfg( # no wrist pitch and yaw
         "left_wrist_roll_link": "right_wrist_roll_link",
         "left_wrist_yaw_link": "right_wrist_yaw_link",
         "left_wrist_pitch_link": "right_wrist_pitch_link"
-    })
+    }),
+    sensors_isaaclab=[
+        ContactSensorCfg(
+            name="contact_forces",
+            primary=".*",
+            secondary=[],
+            track_air_time=True,
+            history_length=3
+        ),
+    ],
+    sensors_mjlab=[
+        ContactSensorCfg(
+            name="contact_forces",
+            primary=".*",
+            secondary=[],
+            track_air_time=True,
+            history_length=3
+        ),
+    ],
 )
+registry.register("asset", "g1_waist_unlocked", G1_WAIST_UNLOCKED_CFG)
 

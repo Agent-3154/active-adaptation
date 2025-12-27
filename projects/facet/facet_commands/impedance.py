@@ -9,7 +9,6 @@ from active_adaptation.utils.math import (
     yaw_rotate, clamp_along, clamp_norm,
     quat_rotate, quat_rotate_inverse,
     quat_from_euler_xyz,
-    quat_from_view,
     yaw_quat,
     EMA
 )
