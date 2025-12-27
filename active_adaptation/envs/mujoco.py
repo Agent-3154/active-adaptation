@@ -138,7 +138,7 @@ class MJArticulation:
         self.spec = mujoco.MjSpec.from_file(cfg.mjcf_path)
         
         # Add a motor actuator for each joint, with the actuator name matching the joint name
-        self.actuator_type = "position" # or motor
+        self.actuator_type = "motor" # or motor
         for joint in self.spec.joints:
             if joint.type != mujoco.mjtJoint.mjJNT_HINGE:
                 continue

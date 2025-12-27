@@ -71,7 +71,6 @@ observation:
   # priv:
     root_linvel_b:    {}
     body_height:  {body_names: .*ankle_roll_link}
-    applied_torque:   {joint_names: "(?!(.*wrist.*)).*"}
 
 reward:
   loco:
@@ -105,11 +104,11 @@ randomization:
     static_friction_range: [0.6, 2.0]
     dynamic_friction_range: [0.6, 2.0]
     restitution_range: [0.0, 0.2]
-  # motor_params_implicit:
-  #   stiffness_range:
-  #     .*: [0.8, 1.1]
-  #   damping_range:
-  #     .*: [0.8, 1.1]
+  motor_params:
+    stiffness_range:
+      .*: [0.8, 1.1]
+    damping_range:
+      .*: [0.8, 1.1]
   reset_joint_states_uniform:
     pos_ranges:
       .*: [-0.1, 0.1]
