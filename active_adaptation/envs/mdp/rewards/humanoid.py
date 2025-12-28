@@ -1,15 +1,15 @@
 import torch
 
 from typing import TYPE_CHECKING
-from isaaclab.utils.math import yaw_quat
-from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
+from active_adaptation.utils.math import (
+    quat_rotate, quat_rotate_inverse, normalize, yaw_quat
+)
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from isaaclab.sensors import ContactSensor
-    from active_adaptation.envs.mdp.commands.locomotion import Command2
 
-from .locomotion import Reward, normalize
+from active_adaptation.envs.mdp.base import Reward
 
 def dot(a: torch.Tensor, b: torch.Tensor):
     return (a * b).sum(-1, True)
@@ -389,38 +389,4 @@ class angular_momentum(Reward):
         m2 = quat_rotate(self.asset.data.body_quat_w, m2)
         r = (m1 + m2).sum(1).square().sum(-1)
         return r.reshape(self.num_envs, 1)
-
-
-class com_pos(Reward):
-    def __init__(self, env, weight: float):
-        super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.body_ids = slice(None)
-        self.body_mass = self.asset.root_physx_view.get_masses()[:, self.body_ids].to(self.device).reshape(self.num_envs, -1, 1)
-        self.mass_weight = self.body_mass / self.body_mass.sum(1, keepdim=True)
-        self.com_offset = self.asset.root_physx_view.get_coms()[:, self.body_ids, :3].to(self.device)
-
-    def update(self):
-        self.body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
-        self.body_quat_w = self.asset.data.body_quat_w[:, self.body_ids]
-        self.root_pos_w = self.asset.data.root_pos_w
-    
-    def compute(self):
-        self.body_com_pos = self.body_link_pos_w + quat_rotate(
-            self.body_quat_w,
-            self.com_offset
-        )
-        self.com_pos_w = (self.body_com_pos * self.mass_weight).sum(1)
-        self.com_pos_b = quat_rotate_inverse(
-            self.asset.data.root_link_quat_w,
-            self.com_pos_w - self.root_pos_w
-        )
-        return self.com_pos_b[:, 0].clamp_max(0.).unsqueeze(1)
-    
-    def debug_draw(self):
-        self.env.debug_draw.point(
-            self.com_pos_w.reshape(-1, 3),
-            size=40,
-            color=(1.0, 0.0, 0.0, 1.0),
-        )
 
