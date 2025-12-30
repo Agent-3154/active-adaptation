@@ -427,14 +427,7 @@ class _EnvBase(EnvBase):
 
         with ScopedTimer("reward", sync=False):
             tensordict = self._compute_reward(tensordict)
-        # Note that command update is a special case
-        # it should take place after reward computation
-        with ScopedTimer("command", sync=False):
-            self.command_manager.update()
-
-        with ScopedTimer("observation", sync=False):
-            tensordict = self._compute_observation(tensordict)
-
+        
         with ScopedTimer("termination", sync=False):
             truncated = (self.episode_length_buf >= self.max_episode_length).unsqueeze(1)
             terminated = self._compute_termination()
@@ -442,6 +435,14 @@ class _EnvBase(EnvBase):
             tensordict.set("truncated", truncated)
             tensordict.set("done", terminated | truncated)
             tensordict.set("discount", self.discount.clone())
+        
+        # Note that command update is a special case
+        # it should take place after reward computation
+        with ScopedTimer("command", sync=False):
+            self.command_manager.update()
+
+        with ScopedTimer("observation", sync=False):
+            tensordict = self._compute_observation(tensordict)
         
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()

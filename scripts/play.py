@@ -6,9 +6,9 @@ import torch
 import hydra
 import itertools
 import datetime
+import copy
 from pathlib import Path
 
-from fractions import Fraction
 from omegaconf import OmegaConf, DictConfig
 
 from torchrl.envs.utils import set_exploration_type, ExplorationType
@@ -16,12 +16,28 @@ from torchrl.envs.utils import set_exploration_type, ExplorationType
 import active_adaptation as aa
 from active_adaptation.utils.export import export_onnx
 from active_adaptation.utils.timerfd import Timer
+from active_adaptation.learning.modules.vecnorm import VecNorm
 
 aa.import_algorithms()
 FILE_PATH = Path(__file__).parent
 
+
+@VecNorm.freeze()
+def export_policy(env, policy, export_dir):
+    fake_input = env.observation_spec[0].rand().cpu()
+    fake_input = fake_input.unsqueeze(0)
+
+    deploy_policy = copy.deepcopy(policy.get_rollout_policy("deploy")).cpu()
+
+    time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
+    export_dir = Path(export_dir)
+    export_dir.mkdir(parents=True, exist_ok=True)
+    path = export_dir / f"policy-{time_str}.onnx"
+    export_onnx(deploy_policy, fake_input, str(path))
+
+
 @hydra.main(config_path="../cfg", config_name="play", version_base=None)
-def main(cfg):
+def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
@@ -35,29 +51,8 @@ def main(cfg):
     env, policy = make_env_policy(cfg)
     
     if cfg.export_policy:
-        import time
-        import copy
-        time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
-        fake_input = env.observation_spec[0].rand().cpu()
-        fake_input["is_init"] = torch.tensor(1, dtype=bool)
-        fake_input["context_adapt_hx"] = torch.zeros(128)
-        fake_input = fake_input.unsqueeze(0)
-
-        def test(m, x):
-            start = time.perf_counter()
-            for _ in range(1000):
-                m(x)
-            return (time.perf_counter() - start) / 1000
-        
-        deploy_policy = copy.deepcopy(policy.get_rollout_policy("deploy")).cpu()
-        print(f"Inference time of policy: {test(deploy_policy, fake_input)}")
-
-        time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
         export_dir = FILE_PATH / "exports" / str(cfg.task.name)
-        export_dir.mkdir(parents=True, exist_ok=True)
-        path = export_dir / f"policy-{time_str}.onnx"
-
-        export_onnx(deploy_policy, fake_input, str(path))
+        export_policy(env, policy, export_dir)
 
     stats_keys = [
         k for k in env.reward_spec.keys(True, True) 
