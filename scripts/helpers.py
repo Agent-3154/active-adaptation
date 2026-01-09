@@ -67,11 +67,6 @@ def make_env_policy(cfg: DictConfig):
     from active_adaptation.envs import SimpleEnvIsaac, SimpleEnvMujoco, SimpleEnvMjlab
     from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
     
-    if "cuda" in str(cfg.device):
-        cfg.device = f"cuda:{active_adaptation.get_local_rank()}"
-    elif not cfg.device == "cpu":
-        raise ValueError(f"Invalid device: {cfg.device}")
-    
     # Select the appropriate backend-specific environment class
     backend = active_adaptation.get_backend()
     if backend == "isaac":

@@ -115,9 +115,21 @@ def import_algorithms():
         entry_point.load()
 
 
-def init(cfg: DictConfig, import_projects: bool = True):
+def init(
+    cfg: DictConfig,
+    auto_rank: bool,
+    import_projects: bool = True,
+):
+    """Initialize the active adaptation framework.
+    
+    Args:
+        cfg: The configuration dictionary.
+        auto_rank: Whether to automatically modify `cfg.device` according to the local rank.
+        import_projects: Whether to import the projects.
+    """
+
     # Store sys.argv to a local file
-    if _MAIN_PROCESS:
+    if is_main_process():
         argv_file = SCRIPT_PATH / "command_history.json"
         argv_file.parent.mkdir(parents=True, exist_ok=True)
         
@@ -132,12 +144,20 @@ def init(cfg: DictConfig, import_projects: bool = True):
         }
         history.append(entry)
         argv_file.write_text(json.dumps(history, indent=2))
-
+    
     set_backend(cfg.get("backend", "isaac"))
+    
+    if auto_rank and str(cfg.device).startswith("cuda"):
+        cfg.device = f"cuda:{get_local_rank()}"
+
     if get_backend() == "isaac":
         from isaaclab.app import AppLauncher
-        AppLauncher(OmegaConf.to_container(cfg.app))
+        app_config = OmegaConf.to_container(cfg.app)
+        AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
     if import_projects:
         _import_projects()
+    
+    import_algorithms()
+
     return cfg
     

@@ -1,15 +1,12 @@
 import torch
-import torchvision
 import hydra
 import numpy as np
 import wandb
 import logging
 import os
 import time
-import sys
 import datetime
 
-from fractions import Fraction
 from omegaconf import OmegaConf, DictConfig
 
 from collections import OrderedDict
@@ -21,7 +18,6 @@ from tensordict.nn import TensorDictModuleBase
 
 import active_adaptation as aa
 from active_adaptation.utils.profiling import ScopedTimer
-from active_adaptation.utils.command_history import CommandHistory
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -32,14 +28,13 @@ torch.backends.cudnn.benchmark = False
 FILE_PATH = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(FILE_PATH, "..", "cfg")
 
-aa.import_algorithms()
 
 @hydra.main(config_path=CONFIG_PATH, config_name="train", version_base=None)
 def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    aa.init(cfg, import_projects=True)
+    aa.init(cfg, auto_rank=True, import_projects=True)
     
     print(f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}")
 

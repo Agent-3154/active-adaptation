@@ -18,7 +18,6 @@ from active_adaptation.utils.export import export_onnx
 from active_adaptation.utils.timerfd import Timer
 from active_adaptation.learning.modules.vecnorm import VecNorm
 
-aa.import_algorithms()
 FILE_PATH = Path(__file__).parent
 
 
@@ -41,11 +40,11 @@ def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    aa.init(cfg)
-
     if cfg.get("device", "auto") == "auto":
         cfg.device = "cuda" if aa.get_backend() == "mjlab" else "cpu"
         print(f"Using device: {cfg.device}")
+    
+    aa.init(cfg, auto_rank=True, import_projects=True)
     
     from helpers import EpisodeStats, make_env_policy
     env, policy = make_env_policy(cfg)

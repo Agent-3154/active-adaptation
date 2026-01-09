@@ -158,7 +158,7 @@ class ActuatorCfg:
             BuiltinPositionActuatorCfg: MuJoCo Lab compatible actuator configuration.
         """
         return BuiltinPositionActuatorCfg(
-            joint_names_expr=self.joint_names_expr,
+            target_names_expr=self.joint_names_expr,
             effort_limit=self.effort_limit,
             stiffness=self.stiffness,
             damping=self.damping,
