@@ -55,17 +55,40 @@ import active_adaptation
 import torch.distributed as distr
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+# @dataclass
+# class PPOConfig:
+#     _target_: str = "active_adaptation.learning.ppo.ppo.PPOPolicy"
+#     name: str = "ppo"
+#     train_every: int = 32
+#     ppo_epochs: int = 4
+#     num_minibatches: int = 4
+#     lr: float = 5e-4
+#     desired_kl: Union[float, None] = None
+#     clip_param: float = 0.2
+#     entropy_coef: float = 0.002
+#     layer_norm: Union[str, None] = "before"
+
+#     # symmetry options
+#     symnet: bool = False # use symmetry wrapper to wrap the policy and critic
+#     symaug: bool = False # use symmetry augmentation
+
+#     compile: bool = False
+#     use_ddp: bool = True
+
+#     checkpoint_path: Union[str, None] = None
+#     in_keys: Tuple[str, ...] = (OBS_KEY,)
+
 @dataclass
 class PPOConfig:
     _target_: str = "active_adaptation.learning.ppo.ppo.PPOPolicy"
     name: str = "ppo"
-    train_every: int = 32
-    ppo_epochs: int = 4
+    train_every: int = 24
+    ppo_epochs: int = 5
     num_minibatches: int = 4
-    lr: float = 5e-4
-    desired_kl: Union[float, None] = None
+    lr: float = 1e-3
+    desired_kl: Union[float, None] = 0.01
     clip_param: float = 0.2
-    entropy_coef: float = 0.002
+    entropy_coef: float = 0.005
     layer_norm: Union[str, None] = "before"
 
     # symmetry options
@@ -76,7 +99,7 @@ class PPOConfig:
     use_ddp: bool = True
 
     checkpoint_path: Union[str, None] = None
-    in_keys: Tuple[str, ...] = (OBS_KEY,)
+    in_keys: Tuple[str, ...] = (OBS_KEY, OBS_PRIV_KEY)
 
 
 cs = ConfigStore.instance()
@@ -104,21 +127,33 @@ class PPOPolicy(PPOBase):
 
         fake_input = observation_spec.zero()
 
-        vecnorm = VecNorm(
+        vecnorm_policy = VecNorm(
             input_shape=observation_spec[OBS_KEY].shape[-1:],
             stats_shape=observation_spec[OBS_KEY].shape[-1:],
             decay=1.0
         )
+        
+        vecnorm_priv = VecNorm(
+            input_shape=observation_spec[OBS_PRIV_KEY].shape[-1:],
+            stats_shape=observation_spec[OBS_PRIV_KEY].shape[-1:],
+            decay=1.0
+        )
+
+        self.vecnorm = Seq(
+            Mod(vecnorm_policy, [OBS_KEY], ["_obs_normed"]),
+            Mod(vecnorm_priv, [OBS_PRIV_KEY], ["_priv_normed"])
+        ).to(self.device)
 
         self.action_dim = env.action_manager.action_dim
         
-        self.vecnorm = Seq(Mod(vecnorm, [OBS_KEY], ["_obs_normed"])).to(self.device)
         actor_module = Seq(
-            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_actor_feature"]),
+            Mod(make_mlp([512, 256, 128]), ["_obs_normed"], ["_actor_feature"]),
             Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
         )
+        
         self.critic = Seq(
-            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_critic_feature"]),
+            CatTensors(["_obs_normed", "_priv_normed"], "_critic_input"),
+            Mod(make_mlp([512, 256, 128]), ["_critic_input"], ["_critic_feature"]),
             Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 

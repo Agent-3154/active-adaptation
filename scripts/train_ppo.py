@@ -68,7 +68,8 @@ def main(cfg: DictConfig):
     total_iters = total_frames // frames_per_batch
     save_interval = cfg.get("save_interval", -1)
 
-    log_interval = (env.max_episode_length // cfg.algo.train_every) + 1
+    # log_interval = (env.max_episode_length // cfg.algo.train_every) + 1
+    log_interval = cfg.algo.train_every
     logging.info(f"Log interval: {log_interval} steps")
 
     stats_keys = [

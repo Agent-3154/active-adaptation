@@ -4,8 +4,8 @@ from typing_extensions import override
 from active_adaptation.envs.mdp.base import Observation
 from active_adaptation.utils.symmetry import cartesian_space_symmetry
 from active_adaptation.assets import get_output_body_indexing
-from active_adaptation.utils.math import quat_rotate_inverse, yaw_quat
-
+from active_adaptation.utils.math import quat_rotate_inverse, yaw_quat, quat_mul, quat_conjugate
+from isaaclab.utils.math import matrix_from_quat
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
 
@@ -80,6 +80,35 @@ class body_pos_b(body_observation):
     def symmetry_transform(self):
         return cartesian_space_symmetry(self.asset, self.output_body_names)
     
+
+class body_ori_b(body_observation):
+    def __init__(self, env, body_names: str, yaw_only: bool=False, output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac"):
+        super().__init__(env, body_names, output_order)
+        self.yaw_only = yaw_only
+        self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
+        self.body_quat_w = self.asset.data.body_link_quat_w[:, self.body_ids]
+
+    @override
+    def update(self):
+        if self.yaw_only:
+            self.root_link_quat_w = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
+        else:
+            self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
+        self.body_quat_w = self.asset.data.body_link_quat_w[:, self.body_ids]
+        
+    @override
+    def compute(self):
+        # Compute body orientation in body frame: q_body_b = q_root_w^-1 * q_body_w
+        self.root_link_quat_w = self.root_link_quat_w.expand_as(self.body_quat_w)
+        root_quat_conj = quat_conjugate(self.root_link_quat_w)
+        body_ori_b = quat_mul(root_quat_conj, self.body_quat_w)
+        body_ori_b_quat = body_ori_b[:, self.output_indexing]
+        body_ori_b_mat = matrix_from_quat(body_ori_b_quat)
+        return body_ori_b_mat[..., :2].reshape(self.num_envs, -1)
+    
+    @override
+    def symmetry_transform(self):
+        return cartesian_space_symmetry(self.asset, self.output_body_names)
 
 class body_vel_b(body_observation):
 

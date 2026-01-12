@@ -311,6 +311,7 @@ class perturb_body_com(Randomization):
 
 
 class push_by_setting_velocity(Randomization):
+    supported_backends = ("isaac",)
     def __init__(self, env, velocity_range=(-0.5, 0.5), min_interval=200):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
@@ -416,6 +417,7 @@ class reset_joint_states_scale(Randomization):
 
 
 class push(Randomization):
+    supported_backends = ("isaac",)
     def __init__(self, env, body_names, force_range = (0.2, 0.9), min_interval=100, decay: float=0.9):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]

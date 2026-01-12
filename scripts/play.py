@@ -41,7 +41,7 @@ def main(cfg: DictConfig):
     OmegaConf.set_struct(cfg, False)
 
     if cfg.get("device", "auto") == "auto":
-        cfg.device = "cuda" if aa.get_backend() == "mjlab" else "cpu"
+        cfg.device = "cuda" if cfg.backend == "mjlab" else "cpu"
         print(f"Using device: {cfg.device}")
     
     aa.init(cfg, auto_rank=True, import_projects=True)
