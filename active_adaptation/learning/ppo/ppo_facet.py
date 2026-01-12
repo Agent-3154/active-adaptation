@@ -49,7 +49,7 @@ from active_adaptation.learning.modules.rnn import set_recurrent_mode, recurrent
 from .common import *
 from .ppo_base import PPOBase
 
-torch.set_float32_matmul_precision('high')
+
 
 @dataclass
 class PPOConfig:
@@ -166,10 +166,10 @@ class PPOPolicy(PPOBase):
         self.action_dim = env.action_manager.action_dim
         
         if self.cfg.symaug:
-            self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transforms().to(self.device)
-            self.priv_transform = env.observation_funcs[OBS_PRIV_KEY].symmetry_transforms().to(self.device)
-            self.ext_transform = env.observation_funcs["ext"].symmetry_transforms().to(self.device)
-            self.act_transform = env.action_manager.symmetry_transforms().to(self.device)
+            self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform().to(self.device)
+            self.priv_transform = env.observation_funcs[OBS_PRIV_KEY].symmetry_transform().to(self.device)
+            self.ext_transform = env.observation_funcs["ext"].symmetry_transform().to(self.device)
+            self.act_transform = env.action_manager.symmetry_transform().to(self.device)
         
         self.vecnorm = Seq(
             Mod(VecNorm(obs_dim, obs_dim, decay=1.0), [OBS_KEY], ["_obs_normed"]),

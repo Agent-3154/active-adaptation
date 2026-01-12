@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import torch
-import einops
-import warnings
-from typing import Dict, Literal, Tuple, Union, TYPE_CHECKING, List
+from typing import Dict, Literal, Tuple, TYPE_CHECKING, List
+from typing_extensions import override
+
 from tensordict import TensorDictBase
 import isaaclab.utils.string as string_utils
 from active_adaptation.utils.math import (
@@ -14,19 +16,21 @@ from active_adaptation.utils.math import (
     yaw_quat,
     clamp_norm
 )
-import active_adaptation.utils.symmetry as symmetry_utils
+from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
+from active_adaptation.assets import get_input_joint_indexing
+from active_adaptation.envs.mdp.base import _RegistryMixin
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
-    from active_adaptation.envs.base import _Env
+    from active_adaptation.envs.env_base import _EnvBase
 
 
-class ActionManager:
+class ActionManager(_RegistryMixin):
 
     action_dim: int
 
-    def __init__(self, env):
-        self.env: _Env = env
+    def __init__(self, env: _EnvBase):
+        self.env = env
         self.asset: Articulation = self.env.scene["robot"]
         self.action_buf: torch.Tensor
 
@@ -39,7 +43,7 @@ class ActionManager:
     def process_action(self, action: torch.Tensor):
         pass
 
-    def apply_action(self, action: torch.Tensor, substep: int):
+    def apply_action(self, substep: int):
         pass
 
     @property
@@ -67,9 +71,9 @@ class ConcatenatedAction(ActionManager):
         for action_manager, action in zip(self.action_managers, actions):
             action_manager.apply_action(action, substep)
     
-    def symmetry_transforms(self):
-        return symmetry_utils.SymmetryTransform.cat(
-            [action_manager.symmetry_transforms() for action_manager in self.action_managers]
+    def symmetry_transform(self):
+        return SymmetryTransform.cat(
+            [action_manager.symmetry_transform() for action_manager in self.action_managers]
         )
 
 
@@ -79,28 +83,27 @@ class JointPosition(ActionManager):
         env,
         action_scaling: Dict[str, float] = 0.5,
         max_delay: int = 2,  # delay in simulation steps
-        alpha: Union[float, Tuple[float, float]] = (0.5, 1.0),
+        alpha_range: Tuple[float, float] = (0.5, 1.0),
+        input_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
     ):
         super().__init__(env)
-        self.joint_ids, self.joint_names, self.action_scaling = (
-            string_utils.resolve_matching_names_values(
-                dict(action_scaling), self.asset.joint_names
-            )
-        )
+        action_scaling = dict(action_scaling)
+        self.joint_ids, self.joint_names, self.action_scaling = self.resolve(action_scaling)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
+        
+        # optionally convert the input order to the asset's order
+        self.indexing, self.input_joint_names = get_input_joint_indexing(
+            input_order=input_order,
+            asset_cfg=self.asset.cfg,
+            target_joint_names=self.joint_names,
+            device=self.device,
+        )
 
         self.action_scaling = torch.tensor(self.action_scaling, device=self.device)
         self.max_delay = max_delay
         self.action_dim = len(self.joint_ids)
 
-        if isinstance(alpha, float):
-            self.alpha_range = (alpha, alpha)
-        else:
-            try:
-                self.alpha_range = tuple(alpha)
-            except:
-                raise ValueError(f"Invalid alpha type: {type(alpha)}")
-
+        self.alpha_range = tuple(alpha_range)
         self.default_joint_pos = self.asset.data.default_joint_pos.clone()
         self.offset = torch.zeros_like(self.default_joint_pos)
         self.decimation = int(self.env.step_dt / self.env.physics_dt)
@@ -115,10 +118,11 @@ class JointPosition(ActionManager):
     def resolve(self, spec):
         return string_utils.resolve_matching_names_values(dict(spec), self.asset.joint_names)
 
-    def symmetry_transforms(self):
-        transform = symmetry_utils.joint_space_symmetry(self.asset, self.joint_names)
+    def symmetry_transform(self):
+        transform = joint_space_symmetry(self.asset, self.input_joint_names)
         return transform
 
+    @override
     def reset(self, env_ids: torch.Tensor):
         self.delay[env_ids] = torch.randint(0, self.max_delay + 1, (len(env_ids), 1), device=self.device)
         self.action_buf[env_ids] = 0
@@ -131,7 +135,11 @@ class JointPosition(ActionManager):
         alpha.uniform_(self.alpha_range[0], self.alpha_range[1])
         self.alpha[env_ids] = alpha
 
+    @override
     def process_action(self, action: torch.Tensor):
+        if action is None:
+            return
+        action = action[:, self.indexing]
         self.action_buf = self.action_buf.roll(1, dims=1)
         self.action_buf[:, 0] = action
         self.action_queue = torch.where(
@@ -140,7 +148,8 @@ class JointPosition(ActionManager):
             action.unsqueeze(1)
         )
 
-    def apply_action(self, action: torch.Tensor, substep: int):
+    @override
+    def apply_action(self, substep: int):
         # deplay model: each substep, the first action in queue is consumed
         self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
         self.action_queue = self.action_queue.roll(-1, dims=1)
@@ -190,19 +199,19 @@ class LegWheel(ActionManager):
         wheel_vel_target = self.wheel_scaling * wheel_action
         self.asset.set_joint_velocity_target(wheel_vel_target, self.wheel_ids)
 
-    def symmetry_transforms(self):
-        return symmetry_utils.SymmetryTransform.cat([
-            symmetry_utils.joint_space_symmetry(self.asset, self.leg_names),
-            symmetry_utils.joint_space_symmetry(self.asset, self.wheel_names),
+    def symmetry_transform(self):
+        return SymmetryTransform.cat([
+            joint_space_symmetry(self.asset, self.leg_names),
+            joint_space_symmetry(self.asset, self.wheel_names),
         ])
     
 
 class Marker(ActionManager):
-    def __init__(self, env, num_markers: int = 1, world_frame: bool = False):
+    def __init__(self, env, num_markers: int = 1, body_frame: bool = False):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.num_markers = num_markers
-        self.world_frame = world_frame
+        self.body_frame = body_frame
         self.has_gui = self.env.sim.has_gui()
         self.action_dim = 3 * self.num_markers
 
@@ -225,15 +234,62 @@ class Marker(ActionManager):
         if not self.has_gui or action is None:
             return
         
-        if not self.world_frame:
+        if self.body_frame:
             pos = self.asset.data.root_link_pos_w.reshape(self.num_envs, 1, 3)
             quat = self.asset.data.root_link_quat_w.reshape(self.num_envs, 1, 4)
             translations = pos + quat_rotate(quat, action.reshape(self.num_envs, self.num_markers, 3))
         else:
-            translations = action
+            # environment frame
+            translations = action + self.env.scene.env_origins.unsqueeze(1)
         translations = translations.reshape(self.num_envs * self.num_markers, 3)
         self.marker.visualize(
             translations=translations,
             scales=torch.ones(3, device=self.device).expand_as(translations)
         )
+
+
+class WriteRootState(ActionManager):
+    """
+    Directly write the root pose to the simulation for debugging purposes.
+    """
+    def __init__(self, env):
+        super().__init__(env)
+        # self.asset: Articulation = self.env.scene["robot"]
+        self.action_dim = 7 + 6
+        self.target_root_pose = None
+        self.target_root_velocity = None
+    
+    def process_action(self, action: torch.Tensor):
+        self.target_root_pose = action[:, :7]
+        self.target_root_pose[:, :3] += self.env.scene.env_origins
+        self.target_root_velocity = action[:, 7:]
+
+    @override
+    def apply_action(self, substep: int):
+        if self.target_root_pose is None:
+            return
+        self.asset.write_root_pose_to_sim(self.target_root_pose)
+        self.asset.write_root_velocity_to_sim(self.target_root_velocity)
+
+
+class WriteJointPosition(ActionManager):
+    """
+    Directly write the joint position (with zero velocity) to the simulation for debugging purposes.
+    """
+    def __init__(self, env):
+        super().__init__(env)
+        # self.asset: Articulation = self.env.scene["robot"]
+        self.action_dim = self.asset.data.default_joint_pos.shape[-1]
+        self.target_joint_pos = None
+
+    def process_action(self, action: torch.Tensor):
+        self.target_joint_pos = action
+    
+    @override
+    def apply_action(self, substep: int):
+        if self.target_joint_pos is None:
+            return
+        self.asset.set_joint_position_target(self.target_joint_pos)
+        self.asset.write_joint_position_to_sim(self.target_joint_pos)
+        self.asset.write_joint_velocity_to_sim(torch.zeros_like(self.target_joint_pos))
 

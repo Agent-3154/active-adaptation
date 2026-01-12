@@ -1,11 +1,22 @@
 import os
+import sys
+import json
+import datetime
 import active_adaptation.learning
 import builtins
 import importlib.metadata
 import importlib.util
+import inspect
 from pathlib import Path
+from omegaconf import DictConfig, OmegaConf
+from fractions import Fraction
 
-_BACKEND = "isaac"
+OmegaConf.register_new_resolver("frac", lambda s: float(Fraction(s)))
+OmegaConf.register_new_resolver("eval", eval)
+
+_BACKEND = None
+_BACKEND_SET = False
+_CALLED_AT = None
 
 _LOCAL_RANK = os.getenv("LOCAL_RANK", "0")
 _LOCAL_RANK = int(_LOCAL_RANK)
@@ -43,17 +54,33 @@ if is_distributed():
 if is_distributed() and _OMP_NUM_THREADS <= 1:
     raise ValueError("Please set OMP_NUM_THREADS to a value greater than 1 when using distributed training.")
 
+CONFIG_PATH = Path(__file__).parent.parent / "cfg"
+ASSET_PATH = Path(__file__).parent / "assets"
+SCRIPT_PATH = Path(__file__).parent.parent / "scripts"
 
-ASSET_PATH = os.path.join(os.path.dirname(__file__), "assets")
 
 def set_backend(backend: str):
-    if not backend in ("isaac", "mujoco"):
-        raise ValueError(f"backend must be either 'isaac' or 'mujoco', got {backend}")
-    global _BACKEND
+    global _BACKEND, _BACKEND_SET, _CALLED_AT
+    if _BACKEND_SET:
+        raise RuntimeError(f"set_backend() already called at {_CALLED_AT['filename']}:{_CALLED_AT['lineno']} in {_CALLED_AT['function']}")
+    if not backend in ("isaac", "mujoco", "mjlab"):
+        raise ValueError(f"backend must be either 'isaac' or 'mujoco' or 'mjlab', got {backend}")
+    # Record the call site
+    stack = inspect.stack()
+    caller = stack[1]
     _BACKEND = backend
+    _BACKEND_SET = True
+    _CALLED_AT = {
+        'filename': caller.filename,
+        'lineno': caller.lineno,
+        'function': caller.function,
+        'code_context': caller.code_context[0].strip() if caller.code_context else None,
+    }
 
 
 def get_backend():
+    if not _BACKEND_SET:
+        raise RuntimeError("set_backend() must be called before get_backend()")
     return _BACKEND
 
 
@@ -76,7 +103,7 @@ for entry_point in importlib.metadata.entry_points(group="active_adaptation.lear
 from hydra_plugins.aa_searchpath_plugin.aa_searchpath_plugin import ActiveAdaptationSearchPathPlugin
 
 
-def import_projects():
+def _import_projects():
     for entry_point in _PROJECT_ENTRY_POINTS:
         print(f"Importing project {entry_point.name}")
         entry_point.load()
@@ -88,3 +115,49 @@ def import_algorithms():
         entry_point.load()
 
 
+def init(
+    cfg: DictConfig,
+    auto_rank: bool,
+    import_projects: bool = True,
+):
+    """Initialize the active adaptation framework.
+    
+    Args:
+        cfg: The configuration dictionary.
+        auto_rank: Whether to automatically modify `cfg.device` according to the local rank.
+        import_projects: Whether to import the projects.
+    """
+
+    # Store sys.argv to a local file
+    if is_main_process():
+        argv_file = SCRIPT_PATH / "command_history.json"
+        argv_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        if argv_file.exists():
+            history = json.loads(argv_file.read_text())
+        else:
+            history = []
+        
+        entry = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "args": sys.argv
+        }
+        history.append(entry)
+        argv_file.write_text(json.dumps(history, indent=2))
+    
+    set_backend(cfg.get("backend", "isaac"))
+    
+    if auto_rank and str(cfg.device).startswith("cuda"):
+        cfg.device = f"cuda:{get_local_rank()}"
+
+    if get_backend() == "isaac":
+        from isaaclab.app import AppLauncher
+        app_config = OmegaConf.to_container(cfg.app)
+        AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
+    if import_projects:
+        _import_projects()
+    
+    import_algorithms()
+
+    return cfg
+    

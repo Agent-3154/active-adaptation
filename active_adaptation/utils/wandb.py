@@ -25,6 +25,9 @@ import datetime
 import logging
 import os
 import math
+import json
+from pathlib import Path
+from typing import Dict, Any
 
 import wandb
 from omegaconf import OmegaConf
@@ -88,6 +91,84 @@ def init_wandb(cfg):
     return run
 
 
+def _get_store_dir() -> Path:
+    """Return the shared W&B store directory under active-adaptation/scripts/wandb."""
+    # File layout: <repo_root>/active-adaptation/active_adaptation/utils/wandb.py
+    # We want:     <repo_root>/active-adaptation/scripts/wandb
+    repo_root = Path(__file__).resolve().parents[2]
+    store_dir = repo_root / "scripts" / "wandb"
+    store_dir.mkdir(parents=True, exist_ok=True)
+    return store_dir
+
+
+def _get_manifest_path() -> Path:
+    return _get_store_dir() / "manifest.json"
+
+
+def _load_manifest() -> Dict[str, Any]:
+    manifest_path = _get_manifest_path()
+    if manifest_path.exists():
+        try:
+            return json.loads(manifest_path.read_text())
+        except Exception:
+            logging.warning("Failed to read W&B manifest.json, recreating.")
+    return {"runs": {}}
+
+
+def _save_manifest(data: Dict[str, Any]) -> None:
+    manifest_path = _get_manifest_path()
+    tmp_path = manifest_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(data, indent=2))
+    tmp_path.replace(manifest_path)
+
+
+def _upsert_run_entry(manifest: Dict[str, Any], run) -> Dict[str, Any]:
+    """Ensure a run entry exists in manifest and return it."""
+    run_id = getattr(run, "id", None) or getattr(run, "name", None)
+    entity = getattr(run, "entity", None) or ""
+    project = getattr(run, "project", None) or ""
+    name = getattr(run, "name", None) or ""
+    path = f"{entity}/{project}/{run_id}" if entity and project and run_id else ""
+    runs = manifest.setdefault("runs", {})
+    entry = runs.get(run_id, {})
+    entry.update({
+        "id": run_id,
+        "entity": entity,
+        "project": project,
+        "name": name,
+        "path": path,
+        "download_dir": str((_get_store_dir() / name).resolve()),
+        "files": entry.get("files", []),
+        "checkpoints": entry.get("checkpoints", []),
+        "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
+    })
+    runs[run_id] = entry
+    return entry
+
+
+def _manifest_add_file(run, file_name: str, local_path: Path, kind: str, iteration: Union[int, str, None] = None) -> None:
+    manifest = _load_manifest()
+    entry = _upsert_run_entry(manifest, run)
+    record: Dict[str, Any] = {
+        "name": file_name,
+        "local_path": str(local_path),
+        "kind": kind,
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    if kind == "checkpoint":
+        record["iteration"] = iteration
+        entry.setdefault("checkpoints", []).append(record)
+    else:
+        entry.setdefault("files", []).append(record)
+    entry["updated_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+    _save_manifest(manifest)
+
+
+def get_store_dir() -> Path:
+    """Public: return the shared store dir for downloaded W&B assets."""
+    return _get_store_dir()
+
+
 def parse_checkpoint_path(path: str=None):
     """
     Parse a checkpoint path from local or wandb.
@@ -111,16 +192,17 @@ def parse_checkpoint_path(path: str=None):
         except:
             run = api.run(path[4:])
             iterations = None
-        root = os.path.join(os.path.dirname(__file__), "wandb", run.name)
-        os.makedirs(root, exist_ok=True)
+        root = _get_store_dir() / run.name
+        root.mkdir(parents=True, exist_ok=True)
 
         checkpoints = []
         for file in run.files():
             print(file.name)
             if "checkpoint" in file.name:
                 checkpoints.append(file)
-            elif file.name == "files/cfg.yaml":
-                file.download(root, replace=True)
+            elif file.name in ("files/cfg.yaml", "cfg.yaml", "config.yaml"):
+                file.download(str(root), replace=True)
+                _manifest_add_file(run, file.name, root / Path(file.name).name, kind="config")
 
         if iterations is not None:
             checkpoint = None
@@ -139,8 +221,15 @@ def parse_checkpoint_path(path: str=None):
                     return int(iteration_str)
             checkpoints.sort(key=sort_by_time)
             checkpoint = checkpoints[-1]
-        path = os.path.join(root, checkpoint.name)
+        path = str(root / checkpoint.name)
         print(f"Downloading checkpoint to {path}")
-        checkpoint.download(root, exist_ok=True)
+        checkpoint.download(str(root), exist_ok=True)
+        # Try to parse iteration from filename
+        try:
+            iteration_str = Path(checkpoint.name).stem.split("_")[-1]
+            iteration_val: Union[int, str] = int(iteration_str) if iteration_str.isdigit() else iteration_str
+        except Exception:
+            iteration_val = None
+        _manifest_add_file(run, checkpoint.name, Path(path), kind="checkpoint", iteration=iteration_val)
     return path
 

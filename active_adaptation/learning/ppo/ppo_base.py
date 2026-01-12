@@ -20,6 +20,7 @@ class PPOBase(TensorDictModuleBase):
         critic: TensorDictModuleBase,
         adv_key: str="adv",
         ret_key: str="ret",
+        clamp_reward: bool=True, # avoid suicide due to negative rewards
     ):
         keys = tensordict.keys(True, True)
         if not ("state_value" in keys and ("next", "state_value") in keys):
@@ -29,7 +30,9 @@ class PPOBase(TensorDictModuleBase):
         values = tensordict["state_value"]
         next_values = tensordict["next", "state_value"]
 
-        rewards = tensordict[REWARD_KEY].sum(-1, keepdim=True).clamp_min(0.)
+        rewards = tensordict[REWARD_KEY].sum(-1, keepdim=True)
+        if clamp_reward:
+            rewards = rewards.clamp_min(0.)
         discount = tensordict["next", "discount"]
         terms = tensordict[TERM_KEY]
         dones = tensordict[DONE_KEY]

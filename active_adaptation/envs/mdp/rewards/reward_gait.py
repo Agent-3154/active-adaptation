@@ -7,6 +7,7 @@ if TYPE_CHECKING:
 
 from active_adaptation.envs.mdp.base import Reward
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
+from isaaclab.utils.string import resolve_matching_names
 
 
 class max_feet_height(Reward):
@@ -25,7 +26,7 @@ class max_feet_height(Reward):
         self.max_height[env_ids] = 0.
     
     def update(self):
-        feet_height = self.asset.data.body_pos_w[:, self.body_ids, 2]
+        feet_height = self.asset.data.body_link_pos_w[:, self.body_ids, 2]
         in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.0
         self.max_height = torch.maximum(self.max_height, feet_height)
         self.rew = self.max_height.clamp_max(self.target_height)
@@ -38,21 +39,21 @@ class max_feet_height(Reward):
 
 
 class feet_sliding(Reward):
+    supported_backends = ("isaac",)
     def __init__(self, env, body_names: str, weight: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.body_ids = self.asset.find_bodies(body_names)[0]
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
         self.body_contact_ids = self.contact_sensor.find_bodies(body_names)[0]
+        self.body_contact_ids = torch.tensor(self.body_contact_ids, device=self.device)
 
     def compute(self) -> torch.Tensor:
-        in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.005 
-        feet_vel_b = quat_rotate_inverse(
-            yaw_quat(self.asset.data.root_quat_w).unsqueeze(1),
-            self.asset.data.body_lin_vel_w[:, self.body_ids]
-        )
-        slip = (in_contact * feet_vel_b[:, :, 1].square()).sum(dim=1)
-        return - slip.reshape(self.num_envs, 1)
+        in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > self.env.physics_dt 
+        feet_speed = self.asset.data.body_lin_vel_w[:, self.body_ids].norm(dim=-1)
+        sliding = (in_contact * feet_speed).sum(dim=1)
+        return - sliding.reshape(self.num_envs, 1)
 
 
 class quadruped_trot(Reward):
@@ -62,14 +63,18 @@ class quadruped_trot(Reward):
     def __init__(self, env, weight: float, body_names: str):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.body_ids, self.body_names = self.asset.find_bodies(body_names)
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
+
         self.body_contact_ids = self.contact_sensor.find_bodies(body_names)[0]
+        self.body_contact_ids = torch.tensor(self.body_contact_ids, device=self.device)
     
     def compute(self) -> torch.Tensor:
         in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.005
         FL_RR = in_contact[:, [0, 3]].all(dim=1)
         FR_RL = in_contact[:, [1, 2]].all(dim=1)
         rew = torch.logical_xor(FL_RR, FR_RL)
-        return rew.reshape(self.num_envs, 1)
+        active = ~self.command_manager.is_standing_env
+        return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 

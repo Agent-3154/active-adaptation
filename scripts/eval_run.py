@@ -4,6 +4,8 @@ import os
 import sys
 import hydra
 import argparse
+from pathlib import Path
+from active_adaptation.utils import wandb as aa_wandb_utils
 
 from omegaconf import OmegaConf
 from isaaclab.app import AppLauncher
@@ -38,8 +40,9 @@ def main():
     run = api.run(args.run_path)
     print(f"Loading run {run.name}")
 
-    root = os.path.join(os.path.dirname(__file__), "wandb", run.name)
-    os.makedirs(root, exist_ok=True)
+    store_dir = aa_wandb_utils.get_store_dir()
+    root = store_dir / run.name
+    root.mkdir(parents=True, exist_ok=True)
 
     checkpoints = []
     for file in run.files():
@@ -47,11 +50,14 @@ def main():
         if "checkpoint" in file.name:
             checkpoints.append(file)
         elif file.name == "cfg.yaml":
-            file.download(root, replace=True)
+            file.download(str(root), replace=True)
+            aa_wandb_utils._manifest_add_file(run, file.name, root / "cfg.yaml", kind="config")  # internal helper
         elif file.name == "files/cfg.yaml":
-            file.download(root, replace=True)
+            file.download(str(root), replace=True)
+            aa_wandb_utils._manifest_add_file(run, file.name, root / "cfg.yaml", kind="config")  # internal helper
         elif file.name == "config.yaml":
-            file.download(root, replace=True)
+            file.download(str(root), replace=True)
+            aa_wandb_utils._manifest_add_file(run, file.name, root / "config.yaml", kind="config")  # internal helper
 
     # `run.config` does not preserve order of the keys
     # so we need to manually load the config file :(

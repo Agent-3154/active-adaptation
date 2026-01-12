@@ -134,7 +134,7 @@ class DiagGaussian(nn.Module):
 
 #     def entropy(self):
 #         return -self.log_prob(self.rsample(self.batch_shape))
-from torchrl.modules.distributions import TanhNormal
+from torchrl.modules.distributions import TanhNormal, TruncatedNormal
 
 class IndependentNormal(D.Independent):
     arg_constraints = {"loc": constraints.real, "scale": constraints.positive}
@@ -232,9 +232,21 @@ class IndependentNormalModule(nn.Module):
 
 class TanhNormalWithEntropy(TanhNormal):
 
+    def log_prob(self, value, **kwargs):
+        value_clamped = value.clamp(self.low+1e-6, self.high-1e-6)
+        return super().log_prob(value + (value_clamped - value).detach(), **kwargs)
+
     def entropy(self):
         return -self.log_prob(self.sample())
 
+class TruncatedNormalWithEntropy(TruncatedNormal):
+
+    def log_prob(self, value, **kwargs):
+        value_clamped = value.clamp(self.low+1e-6, self.high-1e-6)
+        return super().log_prob(value + (value_clamped - value).detach(), **kwargs)
+
+    def entropy(self):
+        return -self.log_prob(self.sample())
 
 class TanhIndependentNormalModule(nn.Module):
     def __init__(

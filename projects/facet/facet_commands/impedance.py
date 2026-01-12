@@ -9,7 +9,6 @@ from active_adaptation.utils.math import (
     yaw_rotate, clamp_along, clamp_norm,
     quat_rotate, quat_rotate_inverse,
     quat_from_euler_xyz,
-    quat_from_view,
     yaw_quat,
     EMA
 )
@@ -81,10 +80,10 @@ class Impedance(Command):
                 self.command = torch.zeros(self.num_envs, 10)
             self.command_hidden = torch.zeros(self.num_envs, len(self.surr_steps) * 8)
             
-            self.surrogate_pos_target = torch.zeros(self.num_envs, len(self.surr_steps), 3)
-            self.surrogate_yaw_target = torch.zeros(self.num_envs, len(self.surr_steps), 1)
-            self.surrogate_lin_vel_target = torch.zeros(self.num_envs, len(self.surr_steps), 3)
-            self.surrogate_yaw_vel_target = torch.zeros(self.num_envs, len(self.surr_steps), 1)
+            self.surr_pos_target = torch.zeros(self.num_envs, len(self.surr_steps), 3)
+            self.surr_yaw_target = torch.zeros(self.num_envs, len(self.surr_steps), 1)
+            self.surr_lin_vel_target = torch.zeros(self.num_envs, len(self.surr_steps), 3)
+            self.surr_yaw_vel_target = torch.zeros(self.num_envs, len(self.surr_steps), 1)
 
             self.command_linvel = torch.zeros(self.num_envs, 3)
             self.command_speed = torch.zeros(self.num_envs, 1)
@@ -341,26 +340,26 @@ class Impedance(Command):
         if self.virtual_mass_range is not None:
             self.command[:, 10:15] = self.command[:, 3:8] / self.virtual_mass
         
-        self.surrogate_pos_target = self.ref_pos_w[:, self.surr_steps]
-        self.surrogate_yaw_target = self.ref_yaw_w[:, self.surr_steps]
-        self.surrogate_lin_vel_target = self.ref_lin_vel_w[:, self.surr_steps] 
-        self.surrogate_yaw_vel_target = self.ref_yaw_vel_w[:, self.surr_steps]
+        self.surr_pos_target = self.ref_pos_w[:, self.surr_steps]
+        self.surr_yaw_target = self.ref_yaw_w[:, self.surr_steps]
+        self.surr_lin_vel_target = self.ref_lin_vel_w[:, self.surr_steps] 
+        self.surr_yaw_vel_target = self.ref_yaw_vel_w[:, self.surr_steps]
 
         self.command_hidden = torch.cat([
             quat_rotate_inverse(
                 self.asset.data.root_quat_w.unsqueeze(1),
-                self.surrogate_pos_target - root_pos.unsqueeze(1)).reshape(self.num_envs, -1),
+                self.surr_pos_target - root_pos.unsqueeze(1)).reshape(self.num_envs, -1),
             quat_rotate_inverse(
                 self.asset.data.root_quat_w.unsqueeze(1),
-                self.surrogate_lin_vel_target).reshape(self.num_envs, -1),
-            self.surrogate_yaw_vel_target.reshape(self.num_envs, -1),
-            math_utils.wrap_to_pi(self.surrogate_yaw_target.squeeze(-1) - yaw.unsqueeze(1))
+                self.surr_lin_vel_target).reshape(self.num_envs, -1),
+            self.surr_yaw_vel_target.reshape(self.num_envs, -1),
+            math_utils.wrap_to_pi(self.surr_yaw_target.squeeze(-1) - yaw.unsqueeze(1))
         ], dim=1)
         
         self.update_command()
         self.update_forces()
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return symmetry_utils.SymmetryTransform(
             perm=torch.arange(15), 
             signs=[1, -1, 

@@ -45,10 +45,23 @@ class SpringForce(TensorClass):
 
 
 class ConstantForce(TensorClass):
+    """
+    A constant pushing/pulling force applied for a certain duration.
+    """
     duration: torch.Tensor
     time: torch.Tensor # the time elapsed since the start of the force
     offset: torch.Tensor
     force: torch.Tensor
+
+    @classmethod
+    def zeros(cls, size: int, device: str):
+        return cls(
+            duration=torch.zeros(size, 1, device=device),
+            time=torch.zeros(size, 1, device=device),
+            offset=torch.zeros(size, 3, device=device),
+            force=torch.zeros(size, 3, device=device),
+            batch_size=size,
+        )
     
     @classmethod
     def sample(
@@ -72,34 +85,68 @@ class ConstantForce(TensorClass):
             batch_size=size,
         )
 
-    def get_force(self):
+    def get_force(self, pos: torch.Tensor, vel: torch.Tensor):
         """Return the world-frame force."""
         return self.force * (self.time < self.duration)
 
 
 class ImpulseForce(TensorClass):
+    """
+    A linear impulse force applied for a certain duration with a peak value.
+    """
     duration: torch.Tensor
     time: torch.Tensor # the time elapsed since the start of the force
     peak: torch.Tensor
+    # offset: torch.Tensor
+
+    @property
+    def expired(self):
+        return self.time >= self.duration - 1e-4
 
     @classmethod
-    def sample(cls, size: int, device: str):
+    def zeros(cls, size: int, device: str):
+        return cls(
+            duration=torch.zeros(size, 1, device=device),
+            time=torch.zeros(size, 1, device=device),
+            peak=torch.zeros(size, 3, device=device),
+            # offset=torch.zeros(size, 3, device=device),
+            batch_size=size,
+        )
+
+    @classmethod
+    def sample(
+        cls,
+        size: int,
+        device: str,
+        x_range: Tuple[float, float] = (20., 80.),
+        y_range: Tuple[float, float] = (20., 80.),
+        z_range: Tuple[float, float] = (-20., 20.),
+        # x_offset_range: Tuple[float, float] = (-0.1, 0.1),
+        # y_offset_range: Tuple[float, float] = (-0.1, 0.1),
+        # z_offset_range: Tuple[float, float] = (-0.1, 0.1),
+    ):
         duration = torch.zeros(size, 1, device=device)
         duration.uniform_(0.40, 0.60)
         peak = torch.zeros(size, 3, device=device)
-        peak[:, 0].uniform_(80., 200.)
-        peak[:, 1].uniform_(80., 200.)
-        peak[:, 2].uniform_(0., 20.)
+        peak[:, 0].uniform_(*x_range)
+        peak[:, 1].uniform_(*y_range)
+        peak[:, 2].uniform_(*z_range)
         peak *= (torch.rand(size, 3, device=device) - 0.5).sign()
+        
+        # offset = torch.zeros(size, 3, device=device)
+        # offset[:, 0].uniform_(*x_offset_range)
+        # offset[:, 1].uniform_(*y_offset_range)
+        # offset[:, 2].uniform_(*z_offset_range)
         return cls(
             duration=duration,
             time=torch.zeros(size, 1, device=device),
             peak=peak,
+            # offset=offset,
             batch_size=size,
         )
 
-    def get_force(self):
+    def get_force(self, pos: torch.Tensor, vel: torch.Tensor):
         """Return the world-frame force."""
-        t = (self.time / self.duration).clamp(0., 1.)
+        t = (self.time / self.duration.clamp_min(1e-6)).clamp(0., 1.)
         force = torch.where(t < 0.5, t * 2 * self.peak, (1 - t) * 2 * self.peak)
         return force

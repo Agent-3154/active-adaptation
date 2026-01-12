@@ -51,8 +51,6 @@ from active_adaptation.learning.modules import (
 from .common import *
 from .ppo_base import PPOBase
 
-torch.set_float32_matmul_precision('high')
-
 import active_adaptation
 import torch.distributed as distr
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -112,8 +110,6 @@ class PPOPolicy(PPOBase):
             decay=1.0
         )
 
-        self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transforms().to(self.device)
-        self.act_transform = env.action_manager.symmetry_transforms().to(self.device)
         self.action_dim = env.action_manager.action_dim
         
         self.vecnorm = Seq(Mod(vecnorm, [OBS_KEY], ["_obs_normed"])).to(self.device)
@@ -127,6 +123,8 @@ class PPOPolicy(PPOBase):
         ).to(self.device)
 
         if self.cfg.symnet:
+            self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform().to(self.device)
+            self.act_transform = env.action_manager.symmetry_transform().to(self.device)
             actor_module = SymmetryWrapper(
                 actor_module,
                 Mod(self.obs_transform, ["_obs_normed"], ["_obs_normed"]),
@@ -294,6 +292,7 @@ class PPOPolicy(PPOBase):
         
         info = {
             "actor/policy_loss": policy_loss.detach(),
+            "actor/noise_std": tensordict["scale"].mean(),
             "actor/entropy": entropy.detach(),
             "actor/grad_norm": actor_grad_norm,
             "critic/value_loss": value_loss.detach(),

@@ -6,7 +6,7 @@ from typing import Tuple, TYPE_CHECKING
 import active_adaptation
 from active_adaptation.envs.mdp.base import Observation
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
-from active_adaptation.utils.symmetry import SymmetryTransform
+from active_adaptation.utils.symmetry import SymmetryTransform, cartesian_space_symmetry
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -20,6 +20,52 @@ if active_adaptation.get_backend() == "isaac":
 
 
 MESHES = {}
+
+
+class external_forces(Observation):
+    supported_backends = ("isaac",)
+    def __init__(self, env, body_names, divide_by_mass: bool=True, scale: float = 1.0):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.body_ids, self.body_names = self.asset.find_bodies(body_names)
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
+        self.forces_b = torch.zeros(self.num_envs, len(self.body_ids) * 3, device=self.device)
+        default_mass_total = self.asset.data.default_mass[0].sum() * 9.81
+        self.denom = default_mass_total if divide_by_mass else torch.tensor(scale, device=self.device)
+
+    def update(self):
+        forces_b = self.asset._external_force_b[:, self.body_ids]
+        forces_b /= self.denom
+        self.forces_b = forces_b
+
+    def compute(self) -> torch.Tensor:
+        return self.forces_b.reshape(self.num_envs, -1)
+
+    def symmetry_transform(self):
+        return cartesian_space_symmetry(self.asset, self.body_names)
+
+
+class external_torques(Observation):
+    supported_backends = ("isaac",)
+    def __init__(self, env, body_names, divide_by_mass: bool=True, scale: float = 0.2):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.body_ids, self.body_names = self.asset.find_bodies(body_names)
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
+        self.torques_b = torch.zeros(self.num_envs, len(self.body_ids) * 3, device=self.device)
+        default_inertia = self.asset.data.default_inertia[0, 0, [0, 4, 8]].to(self.device)
+        self.denom = default_inertia if divide_by_mass else torch.tensor(scale, device=self.device)
+    
+    def update(self):
+        torques_b = self.asset._external_torque_b[:, self.body_ids]
+        torques_b = torques_b / self.denom
+        self.torques_b = torques_b
+    
+    def compute(self) -> torch.Tensor:
+        return self.torques_b.reshape(self.num_envs, -1)
+
+    def symmetry_transform(self):
+        return cartesian_space_symmetry(self.asset, self.body_names, sign=(-1, 1, -1))
 
 
 class height_scan(Observation):
@@ -42,8 +88,8 @@ class height_scan(Observation):
         x = torch.linspace(x_range[0], x_range[1], int((x_range[1] - x_range[0]) / resolution[0])+1)
         y = torch.linspace(y_range[0], y_range[1], int((y_range[1] - y_range[0]) / resolution[1])+1)
         xx, yy = torch.meshgrid(x, y, indexing="ij")
-        self.pos = torch.stack([xx, yy, torch.zeros_like(xx)], dim=-1).to(self.device)
-        self.shape = self.pos.shape[:2]
+        self.scan_pos_b = torch.stack([xx, yy, torch.zeros_like(xx)], dim=-1).to(self.device)
+        self.shape = self.scan_pos_b.shape[:2]
         
         if self.env.backend == "isaac" and self.env.sim.has_gui():
             self.marker = VisualizationMarkers(
@@ -60,13 +106,15 @@ class height_scan(Observation):
             self.marker.set_visibility(True)
 
     def compute(self):
-        root_pos_w = self.asset.data.root_pos_w.reshape(self.num_envs, 1, 1, 3)
-        root_quat = yaw_quat(self.asset.data.root_quat_w).reshape(self.num_envs, 1, 1, 4)
-        self.offset = quat_rotate(root_quat, self.pos.unsqueeze(0))
-        self.height_map_w = self.env.get_ground_height_at(root_pos_w + self.offset)
+        root_pos_w = self.asset.data.root_com_pos_w.reshape(self.num_envs, 1, 1, 3)
+        root_quat = yaw_quat(self.asset.data.root_link_quat_w).reshape(self.num_envs, 1, 1, 4)
+        
+        self.scan_pos_w = root_pos_w + quat_rotate(root_quat, self.scan_pos_b.unsqueeze(0))
+        self.height_map_w = self.env.get_ground_height_at(self.scan_pos_w)
+        
         height_map = (root_pos_w[:, :, :, 2] - self.height_map_w).clamp(-1., 1.)
         if self.include_xy:
-            xy = einops.rearrange(self.pos[..., :2], "X Y C -> C X Y")
+            xy = einops.rearrange(self.scan_pos_b[..., :2], "X Y C -> C X Y")
             height_map = torch.cat([
                 xy.expand(self.num_envs, *xy.shape),
                 height_map.reshape(self.num_envs, 1, *self.shape)
@@ -78,11 +126,11 @@ class height_scan(Observation):
     
     def debug_draw(self):
         if self.env.backend == "isaac":
-            pos = self.asset.data.root_pos_w.reshape(self.num_envs, 1, 1, 3) + self.offset
+            pos = self.scan_pos_w.clone()
             pos[:, :, :, 2] = self.height_map_w
             self.marker.visualize(pos.reshape(-1, 3))
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         if self.flatten:
             assert not self.include_xy
             perm = torch.arange(self.shape.numel()).reshape(self.shape).flip((1,)).reshape(-1)
@@ -138,7 +186,7 @@ class forward_scan(Observation):
     
     def compute(self) -> torch.Tensor:
         directions = quat_rotate(
-            self.asset.data.root_quat_w.unsqueeze(1),
+            self.asset.data.root_link_quat_w.unsqueeze(1),
             self.directions.expand(self.num_envs, self.num_rays, 3)
         )
         ray_starts = self.asset.data.root_pos_w.unsqueeze(1).expand_as(directions)
@@ -157,7 +205,7 @@ class forward_scan(Observation):
         else:
             return ray_distance.reshape(self.num_envs, 1, *self.shape)
     
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         if self.flatten:
             perm = torch.arange(self.shape.numel())
             perm = perm.reshape(self.shape).flip(1)
@@ -215,7 +263,7 @@ class forward_scan(Observation):
 #         self.asset.data.feet_height_map = self.feet_height_map
     
 #     def update(self):
-#         self.feet_pos_w = self.asset.data.body_pos_w[:, self.body_ids]
+#         self.feet_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
 #         self.feet_quat_w = self.asset.data.body_quat_w[:, self.body_ids]
 #         if self.mesh is not None:
 #             shape = (self.num_envs, self.num_feet, self.num_rays, -1)

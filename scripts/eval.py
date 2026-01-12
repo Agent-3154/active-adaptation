@@ -6,6 +6,7 @@ import time
 import sys
 import av
 
+from fractions import Fraction
 from omegaconf import OmegaConf
 
 from isaaclab.app import AppLauncher
@@ -14,13 +15,15 @@ import os
 import datetime
 import termcolor
 
-import active_adaptation
-active_adaptation.import_algorithms()
+import active_adaptation as aa
+aa.import_algorithms()
 
 @hydra.main(config_path="../cfg", config_name="eval", version_base=None)
 def main(cfg):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
+
+    aa.init(cfg)
     
     app_launcher = AppLauncher(cfg.app)
     simulation_app = app_launcher.app

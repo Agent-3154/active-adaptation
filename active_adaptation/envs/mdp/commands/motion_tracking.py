@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
 
-from active_adaptation.envs.mdp import Command, reward, observation
+from active_adaptation.envs.mdp import Command
 from active_adaptation.utils.motion import MotionDataset
 from active_adaptation.utils.math import (
     quat_rotate_inverse,
@@ -82,7 +82,7 @@ class MotionTrackingCommand(Command):
         origins = self.env.scene.env_origins[env_ids]
         motion = self.dataset.get_slice(self.motion_ids[env_ids.cpu()], 0, 1)
         init_root_state[:, :3] = origins + motion.root_pos_w[:, 0].to(self.device)
-        init_root_state[:, 3:7] = motion.root_quat_w[:, 0].to(self.device)
+        init_root_state[:, 3:7] = motion.root_link_quat_w[:, 0].to(self.device)
         return init_root_state
     
     def reset(self, env_ids):
@@ -96,64 +96,64 @@ class MotionTrackingCommand(Command):
             self.relative_quat.reshape(self.num_envs, -1),
         ], dim=-1)
     
-    @reward
-    def root_pos_tracking(self):
-        diff = self.target_pos_w[:, 0] - self.asset.data.root_pos_w
-        error = diff.square().sum(-1, keepdim=True)
-        return torch.exp(- error / 0.25)
+    # @reward
+    # def root_pos_tracking(self):
+    #     diff = self.target_pos_w[:, 0] - self.asset.data.root_pos_w
+    #     error = diff.square().sum(-1, keepdim=True)
+    #     return torch.exp(- error / 0.25)
 
-    @reward
-    def keypoint_tracking(self):
-        diff = self.target_keypoints_w[:, 0] - self.asset.data.body_pos_w[:, self.keypoint_idx_asset]
-        error = diff.square().sum(-1, keepdim=True)
-        return torch.exp(- error / 0.1).mean(1)
+    # @reward
+    # def keypoint_tracking(self):
+    #     diff = self.target_keypoints_w[:, 0] - self.asset.data.body_link_pos_w[:, self.keypoint_idx_asset]
+    #     error = diff.square().sum(-1, keepdim=True)
+    #     return torch.exp(- error / 0.1).mean(1)
 
-    @reward
-    def orientation_tracking(self):
-        error = torch.norm(axis_angle_from_quat(self.relative_quat[:, 0]), dim=-1, keepdim=True)
-        return torch.exp(- error)
+    # @reward
+    # def orientation_tracking(self):
+    #     error = torch.norm(axis_angle_from_quat(self.relative_quat[:, 0]), dim=-1, keepdim=True)
+    #     return torch.exp(- error)
     
-    @reward
-    def joint_pos_tracking(self):
-        error = (self.target_joint_pos - self.asset.data.joint_pos[:, self.joint_idx_asset]).square()
-        return torch.exp(- error / 0.5).mean(1, True)
+    # @reward
+    # def joint_pos_tracking(self):
+    #     error = (self.target_joint_pos - self.asset.data.joint_pos[:, self.joint_idx_asset]).square()
+    #     return torch.exp(- error / 0.5).mean(1, True)
 
-    @reward
-    def feet_tracking(self):
-        # in_contact = self.contact_forces.data.current_contact_time[:, self.feet_ids_sensor] > 0.01
-        first_contact = self.contact_forces.compute_first_contact(0.02)[:, self.feet_ids_sensor]
-        diff = self.target_feet_pos_w - self.asset.data.body_pos_w[:, self.feet_ids_asset]
-        error = diff.square().sum(-1)
-        return - (error * first_contact).sum(1, True)
+    # @reward
+    # def feet_tracking(self):
+    #     # in_contact = self.contact_forces.data.current_contact_time[:, self.feet_ids_sensor] > 0.01
+    #     first_contact = self.contact_forces.compute_first_contact(0.02)[:, self.feet_ids_sensor]
+    #     diff = self.target_feet_pos_w - self.asset.data.body_link_pos_w[:, self.feet_ids_asset]
+    #     error = diff.square().sum(-1)
+    #     return - (error * first_contact).sum(1, True)
 
     def update(self):
         self._motion = self.dataset.get_slice(self.motion_ids, self.t, steps=self.future_steps)
         self.target_pos_w = self._motion.root_pos_w.to(self.device) \
             + self.env.scene.env_origins.reshape(self.num_envs, 1, 3)
         self.target_pos_b = quat_rotate_inverse(
-            self.asset.data.root_quat_w.unsqueeze(1),
+            self.asset.data.root_link_quat_w.unsqueeze(1),
             (self.target_pos_w - self.asset.data.root_pos_w.unsqueeze(1))
         )
-        self.target_quat_w = self._motion.root_quat_w.to(self.device)
+        self.target_quat_w = self._motion.root_link_quat_w.to(self.device)
         self.relative_quat = quat_mul(
-            self.asset.data.root_quat_w.unsqueeze(1).expand_as(self.target_quat_w),
+            self.asset.data.root_link_quat_w.unsqueeze(1).expand_as(self.target_quat_w),
             quat_conjugate(self.target_quat_w)
         )
         self.target_keypoints_b = self._motion.body_pos_b[:, :, self.keypoint_idx_motion].to(self.device)
-        self.target_keypoints_w = self._motion.body_pos_w[:, :, self.keypoint_idx_motion].to(self.device)
+        self.target_keypoints_w = self._motion.body_link_pos_w[:, :, self.keypoint_idx_motion].to(self.device)
         self.target_keypoints_w = self.target_keypoints_w \
             + self.env.scene.env_origins.reshape(self.num_envs, 1, 1, 3)
-        self.target_feet_pos_w = self._motion.body_pos_w[:, 0, self.feet_ids_motion].to(self.device) \
+        self.target_feet_pos_w = self._motion.body_link_pos_w[:, 0, self.feet_ids_motion].to(self.device) \
             + self.env.scene.env_origins.reshape(self.num_envs, 1, 3)
         self.target_joint_pos = self._motion.joint_pos[:, 0, self.joint_idx_motion].to(self.device)
         
         self.t = torch.clamp_max(self.t + 1, self.dataset.lengths[self.motion_ids]-self.future_steps[-1])
 
     def debug_draw(self):
-        target_keypoints_w = self._motion.body_pos_w[:, 0] + self.env.scene.env_origins.cpu().unsqueeze(1)
+        target_keypoints_w = self._motion.body_link_pos_w[:, 0] + self.env.scene.env_origins.cpu().unsqueeze(1)
         self.env.debug_draw.point(target_keypoints_w.reshape(-1, 3), color=(1, 0, 0, 1))
 
-        robot_keypoints_w = self.asset.data.body_pos_w[:, self.keypoint_idx_asset].cpu()
+        robot_keypoints_w = self.asset.data.body_link_pos_w[:, self.keypoint_idx_asset].cpu()
         self.env.debug_draw.point(robot_keypoints_w.reshape(-1, 3), color=(0, 1, 0, 1))
 
         self.env.debug_draw.vector(
@@ -163,10 +163,10 @@ class MotionTrackingCommand(Command):
         )
 
         in_contact = self.contact_forces.data.current_contact_time[:, self.feet_ids_sensor] > 0.01
-        diff = self.target_feet_pos_w - self.asset.data.body_pos_w[:, self.feet_ids_asset]
+        diff = self.target_feet_pos_w - self.asset.data.body_link_pos_w[:, self.feet_ids_asset]
         
         self.env.debug_draw.vector(
-            self.asset.data.body_pos_w[:, self.feet_ids_asset].reshape(-1, 3),
+            self.asset.data.body_link_pos_w[:, self.feet_ids_asset].reshape(-1, 3),
             (diff * in_contact.unsqueeze(-1)).reshape(-1, 3),
             color=(0, 1, 0, 1),
             size=5.

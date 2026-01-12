@@ -33,17 +33,17 @@ class last_contact_pos(Observation):
     def update(self):
         # in_contact = self.contact_sensor.data.net_forces_w[:, self.contact_ids].norm(dim=-1) > 0.1
         in_contact = self.contact_sensor.data.current_contact_time[:, self.contact_ids] > 0.0
-        self.body_pos_w = self.asset.data.body_pos_w[:, self.body_ids]
+        self.body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
 
         self.has_contact.logical_or_(in_contact)
         self.last_contact_pos_w = torch.where(
             in_contact.unsqueeze(-1),
-            self.body_pos_w,
+            self.body_link_pos_w,
             self.last_contact_pos_w
         )
     
     def compute(self):
-        self.root_link_quat_w = self.asset.data.root_quat_w
+        self.root_link_quat_w = self.asset.data.root_link_quat_w
         self.root_link_pos_w = self.asset.data.root_pos_w
         if self.world_frame:
             result =  self.last_contact_pos_w
@@ -57,13 +57,14 @@ class last_contact_pos(Observation):
     def debug_draw(self):
         if self.env.sim.has_gui() and self.env.backend == "isaac":
             self.env.debug_draw.vector(
-                self.body_pos_w,
-                self.last_contact_pos_w - self.body_pos_w,
+                self.body_link_pos_w,
+                self.last_contact_pos_w - self.body_link_pos_w,
                 color=(0, 0, 1, 1)
             )
 
 
 class contact_indicator(Observation):
+    supported_backends = ("isaac",)
     def __init__(self, env, body_names: str):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
@@ -74,7 +75,7 @@ class contact_indicator(Observation):
     def compute(self):
         return self.contact_sensor.data.current_contact_time[:, self.body_ids] > 0.0
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return cartesian_space_symmetry(self.asset, self.body_names, sign=(1,))
 
 
@@ -88,7 +89,7 @@ class contact_forces(Observation):
         self.body_ids = self.contact_sensor.find_bodies(body_names)[0]
 
     def compute(self):
-        self.root_link_quat_w = self.asset.data.root_quat_w
+        self.root_link_quat_w = self.asset.data.root_link_quat_w
         contact_forces = self.contact_sensor.data.net_forces_w[:, self.body_ids]
         if not self.world_frame:
             contact_forces = quat_rotate_inverse(
@@ -97,6 +98,6 @@ class contact_forces(Observation):
             )
         return contact_forces.reshape(self.num_envs, -1)
 
-    def symmetry_transforms(self):
+    def symmetry_transform(self):
         return cartesian_space_symmetry(self.asset, self.body_names)
 

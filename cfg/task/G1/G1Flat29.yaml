@@ -48,7 +48,7 @@ action:
     # .*wrist_pitch.*: 0.293
     # .*wrist_yaw.*: 0.293
   max_delay: 1
-  alpha: [0.6, 1.0]
+  alpha_range: [0.6, 1.0]
 
 command:
   class: Twist
@@ -71,7 +71,6 @@ observation:
   # priv:
     root_linvel_b:    {}
     body_height:  {body_names: .*ankle_roll_link}
-    applied_torque:   {joint_names: "(?!(.*wrist.*)).*"}
 
 reward:
   loco:
@@ -80,7 +79,7 @@ reward:
     angvel_z_exp:       {weight: 1.2, gamma: 0.8}
     angvel_xy_l2:       {weight: 0.02, body_names: ["pelvis", "torso_link"]}
     linvel_z_l2:        {weight: 0.5}
-    tracking_base_height: {weight: 2.0, target_height: 0.74}
+    # tracking_base_height: {weight: 2.0, target_height: 0.74}
     single_foot_contact: {weight: 0.75, body_names: .*ankle_roll_link, margin: 0.1}
 
     energy_l1:          {weight: 2.0e-4}
@@ -105,7 +104,7 @@ randomization:
     static_friction_range: [0.6, 2.0]
     dynamic_friction_range: [0.6, 2.0]
     restitution_range: [0.0, 0.2]
-  motor_params_implicit:
+  motor_params:
     stiffness_range:
       .*: [0.8, 1.1]
     damping_range:

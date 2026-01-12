@@ -4,17 +4,28 @@ import torch
 from isaaclab.utils import configclass
 
 import active_adaptation
-import active_adaptation.envs.mdp as mdp
-from active_adaptation.envs.base import _Env
+from active_adaptation.envs.env_base import _EnvBase
+from active_adaptation.assets import AssetCfg
+from active_adaptation.registry import Registry
+from active_adaptation.envs.adapters import (
+    IsaacSimAdapter, IsaacSceneAdapter,
+    MujocoSimAdapter, MujocoSceneAdapter,
+    MjlabSimAdapter, MjlabSceneAdapter,
+)
+from typing import cast
 
-class SimpleEnv(_Env):
-    def __init__(self, cfg):
-        super().__init__(cfg)
+
+class SimpleEnvIsaac(_EnvBase):
+    """Isaac Sim backend implementation."""
+    
+    def __init__(self, cfg, device: str, headless: bool = True):
+        super().__init__(cfg, device, headless)
         self.robot = self.scene.articulations["robot"]
         
-        if self.backend == "isaac" and self.sim.has_gui():
+        if self.sim.has_gui():
             from isaaclab.envs.ui import BaseEnvWindow, ViewportCameraController
             from isaaclab.envs import ViewerCfg
+            from active_adaptation.utils.debug import DebugDraw
             # hacks to make IsaacLab happy. we don't use them.
             self.cfg.viewer.env_index = 0
             self.manager_visualizers = {}
@@ -23,22 +34,27 @@ class SimpleEnv(_Env):
                 self,
                 ViewerCfg(self.cfg.viewer.eye, self.cfg.viewer.lookat, origin_type="env")
             )
-
-    def setup_scene(self):
-        if active_adaptation.get_backend() == "isaac":
-            self.setup_scene_isaac()
-        else:
-            self.setup_scene_mujoco()
+            self.debug_draw = DebugDraw()
     
-    def setup_scene_isaac(self):
-        import active_adaptation.envs.scene as scene
+    def _reset_idx(self, env_ids: torch.Tensor):
+        init_state = self.command_manager.sample_init(env_ids)
+        if isinstance(init_state, torch.Tensor):
+            init_state = {"robot": init_state}
+        for key, value in init_state.items():
+            self.scene[key].write_root_state_to_sim(
+                value, 
+                env_ids=env_ids
+            )
+        self.stats[env_ids] = 0.
+    
+    def setup_scene(self):
         import isaaclab.sim as sim_utils
-        from isaaclab.scene import InteractiveSceneCfg
+        from isaaclab.sim import SimulationContext
+        from isaaclab.sim.utils.stage import attach_stage_to_usd_context, use_stage
+        from isaaclab.scene import InteractiveSceneCfg, InteractiveScene
         from isaaclab.assets import AssetBaseCfg
         from isaaclab.sensors import ContactSensorCfg
         from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
-        from active_adaptation.assets import get_asset_meta
-        from active_adaptation.registry import Registry
         
         registry = Registry.instance()
         
@@ -50,24 +66,32 @@ class SimpleEnv(_Env):
                 texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
             ),
         )
-        scene_cfg.robot = registry.get("asset", self.cfg.robot.name)
+        asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
+        
+        scene_cfg.robot = asset_cfg.isaaclab()
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
         scene_cfg.terrain = registry.get("terrain", self.cfg.terrain)
 
-        scene_cfg.contact_forces = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/.*", 
-            history_length=3,
-            track_air_time=True
-        )
+        for obj in self.cfg.get("objects", []):
+            obj_cfg = registry.get("asset", obj.name).isaaclab()
+            obj_cfg.prim_path = "{ENV_REGEX_NS}/" + obj.name
+            setattr(scene_cfg, obj.name, obj_cfg)
+
+        for sensor_cfg in asset_cfg.sensors_isaaclab:
+            setattr(scene_cfg, sensor_cfg.name, sensor_cfg.isaaclab())
+
         sim_cfg = sim_utils.SimulationCfg(
             dt=self.cfg.sim.isaac_physics_dt,
             render=sim_utils.RenderCfg(
-                rendering_mode="quality",
+                rendering_mode="balanced",
                 # antialiasing_mode="FXAA",
                 # enable_global_illumination=True,
                 # enable_reflections=True,
             ),
-            device=f"cuda:{active_adaptation.get_local_rank()}"
+            physx=sim_utils.PhysxCfg(
+                **self.cfg.sim.get("physx", {}),
+            ),
+            device=str(self.device)
         )
         
         # slightly reduces GPU memory usage
@@ -78,8 +102,24 @@ class SimpleEnv(_Env):
         # sim_cfg.physx.gpu_total_aggregate_pairs_capacity = 2**23
         # sim_cfg.physx.gpu_collision_stack_size = 2**25
         # sim_cfg.physx.gpu_heap_capacity = 2**24
+
+        # create a simulation context to control the simulator
+        if SimulationContext.instance() is None:
+            # the type-annotation is required to avoid a type-checking error
+            # since it gets confused with Isaac Sim's SimulationContext class
+            self.sim: SimulationContext = SimulationContext(sim_cfg)
+        else:
+            self.sim: SimulationContext = SimulationContext.instance()
         
-        self.sim, self.scene = scene.create_isaaclab_sim_and_scene(sim_cfg, scene_cfg)
+        with use_stage(self.sim.get_initial_stage()):
+            self.scene = InteractiveScene(scene_cfg)
+            attach_stage_to_usd_context()
+        
+        # TODO@btx0424: check if we need to perform startup randomizations before resetting 
+        # the simulation.
+        with use_stage(self.sim.get_initial_stage()):
+            self.sim.reset()
+        
         # set camera view for "/OmniverseKit_Persp" camera
         self.sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat)
         try:
@@ -99,38 +139,59 @@ class SimpleEnv(_Env):
             # for _ in range(4):
             #     self.sim.render()
         except ModuleNotFoundError as e:
-            print("Set enable_cameras=true to use cameras.")
-        
-        try:
-            from active_adaptation.utils.debug import DebugDraw
-            self.debug_draw = DebugDraw()
-            print("[INFO] Debug Draw API enabled.")
-        except ModuleNotFoundError:
-            print()
-        
-        asset_meta = get_asset_meta(self.scene["robot"])
-        path = os.path.join(os.getcwd(), "asset_meta.json")
-        print(f"Saving asset meta to {path}")
-        with open(path, "w") as f:
-            json.dump(asset_meta, f, indent=4)
+            print("Set enable_cameras=true to use cameras.")            
+
+        self.sim = IsaacSimAdapter(self.sim)
+        self.scene = IsaacSceneAdapter(self.scene)
+        self.terrain_type = self.scene.terrain.cfg.terrain_type
+
+
+class SimpleEnvMujoco(_EnvBase):
+    """MuJoCo backend implementation."""
     
-    def setup_scene_mujoco(self):
-        import active_adaptation.assets_mjcf
+    def __init__(self, cfg, device: str, headless: bool = True):
+        super().__init__(cfg, device, headless)
+        self.robot = self.scene.articulations["robot"]
+    
+    def _reset_idx(self, env_ids: torch.Tensor):
+        init_state = self.command_manager.sample_init(env_ids)
+        if isinstance(init_state, torch.Tensor):
+            init_state = {"robot": init_state}
+        for key, value in init_state.items():
+            self.scene[key].write_root_state_to_sim(
+                value, 
+                env_ids=env_ids
+            )
+        self.stats[env_ids] = 0.
+    
+    def setup_scene(self):
         from active_adaptation.envs.mujoco import MJScene, MJSim
         from active_adaptation.registry import Registry
         from active_adaptation.envs.terrain import TERRAINS_MUJOCO
 
         registry = Registry.instance()
+        asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
 
         @configclass
         class SceneCfg:
-            robot = registry.get("asset", self.cfg.robot.name)
+            robot = asset_cfg.mujoco()
             contact_forces = "robot"
             terrain = TERRAINS_MUJOCO.get(self.cfg.terrain, TERRAINS_MUJOCO["plane"])
         
-        self.scene = MJScene(SceneCfg())
-        self.sim = MJSim(self.scene)
-        
+        scene = MJScene(SceneCfg())
+        sim = MJSim(scene)
+        self.scene = MujocoSceneAdapter(scene)
+        self.sim = MujocoSimAdapter(sim)
+        self.terrain_type = "plane"
+
+
+class SimpleEnvMjlab(_EnvBase):
+    """MjLab backend implementation."""
+    
+    def __init__(self, cfg, device: str, headless: bool = True):
+        super().__init__(cfg, device, headless)
+        self.robot = self.scene.articulations["robot"]
+    
     def _reset_idx(self, env_ids: torch.Tensor):
         init_root_state = self.command_manager.sample_init(env_ids)
         if not self.robot.is_fixed_base:
@@ -139,11 +200,49 @@ class SimpleEnv(_Env):
                 env_ids=env_ids
             )
         self.stats[env_ids] = 0.
+    
+    def setup_scene(self):
+        from mjlab.scene import Scene, SceneCfg
+        from mjlab.sim import Simulation, SimulationCfg, MujocoCfg
+        from mjlab.terrains import TerrainImporterCfg
+        from active_adaptation.viewer import MjLabViewer
 
-    def render(self, mode: str="human"):
-        self.sim.set_camera_view(
-            eye=self.robot.data.root_pos_w[0].cpu() + torch.as_tensor(self.cfg.viewer.eye),
-            target=self.robot.data.root_pos_w[0].cpu()
+        registry = Registry.instance()
+        asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
+        # Initialize scene and simulation.
+        sensors = tuple(sensor.mjlab() for sensor in asset_cfg.sensors_mjlab)
+        scene_cfg = SceneCfg(
+            num_envs=self.cfg.num_envs,
+            env_spacing=2.5,
+            entities={"robot": asset_cfg.mjlab()},
+            sensors=sensors,
+            terrain=TerrainImporterCfg(terrain_type="plane"),
         )
-        return super().render(mode)
+        scene = Scene(scene_cfg, device=str(self.device))
+        self.sim = Simulation(
+            num_envs=scene.num_envs,
+            cfg=SimulationCfg(
+                nconmax=50,
+                njmax=300,
+                mujoco=MujocoCfg(
+                    timestep=0.005,
+                    iterations=10,
+                    ls_iterations=20,
+                ),
+            ),
+            model=scene.compile(),
+            device=str(self.device),
+        )
+
+        scene.initialize(self.sim.mj_model, self.sim.model, self.sim.data)
+        self.sim.create_graph()
+
+        self.scene = MjlabSceneAdapter(scene)
+        if not self.headless:
+            viewer = MjLabViewer(self)
+            viewer.run_async()
+        else:
+            viewer = None
+        self.sim = MjlabSimAdapter(self.sim, viewer)
+        self.terrain_type = "plane"
 

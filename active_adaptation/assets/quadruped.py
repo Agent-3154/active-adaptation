@@ -1,42 +1,21 @@
 import os
-import copy
-import torch
+from pathlib import Path
+from active_adaptation.assets.asset_cfg import (
+    AssetCfg,
+    InitialStateCfg,
+    ActuatorCfg,
+    ContactSensorCfg,
+)
+from active_adaptation.registry import Registry
 
-import isaaclab.sim as sim_utils
+registry = Registry.instance()
 
-from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg, ImplicitActuator
-from isaaclab.assets import Articulation
-from isaaclab.sensors import ContactSensor
-from typing import TYPE_CHECKING
+FILE_DIR = Path(__file__).parent
 
-if TYPE_CHECKING:
-    from active_adaptation.envs.base import EnvBase
-
-from .base import ArticulationCfg
-
-
-ASSET_PATH = os.path.dirname(__file__)
-
-UNITREE_GO2_CFG = ArticulationCfg(
-    spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{ASSET_PATH}/Go2/go2.usd",
-        activate_contact_sensors=True,
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=False,
-            retain_accelerations=False,
-            linear_damping=0.0,
-            angular_damping=0.0,
-            max_linear_velocity=1000.0,
-            max_angular_velocity=1000.0,
-            max_depenetration_velocity=1.0,
-        ),
-        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,
-            solver_position_iteration_count=8,
-            solver_velocity_iteration_count=0,
-        ),
-    ),
-    init_state=ArticulationCfg.InitialStateCfg(
+UNITREE_GO2_CFG = AssetCfg(
+    mjcf_path=FILE_DIR / "Go2" / "mjcf" / "go2.xml",
+    usd_path=FILE_DIR / "Go2" / "go2.usd",
+    init_state=InitialStateCfg(
         pos=(0.0, 0.0, 0.4),
         joint_pos={
             ".*L_hip_joint": 0.1,
@@ -47,34 +26,36 @@ UNITREE_GO2_CFG = ArticulationCfg(
         },
         joint_vel={".*": 0.0},
     ),
-    soft_joint_pos_limit_factor=0.9,
+    self_collisions=False,
     actuators={
-        "base_legs": ImplicitActuatorCfg(
+        "base_legs": ActuatorCfg(
             joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
-            effort_limit_sim={
-                ".*_hip_joint": 23.5,
-                ".*_thigh_joint": 23.5,
-                ".*_calf_joint": 35.5,
-            },
-            # saturation_effort=35.5,
-            velocity_limit_sim=30.0,
+            # effort_limit={
+            #     ".*_hip_joint": 23.5,
+            #     ".*_thigh_joint": 23.5,
+            #     ".*_calf_joint": 35.5,
+            # },
+            effort_limit=23.5,
+            velocity_limit=30.0,
             stiffness=25.0,
             damping=0.5,
+            friction=0.01,
+            armature=0.01,
         ),
     },
     joint_symmetry_mapping = { 
-        "FL_hip_joint": [-1, "FR_hip_joint"],
-        "FR_hip_joint": [-1, "FL_hip_joint"],
-        "RL_hip_joint": [-1, "RR_hip_joint"],
-        "RR_hip_joint": [-1, "RL_hip_joint"],
-        "FL_thigh_joint": [1, "FR_thigh_joint"],
-        "FR_thigh_joint": [1, "FL_thigh_joint"],
-        "RL_thigh_joint": [1, "RR_thigh_joint"],
-        "RR_thigh_joint": [1, "RL_thigh_joint"],
-        "FL_calf_joint": [1, "FR_calf_joint"],
-        "FR_calf_joint": [1, "FL_calf_joint"],
-        "RL_calf_joint": [1, "RR_calf_joint"],
-        "RR_calf_joint": [1, "RL_calf_joint"]
+        "FL_hip_joint": (-1, "FR_hip_joint"),
+        "FR_hip_joint": (-1, "FL_hip_joint"),
+        "RL_hip_joint": (-1, "RR_hip_joint"),
+        "RR_hip_joint": (-1, "RL_hip_joint"),
+        "FL_thigh_joint": (1, "FR_thigh_joint"),
+        "FR_thigh_joint": (1, "FL_thigh_joint"),
+        "RL_thigh_joint": (1, "RR_thigh_joint"),
+        "RR_thigh_joint": (1, "RL_thigh_joint"),
+        "FL_calf_joint": (1, "FR_calf_joint"),
+        "FR_calf_joint": (1, "FL_calf_joint"),
+        "RL_calf_joint": (1, "RR_calf_joint"),
+        "RR_calf_joint": (1, "RL_calf_joint")
     },
     spatial_symmetry_mapping = {
         "FL_hip": "FR_hip",
@@ -96,122 +77,68 @@ UNITREE_GO2_CFG = ArticulationCfg(
         "base": "base",
         "Head_upper": "Head_upper",
         "Head_lower": "Head_lower",
-    }
-)
-
-
-UNITREE_ALIENGO_CFG = copy.deepcopy(UNITREE_GO2_CFG)
-UNITREE_ALIENGO_CFG.spawn.usd_path = f"{ASSET_PATH}/Aliengo/aliengo.usd"
-UNITREE_ALIENGO_CFG.init_state.pos = (0.0, 0.0, 0.40)
-UNITREE_ALIENGO_CFG.init_state.joint_pos = {
-    ".*L_hip_joint": 0.1,
-    ".*R_hip_joint": -0.1,
-    "F.*_thigh_joint": 0.6,
-    "R.*_thigh_joint": 0.6,
-    "F.*_calf_joint": -1.2,
-    "R.*_calf_joint": -1.2,
-}
-
-UNITREE_ALIENGO_CFG.actuators["base_legs"] = ImplicitActuatorCfg(
-    joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
-    effort_limit={
-        ".*_hip_joint": 44.0,
-        ".*_thigh_joint": 44.0,
-        ".*_calf_joint": 55.0,
     },
-    # saturation_effort=60.0,
-    velocity_limit=30.0,
-    stiffness=60.0,
-    damping=2,
-    friction=0.0,
-)
-
-UNITREE_ALIENGO_A1_CFG = copy.deepcopy(UNITREE_ALIENGO_CFG)
-UNITREE_ALIENGO_A1_CFG.init_state.joint_pos = {
-    ".*L_hip_joint": 0.1,
-    ".*R_hip_joint": -0.1,
-    "F.*_thigh_joint": 0.6,
-    "R.*_thigh_joint": 0.6,
-    "F.*_calf_joint": -1.2,
-    "R.*_calf_joint": -1.2,
-    "arm_joint1": 0.0,
-    "arm_joint2": 0.6,
-    "arm_joint3": -0.6,
-    "arm_joint4": 0.0,
-    "arm_joint5": 0.0,
-    "arm_joint6": 0.0,
-}
-
-UNITREE_ALIENGO_A1_CFG.ee_body_name = "arm_link6"
-UNITREE_ALIENGO_A1_CFG.spawn.usd_path = f"{ASSET_PATH}/Aliengo/aliengo_a1.usd"
-UNITREE_ALIENGO_A1_CFG.actuators.pop("base_legs")
-UNITREE_ALIENGO_A1_CFG.actuators["base_arm"] = ImplicitActuatorCfg(
-    joint_names_expr=["arm_joint[1-6]", ".*_(hip|thigh|calf)_joint"],
-    effort_limit={
-        "arm_joint[1-6]": 200.0,
-        ".*_(hip|thigh)_joint": 44.0,
-        ".*_(calf)_joint": 55.0,
-    },
-    velocity_limit={
-        "arm_joint[1-6]": 5.0,
-        ".*_(hip|thigh)_joint": 30.0,
-        ".*_(calf)_joint": 30.0,
-    },
-    stiffness={
-        # "arm_joint[1-3]": 40.0,
-        # "arm_joint[4-6]": 30.0,
-
-        "arm_joint1": 40.0,
-        "arm_joint2": 47.0,
-        "arm_joint3": 42.0,
-        "arm_joint[4-6]": 18.0,
-
-        ".*_(hip|thigh|calf)_joint": 60.0,
-    },
-    damping={
-        # "arm_joint[1-3]": 2.0,
-        # "arm_joint[4-6]": 1.0,
-
-        "arm_joint1": 1.2,
-        "arm_joint2": 1.2,
-        "arm_joint3": 1.2,
-        "arm_joint[4-6]": 0.7,
-
-        ".*_(hip|thigh|calf)_joint": 2.0,
-    },
-    friction=0.001,
-)
-UNITREE_ALIENGO_A1_CFG.actuators["gripper"] = ImplicitActuatorCfg(
-    joint_names_expr=["gripper.*"],
-    stiffness=2000.0,
-    damping=100.0,
-    friction=0.001,
-)
-
-UNITREE_ALIENGO_A1_FIX_CFG = copy.deepcopy(UNITREE_ALIENGO_A1_CFG)
-UNITREE_ALIENGO_A1_FIX_CFG.spawn.articulation_props.fix_root_link = True
-
-
-UNITREE_B1Z1_CFG = ArticulationCfg(
-    spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{ASSET_PATH}/b1/b1_plus_z1.usd",
-        activate_contact_sensors=True,
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=False,
-            retain_accelerations=False,
-            linear_damping=0.0,
-            angular_damping=0.0,
-            max_linear_velocity=1000.0,
-            max_angular_velocity=1000.0,
-            max_depenetration_velocity=1.0,
+    sensors_isaaclab=[
+        ContactSensorCfg(
+            name="contact_forces",
+            primary=".*",
+            secondary=[],
+            track_air_time=True,
+            history_length=3
         ),
-        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,
-            solver_position_iteration_count=4,
-            solver_velocity_iteration_count=1,
+    ],
+    sensors_mjlab=[
+        ContactSensorCfg(
+            name="contact_forces",
+            primary=".*",
+            secondary=[],
+            track_air_time=True,
+            history_length=3
         ),
-    ),
-    init_state=ArticulationCfg.InitialStateCfg(
+    ],
+    body_names_isaac=[
+        "base",
+        "FL_hip",
+        "FR_hip",
+        "Head_upper",
+        "RL_hip",
+        "RR_hip",
+        "FL_thigh",
+        "FR_thigh",
+        "Head_lower",
+        "RL_thigh",
+        "RR_thigh",
+        "FL_calf",
+        "FR_calf",
+        "RL_calf",
+        "RR_calf",
+        "FL_foot",
+        "FR_foot",
+        "RL_foot",
+        "RR_foot"
+    ],
+    joint_names_isaac=[
+        "FL_hip_joint",
+        "FR_hip_joint",
+        "RL_hip_joint",
+        "RR_hip_joint",
+        "FL_thigh_joint",
+        "FR_thigh_joint",
+        "RL_thigh_joint",
+        "RR_thigh_joint",
+        "FL_calf_joint",
+        "FR_calf_joint",
+        "RL_calf_joint",
+        "RR_calf_joint"
+    ],
+)
+registry.register("asset", "go2", UNITREE_GO2_CFG)
+
+
+UNITREE_B1Z1_CFG = AssetCfg(
+    mjcf_path=None,
+    usd_path=FILE_DIR / "b1" / "b1_plus_z1.usd",
+    init_state=InitialStateCfg(
         pos=(0.0, 0.0, 0.6),
         joint_pos={
             ".*L_hip_joint": 0.2,
@@ -229,13 +156,11 @@ UNITREE_B1Z1_CFG = ArticulationCfg(
         },
         joint_vel={".*": 0.0},
     ),
-    soft_joint_pos_limit_factor=0.9,
     actuators={
-        "base_legs": ImplicitActuatorCfg(
+        "base_legs": ActuatorCfg(
             joint_names_expr=".*",
-            effort_limit_sim=200.0,
-            # saturation_effort=35.5,
-            velocity_limit_sim=40.0,
+            effort_limit=200.0,
+            velocity_limit=40.0,
             stiffness={
                 ".*hip_joint": 100.0,
                 ".*thigh_joint": 100.0,
@@ -252,4 +177,15 @@ UNITREE_B1Z1_CFG = ArticulationCfg(
             armature=0.01,
         ),
     },
+    sensors_isaaclab=[
+        ContactSensorCfg(
+            name="contact_forces",
+            primary=".*",
+            secondary=[],
+            track_air_time=True,
+            history_length=3
+        ),
+    ],
 )
+registry.register("asset", "b1z1", UNITREE_B1Z1_CFG)
+

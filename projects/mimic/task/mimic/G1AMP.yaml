@@ -1,0 +1,99 @@
+# @package task
+name: G1AMP
+
+viewer:
+  resolution: [1280, 720]
+  lookat: [0., 0., 0.]
+  eye: [4.0, 4.0, 4.0]
+
+robot:
+  name: mimickit:g1
+terrain: plane
+
+# common
+num_envs: 4096
+max_episode_length: 1000
+
+sim:
+  step_dt: 0.02
+  isaac_physics_dt: 0.005
+  mujoco_physics_dt: 0.002
+
+input:
+  action:
+    _target_: active_adaptation.envs.mdp.action.JointPosition
+    action_scaling: {.*_joint: 0.5}
+    max_delay: 1
+    alpha_range: [1.0, 1.0]
+  keypoint_vis:
+    _target_: active_adaptation.envs.mdp.action.Marker
+    num_markers: 5
+    body_frame: true
+  root_state:
+    _target_: active_adaptation.envs.mdp.action.WriteRootState
+  joint_pos:
+    _target_: active_adaptation.envs.mdp.action.WriteJointPosition
+
+command:
+  class: Twist
+  linvel_x_range: [-0.0, 1.0]
+  linvel_y_range: [-0.0, 0.0]
+  angvel_range: [-2.0, 2.0]
+  yaw_stiffness_range: [0.5, 1.0]
+  use_stiffness_ratio: 1.0
+  stand_prob: 0.05
+  target_yaw_range: [0.0, 0.0]
+
+observation:
+  policy:
+    command:
+    root_angvel_b: {}
+    root_linvel_b: {}
+    gravity_multistep: {steps: 4, noise_std: 0.05}
+    joint_pos_multistep: {steps: 4, noise_std: 0.05}
+    joint_vel_multistep: {steps: 4, noise_std: 0.2}
+    prev_actions: {steps: 3}
+  mimic_:
+    root_linvel_b: {}
+    # root_angvel_b: {}
+    body_pos_b: {body_names: ['head_link', 'left_ankle_roll_link', 'right_ankle_roll_link', 'left_wrist_yaw_link', 'right_wrist_yaw_link']}
+    joint_pos_multistep: {steps: 8, noise_std: 0.05}
+    # joint_vel_multistep: {steps: 4, noise_std: 0.05}
+
+reward:
+  loco:
+    linvel_exp:         {weight: 1.5, dim: 2}
+    linvel_projection:  {weight: 0.5}
+    angvel_z_exp:       {weight: 1.2, gamma: 0.8}
+    single_foot_contact: {weight: 0.75, body_names: .*ankle_roll_link, margin: 0.1}
+  reg:
+    angvel_xy_l2:       {weight: 0.02}
+    body_upright:       {weight: 1.0, body_name: ["pelvis", "torso_link"]}
+
+    survival:           {weight: 2.0}
+    energy_l1:          {weight: 2.0e-4}
+    joint_acc_l2:       {weight: 1.0e-7}
+    
+    action_rate_l2:     {weight: 0.005}
+    action_rate2_l2:    {weight: 0.005}
+
+    joint_vel_l2:       {weight: 1.0e-3, joint_names: [.*shoulder.*]}
+    joint_deviation_l2: {weight: 0.1, joint_names: [.*(shoulder|elbow).*, .*hip.*]}
+
+    feet_air_time:      {weight: 2.0, body_names: .*ankle_roll_link, thres: 0.5}
+
+randomization:
+  reset_joint_states_uniform:
+    pos_ranges:
+      .*: [-0.1, 0.1]
+    rel: true
+
+termination:
+  crash:
+    body_names_expr:
+    - "pelvis"
+    - "torso_link"
+    - ".*hip.*"
+    - ".*shoulder.*"
+    - ".*(wrist|elbow).*"
+  fall_over: {xy_thres: 0.9}

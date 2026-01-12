@@ -183,9 +183,9 @@ scripts/file/
 scripts/plot/
 scripts/policies/
 scripts/exports/
-scripts/outputs_play/
-scripts/outputs_eval/
+scripts/outputs*/
 scripts/images
+scripts/rollout
 checkpoint*.pt
 test/
 *.csv
