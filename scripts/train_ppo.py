@@ -59,7 +59,8 @@ def main(cfg: DictConfig):
         run.save(cfg_save_path, policy="now")
         run.save(os.path.join(run.dir, "config.yaml"), policy="now")
 
-    from helpers import make_env_policy, EpisodeStats, evaluate
+    from helpers import make_env_policy, evaluate
+    from active_adaptation.utils.helpers import EpisodeStats
     env, policy = make_env_policy(cfg)
 
     frames_per_batch = env.num_envs * cfg.algo.train_every

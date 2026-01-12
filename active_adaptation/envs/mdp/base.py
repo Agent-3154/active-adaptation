@@ -174,6 +174,8 @@ class Command(MDPComponent, _RegistryMixin):
         
         if self.env.terrain_type == "generator":
             self._origins = self.env.scene.terrain.terrain_origins.reshape(-1, 3).clone()
+        else:
+            self._origins = self.env.scene.terrain.env_origins.reshape(-1, 3).clone()
 
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
         """

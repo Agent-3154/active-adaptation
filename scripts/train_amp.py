@@ -78,7 +78,7 @@ def main(cfg: DictConfig):
         run.name = f"{run_idx}-{default_run_name}"
         setproctitle(run.name)
 
-    from helpers import EpisodeStats
+    from active_adaptation.utils.helpers import EpisodeStats
     stats_keys = [
         k for k in env.reward_spec.keys(True, True) 
         if isinstance(k, tuple) and k[0] == "stats"

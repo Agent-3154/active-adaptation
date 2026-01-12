@@ -9,7 +9,7 @@ import warp as wp
 from tensordict.tensordict import TensorDictBase, TensorDict
 from torchrl.envs import EnvBase
 from torchrl.data import (
-    Composite, 
+    Composite,
     Binary,
     Unbounded,
 )
@@ -36,7 +36,7 @@ EMA_DECAY = 0.99
 
 
 def parse_name_and_class(s: str):
-    pattern = r'^(\w+)\((\w+)\)$'
+    pattern = r"^(\w+)\((\w+)\)$"
     match = re.match(pattern, s)
     if match:
         name, cls = match.groups()
@@ -45,7 +45,7 @@ def parse_name_and_class(s: str):
 
 
 class ObsGroup:
-    
+
     def __init__(
         self,
         name: str,
@@ -66,8 +66,12 @@ class ObsGroup:
         if not hasattr(self, "_spec"):
             foo = self.compute({}, 0)
             spec = {}
-            spec[self.name] = Unbounded(foo[self.name].shape, dtype=foo[self.name].dtype)
-            self._spec = Composite(spec, shape=[foo[self.name].shape[0]]).to(foo[self.name].device)
+            spec[self.name] = Unbounded(
+                foo[self.name].shape, dtype=foo[self.name].dtype
+            )
+            self._spec = Composite(spec, shape=[foo[self.name].shape[0]]).to(
+                foo[self.name].device
+            )
         return self._spec
 
     def compute(self, tensordict: TensorDictBase, timestamp: int) -> torch.Tensor:
@@ -75,7 +79,7 @@ class ObsGroup:
         output = self._compute()
         tensordict[self.name] = output
         return tensordict
-    
+
     # @torch.compile(mode="reduce-overhead")
     def _compute(self) -> torch.Tensor:
         # update only if outdated
@@ -84,7 +88,7 @@ class ObsGroup:
             tensor = func()
             tensors.append(tensor)
         return torch.cat(tensors, dim=-1)
-    
+
     def symmetry_transform(self):
         transforms = []
         for obs_key, func in self.funcs.items():
@@ -105,24 +109,31 @@ class _EnvBase(EnvBase):
         self.cfg = cfg
         self.headless = headless
 
+        self.terrain_type = None
+        self._ground_mesh = None
+
         self.setup_scene()
+        # raise an warning if terrain type is still None
+        if self.terrain_type is None:
+            warnings.warn(
+                "Terrain type is not set. Please check if the scene is properly initialized."
+            )
+
         self.sim = cast(SimAdapter, self.sim)
         self.scene = cast(SceneAdapter, self.scene)
 
-        if hasattr(self.scene, "terrain") and self.scene.terrain is not None:
-            self.terrain_type = self.scene.terrain.cfg.terrain_type
-        else:
-            self.terrain_type = "plane"
-        self._ground_mesh = None
-        
         self.max_episode_length = self.cfg.max_episode_length
         self.step_dt = self.cfg.sim.step_dt
         self.physics_dt = self.sim.get_physics_dt()
         self.decimation = int(self.step_dt / self.physics_dt)
-        
-        print(f"Step dt: {self.step_dt}, physics dt: {self.physics_dt}, decimation: {self.decimation}")
 
-        self.episode_length_buf = torch.zeros(self.num_envs, dtype=int, device=self.device)
+        print(
+            f"Step dt: {self.step_dt}, physics dt: {self.physics_dt}, decimation: {self.decimation}"
+        )
+
+        self.episode_length_buf = torch.zeros(
+            self.num_envs, dtype=int, device=self.device
+        )
         self.episode_id = torch.zeros(self.num_envs, dtype=int, device=self.device)
         self.episode_count = 0
 
@@ -132,7 +143,7 @@ class _EnvBase(EnvBase):
             terminated=Binary(1, [self.num_envs, 1], dtype=bool, device=self.device),
             truncated=Binary(1, [self.num_envs, 1], dtype=bool, device=self.device),
             shape=[self.num_envs],
-            device=self.device
+            device=self.device,
         )
 
         self.reward_spec = Composite(
@@ -142,7 +153,7 @@ class _EnvBase(EnvBase):
                     "success": Unbounded([self.num_envs, 1]),
                 },
             },
-            shape=[self.num_envs]
+            shape=[self.num_envs],
         ).to(self.device)
 
         command_cfg = dict(self.cfg.command)
@@ -168,51 +179,58 @@ class _EnvBase(EnvBase):
         # self._update_callbacks.append(self.command_manager.update)
         self._reset_callbacks.append(self.command_manager.reset)
         self._debug_draw_callbacks.append(self.command_manager.debug_draw)
-        
+
         input_cfg = dict(self.cfg.get("input", {}))
         if not len(input_cfg):
             input_cfg["action"] = self.cfg.action
-        
+
         action_spec = {}
         for input_key, input_cfg in input_cfg.items():
-            input_manager: mdp.ActionManager = hydra.utils.instantiate(input_cfg, env=self)
+            input_manager: mdp.ActionManager = hydra.utils.instantiate(
+                input_cfg, env=self
+            )
             self.input_managers[input_key] = input_manager
             self._reset_callbacks.append(input_manager.reset)
             self._debug_draw_callbacks.append(input_manager.debug_draw)
             action_spec[input_key] = Unbounded(
-                [self.num_envs, input_manager.action_dim],
-                device=self.device
+                [self.num_envs, input_manager.action_dim], device=self.device
             )
-        
-        self.action_spec = Composite(action_spec, shape=[self.num_envs], device=self.device)
-        
+
+        self.action_spec = Composite(
+            action_spec, shape=[self.num_envs], device=self.device
+        )
+
         randomizations = self.cfg.get("randomization", {})
         for rand_spec, kwargs in randomizations.items():
             rand_name, cls_name = parse_name_and_class(rand_spec)
-            rand = mdp.Randomization.make(cls_name, self, **(kwargs if kwargs is not None else {}))
+            rand = mdp.Randomization.make(
+                cls_name, self, **(kwargs if kwargs is not None else {})
+            )
             if not rand:
                 continue
-            
+
             rand = cast(mdp.Randomization, rand)
             self.randomizations[rand_name] = rand
             self._add_mdp_component(rand)
 
         for group_key, group_cfg in self.cfg.observation.items():
-            funcs = OrderedDict()            
+            funcs = OrderedDict()
             for obs_spec, kwargs in group_cfg.items():
                 obs_name, obs_cls_name = parse_name_and_class(obs_spec)
-                obs = mdp.Observation.make(obs_cls_name, self, **(kwargs if kwargs is not None else {}))
+                obs = mdp.Observation.make(
+                    obs_cls_name, self, **(kwargs if kwargs is not None else {})
+                )
                 if not obs:
                     continue
                 obs = cast(mdp.Observation, obs)
                 funcs[obs_name] = obs
                 self._add_mdp_component(obs)
-            
+
             self.observation_funcs[group_key] = ObsGroup(group_key, funcs)
-        
+
         for callback in self._startup_callbacks:
-            callback()        
-       
+            callback()
+
         reward_spec = Composite({})
 
         # parse rewards
@@ -232,18 +250,29 @@ class _EnvBase(EnvBase):
 
             for rew_spec, params in func_specs.items():
                 rew_name, cls_name = parse_name_and_class(rew_spec)
-                reward = mdp.Reward.make(cls_name, self, **(params if params is not None else {}))
+                reward = mdp.Reward.make(
+                    cls_name, self, **(params if params is not None else {})
+                )
                 if not reward:
                     continue
                 reward = cast(mdp.Reward, reward)
                 funcs[rew_name] = reward
-                reward_spec["stats", group_name, rew_name] = Unbounded(1, device=self.device)
+                reward_spec["stats", group_name, rew_name] = Unbounded(
+                    1, device=self.device
+                )
                 self._add_mdp_component(reward)
                 print(f"\t{rew_name}: \t{reward.weight:.2f}")
-                self._stats_ema[group_name][rew_name] = (torch.tensor(0., device=self.device), torch.tensor(0., device=self.device))
+                self._stats_ema[group_name][rew_name] = (
+                    torch.tensor(0.0, device=self.device),
+                    torch.tensor(0.0, device=self.device),
+                )
 
-            self.reward_groups[group_name] = RewardGroup(self, group_name, funcs, eval_func, enabled, compile)
-            reward_spec["stats", group_name, "return"] = Unbounded(1, device=self.device)
+            self.reward_groups[group_name] = RewardGroup(
+                self, group_name, funcs, eval_func, enabled, compile
+            )
+            reward_spec["stats", group_name, "return"] = Unbounded(
+                1, device=self.device
+            )
 
         reward_spec["reward"] = Unbounded(max(1, enabled_groups), device=self.device)
         reward_spec["discount"] = Unbounded(1, device=self.device)
@@ -259,29 +288,33 @@ class _EnvBase(EnvBase):
                 raise e
 
         self.observation_spec = Composite(
-            observation_spec, 
-            shape=[self.num_envs],
-            device=self.device
+            observation_spec, shape=[self.num_envs], device=self.device
         )
         self.observation_spec["episode_id"] = Unbounded(
-            [self.num_envs], dtype=torch.long, device=self.device,
+            [self.num_envs],
+            dtype=torch.long,
+            device=self.device,
         )
 
         self.termination_funcs = OrderedDict()
         for key, params in self.cfg.get("termination", {}).items():
             term_name, cls_name = parse_name_and_class(key)
-            term = mdp.Termination.make(cls_name, self, **(params if params is not None else {}))
+            term = mdp.Termination.make(
+                cls_name, self, **(params if params is not None else {})
+            )
             if not term:
                 continue
             term = cast(mdp.Termination, term)
             self.termination_funcs[term_name] = term
             self._add_mdp_component(term)
-            self.reward_spec["stats", "termination", term_name] = Unbounded((self.num_envs, 1), device=self.device)
-        
-        self.timestamp: int = 0 # global timestamp in steps
+            self.reward_spec["stats", "termination", term_name] = Unbounded(
+                (self.num_envs, 1), device=self.device
+            )
+
+        self.timestamp: int = 0  # global timestamp in steps
 
         self.stats = self.reward_spec["stats"].zero()
-    
+
         self.input_tensordict = None
         self.extra = {}
 
@@ -289,7 +322,7 @@ class _EnvBase(EnvBase):
     def num_envs(self) -> int:
         """The number of instances of the environment that are running."""
         return self.scene.num_envs
-    
+
     @property
     def action_manager(self):
         return self.input_managers["action"]
@@ -302,7 +335,7 @@ class _EnvBase(EnvBase):
             for rew_key, (sum, cnt) in group.items():
                 result[group_key][rew_key] = (sum / cnt).item()
         return result
-    
+
     def _add_mdp_component(self, component: mdp.MDPComponent):
         if mdp.is_method_implemented(component, mdp.MDPComponent, "startup"):
             self._startup_callbacks.append(component.startup)
@@ -316,28 +349,32 @@ class _EnvBase(EnvBase):
             self._update_callbacks.append(component.update)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "debug_draw"):
             self._debug_draw_callbacks.append(component.debug_draw)
-    
+
     def setup_scene(self):
         raise NotImplementedError
-    
-    def _reset(self, tensordict: TensorDictBase | None = None, **kwargs) -> TensorDictBase:
+
+    def _reset(
+        self, tensordict: TensorDictBase | None = None, **kwargs
+    ) -> TensorDictBase:
         if tensordict is not None:
             env_mask = tensordict.get("_reset").reshape(self.num_envs)
             env_ids = env_mask.nonzero().squeeze(-1)
         else:
             env_ids = torch.arange(self.num_envs, device=self.device)
-        
+
         if len(env_ids):
             num_envs = env_ids.numel()
             self.episode_length_buf[env_ids] = 0
-            self.episode_id[env_ids] = self.episode_count + torch.arange(num_envs, device=self.device)
+            self.episode_id[env_ids] = self.episode_count + torch.arange(
+                num_envs, device=self.device
+            )
             self.episode_count += num_envs
 
             self._reset_idx(env_ids)
             self.scene.reset(env_ids)
             for callback in self._reset_callbacks:
                 callback(env_ids)
-        
+
         tensordict = TensorDict({}, self.num_envs, device=self.device)
         tensordict.update(self.observation_spec.zero())
         tensordict.set("episode_id", self.episode_id.clone())
@@ -347,7 +384,7 @@ class _EnvBase(EnvBase):
     @abstractmethod
     def _reset_idx(self, env_ids: torch.Tensor):
         raise NotImplementedError
-    
+
     def apply_action(self, substep: int):
         for input_manager in self.input_managers.values():
             input_manager.apply_action(substep)
@@ -356,12 +393,12 @@ class _EnvBase(EnvBase):
         for group_key, obs_group in self.observation_funcs.items():
             obs_group.compute(tensordict, self.timestamp)
         return tensordict
-            
+
     def _compute_reward(self, tensordict: TensorDictBase) -> TensorDictBase:
         if not self.reward_groups:
             tensordict.set("reward", torch.ones((self.num_envs, 1), device=self.device))
             return tensordict
-        
+
         all_rewards = []
         for group, reward_group in self.reward_groups.items():
             reward = reward_group.compute()
@@ -373,14 +410,18 @@ class _EnvBase(EnvBase):
             rewards *= self.step_dt
 
         self.stats["episode_len"][:] = self.episode_length_buf.unsqueeze(1)
-        self.stats["success"][:] = (self.episode_length_buf >= self.max_episode_length * 0.9).unsqueeze(1).float()
+        self.stats["success"][:] = (
+            (self.episode_length_buf >= self.max_episode_length * 0.9)
+            .unsqueeze(1)
+            .float()
+        )
         tensordict.set("reward", rewards)
         return tensordict
-    
+
     def _compute_termination(self) -> TensorDictBase:
         if not self.termination_funcs:
             return torch.zeros((self.num_envs, 1), dtype=bool, device=self.device)
-        
+
         termination = torch.zeros((self.num_envs, 1), dtype=bool, device=self.device)
         for key, func in self.termination_funcs.items():
             t = func.compute(termination)
@@ -389,7 +430,7 @@ class _EnvBase(EnvBase):
         return termination
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
-        
+
         with ScopedTimer("simulation", sync=False):
             with ScopedTimer("process_action", sync=False):
                 for input_key, input_manager in self.input_managers.items():
@@ -415,27 +456,29 @@ class _EnvBase(EnvBase):
             with ScopedTimer("update_callbacks", sync=False):
                 for callback in self._update_callbacks:
                     callback()
-        
+
         if self.sim.has_gui():
             self.sim.render()
-        
+
         self.episode_length_buf.add_(1)
         self.discount.fill_(1.0)
         self.timestamp += 1
-        
+
         tensordict = TensorDict({}, self.num_envs, device=self.device)
 
         with ScopedTimer("reward", sync=False):
             tensordict = self._compute_reward(tensordict)
-        
+
         with ScopedTimer("termination", sync=False):
-            truncated = (self.episode_length_buf >= self.max_episode_length).unsqueeze(1)
+            truncated = (self.episode_length_buf >= self.max_episode_length).unsqueeze(
+                1
+            )
             terminated = self._compute_termination()
             tensordict.set("terminated", terminated)
             tensordict.set("truncated", truncated)
             tensordict.set("done", terminated | truncated)
             tensordict.set("discount", self.discount.clone())
-        
+
         # Note that command update is a special case
         # it should take place after reward computation
         with ScopedTimer("command", sync=False):
@@ -443,48 +486,58 @@ class _EnvBase(EnvBase):
 
         with ScopedTimer("observation", sync=False):
             tensordict = self._compute_observation(tensordict)
-        
+
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()
 
         if self.sim.has_gui():
-            if hasattr(self, "debug_draw"): # isaac only
+            if hasattr(self, "debug_draw"):  # isaac only
                 self.debug_draw.clear()
             for callback in self._debug_draw_callbacks:
                 callback()
-        
+
         return tensordict
-    
+
     @property
     def ground_mesh(self):
         if self._ground_mesh is None:
             if self.backend == "isaac":
-                self._ground_mesh = _initialize_warp_meshes("/World/ground", self.device.type)
+                self._ground_mesh = _initialize_warp_meshes(
+                    "/World/ground", self.device.type
+                )
             elif self.backend == "mujoco":
                 self._ground_mesh = wp.Mesh(
-                    points=wp.array(self.scene.ground_mesh.vertices, dtype=wp.vec3, device=self.device.type),
-                    indices=wp.array(self.scene.ground_mesh.faces.flatten(), dtype=wp.int32, device=self.device.type),
+                    points=wp.array(
+                        self.scene.ground_mesh.vertices,
+                        dtype=wp.vec3,
+                        device=self.device.type,
+                    ),
+                    indices=wp.array(
+                        self.scene.ground_mesh.faces.flatten(),
+                        dtype=wp.int32,
+                        device=self.device.type,
+                    ),
                 )
             else:
                 raise NotImplementedError
         return self._ground_mesh
-        
+
     def get_ground_height_at(self, pos: torch.Tensor) -> torch.Tensor:
         if self.terrain_type == "plane":
             return torch.zeros(pos.shape[:-1], device=self.device)
         bshape = pos.shape[:-1]
         ray_starts = pos.reshape(-1, 3)
-        ray_directions = torch.tensor([0., 0., -1.], device=self.device)
+        ray_directions = torch.tensor([0.0, 0.0, -1.0], device=self.device)
         ray_hits = raycast_mesh(
             ray_starts=ray_starts.reshape(-1, 3),
             ray_directions=ray_directions.expand(bshape.numel(), 3),
-            max_dist=100.,
+            max_dist=100.0,
             mesh=self.ground_mesh,
             return_distance=False,
         )[0]
-        ray_distance = (ray_hits - ray_starts).norm(dim=-1).nan_to_num(posinf=100.)
+        ray_distance = (ray_hits - ray_starts).norm(dim=-1).nan_to_num(posinf=100.0)
         return (ray_starts[:, 2] - ray_distance).to(pos.device).reshape(*bshape)
-    
+
     def _set_seed(self, seed: int = -1):
         if self.backend == "isaac":
             # set seed for replicator
@@ -511,7 +564,9 @@ class _EnvBase(EnvBase):
                 # obtain the rgb data
                 rgb_data = self._rgb_annotator.get_data()
                 # convert to numpy array
-                rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape)
+                rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(
+                    *rgb_data.shape
+                )
                 # return the rgb data
                 return rgb_data[:, :, :3]
             else:
@@ -560,7 +615,7 @@ class RewardGroup:
         self.eval_func = eval_func
         self.enabled = enabled
         self.compile = compile
-        
+
         if compile:
             self.compute = torch.compile(self.compute, fullgraph=True)
 

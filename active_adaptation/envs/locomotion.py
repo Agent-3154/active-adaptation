@@ -143,6 +143,7 @@ class SimpleEnvIsaac(_EnvBase):
 
         self.sim = IsaacSimAdapter(self.sim)
         self.scene = IsaacSceneAdapter(self.scene)
+        self.terrain_type = self.scene.terrain.cfg.terrain_type
 
 
 class SimpleEnvMujoco(_EnvBase):
@@ -181,6 +182,7 @@ class SimpleEnvMujoco(_EnvBase):
         sim = MJSim(scene)
         self.scene = MujocoSceneAdapter(scene)
         self.sim = MujocoSimAdapter(sim)
+        self.terrain_type = "plane"
 
 
 class SimpleEnvMjlab(_EnvBase):
@@ -242,4 +244,5 @@ class SimpleEnvMjlab(_EnvBase):
         else:
             viewer = None
         self.sim = MjlabSimAdapter(self.sim, viewer)
+        self.terrain_type = "plane"
 
