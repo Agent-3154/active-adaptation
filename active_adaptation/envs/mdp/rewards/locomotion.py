@@ -132,6 +132,19 @@ class linvel_exp(Reward[Twist]):
             )
 
 
+class root_pos_exp(Reward):
+    def __init__(self, env, weight: float, dim: int = 2):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.dim = dim
+    
+    def compute(self) -> torch.Tensor:
+        target_pos = self.command_manager.cmd_pos_w[:, : self.dim]
+        pos_error = (self.asset.data.root_link_pos_w[:, : self.dim] - target_pos).square().sum(-1, True)
+        rew = torch.exp(-pos_error / 0.25)
+        return rew.reshape(self.num_envs, 1)
+
+
 class linvel_projection(Reward[Twist]):
     def __init__(
         self,
