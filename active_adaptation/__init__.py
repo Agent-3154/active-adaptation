@@ -114,8 +114,10 @@ def discover_projects(enabled: bool = False):
         # get the module path
         spec = importlib.util.find_spec(entry_point.value)
         if entry_point.name not in projects:
+            # note that `value` may differ from `name`
             pkg_path = Path(spec.origin).parent.absolute()
             projects[entry_point.name] = {
+                "value": entry_point.value,
                 "path": str(pkg_path),
                 "type": "entry_point",
                 "enabled": enabled,
@@ -138,7 +140,7 @@ def import_projects():
         if project_info["enabled"]:
             print(f"Importing project: {project_name} from {project_info['path']}")
             sys.path.insert(0, str(Path(project_info["path"]).parent))
-            importlib.import_module(project_name)
+            importlib.import_module(project_info["value"])
             sys.path.pop(0)
 
 
@@ -147,7 +149,12 @@ if projects_file.exists():
     projects = json.loads(projects_file.read_text())
     for project_name, project_info in projects.items():
         if project_info["enabled"]:
-            _CONFIG_SEARCH_PATHS.append(project_info["path"])
+            pkg_path = Path(project_info["path"])
+            if pkg_path.parent.name == "src":
+                search_path = pkg_path.parent.parent / "cfg"
+            else:
+                search_path = pkg_path.parent / "cfg"
+            _CONFIG_SEARCH_PATHS.append(search_path)
 
 
 from hydra_plugins.aa_searchpath_plugin.aa_searchpath_plugin import (
