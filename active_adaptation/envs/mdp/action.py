@@ -18,41 +18,12 @@ from active_adaptation.utils.math import (
 )
 from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
 from active_adaptation.assets import get_input_joint_indexing
-from active_adaptation.envs.mdp.base import _RegistryMixin
+from active_adaptation.envs.mdp.base import ActionManager
+
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from active_adaptation.envs.env_base import _EnvBase
-
-
-class ActionManager(_RegistryMixin):
-
-    action_dim: int
-
-    def __init__(self, env: _EnvBase):
-        self.env = env
-        self.asset: Articulation = self.env.scene["robot"]
-        self.action_buf: torch.Tensor
-
-    def reset(self, env_ids: torch.Tensor):
-        pass
-
-    def debug_draw(self):
-        pass
-    
-    def process_action(self, action: torch.Tensor):
-        pass
-
-    def apply_action(self, substep: int):
-        pass
-
-    @property
-    def num_envs(self):
-        return self.env.num_envs
-
-    @property
-    def device(self):
-        return self.env.device
 
 
 class ConcatenatedAction(ActionManager):

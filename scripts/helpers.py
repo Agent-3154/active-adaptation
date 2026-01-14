@@ -37,19 +37,19 @@ def make_env_policy(cfg: DictConfig):
     OmegaConf.set_struct(cfg, False)
     cfg.seed = cfg.seed + active_adaptation.get_local_rank()
     
-    from active_adaptation.envs import SimpleEnvIsaac, SimpleEnvMujoco, SimpleEnvMjlab
+    from active_adaptation.envs import _EnvBase
     from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
     
     # Select the appropriate backend-specific environment class
     backend = active_adaptation.get_backend()
     if backend == "isaac":
-        env_cls = SimpleEnvIsaac
+        env_cls = _EnvBase.registry[cfg.task.get("env_class", "SimpleEnvIsaac")]
     elif backend == "mujoco":
-        env_cls = SimpleEnvMujoco
+        env_cls = _EnvBase.registry[cfg.task.get("env_class", "SimpleEnvMujoco")]
         cfg.task.num_envs = 1
         cfg.task.reward = {}
     elif backend == "mjlab":
-        env_cls = SimpleEnvMjlab
+        env_cls = _EnvBase.registry[cfg.task.get("env_class", "SimpleEnvMjlab")]
     else:
         raise ValueError(f"Unknown backend: {backend}")
     

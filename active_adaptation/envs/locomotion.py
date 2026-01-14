@@ -54,7 +54,7 @@ class SimpleEnvIsaac(_EnvBase):
         from isaaclab.scene import InteractiveSceneCfg, InteractiveScene
         from isaaclab.assets import AssetBaseCfg
         from isaaclab.sensors import ContactSensorCfg
-        from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
+        from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
         
         registry = Registry.instance()
         
