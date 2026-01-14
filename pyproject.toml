@@ -26,6 +26,9 @@ dependencies = [
     "linuxfd",
 ]
 
+[project.scripts]
+aa-discover-projects = "active_adaptation:discover_projects"
+
 [project.entry-points."active_adaptation.projects"]
 facet = "projects.facet"
 mimic = "projects.mimic"
