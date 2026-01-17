@@ -58,7 +58,7 @@ class SimpleEnvIsaac(_EnvBase):
         
         registry = Registry.instance()
         
-        scene_cfg = InteractiveSceneCfg(num_envs=self.cfg.num_envs, env_spacing=2.5)
+        scene_cfg = InteractiveSceneCfg(num_envs=self.cfg.num_envs, env_spacing=2.5, replicate_physics=False)
         scene_cfg.sky_light = AssetBaseCfg(
             prim_path="/World/skyLight",
             spawn=sim_utils.DomeLightCfg(
