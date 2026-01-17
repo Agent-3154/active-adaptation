@@ -52,7 +52,7 @@ class SimpleEnvIsaac(_EnvBase):
         from isaaclab.sim import SimulationContext
         from isaaclab.sim.utils.stage import attach_stage_to_usd_context, use_stage
         from isaaclab.scene import InteractiveSceneCfg, InteractiveScene
-        from isaaclab.assets import AssetBaseCfg
+        from isaaclab.assets import AssetBaseCfg, ArticulationCfg
         from isaaclab.sensors import ContactSensorCfg
         from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
         
@@ -66,9 +66,21 @@ class SimpleEnvIsaac(_EnvBase):
                 texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
             ),
         )
-        asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
+        asset_cfg = registry.get("asset", self.cfg.robot.name)
+        if isinstance(asset_cfg, AssetCfg):
+            scene_cfg.robot = asset_cfg.isaaclab()
+            for sensor_cfg in asset_cfg.sensors_isaaclab:
+                setattr(scene_cfg, sensor_cfg.name, sensor_cfg.isaaclab())
+        elif isinstance(asset_cfg, ArticulationCfg):
+            scene_cfg.robot = asset_cfg
+            scene_cfg.contact_forces = ContactSensorCfg(
+                prim_path="{ENV_REGEX_NS}/Robot/.*",
+                track_air_time=True,
+                history_length=3
+            )
+        else:
+            raise ValueError(f"Asset configuration must be an instance of AssetCfg or ArticulationCfg, got {type(asset_cfg)}")
         
-        scene_cfg.robot = asset_cfg.isaaclab()
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
         scene_cfg.terrain = registry.get("terrain", self.cfg.terrain)
 
@@ -76,9 +88,6 @@ class SimpleEnvIsaac(_EnvBase):
             obj_cfg = registry.get("asset", obj.name).isaaclab()
             obj_cfg.prim_path = "{ENV_REGEX_NS}/" + obj.name
             setattr(scene_cfg, obj.name, obj_cfg)
-
-        for sensor_cfg in asset_cfg.sensors_isaaclab:
-            setattr(scene_cfg, sensor_cfg.name, sensor_cfg.isaaclab())
 
         sim_cfg = sim_utils.SimulationCfg(
             dt=self.cfg.sim.isaac_physics_dt,

@@ -32,6 +32,7 @@ aa-discover-projects = "active_adaptation:discover_projects"
 [project.entry-points."active_adaptation.projects"]
 facet = "projects.facet"
 mimic = "projects.mimic"
+metamorph = "projects.metamorph"
 
 [tool.setuptools.packages]
 find = { where = ["."], include = [
@@ -39,7 +40,8 @@ find = { where = ["."], include = [
     "scripts*",
     "hydra_plugins.*",
     "projects.facet*",
-    "projects.mimic*"
+    "projects.mimic*",
+    "projects.metamorph*"
     ] }
 
 [tool.setuptools.package-data]

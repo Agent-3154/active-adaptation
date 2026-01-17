@@ -319,7 +319,8 @@ class single_foot_contact(Reward):
     def compute(self) -> torch.Tensor:
         in_contact = self.contact_sensor.data.current_contact_time[:, self.body_ids] > self.margin
         single_contact = torch.where(torch.sum(in_contact, dim=1) == 1, 0., -1.)
-        return single_contact.reshape(self.num_envs, 1)
+        valid = ~self.command_manager.is_standing_env
+        return single_contact.reshape(self.num_envs, 1), valid.reshape(self.num_envs, 1)
 
 
 class is_standing_env(Reward):

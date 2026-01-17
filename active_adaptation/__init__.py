@@ -99,7 +99,6 @@ def get_backend():
     return _BACKEND
 
 
-_CONFIG_SEARCH_PATHS = []
 _PROJECT_ENTRY_POINTS = []
 _LEARNING_ENTRY_POINTS = []
 
@@ -144,22 +143,11 @@ def import_projects():
             sys.path.pop(0)
 
 
-projects_file = CACHE_DIR / "projects.json"
-if projects_file.exists():
-    projects = json.loads(projects_file.read_text())
-    for project_name, project_info in projects.items():
-        if project_info["enabled"]:
-            pkg_path = Path(project_info["path"])
-            if pkg_path.parent.name == "src":
-                search_path = pkg_path.parent.parent / "cfg"
-            else:
-                search_path = pkg_path.parent / "cfg"
-            _CONFIG_SEARCH_PATHS.append(search_path)
-
-
+from hydra.core.plugins import Plugins
 from hydra_plugins.aa_searchpath_plugin.aa_searchpath_plugin import (
     ActiveAdaptationSearchPathPlugin,
 )
+Plugins.instance().register(ActiveAdaptationSearchPathPlugin)
 
 
 def init(cfg: DictConfig, auto_rank: bool):
