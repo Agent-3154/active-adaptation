@@ -1,9 +1,10 @@
 import torch
 import numpy as np
 import einops
-from typing import Tuple, TYPE_CHECKING
+from typing import Tuple, TYPE_CHECKING, Optional
 
 import active_adaptation
+from jaxtyping import Float
 from active_adaptation.envs.mdp.base import Observation
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
 from active_adaptation.utils.symmetry import SymmetryTransform, cartesian_space_symmetry
@@ -20,6 +21,53 @@ if active_adaptation.get_backend() == "isaac":
 
 
 MESHES = {}
+
+
+def raymap(width: int, height: int, fov: float) -> Float[torch.Tensor, "height width 3"]:
+    """
+    Generate a raymap for a given width, height, and field of view.
+    
+    The raymap represents normalized ray directions for a perspective camera model.
+    Each pixel corresponds to a ray direction pointing from the camera center through
+    that pixel. The rays are in camera space, where +Z is forward, +X is right, and +Y is up.
+    
+    Args:
+        width: The width of the raymap in pixels.
+        height: The height of the raymap in pixels.
+        fov: The horizontal field of view in radians.
+
+    Returns:
+        A tensor of shape (height, width, 3) where the last dimension contains the
+        normalized ray direction vector (x, y, z) for each pixel.
+    """
+    # Create pixel coordinates (u, v) where u ranges from 0 to width-1, v ranges from 0 to height-1
+    u = torch.arange(width, dtype=torch.float32)
+    v = torch.arange(height, dtype=torch.float32)
+    
+    # Create meshgrid of pixel coordinates
+    uu, vv = torch.meshgrid(u, v, indexing="xy")
+    
+    # Convert to normalized device coordinates (NDC)
+    # x: [-1, 1] from left to right, y: [1, -1] from top to bottom (image coordinates)
+    u_ndc = (uu + 0.5) / width * 2.0 - 1.0
+    v_ndc = 1.0 - (vv + 0.5) / height * 2.0
+    
+    # Compute aspect ratio
+    aspect_ratio = width / height
+    
+    # Scale by FOV: horizontal FOV determines the x range, vertical FOV is computed from aspect ratio
+    tan_fov_half = torch.tan(torch.tensor(fov / 2.0))
+    u_camera = u_ndc * tan_fov_half
+    v_camera = v_ndc * tan_fov_half / aspect_ratio
+    
+    # Create ray directions: (1, x, y) pointing forward in camera space
+    x_camera = torch.ones_like(u_camera)
+    directions = torch.stack([x_camera, v_camera, u_camera], dim=-1)
+    
+    # Normalize the directions
+    directions = directions / directions.norm(dim=-1, keepdim=True)
+    
+    return directions
 
 
 class external_forces(Observation):
@@ -223,6 +271,82 @@ class forward_scan(Observation):
         if self.env.backend == "isaac":
             pos = self.ray_hits.reshape(-1, 3)
             self.marker.visualize(pos)
+
+
+class raycast_camera(Observation):
+    def __init__(
+        self,
+        env,
+        width: int,
+        height: int,
+        fov: float,
+        body_name: Optional[str] = None,
+        near: float = 0.01,
+        far: float = 100.0,
+    ):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.near, self.far = near, far
+
+        self.raymap = raymap(width, height, fov).to(self.device)
+        self.shape = self.raymap.shape[:2]
+        self.num_rays = self.raymap.shape[0] * self.raymap.shape[1]
+        self.ground_mesh = self.env.ground_mesh
+
+        if body_name is not None:
+            self.body_id = self.asset.find_bodies(body_name)[0]
+            assert len(self.body_id) == 1, f"Multiple bodies found for name {body_name}"
+            self.body_id = self.body_id[0]
+        else:
+            self.body_id = None
+
+        if self.env.backend == "isaac" and self.env.sim.has_gui():
+            self.marker = VisualizationMarkers(
+                VisualizationMarkersCfg(
+                    prim_path=f"/Visuals/Command/raycast_camera",
+                    markers={
+                        "scandot": sim_utils.SphereCfg(
+                            radius=0.02,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.0, 0.8)),
+                        ),
+                    }
+                )
+            )
+            self.marker.set_visibility(True)
+    
+    def compute(self) -> torch.Tensor:
+        if self.body_id is not None:
+            ray_starts = self.asset.data.body_link_pos_w[:, self.body_id]
+            quat = self.asset.data.body_link_quat_w[:, self.body_id]
+        else:
+            ray_starts = self.asset.data.root_pos_w
+            quat = self.asset.data.root_link_quat_w
+        ray_dirs = quat_rotate(quat.unsqueeze(1), self.raymap.reshape(1, self.num_rays, 3))
+        ray_starts = ray_starts.unsqueeze(1) + ray_dirs * self.near
+        
+        self.ray_starts_w = ray_starts
+        self.ray_dirs_w = ray_dirs
+
+        _, ray_distance, _, _ = raycast_mesh(
+            ray_starts=ray_starts,
+            ray_directions=ray_dirs,
+            max_dist=self.far,
+            mesh=self.ground_mesh,
+            return_distance=True,
+        )
+        ray_distance = ray_distance.nan_to_num(posinf=self.far)
+        self.ray_hits_w = ray_starts + ray_distance.reshape(self.num_envs, self.num_rays, 1) * ray_dirs
+        return ray_distance.reshape(self.num_envs, 1, self.shape[0], self.shape[1])
+    
+    def debug_draw(self) -> None:
+        if self.env.backend == "isaac":
+            pos = self.ray_hits_w[0].reshape(-1, 3)
+            self.marker.visualize(pos)
+            # self.env.debug_draw.vector(
+            #     self.ray_starts_w[0].reshape(-1, 3),
+            #     self.ray_dirs_w[0].reshape(-1, 3),
+            #     color=(0.8, 0.0, 0.8, 1.0),
+            # )
 
 
 # class feet_height_map(Observation):
