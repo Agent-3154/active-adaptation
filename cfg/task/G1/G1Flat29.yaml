@@ -63,14 +63,14 @@ observation:
   # command:
   policy:
     command:
-    root_angvel_b:  {noise_std: 0.05}
+    # root_angvel_b:  {noise_std: 0.05}
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {joint_names: "(?!(.*wrist.*)).*", steps: 4, noise_std: 0.05}
     joint_vel_multistep: {joint_names: "(?!(.*wrist.*)).*", steps: 4, noise_std: 0.2}
     prev_actions: {steps: 2}
   # priv:
-    root_linvel_b:    {}
-    body_height:  {body_names: .*ankle_roll_link}
+    # root_linvel_b:    {}
+    # body_height:  {body_names: .*ankle_roll_link}
 
 reward:
   loco:
@@ -113,10 +113,11 @@ randomization:
     pos_ranges:
       .*: [-0.1, 0.1]
     rel: true
-  # impulse: {}
-  # constant_force:
-  #   force_range: [50, 50, 15]
-  #   offset_range: [0.1, 0.1, 0.1]
+  push_body:
+    body_names: "torso_link"
+    force_range: [20, 100]
+    min_interval: 100
+    decay: 0.9
 
 termination:
   crash: 

@@ -161,9 +161,9 @@ class _EnvBase(EnvBase, RegistryMixin):
         )
 
         self.episode_length_buf = torch.zeros(
-            self.num_envs, dtype=int, device=self.device
+            self.num_envs, dtype=torch.long, device=self.device
         )
-        self.episode_id = torch.zeros(self.num_envs, dtype=int, device=self.device)
+        self.episode_id = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.episode_count = 0
 
         # parse obs and reward functions
