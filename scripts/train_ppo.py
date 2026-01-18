@@ -18,6 +18,7 @@ from tensordict.nn import TensorDictModuleBase
 
 import active_adaptation as aa
 from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.learning.ppo.ppo_base import PPOBase
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -35,8 +36,10 @@ def main(cfg: DictConfig):
     OmegaConf.set_struct(cfg, False)
 
     aa.init(cfg, auto_rank=True)
-    
-    print(f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}")
+
+    print(
+        f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}"
+    )
 
     if aa.is_main_process():
         run = wandb.init(
@@ -47,8 +50,10 @@ def main(cfg: DictConfig):
         )
         run.config.update(OmegaConf.to_container(cfg))
         run.config["world_size"] = aa.get_world_size()
-        
-        default_run_name = f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
+
+        default_run_name = (
+            f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
+        )
         run_idx = run.name.split("-")[-1]
         run.name = f"{run_idx}-{default_run_name}"
         setproctitle(run.name)
@@ -61,7 +66,9 @@ def main(cfg: DictConfig):
 
     from helpers import make_env_policy, evaluate
     from active_adaptation.utils.helpers import EpisodeStats
+
     env, policy = make_env_policy(cfg)
+    policy: PPOBase
 
     frames_per_batch = env.num_envs * cfg.algo.train_every
     total_frames = cfg.get("total_frames", -1) // aa.get_world_size()
@@ -73,7 +80,8 @@ def main(cfg: DictConfig):
     logging.info(f"Log interval: {log_interval} steps")
 
     stats_keys = [
-        k for k in env.reward_spec.keys(True, True) 
+        k
+        for k in env.reward_spec.keys(True, True)
         if isinstance(k, tuple) and k[0] == "stats"
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
@@ -91,34 +99,31 @@ def main(cfg: DictConfig):
         return ckpt_path
 
     assert env.training
-    if aa.is_main_process():
-        progress = tqdm(range(total_iters))
-    else:
-        progress = range(total_iters)
-    
+
     def should_save(i):
         if not aa.is_main_process():
             return False
         return i > 0 and i % save_interval == 0
-    
+
     ckpt_path = None
     carry = env.reset()
-    rollout_policy: TensorDictModuleBase = policy.get_rollout_policy("train")
 
-    @torch.inference_mode()
+    @torch.no_grad()
     @set_exploration_type(ExplorationType.RANDOM)
-    def collect(carry):
+    def collect(carry, rollout_policy: TensorDictModuleBase):
         data = []
         # torch.compiler.cudagraph_mark_step_begin() # for compiled policy
         # with torch.autocast("cuda"):
         for _ in range(cfg.algo.train_every):
             carry = rollout_policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
-            # td["next"] = td["next"].exclude(*rollout_policy.in_keys)
-
-            private_keys = [key for key in td.keys(True, True) if isinstance(key, str) and key.startswith('_')]
+            private_keys = [
+                key
+                for key in td.keys(True, True)
+                if isinstance(key, str) and key.startswith("_")
+            ]
             td = td.exclude(*private_keys)
-            
+
             data.append(td.to(policy.device))
         data = torch.stack(data, dim=1)
         # if data.get("state_value") is None:
@@ -130,52 +135,76 @@ def main(cfg: DictConfig):
         #     torch.cat([values[:, 1:], policy.critic(carry.copy())["state_value"].unsqueeze(1)], dim=1)
         # )
         return data, carry
-    
+
     env_frames = 0
-    for i in progress:
-        with ScopedTimer("rollout"):
-            rollout_start = time.perf_counter()
-            data, carry = collect(carry)
-            rollout_time = time.perf_counter() - rollout_start
 
-        episode_stats.add(data)
-        env_frames += data.numel()
+    if hasattr(policy.cfg, "stages"):
+        stages = policy.cfg.stages
+    else:
+        stages = ("",)
 
-        info = {}
-        if i % log_interval == 0 and len(episode_stats):
-            for k, v in sorted(episode_stats.pop().items(True, True)):
-                key = "train/" + ("/".join(k) if isinstance(k, tuple) else k)
-                info[key] = torch.mean(v.float()).item()
-        
-        with ScopedTimer("training"):
-            training_start = time.perf_counter()
-            info.update(policy.train_op(data))
-            training_time = time.perf_counter() - training_start
-        
-        info.update(env.extra)
-        info.update(env.stats_ema) # step-wise exponential moving average of stats
-        
-        if hasattr(policy, "step_schedule"):
-            policy.step_schedule(i / total_iters)
-        
-        info["env_frames"] = env_frames * aa.get_world_size()
-        info["performance/rollout_fps"] = data.numel() / rollout_time * aa.get_world_size()
-        info["performance/training_time"] = training_time
-        info["performance/iter_time"] = (time.perf_counter() - rollout_start)
-        
-        if should_save(i):
-            ckpt_path = save(policy, f"checkpoint_{i}")
+    for stage in stages:
+
+        rollout_policy = policy.get_rollout_policy("train")
+        policy.on_stage_start(stage)
 
         if aa.is_main_process():
-            ScopedTimer.print_summary(clear=True)
-            print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, (float, int))}))
-            print(f"Latest checkpoint: {ckpt_path}")
-            run.log(info)
+            progress = tqdm(range(total_iters), desc=stage)
+        else:
+            progress = range(total_iters)
+
+        for i in progress:
+            rollout_start = time.perf_counter()
+            with ScopedTimer("rollout") as rollout_timer:
+                data, carry = collect(carry, rollout_policy)
+            rollout_time = rollout_timer.last_time
+
+            episode_stats.add(data)
+            env_frames += data.numel()
+
+            info = {}
+            if i % log_interval == 0 and len(episode_stats):
+                for k, v in sorted(episode_stats.pop().items(True, True)):
+                    key = "train/" + ("/".join(k) if isinstance(k, tuple) else k)
+                    info[key] = torch.mean(v.float()).item()
+
+            with ScopedTimer("training") as training_timer:
+                info.update(policy.train_op(data))
+            training_time = training_timer.last_time
+
+            info.update(env.extra)
+            info.update(env.stats_ema)  # step-wise exponential moving average of stats
+
+            if hasattr(policy, "step_schedule"):
+                policy.step_schedule(i / total_iters)
+
+            info["env_frames"] = env_frames * aa.get_world_size()
+            info["performance/rollout_fps"] = (
+                data.numel() / rollout_time * aa.get_world_size()
+            )
+            info["performance/rollout_time"] = rollout_time
+            info["performance/training_time"] = training_time
+            info["performance/iter_time"] = time.perf_counter() - rollout_start
+
+            if should_save(i):
+                ckpt_path = save(policy, f"checkpoint_{i}")
+
+            if aa.is_main_process():
+                ScopedTimer.print_summary(clear=True)
+                print(
+                    OmegaConf.to_yaml(
+                        {k: v for k, v in info.items() if isinstance(v, (float, int))}
+                    )
+                )
+                print(f"Latest checkpoint: {ckpt_path}")
+                run.log(info)
 
     if aa.is_main_process():
         ckpt_path = save(policy, "checkpoint_final")
         policy_eval = policy.get_rollout_policy("eval")
-        info, trajs, stats = evaluate(env, policy_eval, render=cfg.eval_render, seed=cfg.seed)
+        info, trajs, stats = evaluate(
+            env, policy_eval, render=cfg.eval_render, seed=cfg.seed
+        )
         info["env_frames"] = env_frames
         run.log(info)
         wandb.finish()
@@ -185,4 +214,3 @@ def main(cfg: DictConfig):
 
 if __name__ == "__main__":
     main()
-
