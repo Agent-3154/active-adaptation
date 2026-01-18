@@ -95,11 +95,14 @@ def make_conv(
         layer = nn.Conv2d(
             in_channels, out_channels, kernel_size=k, stride=2, padding=k // 2
         )
+        nn.init.orthogonal_(layer.weight, 0.02)
+        nn.init.constant_(layer.bias, 0.0)
         layers.append(layer)
         layers.append(activation())
     if flatten:
         layers.append(nn.Flatten())
-    return FlattenBatch(nn.Sequential(*layers), data_dim=3)
+    module = nn.Sequential(*layers)
+    return FlattenBatch(module, data_dim=3)
 
 
 class FlattenBatch(nn.Module):

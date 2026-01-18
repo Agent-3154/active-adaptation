@@ -57,14 +57,18 @@ class fall_over(Termination):
         return fall_over
 
 
-class tracking_error(Termination):
-    def __init__(self, env, tracking_error_threshold):
+class root_pos_error(Termination):
+    def __init__(self, env, threshold: float = 2.0, dim: int = 2):
         super().__init__(env)
-        self.tracking_error_threshold = tracking_error_threshold
+        self.threshold = threshold
         self.asset: Articulation = self.env.scene["robot"]
+        self.dim = dim
     
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
-        return self.asset.data._tracking_error > self.tracking_error_threshold
+        valid = (self.env.episode_length_buf > 10).unsqueeze(-1)
+        target_pos = self.command_manager.cmd_pos_w[:, : self.dim]
+        pos_error = (self.asset.data.root_link_pos_w[:, : self.dim] - target_pos).square().sum(-1, True)
+        return (valid & (pos_error > self.threshold)).reshape(self.num_envs, 1)
 
 
 class cum_error(Termination):
