@@ -1,7 +1,10 @@
+import importlib
+import json
+import sys
 from hydra.core.config_search_path import ConfigSearchPath
 from hydra.plugins.search_path_plugin import SearchPathPlugin
 from pathlib import Path
-import json
+
 
 class ActiveAdaptationSearchPathPlugin(SearchPathPlugin):
     
@@ -17,7 +20,7 @@ class ActiveAdaptationSearchPathPlugin(SearchPathPlugin):
         
         if projects_file.exists():
             projects = json.loads(projects_file.read_text())
-            for project_name, project_info in projects.items():
+            for project_name, project_info in projects["environment"].items():
                 if project_info["enabled"]:
                     pkg_path = Path(project_info["path"])
                     if pkg_path.parent.name == "src":
@@ -25,6 +28,11 @@ class ActiveAdaptationSearchPathPlugin(SearchPathPlugin):
                     else:
                         path = pkg_path.parent / "cfg"
                     CONFIG_SEARCH_PATHS.append(str(path))
+            for project_name, project_info in projects["learning"].items():
+                if project_info["enabled"]:
+                    sys.path.insert(0, str(Path(project_info["path"]).parent))
+                    importlib.import_module(project_info["value"])
+                    sys.path.pop(0)
         for path in CONFIG_SEARCH_PATHS:
             search_path.append(
                 provider="aa_searchpath_plugin", path=f"file://{path}"

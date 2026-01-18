@@ -108,20 +108,36 @@ def discover_projects(enabled: bool = False):
     if projects_file.exists():
         projects = json.loads(projects_file.read_text())
     else:
-        projects = {}
+        projects = {
+            "environment": {},
+            "learning": {},
+        }
     for entry_point in importlib.metadata.entry_points(group="active_adaptation.projects"):
         # get the module path
         spec = importlib.util.find_spec(entry_point.value)
         if entry_point.name not in projects:
             # note that `value` may differ from `name`
             pkg_path = Path(spec.origin).parent.absolute()
-            projects[entry_point.name] = {
+            projects["environment"][entry_point.name] = {
                 "value": entry_point.value,
                 "path": str(pkg_path),
-                "type": "entry_point",
+                "type": "environment",
                 "enabled": enabled,
             }
             print(f"Discovered project: {entry_point.name} at {pkg_path}")
+    for entry_point in importlib.metadata.entry_points(group="active_adaptation.learning"):
+        # get the module path
+        spec = importlib.util.find_spec(entry_point.value)
+        if entry_point.name not in projects:
+            # note that `value` may differ from `name`
+            pkg_path = Path(spec.origin).parent.absolute()
+            projects["learning"][entry_point.name] = {
+                "value": entry_point.value,
+                "path": str(pkg_path),
+                "type": "learning",
+                "enabled": enabled,
+            }
+            print(f"Discovered learning module: {entry_point.name} at {pkg_path}")
     projects_file.write_text(json.dumps(projects, indent=2))
     return projects
 
@@ -135,7 +151,7 @@ def import_projects():
         projects = json.loads(projects_file.read_text())
     else:
         projects = discover_projects(enabled=True)
-    for project_name, project_info in projects.items():
+    for project_name, project_info in projects["environment"].items():
         if project_info["enabled"]:
             print(f"Importing project: {project_name} from {project_info['path']}")
             sys.path.insert(0, str(Path(project_info["path"]).parent))
