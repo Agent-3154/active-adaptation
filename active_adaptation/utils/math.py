@@ -366,6 +366,10 @@ def slerp(quat0: torch.Tensor, quat1: torch.Tensor, t: torch.Tensor):
     return result / torch.linalg.norm(result, dim=-1, keepdim=True)
 
 
+def sample_uniform(size, low: float, high: float, device: torch.device = "cpu"):
+    return torch.rand(size, device=device) * (high - low) + low
+
+
 class MultiUniform(D.Distribution):
     """
     A distribution over the union of multiple disjoint intervals.
