@@ -227,6 +227,10 @@ class PPOPolicy(TensorDictModuleBase):
         return dict(sorted(infos.items()))
 
     @torch.no_grad()
+    def compute_value(self, tensordict: TensorDict):
+        return self.critic(tensordict)
+    
+    @torch.no_grad()
     def _compute_advantage(
         self, 
         tensordict: TensorDict,

@@ -274,22 +274,36 @@ class forward_scan(Observation):
 
 
 class raycast_camera(Observation):
+    supported_dtypes = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        # "uint16": torch.uint16,
+        # "uint8": torch.uint8,
+    }
+
     def __init__(
         self,
         env,
-        width: int,
-        height: int,
+        resolution: Tuple[int, int],
         fov: float,
         body_name: Optional[str] = None,
         near: float = 0.01,
         far: float = 100.0,
+        dtype: torch.dtype | str = torch.float16,
     ):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.near, self.far = near, far
+        self.dtype = self.supported_dtypes[dtype] if isinstance(dtype, str) else dtype
+        assert (
+            self.dtype in self.supported_dtypes.values()
+        ), f"Unsupported dtype: {dtype}"
+        assert self.far - self.near > 1e-6, "Far must be greater than near"
 
+        width, height = resolution
         self.raymap = raymap(width, height, fov).to(self.device)
         self.shape = self.raymap.shape[:2]
+        assert self.shape == (height, width), "Resolution must match the raymap shape"
         self.num_rays = self.raymap.shape[0] * self.raymap.shape[1]
         self.ground_mesh = self.env.ground_mesh
 
@@ -334,8 +348,19 @@ class raycast_camera(Observation):
             mesh=self.ground_mesh,
             return_distance=True,
         )
-        ray_distance = ray_distance.nan_to_num(posinf=self.far)
         self.ray_hits_w = ray_starts + ray_distance.reshape(self.num_envs, self.num_rays, 1) * ray_dirs
+        
+        ray_distance = ray_distance.nan_to_num(posinf=self.far)
+        # Convert to target dtype
+        if self.dtype.is_floating_point:
+            # For float32 and float16, direct conversion
+            ray_distance = ray_distance.to(self.dtype)
+        else:
+            # For uint16 and uint8, normalize to [0, 1] and scale to dtype max value
+            range_size = self.far - self.near
+            normalized = (ray_distance - self.near) / range_size
+            max_val = torch.iinfo(self.dtype).max
+            ray_distance = (normalized * max_val).clamp(0, max_val).to(self.dtype)
         return ray_distance.reshape(self.num_envs, 1, self.shape[0], self.shape[1])
     
     def debug_draw(self) -> None:

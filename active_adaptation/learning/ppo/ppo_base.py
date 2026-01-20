@@ -25,6 +25,9 @@ class PPOBase(TensorDictModuleBase):
     def train_op(self, tensordict: TensorDictBase) -> dict:
         raise NotImplementedError("train_op must be implemented in subclass")
 
+    def compute_value(self, tensordict: TensorDictBase) -> TensorDictBase:
+        raise NotImplementedError("compute_value must be implemented in subclass")
+
     @torch.no_grad()
     def compute_advantage(
         self,

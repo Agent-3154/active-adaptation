@@ -107,13 +107,17 @@ def main(cfg: DictConfig):
 
     ckpt_path = None
     carry = env.reset()
+    observation_keys = list(env.observation_spec.keys(True, True))
 
     @torch.no_grad()
     @set_exploration_type(ExplorationType.RANDOM)
-    def collect(carry, rollout_policy: TensorDictModuleBase):
+    def collect(carry, rollout_policy: TensorDictModuleBase, transitions: bool=False):
+        """
+        If transitions is True, we collect and store transitions.
+        If transitions is False, we store only the trajectories. Due to autoreset, we do not have
+        the next states at terminal states. In this case, we approximate V_{t+1} with V_t.
+        """
         data = []
-        # torch.compiler.cudagraph_mark_step_begin() # for compiled policy
-        # with torch.autocast("cuda"):
         for _ in range(cfg.algo.train_every):
             carry = rollout_policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
@@ -123,17 +127,25 @@ def main(cfg: DictConfig):
                 if isinstance(key, str) and key.startswith("_")
             ]
             td = td.exclude(*private_keys)
+            if not transitions:
+                td["next"] = td["next"].exclude(*observation_keys)
 
             data.append(td.to(policy.device))
         data = torch.stack(data, dim=1)
-        # if data.get("state_value") is None:
-        #     policy.critic(data)
-        # values = data["state_value"]
-        # data["next", "state_value"] = torch.where(
-        #     data["next", "done"],
-        #     values, # a walkaround to avoid storing the next states
-        #     torch.cat([values[:, 1:], policy.critic(carry.copy())["state_value"].unsqueeze(1)], dim=1)
-        # )
+
+        if not transitions:
+            state_value = data["state_value"]
+            next_state_value = policy.compute_value(carry.copy())["state_value"]
+            next_state_value = torch.cat([
+                data["state_value"][:, 1:],
+                next_state_value.unsqueeze(1),
+            ], dim=1)
+            # since we have not stored the terminal states, we approximate V_{t+1} with V_t
+            data["next", "state_value"] = torch.where(
+                data["next", "done"],
+                state_value,
+                next_state_value,
+            )
         return data, carry
 
     env_frames = 0

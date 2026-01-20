@@ -41,6 +41,15 @@ DONE_KEY = ("next", "done")
 CMD_KEY = "command"
 
 
+class DtypeConversion(nn.Module):
+    def __init__(self, dtype: torch.dtype):
+        super().__init__()
+        self.dtype = dtype
+
+    def forward(self, x: torch.Tensor):
+        return x.to(self.dtype)
+
+
 class ResidualFC(nn.Module):
     def __init__(
         self, input_dim: int, output_dim: int, activation: nn.Module = nn.Mish
@@ -83,12 +92,15 @@ def make_conv(
     kernel_sizes: int | List[int] = 3,
     activation=nn.GELU,
     flatten: bool = True,
+    auto_dtype: bool = True,
 ):
     if isinstance(kernel_sizes, int):
         kernel_sizes = [kernel_sizes] * len(num_channels)
     num_channels = [in_channels] + num_channels
 
     layers = []
+    if auto_dtype:
+        layers.append(DtypeConversion(torch.float32))
     for in_channels, out_channels, k in zip(
         num_channels[:-1], num_channels[1:], kernel_sizes, strict=True
     ):
