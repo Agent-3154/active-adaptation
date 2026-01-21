@@ -108,6 +108,7 @@ def main(cfg: DictConfig):
     ckpt_path = None
     carry = env.reset()
     observation_keys = list(env.observation_spec.keys(True, True))
+    transitions = cfg.algo.get("store_transitions", True)
 
     @torch.no_grad()
     @set_exploration_type(ExplorationType.RANDOM)
@@ -157,7 +158,10 @@ def main(cfg: DictConfig):
 
     for stage in stages:
 
-        rollout_policy = policy.get_rollout_policy("train")
+        rollout_policy = policy.get_rollout_policy(
+            "train",
+            critic=not transitions,
+        )
         policy.on_stage_start(stage)
 
         if aa.is_main_process():
@@ -168,7 +172,7 @@ def main(cfg: DictConfig):
         for i in progress:
             rollout_start = time.perf_counter()
             with ScopedTimer("rollout") as rollout_timer:
-                data, carry = collect(carry, rollout_policy)
+                data, carry = collect(carry, rollout_policy, transitions)
             rollout_time = rollout_timer.last_time
 
             episode_stats.add(data)

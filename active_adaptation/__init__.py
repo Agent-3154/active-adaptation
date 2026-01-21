@@ -150,7 +150,7 @@ def import_projects():
     if projects_file.exists():
         projects = json.loads(projects_file.read_text())
     else:
-        projects = discover_projects(enabled=True)
+        projects = discover_projects(enabled=False)
     for project_name, project_info in projects["environment"].items():
         if project_info["enabled"]:
             print(f"Importing project: {project_name} from {project_info['path']}")

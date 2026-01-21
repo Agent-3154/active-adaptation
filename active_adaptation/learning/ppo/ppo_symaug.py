@@ -178,8 +178,14 @@ class PPOPolicy(TensorDictModuleBase):
             self.update = torch.compile(self.update, fullgraph=True)
             # self.update = CudaGraphModule(self.update)
     
-    def get_rollout_policy(self, mode: str="train"):
-        policy = self.actor
+    def on_stage_start(self, stage: str):
+        pass
+
+    def get_rollout_policy(self, mode: str="train", critic: bool = False):
+        if critic:
+            policy = Seq(self.critic, self.actor)
+        else:
+            policy = self.actor
         if self.cfg.compile:
             policy = torch.compile(policy, fullgraph=True)
         return policy

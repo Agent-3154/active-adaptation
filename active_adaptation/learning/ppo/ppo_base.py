@@ -13,7 +13,14 @@ class PPOBase(TensorDictModuleBase):
         super().__init__()
         self.num_updates = 0
 
-    def get_rollout_policy(self, mode: str = "train") -> TensorDictModuleBase:
+    def get_rollout_policy(
+        self,
+        mode: str = "train",
+        critic: bool = False,
+    ) -> TensorDictModuleBase:
+        """
+        If critic is True, the critic should be included in the rollout policy.
+        """
         raise NotImplementedError("get_rollout_policy must be implemented in subclass")
 
     def on_stage_start(self, stage: str):

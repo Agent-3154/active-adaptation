@@ -187,8 +187,11 @@ class PPOPolicy(PPOBase):
         if self.cfg.compile and not active_adaptation.is_distributed():
             self.update = torch.compile(self.update, fullgraph=True)
 
-    def get_rollout_policy(self, mode: str="train"):
-        policy = Seq(self.vecnorm, self.actor)
+    def get_rollout_policy(self, mode: str="train", critic: bool = False):
+        if critic:
+            policy = Seq(self.vecnorm, self.critic, self.actor)
+        else:
+            policy = Seq(self.vecnorm, self.actor)
         if self.cfg.compile:
             policy = torch.compile(policy, fullgraph=True)
         return policy
