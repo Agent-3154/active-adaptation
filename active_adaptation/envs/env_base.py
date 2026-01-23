@@ -122,7 +122,7 @@ class ObsGroup:
         transforms = []
         for obs_key, func in self.funcs.items():
             transform = func.symmetry_transform()
-            transforms.append(transform)
+            transforms.append(transform.to(func.device))
         transform = symmetry_utils.SymmetryTransform.cat(transforms)
         return transform
 

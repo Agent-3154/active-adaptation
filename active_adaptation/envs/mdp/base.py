@@ -6,6 +6,7 @@ import abc
 from typing import Tuple, TYPE_CHECKING, Generic, TypeVar
 from active_adaptation.registry import RegistryMixin
 from active_adaptation.utils.math import quat_mul, sample_quat_yaw
+from active_adaptation.utils.symmetry import SymmetryTransform
 
 
 if TYPE_CHECKING:
@@ -168,7 +169,7 @@ class Observation(Generic[CT], MDPComponent, RegistryMixin):
         tensor = self.compute()
         return tensor
 
-    def symmetry_transform(self):
+    def symmetry_transform(self) -> SymmetryTransform:
         """Called to apply symmetry transformations to the observation"""
         pass
 
