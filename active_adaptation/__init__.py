@@ -115,7 +115,7 @@ def discover_projects(enabled: bool = False):
     for entry_point in importlib.metadata.entry_points(group="active_adaptation.projects"):
         # get the module path
         spec = importlib.util.find_spec(entry_point.value)
-        if entry_point.name not in projects:
+        if entry_point.name not in projects["environment"]:
             # note that `value` may differ from `name`
             pkg_path = Path(spec.origin).parent.absolute()
             projects["environment"][entry_point.name] = {
@@ -128,7 +128,7 @@ def discover_projects(enabled: bool = False):
     for entry_point in importlib.metadata.entry_points(group="active_adaptation.learning"):
         # get the module path
         spec = importlib.util.find_spec(entry_point.value)
-        if entry_point.name not in projects:
+        if entry_point.name not in projects["learning"]:
             # note that `value` may differ from `name`
             pkg_path = Path(spec.origin).parent.absolute()
             projects["learning"][entry_point.name] = {

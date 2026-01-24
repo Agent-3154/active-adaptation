@@ -123,7 +123,6 @@ class height_scan(Observation):
         x_range: Tuple[float, float],
         y_range: Tuple[float, float],
         resolution: Tuple[float, float],
-        include_xy: bool=False,
         flatten: bool=False,
         noise_scale = 0.005
     ):
@@ -131,7 +130,6 @@ class height_scan(Observation):
         self.asset: Articulation = self.env.scene["robot"]
         self.flatten = flatten
         self.noise_scale = noise_scale
-        self.include_xy = include_xy
         
         x = torch.linspace(x_range[0], x_range[1], int((x_range[1] - x_range[0]) / resolution[0])+1)
         y = torch.linspace(y_range[0], y_range[1], int((y_range[1] - y_range[0]) / resolution[1])+1)
@@ -161,12 +159,6 @@ class height_scan(Observation):
         self.height_map_w = self.env.get_ground_height_at(self.scan_pos_w)
         
         height_map = (root_pos_w[:, :, :, 2] - self.height_map_w).clamp(-1., 1.)
-        if self.include_xy:
-            xy = einops.rearrange(self.scan_pos_b[..., :2], "X Y C -> C X Y")
-            height_map = torch.cat([
-                xy.expand(self.num_envs, *xy.shape),
-                height_map.reshape(self.num_envs, 1, *self.shape)
-            ], dim=1)
         if self.flatten:
             return height_map.reshape(self.num_envs, -1)
         else:
@@ -180,7 +172,6 @@ class height_scan(Observation):
 
     def symmetry_transform(self):
         if self.flatten:
-            assert not self.include_xy
             perm = torch.arange(self.shape.numel()).reshape(self.shape).flip((1,)).reshape(-1)
             signs = torch.ones(self.shape.numel())
         else:
