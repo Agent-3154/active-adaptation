@@ -119,11 +119,11 @@ class PPOPolicy(TensorDictModuleBase):
         
         actor_modules = [
             Mod(vecnorm, [OBS_KEY], ["_obs_normed"]),
-            Mod(make_mlp([256, 256, 128]), ["_obs_normed"], ["_actor_feature"]),
+            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_actor_feature"]),
             Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
         ]
         if self.cfg.aux_coef > 0.0:
-            actor_modules.append(Mod(nn.Linear(256, 1), ["_actor_feature"], ["aux_pred"]))
+            actor_modules.append(Mod(nn.LazyLinear(1), ["_actor_feature"], ["aux_pred"]))
         
         self.actor: ProbabilisticActor = ProbabilisticActor(
             module=Seq(*actor_modules),
@@ -135,7 +135,7 @@ class PPOPolicy(TensorDictModuleBase):
         
         self.critic = Seq(
             Mod(vecnorm, [OBS_KEY], ["_obs_normed"]),
-            Mod(make_mlp([256, 256, 128]), ["_obs_normed"], ["_critic_feature"]),
+            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_critic_feature"]),
             Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 
