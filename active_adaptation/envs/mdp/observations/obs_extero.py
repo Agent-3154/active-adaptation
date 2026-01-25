@@ -124,12 +124,14 @@ class height_scan(Observation):
         y_range: Tuple[float, float],
         resolution: Tuple[float, float],
         flatten: bool=False,
-        noise_scale = 0.005
+        noise_scale = 0.005,
+        clamp_range: Tuple[float, float] = (-1., 1.)
     ):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.flatten = flatten
         self.noise_scale = noise_scale
+        self.clamp_range = clamp_range
         
         x = torch.linspace(x_range[0], x_range[1], int((x_range[1] - x_range[0]) / resolution[0])+1)
         y = torch.linspace(y_range[0], y_range[1], int((y_range[1] - y_range[0]) / resolution[1])+1)

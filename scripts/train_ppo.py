@@ -158,11 +158,11 @@ def main(cfg: DictConfig):
 
     for stage in stages:
 
+        policy.on_stage_start(stage)
         rollout_policy = policy.get_rollout_policy(
             "train",
             critic=not transitions,
         )
-        policy.on_stage_start(stage)
 
         if aa.is_main_process():
             progress = tqdm(range(total_iters), desc=stage)
