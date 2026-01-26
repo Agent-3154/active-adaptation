@@ -160,7 +160,7 @@ class height_scan(Observation):
         self.scan_pos_w = root_pos_w + quat_rotate(root_quat, self.scan_pos_b.unsqueeze(0))
         self.height_map_w = self.env.get_ground_height_at(self.scan_pos_w)
         
-        height_map = (root_pos_w[:, :, :, 2] - self.height_map_w).clamp(-1., 1.)
+        height_map = (root_pos_w[:, :, :, 2] - self.height_map_w).clamp(*self.clamp_range)
         if self.flatten:
             return height_map.reshape(self.num_envs, -1)
         else:

@@ -188,10 +188,11 @@ class Actor(nn.Module):
         self.predict_std = predict_std
         if predict_std:
             self.actor_mean = nn.LazyLinear(action_dim * 2)
+            self.scale_mapping = torch.exp
         else:
             self.actor_mean = nn.LazyLinear(action_dim)
             self.actor_std = nn.Parameter(torch.ones(action_dim))
-        self.scale_mapping = nn.Identity()
+            self.scale_mapping = nn.Identity()
 
     def forward(self, features: torch.Tensor):
         if self.predict_std:
