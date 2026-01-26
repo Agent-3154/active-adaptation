@@ -152,8 +152,8 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.scene = cast(SceneAdapter, self.scene)
 
         self.max_episode_length = self.cfg.max_episode_length
-        self.step_dt = self.cfg.sim.step_dt
-        self.physics_dt = self.sim.get_physics_dt()
+        self.step_dt: float = self.cfg.sim.step_dt
+        self.physics_dt: float = self.sim.get_physics_dt()
         self.decimation = int(self.step_dt / self.physics_dt)
 
         print(

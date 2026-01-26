@@ -80,6 +80,7 @@ def yaw_rotate(yaw: torch.Tensor, vec: torch.Tensor):
     """
     Rotate a vector by a yaw angle (in radians).
     """
+    yaw = yaw.reshape(vec.shape[:-1])
     yaw_cos = torch.cos(yaw)
     yaw_sin = torch.sin(yaw)
     vec = vec.expand(*yaw.shape, 3)
