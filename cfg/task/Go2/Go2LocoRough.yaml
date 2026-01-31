@@ -1,0 +1,26 @@
+# @package task
+name: Go2Rough
+
+defaults:
+  # see https://hydra.cc/docs/advanced/overriding_packages/
+  - /task/Go2/Go2LocoFlat@_here_
+  - _self_
+
+terrain: medium_curriculum
+
+command:
+  curriculum: true
+
+observation:
+  extero:
+    height_scan: {
+      x_range: [-1.1, 1.1],
+      y_range: [-0.8, 0.8],
+      resolution: [0.1, 0.1],
+      flatten: true,
+    }
+
+reward:
+  regularization:
+    angvel_xy_l2:       {weight: 0.01}
+    feet_air_time:      {weight: 0.2, body_names: .*_foot, thres: 0.4}

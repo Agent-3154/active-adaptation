@@ -21,11 +21,12 @@ sim:
   isaac_physics_dt: 0.005
   mujoco_physics_dt: 0.002
 
-action:
-  _target_: active_adaptation.envs.mdp.action.JointPosition
-  action_scaling: {.*_joint: 0.5}
-  max_delay: 1
-  alpha_range: [0.5, 1.0]
+input:
+  action:
+    class: JointPosition
+    action_scaling: {.*_joint: 0.5}
+    max_delay: 1
+    alpha_range: [0.5, 1.0]
 
 command:
   class: Twist
@@ -89,7 +90,7 @@ reward:
     angvel_xy_l2:       {weight: 0.02}
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 2.0, target_height: 0.35}
-  reg:
+  regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7}
     joint_torques_l2:   {weight: 2.0e-4}

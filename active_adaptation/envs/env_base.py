@@ -210,18 +210,15 @@ class _EnvBase(EnvBase, RegistryMixin):
         self._debug_draw_callbacks.append(self.command_manager.debug_draw)
 
         input_cfg = dict(self.cfg.get("input", {}))
-        if not len(input_cfg):
-            input_cfg["action"] = self.cfg.action
 
         action_spec = {}
-        for input_key, input_cfg in input_cfg.items():
-            input_manager: mdp.ActionManager = hydra.utils.instantiate(
-                input_cfg, env=self
-            )
-            self.input_managers[input_key] = input_manager
+        for input_spec, input_cfg in input_cfg.items():
+            input_cls = mdp.ActionManager.registry[input_cfg.pop("class")]
+            input_manager: mdp.ActionManager = input_cls(self, **input_cfg)
+            self.input_managers[input_spec] = input_manager
             self._reset_callbacks.append(input_manager.reset)
             self._debug_draw_callbacks.append(input_manager.debug_draw)
-            action_spec[input_key] = Unbounded(
+            action_spec[input_spec] = Unbounded(
                 [self.num_envs, input_manager.action_dim], device=self.device
             )
 
