@@ -131,6 +131,31 @@ class ResidualMLP(nn.Module):
         return x
 
 
+class DtypeConversion(nn.Module):
+    def __init__(self, dtype: torch.dtype):
+        super().__init__()
+        self.dtype = dtype
+
+    def forward(self, x: torch.Tensor):
+        return x.to(self.dtype)
+
+
+class FlattenBatch(nn.Module):
+    def __init__(self, module, data_dim: int = 1):
+        super().__init__()
+        self.module = module
+        self.data_dim = data_dim
+
+    def forward(self, *args: torch.Tensor):
+        batch_shape = args[0].shape[: -self.data_dim]
+        args_flattened = (arg.flatten(0, len(batch_shape) - 1) for arg in args)
+        output_flattened = self.module(*args_flattened)
+        if isinstance(output_flattened, tuple):
+            output = tuple(arg.unflatten(0, batch_shape) for arg in output_flattened)
+        else:
+            output = output_flattened.unflatten(0, batch_shape)
+        return output
+
 
 class SymmetryWrapper(TensorDictModuleBase):
     """
