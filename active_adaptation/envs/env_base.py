@@ -23,13 +23,42 @@ import active_adaptation.envs.mdp as mdp
 import active_adaptation.utils.symmetry as symmetry_utils
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
-from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
+from active_adaptation.registry import RegistryMixin
+
 
 if active_adaptation.get_backend() == "isaac":
     import isaacsim.core.utils.torch as torch_utils
     import isaaclab.sim as sim_utils
+    from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
     from isaaclab.terrains.trimesh.utils import make_plane
     from pxr import UsdGeom, UsdPhysics
+
+    def initialize_warp_meshes(mesh_prim_path, device):
+        # check if the prim is a plane - handle PhysX plane as a special case
+        # if a plane exists then we need to create an infinite mesh that is a plane
+        mesh_prim = sim_utils.get_first_matching_child_prim(
+            mesh_prim_path, lambda prim: prim.GetTypeName() == "Plane"
+        )
+        # if we did not find a plane then we need to read the mesh
+        if mesh_prim is None:
+            # obtain the mesh prim
+            mesh_prim = sim_utils.get_first_matching_child_prim(
+                mesh_prim_path, lambda prim: prim.GetTypeName() == "Mesh"
+            )
+            # check if valid
+            if mesh_prim is None or not mesh_prim.IsValid():
+                raise RuntimeError(f"Invalid mesh prim path: {mesh_prim_path}")
+            # cast into UsdGeomMesh
+            mesh_prim = UsdGeom.Mesh(mesh_prim)
+            # read the vertices and faces
+            points = np.asarray(mesh_prim.GetPointsAttr().Get())
+            indices = np.asarray(mesh_prim.GetFaceVertexIndicesAttr().Get())
+            wp_mesh = convert_to_warp_mesh(points, indices, device=device)
+        else:
+            mesh = make_plane(size=(2e6, 2e6), height=0.0, center_zero=True)
+            wp_mesh = convert_to_warp_mesh(mesh.vertices, mesh.faces, device=device)
+        # add the warp mesh to the list
+        return wp_mesh
 
 
 EMA_DECAY = 0.99
@@ -93,12 +122,12 @@ class ObsGroup:
         transforms = []
         for obs_key, func in self.funcs.items():
             transform = func.symmetry_transform()
-            transforms.append(transform)
+            transforms.append(transform.to(func.device))
         transform = symmetry_utils.SymmetryTransform.cat(transforms)
         return transform
 
 
-class _EnvBase(EnvBase):
+class _EnvBase(EnvBase, RegistryMixin):
     def __init__(self, cfg, device: str, headless: bool = True):
         super().__init__(
             device=device,
@@ -123,8 +152,8 @@ class _EnvBase(EnvBase):
         self.scene = cast(SceneAdapter, self.scene)
 
         self.max_episode_length = self.cfg.max_episode_length
-        self.step_dt = self.cfg.sim.step_dt
-        self.physics_dt = self.sim.get_physics_dt()
+        self.step_dt: float = self.cfg.sim.step_dt
+        self.physics_dt: float = self.sim.get_physics_dt()
         self.decimation = int(self.step_dt / self.physics_dt)
 
         print(
@@ -132,9 +161,9 @@ class _EnvBase(EnvBase):
         )
 
         self.episode_length_buf = torch.zeros(
-            self.num_envs, dtype=int, device=self.device
+            self.num_envs, dtype=torch.long, device=self.device
         )
-        self.episode_id = torch.zeros(self.num_envs, dtype=int, device=self.device)
+        self.episode_id = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.episode_count = 0
 
         # parse obs and reward functions
@@ -181,18 +210,15 @@ class _EnvBase(EnvBase):
         self._debug_draw_callbacks.append(self.command_manager.debug_draw)
 
         input_cfg = dict(self.cfg.get("input", {}))
-        if not len(input_cfg):
-            input_cfg["action"] = self.cfg.action
 
         action_spec = {}
-        for input_key, input_cfg in input_cfg.items():
-            input_manager: mdp.ActionManager = hydra.utils.instantiate(
-                input_cfg, env=self
-            )
-            self.input_managers[input_key] = input_manager
+        for input_spec, input_cfg in input_cfg.items():
+            input_cls = mdp.ActionManager.registry[input_cfg.pop("class")]
+            input_manager: mdp.ActionManager = input_cls(self, **input_cfg)
+            self.input_managers[input_spec] = input_manager
             self._reset_callbacks.append(input_manager.reset)
             self._debug_draw_callbacks.append(input_manager.debug_draw)
-            action_spec[input_key] = Unbounded(
+            action_spec[input_spec] = Unbounded(
                 [self.num_envs, input_manager.action_dim], device=self.device
             )
 
@@ -438,11 +464,7 @@ class _EnvBase(EnvBase):
                         input_manager.process_action(action)
             for substep in range(self.decimation):
                 with ScopedTimer("simulation_pre_step", sync=False):
-                    # for asset in self.scene.articulations.values():
-                    #     if asset.has_external_wrench:
-                    #         asset._external_force_b.zero_()
-                    #         asset._external_torque_b.zero_()
-                    #         asset.has_external_wrench = False
+                    self.scene.zero_external_wrenches()
                     self.apply_action(substep)
                     for callback in self._pre_step_callbacks:
                         callback(substep)
@@ -502,7 +524,7 @@ class _EnvBase(EnvBase):
     def ground_mesh(self):
         if self._ground_mesh is None:
             if self.backend == "isaac":
-                self._ground_mesh = _initialize_warp_meshes(
+                self._ground_mesh = initialize_warp_meshes(
                     "/World/ground", self.device.type
                 )
             elif self.backend == "mujoco":
@@ -631,29 +653,3 @@ class RewardGroup:
         return self.eval_func(*all_rewards)
 
 
-def _initialize_warp_meshes(mesh_prim_path, device):
-    # check if the prim is a plane - handle PhysX plane as a special case
-    # if a plane exists then we need to create an infinite mesh that is a plane
-    mesh_prim = sim_utils.get_first_matching_child_prim(
-        mesh_prim_path, lambda prim: prim.GetTypeName() == "Plane"
-    )
-    # if we did not find a plane then we need to read the mesh
-    if mesh_prim is None:
-        # obtain the mesh prim
-        mesh_prim = sim_utils.get_first_matching_child_prim(
-            mesh_prim_path, lambda prim: prim.GetTypeName() == "Mesh"
-        )
-        # check if valid
-        if mesh_prim is None or not mesh_prim.IsValid():
-            raise RuntimeError(f"Invalid mesh prim path: {mesh_prim_path}")
-        # cast into UsdGeomMesh
-        mesh_prim = UsdGeom.Mesh(mesh_prim)
-        # read the vertices and faces
-        points = np.asarray(mesh_prim.GetPointsAttr().Get())
-        indices = np.asarray(mesh_prim.GetFaceVertexIndicesAttr().Get())
-        wp_mesh = convert_to_warp_mesh(points, indices, device=device)
-    else:
-        mesh = make_plane(size=(2e6, 2e6), height=0.0, center_zero=True)
-        wp_mesh = convert_to_warp_mesh(mesh.vertices, mesh.faces, device=device)
-    # add the warp mesh to the list
-    return wp_mesh

@@ -65,7 +65,8 @@ class PPOConfig:
     desired_kl: Union[float, None] = None
     clip_param: float = 0.2
     entropy_coef: float = 0.002
-    layer_norm: Union[str, None] = "before"
+    
+    aux_coef: float = 0.0 # loss coefficient for auxiliary prediction loss
     value_norm: bool = False
     compile: bool = False
 
@@ -106,10 +107,8 @@ class PPOPolicy(TensorDictModuleBase):
 
         fake_input = observation_spec.zero()
         
-        self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform()
-        self.act_transform = env.action_manager.symmetry_transform()
-        self.obs_transform = self.obs_transform.to(self.device)
-        self.act_transform = self.act_transform.to(self.device)
+        self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform().to(self.device)
+        self.act_transform = env.action_manager.symmetry_transform().to(self.device)
         self.action_dim = env.action_manager.action_dim
 
         vecnorm = VecNorm(
@@ -118,13 +117,16 @@ class PPOPolicy(TensorDictModuleBase):
             decay=1.0
         )
         
-        actor_module = Seq(
+        actor_modules = [
             Mod(vecnorm, [OBS_KEY], ["_obs_normed"]),
-            Mod(make_mlp([256, 256, 128]), ["_obs_normed"], ["_actor_feature"]),
+            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_actor_feature"]),
             Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
-        )
+        ]
+        if self.cfg.aux_coef > 0.0:
+            actor_modules.append(Mod(nn.LazyLinear(1), ["_actor_feature"], ["aux_pred"]))
+        
         self.actor: ProbabilisticActor = ProbabilisticActor(
-            module=actor_module,
+            module=Seq(*actor_modules),
             in_keys=["loc", "scale"],
             out_keys=[ACTION_KEY],
             distribution_class=IndependentNormal,
@@ -133,7 +135,7 @@ class PPOPolicy(TensorDictModuleBase):
         
         self.critic = Seq(
             Mod(vecnorm, [OBS_KEY], ["_obs_normed"]),
-            Mod(make_mlp([256, 256, 128]), ["_obs_normed"], ["_critic_feature"]),
+            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_critic_feature"]),
             Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 
@@ -181,8 +183,14 @@ class PPOPolicy(TensorDictModuleBase):
             self.update = torch.compile(self.update, fullgraph=True)
             # self.update = CudaGraphModule(self.update)
     
-    def get_rollout_policy(self, mode: str="train"):
-        policy = self.actor
+    def on_stage_start(self, stage: str):
+        pass
+
+    def get_rollout_policy(self, mode: str="train", critic: bool = False):
+        if critic:
+            policy = Seq(self.critic, self.actor)
+        else:
+            policy = self.actor
         if self.cfg.compile:
             policy = torch.compile(policy, fullgraph=True)
         return policy
@@ -193,7 +201,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         tensordict = tensordict.exclude("stats")
         infos = []
-        self._compute_advantage(tensordict, self.critic, "adv", "ret", update_value_norm=True)
+        self.compute_advantage(tensordict, self.critic, "adv", "ret", update_value_norm=True)
         action = tensordict[ACTION_KEY]
         adv_unnormalized = tensordict["adv"]
         log_probs_before = tensordict["action_log_prob"]
@@ -230,7 +238,11 @@ class PPOPolicy(TensorDictModuleBase):
         return dict(sorted(infos.items()))
 
     @torch.no_grad()
-    def _compute_advantage(
+    def compute_value(self, tensordict: TensorDict):
+        return self.critic(tensordict)
+    
+    @torch.no_grad()
+    def compute_advantage(
         self, 
         tensordict: TensorDict,
         critic: Mod, 
@@ -286,20 +298,28 @@ class PPOPolicy(TensorDictModuleBase):
         log_probs = dist.log_prob(action_data)
         entropy = (dist.entropy().reshape_as(valid) * valid).sum() / valid_cnt
 
-        adv = tensordict["adv"]
-        log_ratio = (log_probs - log_probs_data).unsqueeze(-1)
+        adv = tensordict["adv"] # [bsize, 1]
+        ret = tensordict["ret"] # [bsize, 1]
+        log_ratio = (log_probs - log_probs_data).reshape_as(adv) # [bsize, 1]
         ratio = torch.exp(log_ratio)
         surr1 = adv * ratio
         surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
+        clamped = ((ratio.detach() - 1.0).abs() > self.clip_param).reshape_as(ret)
+
         policy_loss = - (torch.min(surr1, surr2).reshape_as(valid) * valid).sum() / valid_cnt
         entropy_loss = - self.entropy_coef * entropy
 
-        b_returns = tensordict["ret"]
         values = self.critic(tensordict)["state_value"]
-        value_loss = self.critic_loss_fn(b_returns, values)
+        value_loss = self.critic_loss_fn(ret, values)
         value_loss = (value_loss.reshape_as(valid) * valid).sum() / valid_cnt
 
         loss = policy_loss + entropy_loss + value_loss
+        if self.cfg.aux_coef > 0.0:
+            aux_loss = (tensordict["aux_pred"].reshape_as(ret) - ret).square() * clamped
+            aux_loss = aux_loss.sum() / clamped.sum().clamp_min(1.0)
+            loss += self.cfg.aux_coef * aux_loss
+        else:
+            aux_loss = torch.tensor(0.0)
         self.opt.zero_grad()
         loss.backward()
 
@@ -316,8 +336,8 @@ class PPOPolicy(TensorDictModuleBase):
         self.opt.step()
         
         with torch.no_grad():
-            explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
-            clipfrac = ((ratio - 1.0).abs() > self.clip_param).float().mean()
+            explained_var = 1 - F.mse_loss(values, ret) / ret.var()
+            clipfrac = clamped.float().mean()
             loc, scale = dist.loc[:bsize], dist.scale[:bsize]
             kl = torch.sum(
                 torch.log(scale) - torch.log(scale_old)
@@ -326,16 +346,21 @@ class PPOPolicy(TensorDictModuleBase):
                 axis=-1,
             ).mean()
             symmetry_loss = F.mse_loss(dist.mean[bsize:], self.act_transform(dist.mean[:bsize]))
+            actor_feature_norm = torch.norm(tensordict["_actor_feature"], dim=-1).mean()
+            critic_feature_norm = torch.norm(tensordict["_critic_feature"], dim=-1).mean()
         return {
             "actor/policy_loss": policy_loss.detach(),
             "actor/entropy": entropy.detach(),
             "actor/grad_norm": actor_grad_norm,
             "actor/clamp_ratio": clipfrac,
             "actor/kl": kl,
+            "actor/aux_loss": aux_loss,
             "actor/symmetry_loss": symmetry_loss.detach(),
+            "actor/feature_norm": actor_feature_norm.detach(),
             "critic/value_loss": value_loss.detach(),
             "critic/grad_norm": critic_grad_norm,
             "critic/explained_var": explained_var,
+            "critic/feature_norm": critic_feature_norm.detach(),
         }
 
     def state_dict(self):

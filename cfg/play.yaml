@@ -5,7 +5,7 @@ hydra:
 headless: false
 
 backend: isaac
-device: auto # cuda for mjlab, cpu for isaac and mujoco
+device: cpu # cuda for mjlab, cpu for isaac and mujoco
 
 app:
   headless: ${..headless}

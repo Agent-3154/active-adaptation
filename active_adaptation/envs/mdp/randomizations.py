@@ -415,13 +415,20 @@ class reset_joint_states_scale(Randomization):
         )
 
 
-class push(Randomization):
-    def __init__(self, env, body_names, force_range = (0.2, 0.9), min_interval=100, decay: float=0.9):
+class push_body(Randomization):
+    supported_backends = ("isaac", "mujoco")
+    def __init__(
+        self,
+        env,
+        body_names,
+        force_range = (20, 50),
+        min_interval=100,
+        decay: float=0.9
+    ):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.body_indices, self.body_names = self.asset.find_bodies(body_names)
         self.num_bodies = len(self.body_indices)
-        self.default_mass_total = self.asset.root_physx_view.get_masses()[0].sum() * 9.81
         self.force_range = force_range
         self.min_interval = min_interval
         self.decay = decay
@@ -435,25 +442,28 @@ class push(Randomization):
         self.forces[env_ids] = 0.
         self.last_push[env_ids] = 0.
 
-    def step(self, substep):
-        if substep == 0:
-            t = self.env.episode_length_buf.view(self.env.num_envs, 1, 1)
-            i = torch.rand(self.env.num_envs, len(self.body_indices), 1, device=self.env.device) < 0.02
-            i = i & ((t - self.last_push) > self.min_interval)
-            self.last_push = torch.where(i, t, self.last_push)
+    def pre_step(self, substep):
+        self.asset._external_force_b[:, self.body_indices] = self.forces
+        self.asset.has_external_wrench = True
 
-            push_forces = torch.zeros_like(self.forces)
-            push_forces[:, :, 0].uniform_(*self.force_range)
-            push_forces[:, :, 1].uniform_(*self.force_range)
-            self.forces = torch.where(i, push_forces * self.default_mass_total, self.forces * self.decay)
-        self.asset.set_external_force_and_torque(self.forces, self.torques, body_ids=self.body_indices)
+    def update(self) -> None:
+        t = self.env.episode_length_buf.view(self.env.num_envs, 1, 1)
+        i = torch.rand(self.env.num_envs, len(self.body_indices), 1, device=self.env.device) < 0.02
+        i = i & ((t - self.last_push) > self.min_interval)
+        self.last_push = torch.where(i, t, self.last_push)
 
+        push_forces = torch.zeros_like(self.forces)
+        push_forces[:, :, 0].uniform_(*self.force_range)
+        push_forces[:, :, 1].uniform_(*self.force_range)
+        self.forces = torch.where(i, push_forces, self.forces * self.decay)
+        
     def debug_draw(self):
-        self.env.debug_draw.vector(
-            self.asset.data.body_link_pos_w[:, self.body_indices],
-            self.forces / self.default_mass_total,
-            color=(1., 0.8, .4, 1.)
-        )
+        if self.env.backend == "isaac":
+            self.env.debug_draw.vector(
+                self.asset.data.body_link_pos_w[:, self.body_indices],
+                self.forces / 9.81,
+                color=(1., 0.8, .4, 1.)
+            )
         
     
 class drag(Randomization):

@@ -80,6 +80,7 @@ def yaw_rotate(yaw: torch.Tensor, vec: torch.Tensor):
     """
     Rotate a vector by a yaw angle (in radians).
     """
+    yaw = yaw.reshape(vec.shape[:-1])
     yaw_cos = torch.cos(yaw)
     yaw_sin = torch.sin(yaw)
     vec = vec.expand(*yaw.shape, 3)
@@ -325,6 +326,49 @@ def uniform_noise(x: torch.Tensor, min: float, max: float):
     Add uniform noise to a tensor.
     """
     return x + torch.rand_like(x) * (max - min) + min
+
+
+def slerp(quat0: torch.Tensor, quat1: torch.Tensor, t: torch.Tensor):
+    """
+    Spherical linear interpolation between two quaternions.
+    
+    Args:
+        quat0: First quaternion tensor
+        quat1: Second quaternion tensor
+        t: Interpolation factor (0 = quat0, 1 = quat1)
+    
+    Returns:
+        Interpolated quaternion (normalized)
+    """
+    # Compute dot product
+    dot = torch.sum(quat0 * quat1, dim=-1, keepdim=True)
+    dot = torch.clamp(dot, -1.0, 1.0)
+    
+    # If dot product is negative, negate one quaternion to take shorter path
+    # (since q and -q represent the same rotation)
+    quat1 = torch.where(dot < 0, -quat1, quat1)
+    dot = torch.abs(dot)
+    
+    # Compute angle
+    theta = torch.arccos(dot)
+    sin_theta = torch.sin(theta)
+    
+    # Handle case when quaternions are very close (fallback to linear interpolation)
+    # Use a small epsilon to avoid division by zero
+    eps = 1e-6
+    mask = sin_theta > eps
+    
+    # Compute interpolation coefficients
+    t1 = torch.where(mask, torch.sin((1 - t) * theta) / sin_theta, 1 - t)
+    t2 = torch.where(mask, torch.sin(t * theta) / sin_theta, t)
+    
+    # Interpolate and normalize
+    result = quat0 * t1 + quat1 * t2
+    return result / torch.linalg.norm(result, dim=-1, keepdim=True)
+
+
+def sample_uniform(size, low: float, high: float, device: torch.device = "cpu"):
+    return torch.rand(size, device=device) * (high - low) + low
 
 
 class MultiUniform(D.Distribution):

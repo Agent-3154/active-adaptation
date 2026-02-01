@@ -1,5 +1,5 @@
 # @package task
-name: G1Flat29
+name: G1LocoFlat
 
 viewer:
   resolution: [1280, 720]
@@ -8,7 +8,7 @@ viewer:
 
 robot: 
   name: g1_waist_unlocked
-terrain: easy
+terrain: plane
 
 # common
 num_envs: 4096
@@ -19,36 +19,25 @@ sim:
   isaac_physics_dt: 0.005
   mujoco_physics_dt: 0.002
 
-# action:
-#   _target_: active_adaptation.envs.mdp.action.JointPosition
-#   action_scaling: 
-#     .*elbow_joint: 0.5
-#     .*shoulder.*: 0.5
-#     .*hip.*: 0.5
-#     .*knee.*: 0.5
-#     waist_(roll|pitch|yaw)_joint: 0.25
-#     .*ankle.*: 0.25
-#   max_delay: 1
-#   alpha: [0.5, 1.0]
-
-action:
-  _target_: active_adaptation.envs.mdp.action.JointPosition
-  action_scaling: 
-    .*hip_pitch.*: 0.548
-    .*hip_roll.*: 0.351
-    .*hip_yaw.*: 0.548
-    .*knee.*: 0.351
-    waist_yaw_joint: 0.541
-    waist_roll_joint: 0.439
-    waist_pitch_joint: 0.439
-    .*ankle.*: 0.439
-    .*shoulder.*: 0.173
-    .*elbow_joint: 0.173
-    # .*wrist_roll.*: 0.173
-    # .*wrist_pitch.*: 0.293
-    # .*wrist_yaw.*: 0.293
-  max_delay: 1
-  alpha_range: [0.6, 1.0]
+input:
+  action:
+    class: JointPosition
+    action_scaling: 
+      .*hip_pitch.*: 0.548
+      .*hip_roll.*: 0.351
+      .*hip_yaw.*: 0.548
+      .*knee.*: 0.351
+      waist_yaw_joint: 0.541
+      waist_roll_joint: 0.439
+      waist_pitch_joint: 0.439
+      .*ankle.*: 0.439
+      .*shoulder.*: 0.173
+      .*elbow_joint: 0.173
+      # .*wrist_roll.*: 0.173
+      # .*wrist_pitch.*: 0.293
+      # .*wrist_yaw.*: 0.293
+    max_delay: 2
+    alpha_range: [0.8, 1.0]
 
 command:
   class: Twist
@@ -58,19 +47,20 @@ command:
   yaw_stiffness_range: [0.5, 1.0]
   use_stiffness_ratio: 0.9
   stand_prob: 0.05
+  curriculum: false
 
 observation:
   # command:
   policy:
     command:
-    root_angvel_b:  {noise_std: 0.05}
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {joint_names: "(?!(.*wrist.*)).*", steps: 4, noise_std: 0.05}
     joint_vel_multistep: {joint_names: "(?!(.*wrist.*)).*", steps: 4, noise_std: 0.2}
     prev_actions: {steps: 2}
   # priv:
-    root_linvel_b:    {}
-    body_height:  {body_names: .*ankle_roll_link}
+    # root_linvel_b:    {}
+    # root_angvel_b:  {noise_std: 0.05}
+    # body_height:  {body_names: .*ankle_roll_link}
 
 reward:
   loco:
@@ -113,10 +103,11 @@ randomization:
     pos_ranges:
       .*: [-0.1, 0.1]
     rel: true
-  # impulse: {}
-  # constant_force:
-  #   force_range: [50, 50, 15]
-  #   offset_range: [0.1, 0.1, 0.1]
+  push_body:
+    body_names: "torso_link"
+    force_range: [20, 100]
+    min_interval: 100
+    decay: 0.9
 
 termination:
   crash: 

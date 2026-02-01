@@ -1,31 +1,17 @@
 from __future__ import annotations
 
 import torch
-import inspect
 import abc
-import warnings
 
 from typing import Tuple, TYPE_CHECKING, Generic, TypeVar
-from isaaclab.utils.math import quat_mul
-import active_adaptation as aa
+from active_adaptation.registry import RegistryMixin
+from active_adaptation.utils.math import quat_mul, sample_quat_yaw
+from active_adaptation.utils.symmetry import SymmetryTransform
+
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from active_adaptation.envs.env_base import _EnvBase
-
-
-def sample_quat_yaw(size, yaw_range=(0, torch.pi * 2), device: torch.device = "cpu"):
-    yaw = torch.rand(size, device=device).uniform_(*yaw_range)
-    quat = torch.cat(
-        [
-            torch.cos(yaw / 2).unsqueeze(-1),
-            torch.zeros_like(yaw).unsqueeze(-1),
-            torch.zeros_like(yaw).unsqueeze(-1),
-            torch.sin(yaw / 2).unsqueeze(-1),
-        ],
-        dim=-1,
-    )
-    return quat
 
 
 def is_method_implemented(obj, base_class, method_name: str):
@@ -61,42 +47,6 @@ def is_method_implemented(obj, base_class, method_name: str):
     return obj_func is not base_func
 
 
-class _RegistryMixin:
-    # Class variable: list of supported backends
-    # Subclasses should override this to declare which backends they support
-    supported_backends: tuple[str, ...] = ("isaac", "mujoco", "mjlab")
-    
-    def __init_subclass__(cls, namespace: str | None = None) -> None:
-        """Put the subclass in the global registry"""
-        if not hasattr(cls, 'registry'):
-            cls.registry = {}
-        
-        if namespace is None:
-            cls_name = cls.__name__
-        else:
-            cls_name = f"{namespace}.{cls.__name__}"
-        
-        if cls_name not in cls.registry:
-            cls._file = inspect.getfile(cls)
-            cls._line = inspect.getsourcelines(cls)[1]
-            cls.registry[cls_name] = cls    
-        else:
-            conflicting_cls = cls.registry[cls_name]
-            location = f"{conflicting_cls._file}:{conflicting_cls._line}"
-            raise ValueError(f"Term {cls_name} already registered in {location}")
-    
-    @classmethod
-    def make(cls, class_name, env: _EnvBase, **kwargs):
-        if class_name not in cls.registry:
-            raise ValueError(f"Class '{class_name}' not found in {cls.__name__}.registry")
-        instance_cls = cls.registry[class_name]
-        if aa.get_backend() not in instance_cls.supported_backends:
-            warnings.warn(f"Class '{class_name}' does not support backend '{aa.get_backend()}'. "
-                          f"Supported backends: {instance_cls.supported_backends}")
-            return None
-        return instance_cls(env, **kwargs)
-
-
 class MDPComponent:
     """
     Base class for all MDP components (Command, Observation, Reward, Termination, Randomization).
@@ -105,7 +55,7 @@ class MDPComponent:
     across all component types.
     
     Note: This class does not include registry functionality. Use multiple inheritance
-    with `_RegistryMixin` if registry functionality is needed.
+    with `RegistryMixin` if registry functionality is needed.
     """
     
     def __init__(self, env: _EnvBase):
@@ -163,7 +113,7 @@ class MDPComponent:
         pass
 
 
-class Command(MDPComponent, _RegistryMixin):
+class Command(MDPComponent, RegistryMixin):
     def __init__(self, env: _EnvBase, teleop: bool=False) -> None:
         super().__init__(env)
         self.asset: Articulation = env.scene["robot"]
@@ -172,10 +122,13 @@ class Command(MDPComponent, _RegistryMixin):
         self.init_joint_vel = self.asset.data.default_joint_vel.clone()
         self.teleop = teleop
         
-        if self.env.terrain_type == "generator":
-            self._origins = self.env.scene.terrain.terrain_origins.reshape(-1, 3).clone()
-        else:
-            self._origins = self.env.scene.terrain.env_origins.reshape(-1, 3).clone()
+        if self.env.backend == "isaac":
+            if self.env.terrain_type == "generator":
+                self._origins = self.env.scene.terrain.terrain_origins.reshape(-1, 3).clone()
+            else:
+                self._origins = self.env.scene.env_origins.reshape(-1, 3).clone()
+        elif self.env.backend == "mujoco":
+            self._origins = torch.zeros(self.num_envs, 3, device=self.device)
 
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -199,7 +152,7 @@ class Command(MDPComponent, _RegistryMixin):
 CT = TypeVar('CT', bound=Command)
 
 
-class Observation(Generic[CT], MDPComponent, _RegistryMixin):
+class Observation(Generic[CT], MDPComponent, RegistryMixin):
     """
     Base class for all observations.
     """
@@ -216,12 +169,32 @@ class Observation(Generic[CT], MDPComponent, _RegistryMixin):
         tensor = self.compute()
         return tensor
 
-    def symmetry_transform(self):
+    def symmetry_transform(self) -> SymmetryTransform:
         """Called to apply symmetry transformations to the observation"""
         pass
 
 
-class Reward(Generic[CT], MDPComponent, _RegistryMixin):
+class ActionManager(MDPComponent, RegistryMixin):
+
+    action_dim: int
+    action_buf: torch.Tensor
+
+    def __init__(self, env: _EnvBase):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+
+    @abc.abstractmethod
+    def process_action(self, action: torch.Tensor):
+        """Process the action. Called once per environment step."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def apply_action(self, substep: int):
+        """Apply the action. Called at every simulation step."""
+        raise NotImplementedError
+
+
+class Reward(Generic[CT], MDPComponent, RegistryMixin):
     def __init__(
         self,
         env: _EnvBase,
@@ -246,7 +219,7 @@ class Reward(Generic[CT], MDPComponent, _RegistryMixin):
         raise NotImplementedError
 
 
-class Termination(Generic[CT], MDPComponent, _RegistryMixin):
+class Termination(Generic[CT], MDPComponent, RegistryMixin):
     def __init__(self, env: _EnvBase):
         super().__init__(env)
         self.command_manager: CT = env.command_manager
@@ -256,7 +229,7 @@ class Termination(Generic[CT], MDPComponent, _RegistryMixin):
         raise NotImplementedError
 
 
-class Randomization(MDPComponent, _RegistryMixin):
+class Randomization(MDPComponent, RegistryMixin):
     def __init__(self, env: _EnvBase):
         super().__init__(env)
 

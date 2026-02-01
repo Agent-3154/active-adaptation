@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.distributions as D
 import math
 import warp as wp
-from typing import Sequence
+from typing import Sequence, Tuple
 from typing_extensions import override
 
 from active_adaptation.utils.math import (
@@ -13,6 +13,7 @@ from active_adaptation.utils.math import (
     quat_rotate_inverse,
     clamp_norm,
     yaw_quat,
+    yaw_rotate,
     wrap_to_pi,
     MultiUniform
 )
@@ -248,6 +249,163 @@ class Twist(Command):
         # left-right symmetry: flip y velocity and yaw velocity
         transform = symmetry_utils.SymmetryTransform(perm=torch.arange(4), signs=[1, -1, -1, 1])
         return transform
+
+
+class PositionVelocityTracking(Command):
+    def __init__(
+        self,
+        env,
+        linvel_x_range: Tuple[float, float] = (-1.0, 1.0),
+        linvel_y_range: Tuple[float, float] = (-1.0, 1.0),
+        angvel_range: Tuple[float, float] = (-1.0, 1.0),
+        resample_interval: int = 300,
+        resample_prob: float = 0.75,
+        curriculum: bool = False,
+    ):
+        super().__init__(env)
+        self.linvel_x_range = linvel_x_range
+        self.linvel_y_range = linvel_y_range
+        self.angvel_range = angvel_range
+        self.resample_interval = resample_interval
+        self.resample_prob = resample_prob
+        self.curriculum = curriculum and self.env.backend == "isaac"
+
+        if self.curriculum:
+            from isaaclab.terrains import TerrainImporter
+            self.terrain: TerrainImporter = self.env.scene.terrain
+            assert self.terrain.cfg.terrain_type == "generator", "Curriculum is only supported for generator terrain"
+            assert self.terrain.cfg.terrain_generator.curriculum, "Curriculum is not enabled for the terrain"
+
+        with torch.device(self.device):
+            self.ref_pos_w = torch.zeros(self.num_envs, 3)
+            self.ref_yaw_w = torch.zeros(self.num_envs, 1)
+            self.ref_linvel_b_next = torch.zeros(self.num_envs, 3) # intermediate term for smooth transition
+            self.ref_linvel_b = torch.zeros(self.num_envs, 3)
+            self.ref_yawvel_w = torch.zeros(self.num_envs, 1)
+            
+            self.ref_linvel_w: torch.Tensor # derived from ref_lin_vel_b and ref_yaw_w
+            self.cmd_linvel_w: torch.Tensor
+            self.cmd_yawvel_w: torch.Tensor
+            self.command_speed: torch.Tensor # derived from cmd_linvel_w
+
+            self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=bool)
+            self.distance_commanded = torch.zeros(self.num_envs, 1)
+            self.distance_traveled = torch.zeros(self.num_envs, 1)
+        
+        if self.env.sim.has_gui():
+            if self.env.backend == "isaac":
+                from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, sim_utils
+                self.marker = VisualizationMarkers(
+                    VisualizationMarkersCfg(
+                        prim_path=f"/Visuals/Command/ref_pos_w",
+                        markers={
+                            "ref_pos_w": sim_utils.SphereCfg(radius=0.04, visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.8, 1.0))),
+                        }
+                    )
+                )
+                self.marker.set_visibility(True)
+        
+        self.update()
+    
+    @property
+    def command(self):
+        quat = yaw_quat(self.asset.data.root_link_quat_w)
+        return torch.cat([
+            quat_rotate_inverse(quat, self.ref_pos_w - self.asset.data.root_link_pos_w)[:, :2], # 2
+            quat_rotate_inverse(quat, self.cmd_linvel_w)[:, :2], # 2
+            wrap_to_pi(self.ref_yaw_w - self.asset.data.heading_w.reshape(self.num_envs, 1)), # 1
+            self.cmd_yawvel_w.reshape(self.num_envs, 1), # 1
+        ], dim=-1)
+    
+    @override
+    def symmetry_transform(self):
+        # left-right symmetry: flip y velocity and yaw velocity
+        transform = symmetry_utils.SymmetryTransform(
+            perm=torch.arange(2 + 2 + 1 + 1),
+            signs=[1, -1] + [1, -1] + [-1, -1]
+        )
+        return transform
+    
+    @override
+    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+        if self.curriculum and self.env.episode_count > 1: # and self.env.training:
+            distance_traveled = self.distance_traveled[env_ids]
+            distance_commanded = self.distance_commanded[env_ids].clamp_min(1.0)
+            move_up = distance_traveled > distance_commanded * 0.8
+            move_down = distance_traveled < distance_commanded * 0.4
+            move_up = move_up & ~move_down
+            self.terrain.update_env_origins(env_ids, move_up.squeeze(-1), move_down.squeeze(-1))
+            self._origins = self.terrain.env_origins.clone()
+            self.env.extra["curriculum/terrain_level"] = self.terrain.terrain_levels.float().mean()
+        self.env.extra["curriculum/distance_commanded"] = self.distance_commanded.mean()
+        self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
+        self.distance_commanded[env_ids] = 0.0
+        self.distance_traveled[env_ids] = 0.0
+        return super().sample_init(env_ids)
+
+    @override
+    def reset(self, env_ids):
+        self.ref_pos_w[env_ids] = self.asset.data.root_link_pos_w[env_ids]
+        self.ref_yaw_w[env_ids] = self.asset.data.heading_w[env_ids, None]
+        self.ref_linvel_b[env_ids] = 0.0
+        self.ref_yawvel_w[env_ids] = 0.0
+        self.is_standing_env[env_ids] = False
+    
+    @override
+    def update(self):
+        self.ref_linvel_b = (
+            self.ref_linvel_b 
+            + clamp_norm((self.ref_linvel_b_next - self.ref_linvel_b) * 0.1, max=0.1)
+        )
+        self.ref_linvel_w = yaw_rotate(self.ref_yaw_w, self.ref_linvel_b)
+        self.ref_pos_w = self.ref_pos_w + self.ref_linvel_w * self.env.step_dt
+        self.ref_yaw_w = self.ref_yaw_w + self.ref_yawvel_w * self.env.step_dt
+
+        self.cmd_linvel_w = (
+            (self.ref_pos_w - self.asset.data.root_link_pos_w)
+            + self.ref_linvel_w
+        )
+        self.command_speed = self.cmd_linvel_w[:, :2].norm(dim=-1, keepdim=True)
+        self.current_speed = self.asset.data.root_com_lin_vel_w[:, :2].norm(dim=-1, keepdim=True)
+        self.distance_commanded = self.distance_commanded + self.command_speed * self.env.step_dt
+        self.distance_traveled = self.distance_traveled + self.current_speed * self.env.step_dt
+
+        self.cmd_yawvel_w = (
+            wrap_to_pi(self.ref_yaw_w - self.asset.data.heading_w.reshape(self.num_envs, 1))
+            + self.ref_yawvel_w
+        )
+        self.cmd_pos_w = self.ref_pos_w.clone()
+        self.cmd_yawvel_b = self.cmd_yawvel_w.clone()
+
+        resample_lin_vel = (
+            ((self.env.episode_length_buf - 20) % self.resample_interval == 0)
+            & (torch.rand(self.num_envs, device=self.device) < self.resample_prob)
+        )
+        resample_ids = resample_lin_vel.nonzero().squeeze(-1)
+        if len(resample_ids):
+            ref_lin_vel_b = torch.zeros(len(resample_ids), 3, device=self.device)
+            ref_lin_vel_b[:, 0].uniform_(*self.linvel_x_range)
+            ref_lin_vel_b[:, 1].uniform_(*self.linvel_y_range)
+            ref_lin_vel_b = torch.where(
+                ref_lin_vel_b.norm(dim=-1, keepdim=True) < 0.1,
+                0.0,
+                ref_lin_vel_b,
+            )
+            self.ref_linvel_b_next[resample_ids] = ref_lin_vel_b
+        
+        resample_yaw_vel = (
+            ((self.env.episode_length_buf - 20) % self.resample_interval == 0)
+            & (torch.rand(self.num_envs, device=self.device) < self.resample_prob)
+        )
+        resample_ids = resample_yaw_vel.nonzero().squeeze(-1)
+        if len(resample_ids):
+            ref_yaw_vel_w = torch.zeros(len(resample_ids), 1, device=self.device)
+            ref_yaw_vel_w.uniform_(*self.angvel_range)
+            self.ref_yawvel_w[resample_ids] = ref_yaw_vel_w
+
+    def debug_draw(self):
+        if self.env.backend == "isaac":
+            self.marker.visualize(self.ref_pos_w)
 
 
 def sample_uniform(size, low: float, high: float, device: torch.device = "cpu"):

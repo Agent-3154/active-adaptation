@@ -405,8 +405,9 @@ class MJArticulation:
             raise ValueError(f"Invalid actuator type: {self.actuator_type}")
 
         if self.has_external_wrench:
-            self.mj_data.xfrc_applied[self.body_adrs_write, :3] = quat_rotate(self._data.root_quat_w, self._external_force_b)[0]
-            self.mj_data.xfrc_applied[self.body_adrs_write, 3:] = quat_rotate(self._data.root_quat_w, self._external_torque_b)[0]
+            root_quat_w = self._data.root_quat_w.unsqueeze(1)
+            self.mj_data.xfrc_applied[self.body_adrs_write, :3] = quat_rotate(root_quat_w, self._external_force_b).squeeze(1)[0]
+            self.mj_data.xfrc_applied[self.body_adrs_write, 3:] = quat_rotate(root_quat_w, self._external_torque_b).squeeze(1)[0]
 
     def write_joint_state_to_sim(self, joint_pos: ArrayType, joint_vel: ArrayType, joint_ids: ArrayType, env_ids: ArrayType=None):
         if joint_pos is not None:

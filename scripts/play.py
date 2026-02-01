@@ -16,6 +16,7 @@ from torchrl.envs.utils import set_exploration_type, ExplorationType
 import active_adaptation as aa
 from active_adaptation.utils.export import export_onnx
 from active_adaptation.utils.timerfd import Timer
+from active_adaptation.utils.helpers import EpisodeStats
 from active_adaptation.learning.modules.vecnorm import VecNorm
 
 FILE_PATH = Path(__file__).parent
@@ -40,13 +41,9 @@ def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    if cfg.get("device", "auto") == "auto":
-        cfg.device = "cuda" if aa.get_backend() == "mjlab" else "cpu"
-        print(f"Using device: {cfg.device}")
+    aa.init(cfg, auto_rank=False)
     
-    aa.init(cfg, auto_rank=True, import_projects=True)
-    
-    from helpers import EpisodeStats, make_env_policy
+    from helpers import make_env_policy
     env, policy = make_env_policy(cfg)
     
     if cfg.export_policy:
