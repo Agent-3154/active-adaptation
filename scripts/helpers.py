@@ -111,6 +111,7 @@ def evaluate(
     seed: int=0, 
     exploration_type: ExplorationType=ExplorationType.MODE,
     render=False,
+    render_decimation: int=1,
     keys=[("next", "stats")],
 ):
     """
@@ -137,7 +138,7 @@ def evaluate(
             inference_time.append(e - s)
             tensordict, tensordict_ = env.step_and_maybe_reset(tensordict_)
             trajs.append(tensordict.select(*keys, strict=False).cpu())
-            if render:
+            if render and (i % max(1, render_decimation) == 0):
                 frames.append(env.render("rgb_array"))
     inference_time = np.mean(inference_time[5:])
     print(f"Average inference time: {inference_time:.4f} s")
@@ -171,6 +172,7 @@ def evaluate(
         write_video(
             video_path, video_array=video_array, fps=int(1 / env.step_dt), video_codec="h264"
         )
+        info["video_path"] = video_path
 
     info["episode_cnt"] = episode_cnt
     return dict(sorted(info.items())), trajs, stats

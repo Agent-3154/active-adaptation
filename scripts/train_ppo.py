@@ -34,6 +34,11 @@ def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
+    if cfg.get("render_interval", -1) > 0:
+        cfg.eval_render = True
+        if "app" in cfg:
+            cfg.app.enable_cameras = True
+
     aa.init(cfg, auto_rank=True, import_projects=True)
     
     print(
@@ -103,6 +108,11 @@ def main(cfg: DictConfig):
         if not aa.is_main_process():
             return False
         return i > 0 and i % save_interval == 0
+
+    def should_render(i):
+        if not aa.is_main_process():
+            return False
+        return cfg.get("render_interval", -1) > 0 and i > 0 and i % cfg.render_interval == 0
     
     ckpt_path = None
     carry = env.reset()
@@ -135,6 +145,8 @@ def main(cfg: DictConfig):
         return data, carry
     
     env_frames = 0
+    policy_eval = policy.get_rollout_policy("eval")
+
     for i in progress:
         with ScopedTimer("rollout"):
             rollout_start = time.perf_counter()
@@ -168,6 +180,22 @@ def main(cfg: DictConfig):
         
         if should_save(i):
             ckpt_path = save(policy, f"checkpoint_{i}")
+
+        if should_render(i):
+            eval_info, _, _ = evaluate(
+                env,
+                policy_eval,
+                render=True,
+                render_decimation=cfg.get("render_decimation", 1),
+                seed=cfg.seed,
+            )
+            video_path = eval_info.pop("video_path", None)
+            if video_path is not None:
+                info["render/video"] = wandb.Video(
+                    video_path, fps=int(1 / env.step_dt), format="mp4"
+                )
+            env.train()
+            carry = env.reset()
 
         if aa.is_main_process():
             ScopedTimer.print_summary(clear=True)
