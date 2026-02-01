@@ -35,7 +35,7 @@ class Every:
 
 def make_env_policy(cfg: DictConfig):
     OmegaConf.set_struct(cfg, False)
-    cfg.seed = cfg.seed + active_adaptation.get_local_rank()
+    cfg.seed = cfg.seed + active_adaptation.get_rank()
     
     from active_adaptation.envs import SimpleEnvIsaac, SimpleEnvMujoco, SimpleEnvMjlab
     from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter

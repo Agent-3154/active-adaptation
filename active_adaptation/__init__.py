@@ -18,11 +18,10 @@ _BACKEND = None
 _BACKEND_SET = False
 _CALLED_AT = None
 
-_LOCAL_RANK = os.getenv("LOCAL_RANK", "0")
-_LOCAL_RANK = int(_LOCAL_RANK)
-_WORLD_SIZE = os.getenv("WORLD_SIZE", "1")
-_WORLD_SIZE = int(_WORLD_SIZE)
-_MAIN_PROCESS = _LOCAL_RANK == 0
+_LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
+_RANK = int(os.getenv("RANK", _LOCAL_RANK))
+_WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
+_MAIN_PROCESS = _RANK == 0
 
 _OMP_NUM_THREADS = os.getenv("OMP_NUM_THREADS", "1")
 _OMP_NUM_THREADS = int(_OMP_NUM_THREADS)
@@ -33,6 +32,9 @@ def is_main_process():
 
 def is_distributed():
     return _WORLD_SIZE > 1
+
+def get_rank():
+    return _RANK
 
 def get_local_rank():
     return _LOCAL_RANK
@@ -45,7 +47,7 @@ _original_print = builtins.print
 
 def _ranked_print(*args, **kwargs):
     """Print function with rank information prefix."""
-    _original_print(f"[RANK {_LOCAL_RANK}/{_WORLD_SIZE}]:", *args, **kwargs)
+    _original_print(f"[RANK {_RANK}/{_WORLD_SIZE} LOCAL {_LOCAL_RANK}]:", *args, **kwargs)
 
 # Override builtins.print for global effect
 if is_distributed():

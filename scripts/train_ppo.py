@@ -36,7 +36,10 @@ def main(cfg: DictConfig):
 
     aa.init(cfg, auto_rank=True, import_projects=True)
     
-    print(f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}")
+    print(
+        f"is_distributed: {aa.is_distributed()}, "
+        f"rank: {aa.get_rank()}, local_rank: {aa.get_local_rank()}, world_size: {aa.get_world_size()}"
+    )
 
     if aa.is_main_process():
         run = wandb.init(
