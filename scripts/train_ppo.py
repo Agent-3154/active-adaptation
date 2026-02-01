@@ -40,7 +40,7 @@ def main(cfg: DictConfig):
         if "app" in cfg:
             cfg.app.enable_cameras = True
 
-    aa.init(cfg, auto_rank=True, import_projects=True)
+    aa.init(cfg, auto_rank=True)
     
     print(
         f"is_distributed: {aa.is_distributed()}, "
