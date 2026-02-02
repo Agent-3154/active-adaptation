@@ -97,12 +97,18 @@ class PPOPolicy(PPOBase):
         super().__init__()
         self.cfg = PPOConfig(**cfg)
         self.device = device
+        if active_adaptation.is_distributed() and torch.cuda.is_available():
+            local_rank = active_adaptation.get_local_rank()
+            torch.cuda.set_device(local_rank)
+            self.device = f"cuda:{local_rank}"
 
         self.max_grad_norm = 1.0
         self.critic_loss_fn = nn.MSELoss(reduction="none")
         self.gae = GAE(0.99, 0.95)
 
         fake_input = observation_spec.zero()
+        if hasattr(fake_input, "to"):
+            fake_input = fake_input.to(self.device)
 
         vecnorm = VecNorm(
             input_shape=observation_spec[OBS_KEY].shape[-1:],
@@ -160,13 +166,20 @@ class PPOPolicy(PPOBase):
         self.critic.apply(init_)
 
         if active_adaptation.is_distributed():
+            local_rank = active_adaptation.get_local_rank()
             if torch.cuda.is_available():
-                torch.cuda.set_device(active_adaptation.get_local_rank())
+                torch.cuda.set_device(local_rank)
+                self.device = f"cuda:{local_rank}"
+            # Ensure all modules are on the same device before DDP
+            self.vecnorm = self.vecnorm.to(self.device)
+            self.actor = self.actor.to(self.device)
+            self.critic = self.critic.to(self.device)
+
             if not distr.is_initialized():
-                distr.init_process_group(
-                    backend="nccl",
-                    world_size=active_adaptation.get_world_size(),
-                    rank=active_adaptation.get_rank()
+                raise RuntimeError(
+                    "torch.distributed is not initialized. "
+                    "Call active_adaptation.init(..., auto_rank=True) before "
+                    "creating PPOPolicy."
                 )
             self.world_size = active_adaptation.get_world_size()
             if self.cfg.use_ddp:
