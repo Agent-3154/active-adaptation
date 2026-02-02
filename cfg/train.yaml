@@ -29,11 +29,13 @@ vecnorm: ${oc.select:algo.vecnorm,train}
 camera_follow: true
 
 wandb:
+  run_name: null
   name: ${..exp_name}/${now:%m-%d}_${now:%H-%M}
   job_type: train
   project: ${oc.select:task.project,active_adaptation}
   mode: online # set to 'disabled' when debugging locally
   tags: []
+
 
 defaults:
   - task: Velocity

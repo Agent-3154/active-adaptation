@@ -60,6 +60,9 @@ def main(cfg: DictConfig):
         default_run_name = (
             f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         )
+
+        if cfg.wandb.get("run_name"):
+            default_run_name = f"{cfg.wandb.run_name}-{default_run_name}"
         run_idx = run.name.split("-")[-1]
         run.name = f"{run_idx}-{default_run_name}"
         setproctitle(run.name)
@@ -215,30 +218,35 @@ def main(cfg: DictConfig):
             info["performance/training_time"] = training_time
             info["performance/iter_time"] = time.perf_counter() - rollout_start
 
+            # if aa.is_main_process():
+            #     print(
+            #         f"iter {i}: rollout_fps={info['performance/rollout_fps']:.2f}"
+            #     )
+
             if should_save(i):
                 ckpt_path = save(policy, f"checkpoint_{i}")
 
-        if should_render(i):
-            eval_info, _, _ = evaluate(
-                env,
-                policy_eval,
-                render=True,
-                render_decimation=cfg.get("render_decimation", 1),
-                seed=cfg.seed,
-            )
-            video_path = eval_info.pop("video_path", None)
-            if video_path is not None:
-                info["render/video"] = wandb.Video(
-                    video_path, fps=int(1 / env.step_dt), format="mp4"
+            if should_render(i):
+                eval_info, _, _ = evaluate(
+                    env,
+                    policy_eval,
+                    render=True,
+                    render_decimation=cfg.get("render_decimation", 1),
+                    seed=cfg.seed,
                 )
-            env.train()
-            carry = env.reset()
+                video_path = eval_info.pop("video_path", None)
+                if video_path is not None:
+                    info["render/video"] = wandb.Video(
+                        video_path, fps=int(1 / env.step_dt), format="mp4"
+                    )
+                env.train()
+                carry = env.reset()
 
-        if aa.is_main_process():
-            ScopedTimer.print_summary(clear=True)
-            print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, (float, int))}))
-            print(f"Latest checkpoint: {ckpt_path}")
-            run.log(info)
+            if aa.is_main_process():
+                ScopedTimer.print_summary(clear=True)
+                print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, (float, int))}))
+                print(f"Latest checkpoint: {ckpt_path}")
+                run.log(info)
 
     if aa.is_main_process():
         ckpt_path = save(policy, "checkpoint_final")
