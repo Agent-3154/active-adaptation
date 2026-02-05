@@ -88,9 +88,9 @@ class CrossAttention(nn.Module):
 
     def forward(
         self,
-        feature: Float[torch.Tensor, "b m c"],
-        context: Float[torch.Tensor, "b n c"]
-    ) -> Float[torch.Tensor, "b m c"]:
+        feature: Float[torch.Tensor, "b m feature_dim"],
+        context: Float[torch.Tensor, "b n context_dim"]
+    ) -> Float[torch.Tensor, "b m feature_dim"]:
         feature = self.norm_feature(feature)
         context = self.norm_context(context)
         attn_output, _ = self.attn(feature, context, context, need_weights=False)
