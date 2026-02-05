@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+from jaxtyping import Float
 
 class FiLM(nn.Module):
     """
@@ -57,4 +57,45 @@ class FiLM(nn.Module):
         output = gamma * features + beta
         
         return output
+
+
+class CrossAttention(nn.Module):
+    def __init__(
+        self,
+        feature_dim: int = 64,
+        context_dim: int = 32,
+        num_heads: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.attn = nn.MultiheadAttention(
+            embed_dim=feature_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+            kdim=context_dim,
+            vdim=context_dim,
+        )
+        self.norm_feature = nn.LayerNorm(feature_dim)
+        self.norm_context = nn.LayerNorm(context_dim)
+        self.norm_out = nn.LayerNorm(feature_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.GELU(),
+            nn.Linear(feature_dim, feature_dim),
+        )
+
+    def forward(
+        self,
+        feature: Float[torch.Tensor, "b m c"],
+        context: Float[torch.Tensor, "b n c"]
+    ) -> Float[torch.Tensor, "b m c"]:
+        feature = self.norm_feature(feature)
+        context = self.norm_context(context)
+        attn_output, _ = self.attn(feature, context, context, need_weights=False)
+        feature = feature + attn_output
+
+        feature = feature + self.mlp(self.norm_out(feature))
+        return feature
 
