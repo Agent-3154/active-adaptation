@@ -72,7 +72,6 @@ class undesired_contact(Reward):
     def update(self):
         contact = self.contact_sensor.data.current_contact_time[:, self.body_ids] > 0.0
         self.undesired_contact = - contact.float().sum(1, keepdim=True)
-        self.env.discount.mul_((self.undesired_contact / self.num_bodies).exp())
 
     def compute(self) -> torch.Tensor:
         return self.undesired_contact.reshape(self.num_envs, 1)

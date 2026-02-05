@@ -303,7 +303,6 @@ class _EnvBase(EnvBase, RegistryMixin):
         reward_spec["reward"] = Unbounded(max(1, enabled_groups), device=self.device)
         reward_spec["discount"] = Unbounded(1, device=self.device)
         self.reward_spec.update(reward_spec.expand(self.num_envs).to(self.device))
-        self.discount = torch.ones((self.num_envs, 1), device=self.device)
 
         observation_spec = {}
         for group_key, group in self.observation_funcs.items():
@@ -444,16 +443,24 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict.set("reward", rewards)
         return tensordict
 
-    def _compute_termination(self) -> TensorDictBase:
-        if not self.termination_funcs:
-            return torch.zeros((self.num_envs, 1), dtype=bool, device=self.device)
-
-        termination = torch.zeros((self.num_envs, 1), dtype=bool, device=self.device)
+    def _compute_termination(self, tensordict: TensorDictBase) -> TensorDictBase:
+        truncated = (self.episode_length_buf[:, None] >= self.max_episode_length)
+        terminated = torch.zeros((self.num_envs, 1), dtype=bool, device=self.device)
+        discount = torch.ones((self.num_envs, 1), device=self.device)
         for key, func in self.termination_funcs.items():
-            t = func.compute(termination)
-            termination |= t
+            result = func.compute(terminated)
+            if isinstance(result, tuple):
+                t, d = result
+            else:
+                t, d = result, 1.0
+            terminated |= t
+            discount *= d
             self.stats["termination", key] = t.float()
-        return termination
+        tensordict.set("truncated", truncated)
+        tensordict.set("terminated", terminated)
+        tensordict.set("done", terminated | truncated)
+        tensordict.set("discount", discount)
+        return tensordict
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
 
@@ -483,7 +490,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             self.sim.render()
 
         self.episode_length_buf.add_(1)
-        self.discount.fill_(1.0)
         self.timestamp += 1
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
@@ -492,14 +498,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             tensordict = self._compute_reward(tensordict)
 
         with ScopedTimer("termination", sync=False):
-            truncated = (self.episode_length_buf >= self.max_episode_length).unsqueeze(
-                1
-            )
-            terminated = self._compute_termination()
-            tensordict.set("terminated", terminated)
-            tensordict.set("truncated", truncated)
-            tensordict.set("done", terminated | truncated)
-            tensordict.set("discount", self.discount.clone())
+            tensordict = self._compute_termination(tensordict)
 
         # Note that command update is a special case
         # it should take place after reward computation

@@ -25,20 +25,21 @@ class crash(Termination):
         return (contact_time > self.t_thres).any(1, True)
 
 
-class soft_contact(Termination):
+class undesired_contact(Termination):
     supported_backends = ("isaac",)
-    def __init__(self, env, body_names: str):
+    def __init__(self, env, body_names: str, thres: float = 1.0):
         super().__init__(env)
+        self.thres = thres
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
         self.body_indices, self.body_names = self.contact_sensor.find_bodies(body_names)
-    
-    def update(self):
-        forces = self.contact_sensor.data.net_forces_w[:, self.body_indices].norm(dim=-1, keepdim=True)
-        in_contact = (forces > 1.0).sum(dim=1)
-        self.env.discount.mul_(0.4 ** in_contact)
+        self.body_indices = torch.tensor(self.body_indices, device=self.env.device)
 
     def compute(self, termination: torch.Tensor):
-        return torch.zeros(self.num_envs, 1, device=self.env.device, dtype=bool)
+        terminated = torch.zeros(self.num_envs, 1, device=self.env.device, dtype=bool)
+        forces = self.contact_sensor.data.net_forces_w[:, self.body_indices].norm(dim=-1, keepdim=True)
+        in_contact = (forces > self.thres).sum(dim=1)
+        discount = 0.8 ** in_contact
+        return terminated, discount.reshape(self.num_envs, 1)
     
 
 class fall_over(Termination):
