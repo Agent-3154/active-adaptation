@@ -59,13 +59,14 @@ class PPOConfig:
     _target_: str = "active_adaptation.learning.ppo.ppo_go2.PPOPolicy"
     name: str = "ppo_go2"
     train_every: int = 32
-    ppo_epochs: int = 5
+    ppo_epochs: int = 4
     num_minibatches: int = 4
     lr: float = 5e-4
     clip_param: float = 0.2
     entropy_coef: float = 0.006
     layer_norm: Union[str, None] = "before"
     value_norm: bool = False
+    symaug: bool = True
 
     checkpoint_path: Union[str, None] = None
     in_keys: Tuple[str, ...] = (OBS_KEY, "extero")
@@ -143,8 +144,12 @@ class PPOPolicy(TensorDictModuleBase):
         self.max_grad_norm = 1.0
         self.clip_param = self.cfg.clip_param
         self.critic_loss_fn = nn.MSELoss(reduction="none")
-        self.action_dim = action_spec.shape[-1]
         self.gae = GAE(0.99, 0.95)
+
+        self.obs_transform = env.observation_funcs["policy"].symmetry_transform().to(self.device)
+        self.extero_transform = env.observation_funcs["extero"].symmetry_transform().to(self.device)
+        self.act_transform = env.action_manager.symmetry_transform().to(self.device)
+        action_dim = env.action_manager.action_dim
         
         fake_input = observation_spec.zero()
         self.vecnorm_proprio = VecNorm(
@@ -228,13 +233,30 @@ class PPOPolicy(TensorDictModuleBase):
 
         self.compute_advantage(tensordict, self.critic, "adv", "ret")
         tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
+        train_in_keys = (
+            ["policy", "extero"]
+            + ["action", "action_log_prob"]
+            + ["adv", "ret", "is_init"]
+        )
+        tensordict = tensordict.select(*train_in_keys, strict=False)  # avoid inplace modification
 
         for epoch in range(self.cfg.ppo_epochs):
             batch = make_batch(tensordict, self.cfg.num_minibatches)
             for minibatch in batch:
+                if self.cfg.symaug:
+                    mirrored = minibatch.empty()
+                    mirrored["policy"] = self.obs_transform(minibatch["policy"])
+                    mirrored["extero"] = self.extero_transform(minibatch["extero"])
+                    mirrored["action"] = self.act_transform(minibatch["action"])
+                    mirrored["action_log_prob"] = minibatch["action_log_prob"]
+                    mirrored["adv"] = minibatch["adv"]
+                    mirrored["ret"] = minibatch["ret"]
+                    mirrored["is_init"] = minibatch["is_init"]
+                    minibatch = torch.cat([minibatch, mirrored], dim=0)
                 infos.append(TensorDict(self._update(minibatch), []))
         
         with torch.no_grad(), torch.device(self.device):
+            self.vecnorm(tensordict)
             a = self.critic(tensordict.replace(cnn_mask=torch.zeros(*tensordict.shape, 1)))
             b = self.critic(tensordict.replace(cnn_mask=torch.ones(*tensordict.shape, 1)))
             value_diff = F.mse_loss(a["state_value"], b["state_value"])
@@ -246,6 +268,8 @@ class PPOPolicy(TensorDictModuleBase):
         infos["critic/value_mean"] = tensordict["ret"].mean().item()
         infos["actor/policy_diff"] = policy_diff.item()
         infos["critic/value_diff"] = value_diff.item()
+        infos["actor/feature_norm"] = tensordict["actor_feature"].norm(dim=-1).mean().item()
+        infos["critic/feature_norm"] = tensordict["critic_feature"].norm(dim=-1).mean().item()
         return dict(sorted(infos.items()))
 
     @torch.no_grad()
