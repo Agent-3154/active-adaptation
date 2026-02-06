@@ -88,10 +88,10 @@ class ResidualFC(nn.Module):
 
 
 class MixedEncoder(nn.Module):
-    def __init__(self, mlp_out=256, cnn_out=32):
+    def __init__(self, proprio_shape: torch.Size, extero_shape: torch.Size):
         super().__init__()
-        self.mlp_out = mlp_out
-        self.cnn_out = cnn_out
+        self.proprio_shape = proprio_shape
+        self.extero_shape = extero_shape
         self.mlp_encoder = nn.Sequential(
             nn.LazyLinear(256), nn.Mish(), nn.LayerNorm(256), 
             nn.LazyLinear(256)
@@ -99,11 +99,11 @@ class MixedEncoder(nn.Module):
         self.cnn_encoder = nn.Sequential(
             FlattenBatch(
                 nn.Sequential(
-                    nn.LazyConv2d(8, kernel_size=3, stride=2, padding=1), 
+                    nn.Conv2d(extero_shape[0], 8, kernel_size=3, stride=2, padding=1), 
                     nn.Mish(), # nn.GroupNorm(num_channels=2, num_groups=2),
-                    nn.LazyConv2d(8, kernel_size=3, stride=2, padding=1),
+                    nn.Conv2d(8, 8, kernel_size=3, stride=2, padding=1),
                     nn.Mish(), # nn.GroupNorm(num_channels=4, num_groups=2),
-                    nn.LazyConv2d(8, kernel_size=3, stride=2, padding=1),
+                    nn.Conv2d(8, 8, kernel_size=3, stride=2, padding=1),
                     nn.Mish(), # nn.GroupNorm(num_channels=8, num_groups=2), 
                     nn.Flatten(),
                 ),
@@ -124,6 +124,82 @@ class MixedEncoder(nn.Module):
         feature = mlp_feature + cnn_feature
         return self.out(feature)
 
+
+import einops
+from active_adaptation.learning.modules.pos_emb import PositionEncodingND
+class CrossAttnEncoder(nn.Module):
+    def __init__(self, proprio_shape: torch.Size, extero_shape: torch.Size):
+        super().__init__()
+        self.proprio_shape = proprio_shape
+        self.extero_shape = extero_shape
+        assert len(proprio_shape) == 1
+        assert len(extero_shape) == 3
+        
+        self.mlp_encoder = nn.Sequential(
+            nn.LazyLinear(256), nn.Mish(), nn.LayerNorm(256), 
+            nn.LazyLinear(256), nn.Mish(), nn.LayerNorm(256),
+        )
+        self.cnn_encoder = nn.Sequential(
+            FlattenBatch(
+                nn.Sequential(
+                    nn.Conv2d(extero_shape[0], 8, kernel_size=3, stride=2, padding=1), 
+                    nn.Mish(), # nn.GroupNorm(num_channels=2, num_groups=2),
+                    nn.Conv2d(8, 16, kernel_size=3, stride=2, padding=1),
+                    nn.Mish(), # nn.GroupNorm(num_channels=4, num_groups=2),
+                    nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+                    nn.Mish(), # nn.GroupNorm(num_channels=8, num_groups=2), 
+                ),
+                data_dim=3,
+            ),
+        )
+
+        with torch.no_grad():
+            shape = self.cnn_encoder(torch.zeros(1, *extero_shape)).shape[-2:]
+        self.pos_enc = PositionEncodingND(shape)
+        
+        self.embed_dim = 128
+        self.propri_proj = nn.LazyLinear(self.embed_dim)
+        self.extero_proj = nn.LazyLinear(self.embed_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=self.embed_dim,
+            num_heads=2,
+            batch_first=True,
+        )
+        self.mlp = nn.Sequential(
+            nn.Linear(self.embed_dim, self.embed_dim),
+            nn.Mish(),
+            nn.Linear(self.embed_dim, self.embed_dim),
+        )
+        self.out = nn.LazyLinear(256)
+
+    def forward(self, propri, extero, mask_cnn):
+        propri_feature = self.mlp_encoder(propri)
+        propri_feature = einops.rearrange(propri_feature, "... (m c) -> ... m c", m=4)
+        propri_feature = self.propri_proj(propri_feature)
+        propri_slots = propri_feature.shape[-2]
+
+        extero_feature = self.cnn_encoder(extero)
+        extero_feature = self.pos_enc(extero_feature)
+        extero_feature = einops.rearrange(extero_feature, "... c h w -> ... (h w) c")
+        extero_feature = self.extero_proj(extero_feature)
+        extero_slots = extero_feature.shape[-2]
+
+        Q = propri_feature
+        K = torch.cat([propri_feature, extero_feature], dim=-2) # [..., (m+h*w), c]
+        V = torch.cat([propri_feature, extero_feature], dim=-2) # [..., (m+h*w), c]
+        
+        if mask_cnn is not None:
+            key_padding_mask = torch.zeros(Q.shape[:-2], propri_slots + extero_slots, dtype=bool, device=Q.device)
+            key_padding_mask[:, propri_slots:] = ~mask_cnn
+            attn_output, attn_output_weights = self.attn(Q, K, V, key_padding_mask=key_padding_mask)
+        else:
+            attn_output, attn_output_weights = self.attn(Q, K, V)
+        feature = propri_feature + attn_output
+        feature = feature + self.mlp(feature)
+        feature = self.out(feature.flatten(-2))
+        return feature
+        
+        
 
 class PPOPolicy(TensorDictModuleBase):
 
@@ -149,7 +225,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.obs_transform = env.observation_funcs["policy"].symmetry_transform().to(self.device)
         self.extero_transform = env.observation_funcs["extero"].symmetry_transform().to(self.device)
         self.act_transform = env.action_manager.symmetry_transform().to(self.device)
-        action_dim = env.action_manager.action_dim
+        self.action_dim = env.action_manager.action_dim
         
         fake_input = observation_spec.zero()
         self.vecnorm_proprio = VecNorm(
@@ -169,8 +245,12 @@ class PPOPolicy(TensorDictModuleBase):
             Mod(self.vecnorm_extero, ["extero"], ["extero_normed"]),
         ).to(self.device)
         
+        encoder_cls = CrossAttnEncoder
         _actor = nn.Sequential(ResidualFC(256), Actor(self.action_dim))
-        self.actor_encoder = MixedEncoder()
+        self.actor_encoder = encoder_cls(
+            observation_spec[OBS_KEY].shape[-1:],
+            observation_spec["extero"].shape[-3:]
+        )
         actor_module = Seq(
             Mod(self.actor_encoder, ["policy_normed", "extero_normed", "cnn_mask"], ["actor_feature"]),
             Mod(_actor, ["actor_feature"], ["loc", "scale"]),
@@ -185,7 +265,10 @@ class PPOPolicy(TensorDictModuleBase):
         ).to(self.device)
         
         _critic = nn.Sequential(ResidualFC(256), nn.LazyLinear(1))
-        self.critic_encoder = MixedEncoder()
+        self.critic_encoder = encoder_cls(
+            observation_spec[OBS_KEY].shape[-1:],
+            observation_spec["extero"].shape[-3:]
+        )
         self.critic = Seq(
             Mod(self.critic_encoder, ["policy_normed", "extero_normed", "cnn_mask"], ["critic_feature"]),
             Mod(_critic, ["critic_feature"], ["state_value"])
@@ -238,10 +321,9 @@ class PPOPolicy(TensorDictModuleBase):
             + ["action", "action_log_prob"]
             + ["adv", "ret", "is_init"]
         )
-        tensordict = tensordict.select(*train_in_keys, strict=False)  # avoid inplace modification
 
         for epoch in range(self.cfg.ppo_epochs):
-            batch = make_batch(tensordict, self.cfg.num_minibatches)
+            batch = make_batch(tensordict.select(*train_in_keys, strict=False), self.cfg.num_minibatches)
             for minibatch in batch:
                 if self.cfg.symaug:
                     mirrored = minibatch.empty()
