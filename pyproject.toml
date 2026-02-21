@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "active_adaptation"
+version = "0.3.0"
+authors = [
+    {name = "btx0424@SUSTech"}
+]
+keywords = ["robotics", "rl"]
+requires-python = ">=3.11"
+dependencies = [
+    "setproctitle",
+    "hydra-core",
+    "omegaconf",
+    "wandb",
+    "moviepy",
+    "av",
+    "einops",
+    "termcolor",
+    "pygame",
+    "tensordict",
+    "torchrl",
+    "mujoco",
+    "linuxfd",
+]
+
+[project.entry-points."active_adaptation.projects"]
+facet = "projects.facet"
+
+[tool.setuptools.packages]
+find = { where = ["."], include = ["active_adaptation*", "scripts*", "projects.facet*", "hydra_plugins.*"] }
+
+[tool.setuptools.package-data]
+"*" = ["**/*"]
+
