@@ -35,8 +35,8 @@ class Game(Command):
     def command(self):
         arange = torch.arange(self.num_envs, device=self.device)
         return torch.cat([
-            quat_rotate_inverse(self.asset.data.root_quat_w, self.target_diff),
-            quat_rotate_inverse(self.asset.data.root_quat_w, self.target_lin_vel_w),
+            quat_rotate_inverse(self.asset.data.root_link_quat_w, self.target_diff),
+            quat_rotate_inverse(self.asset.data.root_link_quat_w, self.target_lin_vel_w),
             (arange % 2 == 0).reshape(self.num_envs, 1),
             (arange % 2 == 1).reshape(self.num_envs, 1),
         ], dim=-1)
@@ -79,8 +79,8 @@ class Game(Command):
             self.asset.data.root_pos_w[::2],
         ], 1).reshape(self.num_envs, 3)
         self.target_lin_vel_w = torch.cat([
-            self.asset.data.root_lin_vel_w[1::2],
-            self.asset.data.root_lin_vel_w[::2],
+            self.asset.data.root_link_lin_vel_w[1::2],
+            self.asset.data.root_link_lin_vel_w[::2],
         ], 1).reshape(self.num_envs, 3)
         self.target_diff = self.target_pos_w - self.asset.data.root_pos_w
         self.distance = self.target_diff[:, :2].norm(dim=-1, keepdim=True)
@@ -100,7 +100,7 @@ class Game(Command):
         )
         self.frame_marker.visualize(
             self.asset.data.root_pos_w[::2] + torch.tensor([0.0, 0.0, 0.2], device=self.device),
-            self.asset.data.root_quat_w[::2],
+            self.asset.data.root_link_quat_w[::2],
             scales=torch.tensor([[4., 1., 0.1]]).expand(self.num_envs // 2, 3),
         )
     
@@ -132,7 +132,7 @@ class chase_velocity(Reward[Game]):
     def compute(self) -> tuple[torch.Tensor, torch.Tensor]:
         is_active = torch.arange(self.num_envs, device=self.device) % 2 == 0
         direction = normalize(self.command_manager.target_diff[:, :2])
-        velocity = self.asset.data.root_lin_vel_w[:, :2]
+        velocity = self.asset.data.root_link_lin_vel_w[:, :2]
         rew = torch.sum(direction * velocity, dim=1, keepdim=True)
         rew = torch.where(rew > 0, rew.log1p(), rew)
         return rew.reshape(self.num_envs, 1), is_active.reshape(self.num_envs, 1)
@@ -155,7 +155,7 @@ class target_in_sight(Reward[Game]):
     
     def compute(self) -> torch.Tensor:
         forward_vec = quat_rotate(
-            self.asset.data.root_quat_w,
+            self.asset.data.root_link_quat_w,
             torch.tensor([1., 0., 0.], device=self.device).expand(self.num_envs, 3)
         )
         diff = normalize(self.command_manager.target_diff)

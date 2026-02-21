@@ -3,9 +3,13 @@ import active_adaptation.learning
 import builtins
 import importlib.metadata
 import importlib.util
+import inspect
 from pathlib import Path
+from omegaconf import DictConfig, OmegaConf
 
-_BACKEND = "isaac"
+_BACKEND = None
+_BACKEND_SET = False
+_CALLED_AT = None
 
 _LOCAL_RANK = os.getenv("LOCAL_RANK", "0")
 _LOCAL_RANK = int(_LOCAL_RANK)
@@ -47,14 +51,29 @@ CONFIG_PATH = Path(__file__).parent.parent / "cfg"
 ASSET_PATH = Path(__file__).parent / "assets"
 SCRIPT_PATH = Path(__file__).parent.parent / "scripts"
 
+
 def set_backend(backend: str):
-    if not backend in ("isaac", "mujoco"):
-        raise ValueError(f"backend must be either 'isaac' or 'mujoco', got {backend}")
-    global _BACKEND
+    global _BACKEND, _BACKEND_SET, _CALLED_AT
+    if _BACKEND_SET:
+        raise RuntimeError(f"set_backend() already called at {_CALLED_AT['filename']}:{_CALLED_AT['lineno']} in {_CALLED_AT['function']}")
+    if not backend in ("isaac", "mujoco", "mjlab"):
+        raise ValueError(f"backend must be either 'isaac' or 'mujoco' or 'mjlab', got {backend}")
+    # Record the call site
+    stack = inspect.stack()
+    caller = stack[1]
     _BACKEND = backend
+    _BACKEND_SET = True
+    _CALLED_AT = {
+        'filename': caller.filename,
+        'lineno': caller.lineno,
+        'function': caller.function,
+        'code_context': caller.code_context[0].strip() if caller.code_context else None,
+    }
 
 
 def get_backend():
+    if not _BACKEND_SET:
+        raise RuntimeError("set_backend() must be called before get_backend()")
     return _BACKEND
 
 
@@ -77,7 +96,7 @@ for entry_point in importlib.metadata.entry_points(group="active_adaptation.lear
 from hydra_plugins.aa_searchpath_plugin.aa_searchpath_plugin import ActiveAdaptationSearchPathPlugin
 
 
-def import_projects():
+def _import_projects():
     for entry_point in _PROJECT_ENTRY_POINTS:
         print(f"Importing project {entry_point.name}")
         entry_point.load()
@@ -89,3 +108,12 @@ def import_algorithms():
         entry_point.load()
 
 
+def init(cfg: DictConfig, import_projects: bool = True):
+    set_backend(cfg.get("backend", "isaac"))
+    if get_backend() == "isaac":
+        from isaaclab.app import AppLauncher
+        AppLauncher(OmegaConf.to_container(cfg.app))
+    if import_projects:
+        _import_projects()
+    return cfg
+    

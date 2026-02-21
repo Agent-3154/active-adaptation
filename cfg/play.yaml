@@ -4,6 +4,9 @@ hydra:
 
 headless: false
 
+backend: isaac
+device: auto # cuda for mjlab, cpu for isaac and mujoco
+
 app:
   headless: ${..headless}
   enable_cameras: false
@@ -37,4 +40,4 @@ defaults:
   - _self_
 
 task:
-  num_envs: 64
+  num_envs: 16

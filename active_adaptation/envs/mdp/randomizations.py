@@ -11,8 +11,6 @@ import isaaclab.utils.string as string_utils
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
-    from isaaclab.sensors import RayCaster
-    from active_adaptation.envs.base import _Env
 
 
 if active_adaptation.get_backend() == "isaac":
@@ -48,6 +46,7 @@ class motor_params(Randomization):
           .*_calf:  [0.8, 1.2]
     
     """
+    supported_backends = ("isaac",)
     def __init__(
         self, 
         env,
@@ -130,6 +129,7 @@ class motor_params(Randomization):
 
 
 class motor_params_implicit(Randomization):
+    supported_backends = ("isaac",)
     def __init__(
         self,
         env,
@@ -226,6 +226,7 @@ class motor_params_armature(Randomization):
 
 
 class random_motor_failure(Randomization):
+    supported_backends = ("isaac",)
     def __init__(
         self,
         env,
@@ -258,12 +259,13 @@ class random_motor_failure(Randomization):
         self.motor_failure[env_ids, i] = 1.0
 
     def debug_draw(self):
-        x = self.asset.data.body_pos_w[:, self._body_ids]
+        x = self.asset.data.body_link_pos_w[:, self._body_ids]
         x = x[self.motor_failure > 0.]
         self.env.debug_draw.point(x, color=(0.1, 1.0, 0.1, 0.8), size=20)
 
 
 class perturb_body_materials(Randomization):
+    supported_backends = ("isaac",)
     def __init__(
         self,
         env,
@@ -314,6 +316,9 @@ class perturb_body_materials(Randomization):
 
 
 class rand_body_materials(Randomization):
+    
+    supported_backends = ("isaac",)
+
     def __init__(
         self,
         env,
@@ -360,6 +365,7 @@ class rand_body_materials(Randomization):
 
 
 class perturb_body_mass(Randomization):
+    supported_backends = ("isaac",)
     def __init__(
         self, env, **perturb_ranges: Tuple[float, float]
     ):
@@ -390,6 +396,7 @@ class perturb_body_mass(Randomization):
 
 
 class perturb_body_com(Randomization):
+    supported_backends = ("isaac",)
     def __init__(
         self, env, body_names, pos_range = (-0.05, 0.05)
     ):
@@ -451,7 +458,13 @@ class push_by_setting_velocity(Randomization):
 
 
 class reset_joint_states_uniform(Randomization):
-    def __init__(self, env, pos_ranges: Dict[str, tuple], vel_ranges: Dict[str, tuple]=None, rel: bool=False):
+    def __init__(
+        self,
+        env,
+        pos_ranges: Dict[str, tuple],
+        vel_ranges: Dict[str, tuple]=None,
+        rel: bool=False,
+    ):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.rel = rel
@@ -467,9 +480,9 @@ class reset_joint_states_uniform(Randomization):
             self.vel_ranges = torch.as_tensor(self.vel_ranges, device=self.device).unbind(-1)
         else:
             self.vel_ranges = None
-        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
-        self.default_joint_vel = self.asset.data.default_joint_vel[:, self.joint_ids]
-        self.joint_limits = self.asset.data.joint_limits[0, self.joint_ids].unbind(-1)
+        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].float()
+        self.default_joint_vel = self.asset.data.default_joint_vel[:, self.joint_ids].float()
+        self.joint_limits = self.asset.data.joint_pos_limits[0, self.joint_ids].float().unbind(-1)
 
     def reset(self, env_ids: torch.Tensor):
         shape = (len(env_ids), len(self.joint_ids))
@@ -550,7 +563,7 @@ class push(Randomization):
 
     def debug_draw(self):
         self.env.debug_draw.vector(
-            self.asset.data.body_pos_w[:, self.body_indices],
+            self.asset.data.body_link_pos_w[:, self.body_indices],
             self.forces / self.default_mass_total,
             color=(1., 0.8, .4, 1.)
         )
@@ -580,7 +593,7 @@ class drag(Randomization):
 
     def debug_draw(self):
         self.env.debug_draw.vector(
-            self.asset.data.body_pos_w[:, self.body_indices],
+            self.asset.data.body_link_pos_w[:, self.body_indices],
             self.forces / self.default_mass_total * 100,
             color=(0.6, 0.8, 0.6, 1.)
         )
@@ -630,7 +643,7 @@ class stumble(Randomization):
 
     def debug_draw(self):
         self.env.debug_draw.vector(
-            self.asset.data.body_pos_w[:, self.body_ids],
+            self.asset.data.body_link_pos_w[:, self.body_ids],
             self.forces_w * self.env.physics_dt,
             color=(1., 0.6, 0., 1.)
         )
@@ -674,7 +687,7 @@ class pull(Randomization):
         force =  self.axis * self.drag_magnitude
         self.forces[:] = torch.where(self.apply_drag, force, torch.zeros_like(self.forces))
         self.asset.set_external_force_and_torque(
-            quat_rotate_inverse(self.asset.data.root_quat_w, self.forces).unsqueeze(1), 
+            quat_rotate_inverse(self.asset.data.root_link_quat_w, self.forces).unsqueeze(1), 
             torch.zeros_like(force).unsqueeze(1), [0])
 
     def debug_draw(self):
@@ -740,7 +753,7 @@ class spring_grf(Randomization):
         self.asset.has_external_wrench = True
 
     def debug_draw(self):
-        feet_pos = self.asset.data.body_pos_w[:, self.feet_ids]
+        feet_pos = self.asset.data.body_link_pos_w[:, self.feet_ids]
         self.env.debug_draw.vector(feet_pos, self.forces / 9.81, color=(0.8, 0.6, 0.6, 1.))
 
 
@@ -784,7 +797,7 @@ class random_impulse(Randomization):
 
     def debug_draw(self):
         self.env.debug_draw.vector(
-            self.asset.data.body_pos_w[:, self.body_id],
+            self.asset.data.body_link_pos_w[:, self.body_id],
             self.impulse_force.get_force(None, None) /  9.81,
             color=(1.0, 0.6, 0.0, 1.0),
             size=3.0,
@@ -836,7 +849,7 @@ class constant_force(Randomization):
     
     def debug_draw(self):
         self.env.debug_draw.vector(
-            self.asset.data.body_pos_w[torch.arange(self.num_envs, device=self.device), self.body_id],
+            self.asset.data.body_link_pos_w[torch.arange(self.num_envs, device=self.device), self.body_id],
             self.force.get_force() /  9.81,
             color=(1.0, 0.6, 0.0, 1.0),
             size=3.0,

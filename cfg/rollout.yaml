@@ -1,0 +1,22 @@
+hydra:
+  run:
+    dir: ./outputs_rollout/${now:%Y-%m-%d}/${now:%H-%M-%S}-${task.name}-${algo.name}
+
+num_steps: ${oc.select:task.max_episode_length,1000}
+headless: true
+
+backend: isaac
+device: cuda
+seed: 42
+
+checkpoint_path: null
+
+app:
+  headless: ${..headless}
+  enable_cameras: false
+
+defaults:
+  - task: Velocity
+  - algo: ppo
+  - _self_
+

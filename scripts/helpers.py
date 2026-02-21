@@ -19,7 +19,7 @@ from active_adaptation.utils.wandb import parse_checkpoint_path
 
 import active_adaptation
 
-active_adaptation.import_projects()
+# active_adaptation.import_projects()
 
 class Every:
     def __init__(self, func, steps):
@@ -64,10 +64,28 @@ def make_env_policy(cfg: DictConfig):
     OmegaConf.set_struct(cfg, False)
     cfg.seed = cfg.seed + active_adaptation.get_local_rank()
     
-    from active_adaptation.envs import SimpleEnv
+    from active_adaptation.envs import SimpleEnvIsaac, SimpleEnvMujoco, SimpleEnvMjlab
     from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
     
-    base_env = SimpleEnv(cfg.task)
+    if "cuda" in str(cfg.device):
+        cfg.device = f"cuda:{active_adaptation.get_local_rank()}"
+    elif not cfg.device == "cpu":
+        raise ValueError(f"Invalid device: {cfg.device}")
+    
+    # Select the appropriate backend-specific environment class
+    backend = active_adaptation.get_backend()
+    if backend == "isaac":
+        env_cls = SimpleEnvIsaac
+    elif backend == "mujoco":
+        env_cls = SimpleEnvMujoco
+        cfg.task.num_envs = 1
+        cfg.task.reward = {}
+    elif backend == "mjlab":
+        env_cls = SimpleEnvMjlab
+    else:
+        raise ValueError(f"Unknown backend: {backend}")
+    
+    base_env = env_cls(cfg.task, str(cfg.device))
 
     checkpoint_path = parse_checkpoint_path(cfg.checkpoint_path)
     if checkpoint_path is not None:

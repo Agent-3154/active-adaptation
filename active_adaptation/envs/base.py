@@ -3,6 +3,7 @@ import numpy as np
 import hydra
 import inspect
 import re
+import warnings
 import warp as wp
 
 from tensordict.tensordict import TensorDictBase, TensorDict
@@ -15,20 +16,19 @@ from torchrl.data import (
 from collections import OrderedDict
 
 from abc import abstractmethod
-from typing import NamedTuple, Dict
+from typing import Dict, cast
 
 import active_adaptation
 import active_adaptation.envs.mdp as mdp
 import active_adaptation.utils.symmetry as symmetry_utils
 from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.envs.adapters import wrap_sim, wrap_scene
 from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
 
 if active_adaptation.get_backend() == "isaac":
     import isaacsim.core.utils.torch as torch_utils
     import isaaclab.sim as sim_utils
     from isaaclab.terrains.trimesh.utils import make_plane
-    from isaaclab.scene import InteractiveScene
-    from isaaclab.sim import SimulationContext
     from pxr import UsdGeom, UsdPhysics
 
 
@@ -95,22 +95,19 @@ class ObsGroup:
 
 
 class _Env(EnvBase):
-    """
-    
-    2024.10.10
-    - disable delay
-    - refactor flipping
-    - no longer recompute observation upon reset
-
-    """
-    def __init__(self, cfg):
-        self.cfg = cfg
+    def __init__(self, cfg, device: str):
+        super().__init__(
+            device=device,
+            batch_size=[cfg.num_envs],
+            run_type_checks=False,
+        )
         self.backend = active_adaptation.get_backend()
-        # self._set_seed(cfg.seed)
+        self.cfg = cfg
 
-        self.scene: InteractiveScene
-        self.sim: SimulationContext
         self.setup_scene()
+        # Wrap sim and scene with adapters for unified API
+        self.sim = wrap_sim(self.sim, self.backend)
+        self.scene = wrap_scene(self.scene, self.backend)
 
         if hasattr(self.scene, "terrain") and self.scene.terrain is not None:
             self.terrain_type = self.scene.terrain.cfg.terrain_type
@@ -125,11 +122,6 @@ class _Env(EnvBase):
         
         print(f"Step dt: {self.step_dt}, physics dt: {self.physics_dt}, decimation: {self.decimation}")
 
-        super().__init__(
-            device=self.sim.device,
-            batch_size=[self.num_envs],
-            run_type_checks=False,
-        )
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=int, device=self.device)
         self.episode_id = torch.zeros(self.num_envs, dtype=int, device=self.device)
         self.episode_count = 0
@@ -153,17 +145,14 @@ class _Env(EnvBase):
             shape=[self.num_envs]
         ).to(self.device)
 
-        if self.cfg.command.get("_target_") is not None:
-            self.command_manager: mdp.Command = hydra.utils.instantiate(self.cfg.command, env=self)
-        else:
-            command_cfg = dict(self.cfg.command)
-            class_name = command_cfg.pop("class")
-            self.command_manager: mdp.Command = mdp.Command.registry[class_name](self, **command_cfg)
+        command_cfg = dict(self.cfg.command)
+        class_name = command_cfg.pop("class")
+        command = mdp.Command.make(class_name, self, **command_cfg)
+        if not command:
+            raise ValueError(f"Command class '{class_name}' not found")
+        self.command_manager = cast(mdp.Command, command)
 
-        ADDONS = mdp.ADDONS
-
-        self.addons = OrderedDict()
-        self.randomizations = OrderedDict()
+        self.randomizations: Dict[str, mdp.Randomization] = OrderedDict()
         self.observation_funcs: Dict[str, ObsGroup] = OrderedDict()
         self.reward_groups: Dict[str, RewardGroup] = OrderedDict()
         self.input_managers: Dict[str, mdp.ActionManager] = OrderedDict()
@@ -175,7 +164,7 @@ class _Env(EnvBase):
         self._pre_step_callbacks = []
         self._post_step_callbacks = []
 
-        self._pre_step_callbacks.append(self.command_manager.step)
+        self._pre_step_callbacks.append(self.command_manager.pre_step)
         # self._update_callbacks.append(self.command_manager.update)
         self._reset_callbacks.append(self.command_manager.reset)
         self._debug_draw_callbacks.append(self.command_manager.debug_draw)
@@ -197,39 +186,26 @@ class _Env(EnvBase):
         
         self.action_spec = Composite(action_spec, shape=[self.num_envs], device=self.device)
         
-        addons = self.cfg.get("addons", {})
-        print(f"Addons: {ADDONS.keys()}")
-        for key, params in addons.items():
-            addon = ADDONS[key](self, **params if params is not None else {})
-            self.addons[key] = addon
-            self._reset_callbacks.append(addon.reset)
-            self._update_callbacks.append(addon.update)
-            self._debug_draw_callbacks.append(addon.debug_draw)
-        
-        for rand_spec, params in self.cfg.randomization.items():
+        for rand_spec, kwargs in self.cfg.randomization.items():
             rand_name, cls_name = parse_name_and_class(rand_spec)
-            rand_cls = mdp.Randomization.registry[cls_name]
-            rand: mdp.Randomization = rand_cls(self, **params if params is not None else {})
+            rand = mdp.Randomization.make(cls_name, self, **(kwargs if kwargs is not None else {}))
+            if not rand:
+                continue
+            
+            rand = cast(mdp.Randomization, rand)
             self.randomizations[rand_name] = rand
-            self._startup_callbacks.append(rand.startup)
-            self._reset_callbacks.append(rand.reset)
-            self._debug_draw_callbacks.append(rand.debug_draw)
-            self._pre_step_callbacks.append(rand.step)
-            self._update_callbacks.append(rand.update)
+            self._add_mdp_component(rand)
 
-        for group_key, params in self.cfg.observation.items():
+        for group_key, group_cfg in self.cfg.observation.items():
             funcs = OrderedDict()            
-            for obs_spec, kwargs in params.items():
+            for obs_spec, kwargs in group_cfg.items():
                 obs_name, obs_cls_name = parse_name_and_class(obs_spec)
-                obs_cls = mdp.Observation.registry[obs_cls_name]
-                obs: mdp.Observation = obs_cls(self, **(kwargs if kwargs is not None else {}))
+                obs = mdp.Observation.make(obs_cls_name, self, **(kwargs if kwargs is not None else {}))
+                if not obs:
+                    continue
+                obs = cast(mdp.Observation, obs)
                 funcs[obs_name] = obs
-
-                self._startup_callbacks.append(obs.startup)
-                self._update_callbacks.append(obs.update)
-                self._reset_callbacks.append(obs.reset)
-                self._debug_draw_callbacks.append(obs.debug_draw)
-                self._post_step_callbacks.append(obs.post_step)
+                self._add_mdp_component(obs)
             
             self.observation_funcs[group_key] = ObsGroup(group_key, funcs)
         
@@ -255,17 +231,13 @@ class _Env(EnvBase):
 
             for rew_spec, params in func_specs.items():
                 rew_name, cls_name = parse_name_and_class(rew_spec)
-                rew_cls = mdp.Reward.registry[cls_name]
-                if "enabled" in params:
-                    params.pop("enabled")
-                reward: mdp.Reward = rew_cls(self, **params)
+                reward = mdp.Reward.make(cls_name, self, **(params if params is not None else {}))
+                if not reward:
+                    continue
+                reward = cast(mdp.Reward, reward)
                 funcs[rew_name] = reward
                 reward_spec["stats", group_name, rew_name] = Unbounded(1, device=self.device)
-                self._update_callbacks.append(reward.update)
-                self._reset_callbacks.append(reward.reset)
-                self._debug_draw_callbacks.append(reward.debug_draw)
-                self._pre_step_callbacks.append(reward.step)
-                self._post_step_callbacks.append(reward.post_step)
+                self._add_mdp_component(reward)
                 print(f"\t{rew_name}: \t{reward.weight:.2f}")
                 self._stats_ema[group_name][rew_name] = (torch.tensor(0., device=self.device), torch.tensor(0., device=self.device))
 
@@ -297,11 +269,12 @@ class _Env(EnvBase):
         self.termination_funcs = OrderedDict()
         for key, params in self.cfg.termination.items():
             term_name, cls_name = parse_name_and_class(key)
-            term_cls = mdp.Termination.registry[cls_name]
-            term: mdp.Termination = term_cls(self, **params)
+            term = mdp.Termination.make(cls_name, self, **(params if params is not None else {}))
+            if not term:
+                continue
+            term = cast(mdp.Termination, term)
             self.termination_funcs[term_name] = term
-            self._update_callbacks.append(term.update)
-            self._reset_callbacks.append(term.reset)
+            self._add_mdp_component(term)
             self.reward_spec["stats", "termination", term_name] = Unbounded((self.num_envs, 1), device=self.device)
         
         self.timestamp: int = 0 # global timestamp in steps
@@ -328,6 +301,20 @@ class _Env(EnvBase):
             for rew_key, (sum, cnt) in group.items():
                 result[group_key][rew_key] = (sum / cnt).item()
         return result
+    
+    def _add_mdp_component(self, component: mdp.MDPComponent):
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "startup"):
+            self._startup_callbacks.append(component.startup)
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "reset"):
+            self._reset_callbacks.append(component.reset)
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "pre_step"):
+            self._pre_step_callbacks.append(component.pre_step)
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "post_step"):
+            self._post_step_callbacks.append(component.post_step)
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "update"):
+            self._update_callbacks.append(component.update)
+        if mdp.is_method_implemented(component, mdp.MDPComponent, "debug_draw"):
+            self._debug_draw_callbacks.append(component.debug_draw)
     
     def setup_scene(self):
         raise NotImplementedError
@@ -409,11 +396,11 @@ class _Env(EnvBase):
                     input_manager.process_action(tensordict.get(input_key))
             for substep in range(self.decimation):
                 with ScopedTimer("simulation_pre_step", sync=False):
-                    for asset in self.scene.articulations.values():
-                        if asset.has_external_wrench:
-                            asset._external_force_b.zero_()
-                            asset._external_torque_b.zero_()
-                            asset.has_external_wrench = False
+                    # for asset in self.scene.articulations.values():
+                    #     if asset.has_external_wrench:
+                    #         asset._external_force_b.zero_()
+                    #         asset._external_torque_b.zero_()
+                    #         asset.has_external_wrench = False
                     self.apply_action(tensordict, substep)
                     for callback in self._pre_step_callbacks:
                         callback(substep)
@@ -517,14 +504,21 @@ class _Env(EnvBase):
         if mode == "human":
             return None
         elif mode == "rgb_array":
-            # obtain the rgb data
-            rgb_data = self._rgb_annotator.get_data()
-            # convert to numpy array
-            rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape)
-            # return the rgb data
-            return rgb_data[:, :, :3]
+            # Backend-specific rendering - only Isaac supports rgb_array via replicator
+            if hasattr(self, "_rgb_annotator"):
+                # obtain the rgb data
+                rgb_data = self._rgb_annotator.get_data()
+                # convert to numpy array
+                rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape)
+                # return the rgb data
+                return rgb_data[:, :, :3]
+            else:
+                raise NotImplementedError(
+                    f"rgb_array mode not supported for backend '{self.backend}'. "
+                    "Only Isaac backend supports rgb_array rendering."
+                )
         else:
-            raise NotImplementedError
+            raise NotImplementedError(f"Render mode '{mode}' not supported.")
 
     def state_dict(self):
         sd = super().state_dict()
