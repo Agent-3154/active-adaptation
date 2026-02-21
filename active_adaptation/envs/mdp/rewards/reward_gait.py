@@ -50,13 +50,10 @@ class feet_sliding(Reward):
         self.body_contact_ids = torch.tensor(self.body_contact_ids, device=self.device)
 
     def compute(self) -> torch.Tensor:
-        in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > 0.005 
-        feet_vel_b = quat_rotate_inverse(
-            yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1),
-            self.asset.data.body_lin_vel_w[:, self.body_ids]
-        )
-        slip = (in_contact * feet_vel_b[:, :, 1].square()).sum(dim=1)
-        return - slip.reshape(self.num_envs, 1)
+        in_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids] > self.env.physics_dt 
+        feet_speed = self.asset.data.body_lin_vel_w[:, self.body_ids].norm(dim=-1)
+        sliding = (in_contact * feet_speed).sum(dim=1)
+        return - sliding.reshape(self.num_envs, 1)
 
 
 class quadruped_trot(Reward):

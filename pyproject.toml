@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "active_adaptation"
-version = "0.3.0"
+version = "0.4.0"
 authors = [
     {name = "btx0424@SUSTech"}
 ]
@@ -26,11 +26,23 @@ dependencies = [
     "linuxfd",
 ]
 
+[project.scripts]
+aa-discover-projects = "active_adaptation:discover_projects"
+
 [project.entry-points."active_adaptation.projects"]
 facet = "projects.facet"
+mimic = "projects.mimic"
+metamorph = "projects.metamorph"
 
 [tool.setuptools.packages]
-find = { where = ["."], include = ["active_adaptation*", "scripts*", "projects.facet*", "hydra_plugins.*"] }
+find = { where = ["."], include = [
+    "active_adaptation*",
+    "scripts*",
+    "hydra_plugins.*",
+    "projects.facet*",
+    "projects.mimic*",
+    "projects.metamorph*"
+    ] }
 
 [tool.setuptools.package-data]
 "*" = ["**/*"]

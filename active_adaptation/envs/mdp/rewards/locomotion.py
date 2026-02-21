@@ -1,5 +1,5 @@
 import torch
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, List, Union
 from typing_extensions import override
 
 import isaaclab.utils.string as string_utils
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
     from isaaclab.assets import Articulation
 
+Names = Union[str, List[str]]
 
 class survival(Reward):
     @override
@@ -34,22 +35,32 @@ class linvel_z_l2(Reward):
 
 
 class angvel_xy_l2(Reward):
-    def __init__(self, env, weight: float):
+    def __init__(self, env, weight: float, body_names: Optional[Names] = None):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
-        self.angvel = torch.zeros(self.num_envs, 3, device=self.device)
-
-    def update(self):
-        self.angvel = self.asset.data.root_com_ang_vel_b
+        if body_names is not None:
+            self.body_ids, self.body_names = self.asset.find_bodies(body_names)
+            self.body_ids = torch.tensor(self.body_ids, device=self.device)
+        else: # root body
+            self.body_ids = None
+            self.body_names = [self.asset.body_names[0]]
 
     def compute(self) -> torch.Tensor:
-        r = -self.angvel[:, :2].square().sum(-1)
-        return r.reshape(self.num_envs, 1)
+        if self.body_ids is not None:
+            angvel = quat_rotate_inverse(
+                self.asset.data.body_quat_w[:, self.body_ids],
+                self.asset.data.body_ang_vel_w[:, self.body_ids]
+            )
+            reward = - angvel[:, :, :2].square().sum((1, 2))
+        else:
+            angvel = self.asset.data.root_com_ang_vel_b
+            reward = - angvel[:, :2].square().sum(1)
+        return reward.reshape(self.num_envs, 1)
 
 
 class undesired_contact(Reward):
     supported_backends = ("isaac",)
-    def __init__(self, env, body_names, weight: float):
+    def __init__(self, env, body_names: Names, weight: float):
         super().__init__(env, weight)
         self.asset: Articulation = self.env.scene["robot"]
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
@@ -73,29 +84,6 @@ class undesired_contact(Reward):
     #         color=(1., .6, .4, 1.),
     #         size=20,
     #     )
-
-
-class impact_force_l2(Reward):
-    def __init__(self, env, body_names, weight: float):
-        super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.default_mass_total = (
-            self.asset.root_physx_view.get_masses()[0].sum() * 9.81
-        )
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
-        self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
-
-        print(f"Penalizing impact forces on {self.body_names}.")
-
-    def compute(self) -> torch.Tensor:
-        first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[
-            :, self.body_ids
-        ]
-        contact_forces = self.contact_sensor.data.net_forces_w_history.norm(
-            dim=-1
-        ).mean(1)
-        force = contact_forces[:, self.body_ids] / self.default_mass_total
-        return -(force.square() * first_contact).sum(1, True)
 
 
 class linvel_exp(Reward[Twist]):
@@ -133,14 +121,41 @@ class linvel_exp(Reward[Twist]):
         return rew.reshape(self.num_envs, 1)
 
     def debug_draw(self):
-        # draw smoothed lin vel (purple)
-        linvel_w = self.linvel_w_sum / self.count.clamp_min(1.0)
-        self.env.debug_draw.vector(
-            self.asset.data.root_link_pos_w
-            + torch.tensor([0.0, 0.0, 0.2], device=self.device),
-            linvel_w,
-            color=(0.8, 0.1, 0.8, 1.0),
-        )
+        if self.env.backend == "isaac":
+            # draw smoothed lin vel (purple)
+            linvel_w = self.linvel_w_sum / self.count.clamp_min(1.0)
+            self.env.debug_draw.vector(
+                self.asset.data.root_link_pos_w
+                + torch.tensor([0.0, 0.0, 0.2], device=self.device),
+                linvel_w,
+                color=(0.8, 0.1, 0.8, 1.0),
+            )
+
+
+class root_pos_exp(Reward):
+    def __init__(self, env, weight: float, dim: int = 2):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.dim = dim
+    
+    def compute(self) -> torch.Tensor:
+        target_pos = self.command_manager.cmd_pos_w[:, : self.dim]
+        pos_error = (self.asset.data.root_link_pos_w[:, : self.dim] - target_pos).square().sum(-1, True)
+        rew = torch.exp(-pos_error / 0.25)
+        return rew.reshape(self.num_envs, 1)
+
+
+class root_pos_l2(Reward):
+    def __init__(self, env, weight: float, dim: int = 2):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.dim = dim
+    
+    def compute(self) -> torch.Tensor:
+        target_pos = self.command_manager.cmd_pos_w[:, : self.dim]
+        pos_error = (self.asset.data.root_link_pos_w[:, : self.dim] - target_pos).square().sum(-1, True)
+        rew = - pos_error
+        return rew.reshape(self.num_envs, 1)
 
 
 class linvel_projection(Reward[Twist]):
@@ -210,31 +225,23 @@ class tracking_yaw(Reward):
 
 class feet_air_time(Reward):
     
-    def __init__(self, env, body_names: str, thres: float, weight: float, condition_on_linvel: bool = False):
+    def __init__(self, env, body_names: str, thres: float, weight: float):
         super().__init__(env, weight)
         self.thres = thres
         self.asset: Articulation = self.env.scene["robot"]
         self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
-        self.condition_on_linvel = condition_on_linvel
 
         self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
         self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
         self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
-        self.reward = torch.zeros(self.num_envs, 1, device=self.env.device)
-        self.last_air_time = torch.zeros(
-            self.num_envs, len(self.body_ids), device=self.env.device
-        )
 
     @override
     def compute(self):
+        first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[:, self.body_ids]
         last_air_time = self.contact_sensor.data.last_air_time[:, self.body_ids]
-        contact = self.last_air_time != last_air_time
-        self.last_air_time = last_air_time
-        self.reward = torch.sum(
-            (last_air_time - self.thres).clamp_max(0.0) * contact, dim=1, keepdim=True
-        )
-        self.reward *= ~self.env.command_manager.is_standing_env
-        return self.reward
+        reward = ((last_air_time - self.thres).clamp_max(0.0) * first_contact).sum(1)
+        active = ~self.command_manager.is_standing_env
+        return reward.reshape(self.num_envs, 1), active
 
 
 class feet_contact_count(Reward):
@@ -325,7 +332,8 @@ class single_foot_contact(Reward):
     def compute(self) -> torch.Tensor:
         in_contact = self.contact_sensor.data.current_contact_time[:, self.body_ids] > self.margin
         single_contact = torch.where(torch.sum(in_contact, dim=1) == 1, 0., -1.)
-        return single_contact.reshape(self.num_envs, 1)
+        valid = ~self.command_manager.is_standing_env
+        return single_contact.reshape(self.num_envs, 1), valid.reshape(self.num_envs, 1)
 
 
 class is_standing_env(Reward):
@@ -335,28 +343,6 @@ class is_standing_env(Reward):
     @override
     def compute(self) -> torch.Tensor:
         return self.env.command_manager.is_standing_env.reshape(self.num_envs, 1)
-
-
-class stance_width(Reward):
-    def __init__(self, env, weight: float, target_width=0.15):
-        """penalize stance width smaller than target_width"""
-        super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.target_width = target_width
-
-    def compute(self) -> torch.Tensor:
-        front_width = (
-            self.asset.data.feet_pos_b[:, [0, 1], 0]
-            .diff(dim=1)
-            .norm(dim=1, keepdim=True)
-        )
-        back_width = (
-            self.asset.data.feet_pos_b[:, [2, 3], 0]
-            .diff(dim=1)
-            .norm(dim=1, keepdim=True)
-        )
-        width = torch.cat([front_width, back_width], dim=1)
-        return -(self.target_width - width).clamp_min(0.0).sum(1, keepdim=True)
 
 
 # class feet_swing_height(Reward):
@@ -588,50 +574,3 @@ class action_rate2_l2(Reward):
         rew = - action_diff.square().sum(dim=-1, keepdim=True)
         return rew
 
-
-class support_polygon(Reward):
-    def __init__(self, env, margin: float, weight: float):
-        super().__init__(env, weight)
-        self.margin = margin
-        self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
-        self.feet_ids, self.feet_names = self.asset.find_bodies(".*_foot")
-        self.feet_ids_contact = self.contact_sensor.find_bodies(".*_foot")[0]
-
-        body_masses = self.asset.data.default_mass.to(self.device)
-        mass_total = body_masses.sum(dim=1)
-        self.body_mass_ratio = body_masses / mass_total.unsqueeze(-1)
-    
-    def update(self):
-        # self.com_pos_w = (self.asset.data.body_com_pos_w * self.body_mass_ratio.unsqueeze(-1)).sum(dim=1)
-        self.com_pos_w = self.asset.data.root_com_pos_w
-        self.feet_pos_w = self.asset.data.body_link_pos_w[:, self.feet_ids]
-    
-    def compute(self):
-        feet_pos_b = quat_rotate_inverse(
-            self.asset.data.root_link_quat_w.unsqueeze(1),
-            self.feet_pos_w - self.com_pos_w.unsqueeze(1)
-        )        
-        in_contact = self.contact_sensor.data.net_forces_w[:, self.feet_ids_contact].norm(dim=-1, keepdim=True) > 0.1
-        rew = ((feet_pos_b.abs() - self.margin).clamp_max(0.) * in_contact).sum(-1)
-        rew = rew.min(dim=1).values
-        return rew.reshape(self.num_envs, 1)
-    
-    def debug_draw(self):
-        if self.env.backend == "isaac":
-            self.env.debug_draw.vector(
-                self.com_pos_w,
-                torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, 3),
-                color=(1.0, 0.0, 0.0, 1.0),
-            )
-
-
-def normalize(x: torch.Tensor):
-    return x / x.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-
-
-def shaped_error(error: torch.Tensor):
-    """
-    Shaped error for reward shaping.
-    """
-    return torch.maximum(error.abs(), error.square())

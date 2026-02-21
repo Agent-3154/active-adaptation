@@ -39,8 +39,9 @@ def export_onnx(
         module,
         kwargs=td.to_dict(),
         dynamo=True,
-        # input_names=input_names,
-        # output_names=output_names,
+        verify=True,
+        input_names=input_names,
+        output_names=output_names,
     )
     onnx_program.save(path)
     print(f"Exported ONNX model to {path}.")

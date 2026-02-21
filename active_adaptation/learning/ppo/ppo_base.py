@@ -13,14 +13,36 @@ class PPOBase(TensorDictModuleBase):
         super().__init__()
         self.num_updates = 0
 
+    def get_rollout_policy(
+        self,
+        mode: str = "train",
+        critic: bool = False,
+    ) -> TensorDictModuleBase:
+        """
+        If critic is True, the critic should be included in the rollout policy.
+        """
+        raise NotImplementedError("get_rollout_policy must be implemented in subclass")
+
+    def on_stage_start(self, stage: str):
+        pass
+
+    def step_schedule(self, progress: float):
+        pass
+
+    def train_op(self, tensordict: TensorDictBase) -> dict:
+        raise NotImplementedError("train_op must be implemented in subclass")
+
+    def compute_value(self, tensordict: TensorDictBase) -> TensorDictBase:
+        raise NotImplementedError("compute_value must be implemented in subclass")
+
     @torch.no_grad()
     def compute_advantage(
-        self, 
+        self,
         tensordict: TensorDictBase,
         critic: TensorDictModuleBase,
-        adv_key: str="adv",
-        ret_key: str="ret",
-        clamp_reward: bool=True, # avoid suicide due to negative rewards
+        adv_key: str = "adv",
+        ret_key: str = "ret",
+        clamp_reward: bool = True,  # avoid suicide due to negative rewards
     ):
         keys = tensordict.keys(True, True)
         if not ("state_value" in keys and ("next", "state_value") in keys):
@@ -32,7 +54,7 @@ class PPOBase(TensorDictModuleBase):
 
         rewards = tensordict[REWARD_KEY].sum(-1, keepdim=True)
         if clamp_reward:
-            rewards = rewards.clamp_min(0.)
+            rewards = rewards.clamp_min(0.0)
         discount = tensordict["next", "discount"]
         terms = tensordict[TERM_KEY]
         dones = tensordict[DONE_KEY]
@@ -43,13 +65,13 @@ class PPOBase(TensorDictModuleBase):
             done=dones,
             value=values,
             next_value=next_values,
-            discount=discount
+            discount=discount,
         )
 
         tensordict.set(adv_key, adv)
         tensordict.set(ret_key, ret)
         return tensordict
-    
+
     def state_dict(self):
         state_dict = OrderedDict()
         for name, module in self.named_children():
@@ -57,7 +79,7 @@ class PPOBase(TensorDictModuleBase):
                 module = module.module
             state_dict[name] = module.state_dict()
         return state_dict
-    
+
     def load_state_dict(self, state_dict, strict=True):
         succeed_keys = []
         failed_keys = []

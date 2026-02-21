@@ -19,7 +19,10 @@ import active_adaptation as aa
 if aa.get_backend() == "isaac":
     import isaaclab.sim as sim_utils
     from isaaclab.actuators import ImplicitActuatorCfg
-    from isaaclab.assets import ArticulationCfg as _ArticulationCfg
+    from isaaclab.assets import (
+        ArticulationCfg as _ArticulationCfg,
+        RigidObjectCfg as IsaaclabRigidObjectCfg,
+    )
     from isaaclab.utils import configclass
     from isaaclab.sensors import ContactSensorCfg as IsaaclabContactSensorCfg
 
@@ -155,7 +158,7 @@ class ActuatorCfg:
             BuiltinPositionActuatorCfg: MuJoCo Lab compatible actuator configuration.
         """
         return BuiltinPositionActuatorCfg(
-            joint_names_expr=self.joint_names_expr,
+            target_names_expr=self.joint_names_expr,
             effort_limit=self.effort_limit,
             stiffness=self.stiffness,
             damping=self.damping,
@@ -171,6 +174,7 @@ class ContactSensorCfg:
     """
     name: str = MISSING
     primary: str = MISSING
+    # for isaaclab, secondary is a list of strings
     secondary: str | Tuple[str, ...] = MISSING
 
     track_air_time: bool = False
@@ -194,6 +198,7 @@ class ContactSensorCfg:
     def mjlab(self):
         return CfrcContactSensorCfg(
             name=self.name,
+            entity="robot",
             track_air_time=self.track_air_time,
         )
         return MjlabContactSensorCfg(
@@ -268,29 +273,48 @@ class AssetCfg:
                 - Collision properties (contact/rest offsets)
                 - Initial state and actuator configurations
         """
-        joint_names_expr = ""
-        effort_limit = {}
-        velocity_limit = {}
-        stiffness = {}
-        damping = {}
-        friction = {}
-        armature = {}
-        
-        def get(expr, cfg):
-            if isinstance(cfg, float):
-                return {expr: cfg}
-            else:
-                return cfg
-        
-        # merge all actuator configurations into a single implicit actuator configuration
-        for _, actuator in self.actuators.items():
-            joint_names_expr += f"({actuator.joint_names_expr})|"
-            effort_limit.update(get(actuator.joint_names_expr, actuator.effort_limit))
-            velocity_limit.update(get(actuator.joint_names_expr, actuator.velocity_limit))
-            stiffness.update(get(actuator.joint_names_expr, actuator.stiffness))
-            damping.update(get(actuator.joint_names_expr, actuator.damping))
-            friction.update(get(actuator.joint_names_expr, actuator.friction))
-            armature.update(get(actuator.joint_names_expr, actuator.armature))
+        if len(self.actuators) > 1:
+            joint_names_expr = ""
+            effort_limit = {}
+            velocity_limit = {}
+            stiffness = {}
+            damping = {}
+            friction = {}
+            armature = {}
+            
+            def parse_cfg(expr, cfg):
+                if isinstance(cfg, (float, int)):
+                    return {expr: cfg}
+                else:
+                    return cfg
+            
+            # merge all actuator configurations into a single implicit actuator configuration
+            for _, actuator in self.actuators.items():
+                expr = actuator.joint_names_expr
+                if not isinstance(expr, str):
+                    expr = "|".join(expr)
+                joint_names_expr += f"({expr})|"
+                effort_limit.update(parse_cfg(expr, actuator.effort_limit))
+                velocity_limit.update(parse_cfg(expr, actuator.velocity_limit))
+                stiffness.update(parse_cfg(expr, actuator.stiffness))
+                damping.update(parse_cfg(expr, actuator.damping))
+                friction.update(parse_cfg(expr, actuator.friction))
+                armature.update(parse_cfg(expr, actuator.armature))
+            actuators = {
+                "all": ImplicitActuatorCfg(
+                    joint_names_expr=joint_names_expr,
+                    effort_limit_sim=effort_limit,
+                    velocity_limit_sim=velocity_limit,
+                    stiffness=stiffness,
+                    damping=damping,
+                    friction=friction,
+                    armature=armature,
+                )
+            }
+        else:
+            actuators = {
+                name: actuator.isaaclab() for name, actuator in self.actuators.items()
+            }
         
         return ArticulationCfg(
             spawn=sim_utils.UsdFileCfg(
@@ -299,8 +323,8 @@ class AssetCfg:
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
                     disable_gravity=False,
                     retain_accelerations=False,
-                    linear_damping=0.0,
-                    angular_damping=0.0,
+                    linear_damping=0.002,
+                    angular_damping=0.002,
                     max_linear_velocity=1000.0,
                     max_angular_velocity=1000.0,
                     max_depenetration_velocity=1.0,
@@ -316,15 +340,7 @@ class AssetCfg:
                 ),
             ),
             init_state=self.init_state.isaaclab(),
-            actuators={"all": ImplicitActuatorCfg(
-                joint_names_expr=joint_names_expr,
-                effort_limit_sim=effort_limit,
-                velocity_limit_sim=velocity_limit,
-                stiffness=stiffness,
-                damping=damping,
-                friction=friction,
-                armature=armature,
-            )},
+            actuators=actuators,
             soft_joint_pos_limit_factor=0.9,
             joint_symmetry_mapping=self.joint_symmetry_mapping,
             spatial_symmetry_mapping=self.spatial_symmetry_mapping,
@@ -343,7 +359,7 @@ class AssetCfg:
         friction = {}
         armature = {}
         
-        def get(expr, cfg):
+        def parse_cfg(expr, cfg):
             if isinstance(cfg, float):
                 return {expr: cfg}
             else:
@@ -351,13 +367,16 @@ class AssetCfg:
         
         # merge all actuator configurations into a single implicit actuator configuration
         for _, actuator in self.actuators.items():
-            joint_names_expr += f"({actuator.joint_names_expr})|"
-            effort_limit.update(get(actuator.joint_names_expr, actuator.effort_limit))
-            velocity_limit.update(get(actuator.joint_names_expr, actuator.velocity_limit))
-            stiffness.update(get(actuator.joint_names_expr, actuator.stiffness))
-            damping.update(get(actuator.joint_names_expr, actuator.damping))
-            friction.update(get(actuator.joint_names_expr, actuator.friction))
-            armature.update(get(actuator.joint_names_expr, actuator.armature))
+            expr = actuator.joint_names_expr
+            if not isinstance(expr, str):
+                expr = "|".join(expr)
+            joint_names_expr += f"({expr})|"
+            effort_limit.update(parse_cfg(expr, actuator.effort_limit))
+            velocity_limit.update(parse_cfg(expr, actuator.velocity_limit))
+            stiffness.update(parse_cfg(expr, actuator.stiffness))
+            damping.update(parse_cfg(expr, actuator.damping))
+            friction.update(parse_cfg(expr, actuator.friction))
+            armature.update(parse_cfg(expr, actuator.armature))
         
         return MJArticulationCfg(
             mjcf_path=str(self.mjcf_path),
@@ -427,6 +446,39 @@ class AssetCfg:
             body_names_isaac=self.body_names_isaac,
             body_names_mjlab=self.body_names_mjlab,
         )
+
+
+@dataclass(kw_only=True, frozen=True)
+class RigidObjectCfg:
+    
+    usd_path: str | Path = MISSING
+    activate_contact_sensors: bool = True
+    disable_gravity: bool = False
+
+    def isaaclab(self):
+        return IsaaclabRigidObjectCfg(
+            spawn=sim_utils.UsdFileCfg(
+                scale=(1.0, 1.0, 1.0),
+                usd_path=str(self.usd_path),
+                activate_contact_sensors=self.activate_contact_sensors,
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    disable_gravity=self.disable_gravity,
+                    retain_accelerations=False,
+                    linear_damping=0.0,
+                    angular_damping=0.0,
+                    max_linear_velocity=1000.0,
+                    max_angular_velocity=1000.0,
+                    max_depenetration_velocity=10.0,
+                    # enable_gyroscopic_forces=True,
+                ),
+            )
+        )
+    
+    def mujoco(self):
+        raise NotImplementedError("MuJoCo backend does not support rigid objects")
+
+    def mjlab(self):
+        raise NotImplementedError("MuJoCo Lab backend does not support rigid objects")
 
 
 def get_input_joint_indexing(

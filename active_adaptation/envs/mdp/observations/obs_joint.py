@@ -236,8 +236,8 @@ class applied_torque(joint_observation):
     
     supported_backends = ("isaac",)
 
-    def __init__(self, env, joint_names: str=".*"):
-        super().__init__(env)
+    def __init__(self, env, joint_names: str=".*", output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac"):
+        super().__init__(env, joint_names, output_order=output_order)
         self.asset: Articulation = self.env.scene["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)

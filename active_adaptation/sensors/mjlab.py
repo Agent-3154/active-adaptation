@@ -19,6 +19,7 @@ class CfrcContactSensorCfg(SensorCfg):
     Compared to mjlab's ContactSensor, this sensor directly reads the 
     per-body contact forces from `data.cfrc_ext`.
     """
+    entity: str = "robot"
     track_air_time: bool = True
 
     def build(self) -> CfrcContactSensor:
@@ -42,21 +43,27 @@ class CfrcContactSensor(Sensor[ContactData]):
         device: str,
     ) -> None:
         n_envs = data.time.shape[0]
-        b_body = mj_model.nbody
         
         # mj_model.sensor_rne_postconstraint = True
         model.struct.sensor_rne_postconstraint = True
 
-        self.body_names = [mj_model.body(i).name for i in range(b_body)]
+        self.body_adr = None # start address when indexing `cfrc_ext`
+        self.body_names = []
+        for i in range(mj_model.nbody):
+            body = mj_model.body(i)
+            if body.name.startswith(self.cfg.entity):
+                if self.body_adr is None:
+                    self.body_adr = i
+                self.body_names.append(body.name.split("/")[-1])
         
         self._data: mjwarp.Data = data
         self._device = device
         if self.cfg.track_air_time:
             self._air_time_state = _AirTimeState(
-            current_air_time=torch.zeros((n_envs, b_body), device=device),
-            last_air_time=torch.zeros((n_envs, b_body), device=device),
-            current_contact_time=torch.zeros((n_envs, b_body), device=device),
-            last_contact_time=torch.zeros((n_envs, b_body), device=device),
+            current_air_time=torch.zeros((n_envs, len(self.body_names)), device=device),
+            last_air_time=torch.zeros((n_envs, len(self.body_names)), device=device),
+            current_contact_time=torch.zeros((n_envs, len(self.body_names)), device=device),
+            last_contact_time=torch.zeros((n_envs, len(self.body_names)), device=device),
             last_time=torch.zeros((n_envs,), device=device),
         )
     
@@ -81,8 +88,8 @@ class CfrcContactSensor(Sensor[ContactData]):
     
     def update(self, dt: float) -> None:
         
-        self._contact_data.force = self._data.cfrc_ext[:, :, :3]
-        self._contact_data.torque = self._data.cfrc_ext[:, :, 3:]
+        self._contact_data.force = self._data.cfrc_ext[:, self.body_adr:, :3]
+        self._contact_data.torque = self._data.cfrc_ext[:, self.body_adr:, 3:]
         self._contact_data.found = self._contact_data.force.norm(dim=-1) > 0.1
 
         if self._air_time_state is not None:

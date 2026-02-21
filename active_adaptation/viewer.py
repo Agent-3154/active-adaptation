@@ -1,11 +1,12 @@
 import viser
 import time
 import threading
+import torch
 
 from mjlab.sim import Simulation
-from mjlab.viewer.viser_scene import ViserMujocoScene
+from mjlab.viewer.viser import ViserMujocoScene
 from mjlab.viewer.base import Timer
-from active_adaptation.envs.base import _Env
+from active_adaptation.envs.env_base import _EnvBase
 
 
 class MjLabViewer:
@@ -13,19 +14,19 @@ class MjLabViewer:
     Different from `mjlab.viewer.viser_play.ViserPlayViewer`, this
     viewer is not responsible for stepping the environment.
     """
-    def __init__(self, env: _Env):
+    def __init__(self, env: _EnvBase):
         self.env = env
         self.sim: Simulation = env.sim
         self.frame_rate = 30.0
         self.frame_time = 1.0 / self.frame_rate
 
+        self._server = viser.ViserServer(label="mjlab")
         self._timer = Timer()
         self._render_timer = Timer()
         self._time_until_next_frame = 0.0
         self._thread = None
 
     def setup(self):
-        self._server = viser.ViserServer(label="mjlab")
         self._scene = ViserMujocoScene.create(
             server=self._server,
             mj_model=self.sim.mj_model,
@@ -35,7 +36,23 @@ class MjLabViewer:
 
         tabs = self._server.gui.add_tab_group()
         self._scene.create_geom_groups_gui(tabs)
-        
+    
+    def add_batched_axes(self, name: str):
+        axes_handle = self._server.scene.add_batched_axes(
+            name=name,
+            batched_wxyzs=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(self.env.num_envs, 4),
+            batched_positions=torch.tensor([[0.0, 0.0, 0.0]]).expand(self.env.num_envs, 3),
+            batched_scales=torch.tensor([[1.0, 1.0, 1.0]]).expand(self.env.num_envs, 3),
+        )
+        return axes_handle
+    
+    def add_line_segments(self, name: str, colors: tuple[float, float, float] | torch.Tensor):
+        lines_handle = self._server.scene.add_line_segments(
+            name=name,
+            points=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]).expand(self.env.num_envs, 2, 3),
+            colors=colors,
+        )
+        return lines_handle
     
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()

@@ -25,7 +25,7 @@ action:
     (F|R)(L|R)_(thigh|calf)_joint: 0.5
     (F|R)(L|R)_hip_joint: 0.5
     arm_joint[1-5]: 1.0
-  alpha: [0.75, 0.95]
+  alpha_range: [0.75, 0.95]
   max_delay: 1
 
 command:
@@ -91,7 +91,6 @@ reward:
 termination:
   crash: {body_names_expr: ["base", ".*calf.*", "arm_link[1-6]"], t_thres: 0.05}
   fall_over: {xy_thres: 0.9}
-  # cum_error: {thres: 1.5, min_steps: 100}
 
 randomization:
   perturb_body_mass:

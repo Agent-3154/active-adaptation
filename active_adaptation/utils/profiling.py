@@ -53,7 +53,8 @@ class ScopedTimer:
         if self.sync:
             torch.cuda.synchronize()
         self.end = time.perf_counter()
-        self.time += self.end - self.start
+        self.last_time = self.end - self.start
+        self.time += self.last_time
         self.count += 1
         ScopedTimer._stack.pop()
     

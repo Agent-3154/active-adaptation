@@ -8,7 +8,7 @@ from .asset_cfg import (
     get_output_body_indexing,
 )
 from . import quadruped
-# from . import humanoid
+from . import humanoid
 
 __all__ = [
     "AssetCfg",

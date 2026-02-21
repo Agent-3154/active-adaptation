@@ -3,15 +3,6 @@
 
 import torch
 import torch.distributions as D
-from isaaclab.utils.math import (
-    yaw_quat,
-    quat_from_matrix,
-    quat_mul,
-    quat_conjugate,
-    axis_angle_from_quat,
-    create_rotation_matrix_from_view,
-    convert_camera_frame_orientation_convention
-)
 
 from .helpers import batchify
 
@@ -89,6 +80,7 @@ def yaw_rotate(yaw: torch.Tensor, vec: torch.Tensor):
     """
     Rotate a vector by a yaw angle (in radians).
     """
+    yaw = yaw.reshape(vec.shape[:-1])
     yaw_cos = torch.cos(yaw)
     yaw_sin = torch.sin(yaw)
     vec = vec.expand(*yaw.shape, 3)
@@ -112,6 +104,79 @@ def quat_from_yaw(yaw: torch.Tensor):
         ],
         dim=-1,
     )
+
+
+def yaw_quat(quat: torch.Tensor) -> torch.Tensor:
+    """Extract the yaw component of a quaternion.
+
+    Args:
+        quat: The orientation in (w, x, y, z). Shape is (..., 4)
+
+    Returns:
+        A quaternion with only yaw component.
+    """
+    shape = quat.shape
+    quat_yaw = quat.view(-1, 4)
+    qw = quat_yaw[:, 0]
+    qx = quat_yaw[:, 1]
+    qy = quat_yaw[:, 2]
+    qz = quat_yaw[:, 3]
+    yaw = torch.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+    quat_yaw = torch.zeros_like(quat_yaw)
+    quat_yaw[:, 3] = torch.sin(yaw / 2)
+    quat_yaw[:, 0] = torch.cos(yaw / 2)
+    quat_yaw = normalize(quat_yaw)
+    return quat_yaw.view(shape)
+
+
+def quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+    """Multiply two quaternions together.
+
+    Args:
+        q1: The first quaternion in (w, x, y, z). Shape is (..., 4).
+        q2: The second quaternion in (w, x, y, z). Shape is (..., 4).
+
+    Returns:
+        The product of the two quaternions in (w, x, y, z). Shape is (..., 4).
+
+    Raises:
+        ValueError: Input shapes of ``q1`` and ``q2`` are not matching.
+    """
+    # check input is correct
+    if q1.shape != q2.shape:
+        msg = f"Expected input quaternion shape mismatch: {q1.shape} != {q2.shape}."
+        raise ValueError(msg)
+    # reshape to (N, 4) for multiplication
+    shape = q1.shape
+    q1 = q1.reshape(-1, 4)
+    q2 = q2.reshape(-1, 4)
+    # extract components from quaternions
+    w1, x1, y1, z1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
+    w2, x2, y2, z2 = q2[:, 0], q2[:, 1], q2[:, 2], q2[:, 3]
+    # perform multiplication
+    ww = (z1 + x1) * (x2 + y2)
+    yy = (w1 - y1) * (w2 + z2)
+    zz = (w1 + y1) * (w2 - z2)
+    xx = ww + yy + zz
+    qq = 0.5 * (xx + (z1 - x1) * (x2 - y2))
+    w = qq - ww + (z1 - y1) * (y2 - z2)
+    x = qq - xx + (x1 + w1) * (x2 + w2)
+    y = qq - yy + (w1 - x1) * (y2 + z2)
+    z = qq - zz + (z1 + y1) * (w2 - x2)
+
+    return torch.stack([w, x, y, z], dim=-1).view(shape)
+
+
+def quat_conjugate(q: torch.Tensor) -> torch.Tensor:
+    """Computes the conjugate of a quaternion.
+
+    Args:
+        q: The quaternion orientation in (w, x, y, z). Shape is (..., 4).
+
+    Returns:
+        The conjugate quaternion in (w, x, y, z). Shape is (..., 4).
+    """
+    return torch.cat((q[..., 0:1], -q[..., 1:]), dim=-1)
 
 
 def quat_from_euler_xyz(rpy: torch.Tensor) -> torch.Tensor:
@@ -164,11 +229,42 @@ def euler_from_quat(quat: torch.Tensor):
     return torch.stack([roll, pitch, yaw], dim=-1)
 
 
-def quat_from_view(eyes: torch.Tensor, lookat: torch.Tensor):
-    matrix = create_rotation_matrix_from_view(eyes, lookat, up_axis="Z", device=eyes.device)
-    quat = quat_from_matrix(matrix)
-    quat = convert_camera_frame_orientation_convention(quat, "opengl", "world")
-    return quat
+# def quat_from_view(eyes: torch.Tensor, lookat: torch.Tensor):
+#     matrix = create_rotation_matrix_from_view(eyes, lookat, up_axis="Z", device=eyes.device)
+#     quat = quat_from_matrix(matrix)
+#     quat = convert_camera_frame_orientation_convention(quat, "opengl", "world")
+#     return quat
+
+
+def axis_angle_from_quat(quat: torch.Tensor, eps: float = 1.0e-6) -> torch.Tensor:
+    """Convert rotations given as quaternions to axis/angle.
+
+    Args:
+        quat: The quaternion orientation in (w, x, y, z). Shape is (..., 4).
+        eps: The tolerance for Taylor approximation. Defaults to 1.0e-6.
+
+    Returns:
+        Rotations given as a vector in axis angle form. Shape is (..., 3).
+        The vector's magnitude is the angle turned anti-clockwise in radians around the vector's direction.
+
+    Reference:
+        https://github.com/facebookresearch/pytorch3d/blob/main/pytorch3d/transforms/rotation_conversions.py#L526-L554
+    """
+    # Modified to take in quat as [q_w, q_x, q_y, q_z]
+    # Quaternion is [q_w, q_x, q_y, q_z] = [cos(theta/2), n_x * sin(theta/2), n_y * sin(theta/2), n_z * sin(theta/2)]
+    # Axis-angle is [a_x, a_y, a_z] = [theta * n_x, theta * n_y, theta * n_z]
+    # Thus, axis-angle is [q_x, q_y, q_z] / (sin(theta/2) / theta)
+    # When theta = 0, (sin(theta/2) / theta) is undefined
+    # However, as theta --> 0, we can use the Taylor approximation 1/2 - theta^2 / 48
+    quat = quat * (1.0 - 2.0 * (quat[..., 0:1] < 0.0))
+    mag = torch.linalg.norm(quat[..., 1:], dim=-1)
+    half_angle = torch.atan2(mag, quat[..., 0])
+    angle = 2.0 * half_angle
+    # check whether to apply Taylor approximation
+    sin_half_angles_over_angles = torch.where(
+        angle.abs() > eps, torch.sin(half_angle) / angle, 0.5 - angle * angle / 48
+    )
+    return quat[..., 1:4] / sin_half_angles_over_angles.unsqueeze(-1)
 
 
 def sample_quat_yaw(size, yaw_range=(0, torch.pi * 2), device: torch.device = "cpu"):
@@ -185,6 +281,39 @@ def sample_quat_yaw(size, yaw_range=(0, torch.pi * 2), device: torch.device = "c
     return quat
 
 
+def matrix_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
+    """Convert rotations given as quaternions to rotation matrices.
+
+    Args:
+        quaternions: The quaternion orientation in (w, x, y, z). Shape is (..., 4).
+
+    Returns:
+        Rotation matrices. The shape is (..., 3, 3).
+
+    Reference:
+        https://github.com/facebookresearch/pytorch3d/blob/main/pytorch3d/transforms/rotation_conversions.py#L41-L70
+    """
+    r, i, j, k = torch.unbind(quaternions, -1)
+    # pyre-fixme[58]: `/` is not supported for operand types `float` and `Tensor`.
+    two_s = 2.0 / (quaternions * quaternions).sum(-1)
+
+    o = torch.stack(
+        (
+            1 - two_s * (j * j + k * k),
+            two_s * (i * j - k * r),
+            two_s * (i * k + j * r),
+            two_s * (i * j + k * r),
+            1 - two_s * (i * i + k * k),
+            two_s * (j * k - i * r),
+            two_s * (i * k - j * r),
+            two_s * (j * k + i * r),
+            1 - two_s * (i * i + j * j),
+        ),
+        -1,
+    )
+    return o.reshape(quaternions.shape[:-1] + (3, 3))
+
+
 def normal_noise(x: torch.Tensor, std: float):
     """
     Add normal noise to a tensor. Clamp the noise to 3 standard deviations for stability.
@@ -197,6 +326,49 @@ def uniform_noise(x: torch.Tensor, min: float, max: float):
     Add uniform noise to a tensor.
     """
     return x + torch.rand_like(x) * (max - min) + min
+
+
+def slerp(quat0: torch.Tensor, quat1: torch.Tensor, t: torch.Tensor):
+    """
+    Spherical linear interpolation between two quaternions.
+    
+    Args:
+        quat0: First quaternion tensor
+        quat1: Second quaternion tensor
+        t: Interpolation factor (0 = quat0, 1 = quat1)
+    
+    Returns:
+        Interpolated quaternion (normalized)
+    """
+    # Compute dot product
+    dot = torch.sum(quat0 * quat1, dim=-1, keepdim=True)
+    dot = torch.clamp(dot, -1.0, 1.0)
+    
+    # If dot product is negative, negate one quaternion to take shorter path
+    # (since q and -q represent the same rotation)
+    quat1 = torch.where(dot < 0, -quat1, quat1)
+    dot = torch.abs(dot)
+    
+    # Compute angle
+    theta = torch.arccos(dot)
+    sin_theta = torch.sin(theta)
+    
+    # Handle case when quaternions are very close (fallback to linear interpolation)
+    # Use a small epsilon to avoid division by zero
+    eps = 1e-6
+    mask = sin_theta > eps
+    
+    # Compute interpolation coefficients
+    t1 = torch.where(mask, torch.sin((1 - t) * theta) / sin_theta, 1 - t)
+    t2 = torch.where(mask, torch.sin(t * theta) / sin_theta, t)
+    
+    # Interpolate and normalize
+    result = quat0 * t1 + quat1 * t2
+    return result / torch.linalg.norm(result, dim=-1, keepdim=True)
+
+
+def sample_uniform(size, low: float, high: float, device: torch.device = "cpu"):
+    return torch.rand(size, device=device) * (high - low) + low
 
 
 class MultiUniform(D.Distribution):

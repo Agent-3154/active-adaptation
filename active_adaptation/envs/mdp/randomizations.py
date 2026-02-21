@@ -24,111 +24,6 @@ NestedRangeType = Union[RangeType, Dict[str, RangeType]]
 
 
 class motor_params(Randomization):
-    """
-    2024.10.28
-    - refactor to grouped randomization.
-
-
-    Example usage in the config file:
-
-      actuator_name: base_legs
-        stiffness_range:  
-          F[L,R]_hip:   [0.8, 1.2]
-          F[L,R]_thigh: [0.8, 1.2]
-          ...
-        damping_range:
-          F[L,R]_hip:   [0.8, 1.2]
-          F[L,R]_thigh: [0.8, 1.2]
-          ...
-        scale_factor_range:
-          .*_hip:   [0.8, 1.2]
-          .*_thigh: [0.8, 1.2]
-          .*_calf:  [0.8, 1.2]
-    
-    """
-    supported_backends = ("isaac",)
-    def __init__(
-        self, 
-        env,
-        actuator_name,
-        stiffness_range: NestedRangeType = (1.0, 1.0),
-        damping_range: NestedRangeType = (1.0, 1.0),
-        scale_factor_range: NestedRangeType = (1.0, 1.0),
-        armature_range: NestedRangeType = (0.0, 0.0),
-        strength_range: NestedRangeType = (1.0, 1.0),
-        **kwargs
-    ):
-        super().__init__(env)
-        if len(kwargs) > 0:
-            import warnings
-            warnings.warn(f"Got unexpected keyword arguments: {kwargs}")
-        
-        self.asset: Articulation = self.env.scene["robot"]
-        self.actuator_name = actuator_name
-        self.stiffness_range = stiffness_range
-        self.damping_range = damping_range
-        self.strength_range = strength_range
-
-        self.actuator: Union[DCMotor, ImplicitActuator] = self.asset.actuators[self.actuator_name]
-        self.num_joints = len(self.actuator.joint_names)
-        self.default_stiffness  = self.actuator.stiffness[0].clone()
-        self.default_damping    = self.actuator.damping[0].clone()
-        
-        from omegaconf import ListConfig
-        def parse(range: NestedRangeType, default: torch.Tensor):
-            if isinstance(range, (tuple, list, ListConfig)):
-                range = {".*": range}
-            result = {}
-            for key, value in range.items():
-                ids, names = string_utils.resolve_matching_names(key, self.actuator.joint_names)
-                result[key] = (ids, names, value, default[ids])
-            return result
-
-        self.stiffness_range    = parse(stiffness_range, self.default_stiffness)
-        self.damping_range      = parse(damping_range, self.default_damping)
-        self.scale_factor_range = parse(scale_factor_range, torch.ones(self.num_joints, device=self.device))
-        self.armature_range     = parse(armature_range, torch.zeros(self.num_joints, device=self.device))
-        
-    def reset(self, env_ids: torch.Tensor=slice(None)):
-        if not self.env.backend == "isaac":
-            return
-        
-        scale_factor = torch.ones(len(env_ids), self.num_joints, device=self.device)
-        for key, (ids, names, value, default) in self.scale_factor_range.items():
-            r = (value[1] - value[0]) * torch.rand(len(env_ids), 1, device=self.device) + value[0]
-            scale_factor[:, ids] = default * r
-
-        stiffness = self.default_stiffness.expand(len(env_ids), -1).clone()
-        for key, (ids, names, value, default) in self.stiffness_range.items():
-            r = (value[1] - value[0]) * torch.rand(len(env_ids), 1, device=self.device) + value[0]
-            stiffness[:, ids] = default * r
-        self.actuator.stiffness[env_ids] = stiffness * scale_factor
-        
-        damping = self.default_damping.expand(len(env_ids), -1).clone()
-        for key, (ids, names, value, default) in self.damping_range.items():
-            r = (value[1] - value[0]) * torch.rand(len(env_ids), 1, device=self.device) + value[0]
-            damping[:, ids] = default * r
-        self.actuator.damping[env_ids] = damping * scale_factor
-
-        armature = torch.zeros(len(env_ids), self.num_joints, device=self.device)
-        for key, (ids, names, value, default) in self.armature_range.items():
-            r = (value[1] - value[0]) * torch.rand(len(env_ids), 1, device=self.device) + value[0]
-            armature[:, ids] = r
-        self.asset.write_joint_armature_to_sim(armature, env_ids=env_ids)
-
-        # apply randomization
-        if isinstance(self.actuator, DCMotor):
-            pass
-        elif isinstance(self.actuator, HybridActuator):
-            implicit = self.actuator.implicit[env_ids]
-            self.asset.write_joint_stiffness_to_sim(stiffness * implicit, self.actuator.joint_indices, env_ids)
-            self.asset.write_joint_damping_to_sim(damping * implicit, self.actuator.joint_indices, env_ids)
-        elif isinstance(self.actuator, ImplicitActuator):
-            self.asset.write_joint_stiffness_to_sim(stiffness, self.actuator.joint_indices, env_ids)
-            self.asset.write_joint_damping_to_sim(damping, self.actuator.joint_indices, env_ids)
-
-
-class motor_params_implicit(Randomization):
     supported_backends = ("isaac",)
     def __init__(
         self,
@@ -139,49 +34,41 @@ class motor_params_implicit(Randomization):
     ):
         super().__init__(env),
         self.asset: Articulation = self.env.scene["robot"]
+        self.indices = {}
+        self.ranges = {}
+        self.write_func = {}
 
         if stiffness_range is not None:
             self.stiffness_range = dict(stiffness_range)
             ids, _, value = string_utils.resolve_matching_names_values(self.stiffness_range, self.asset.joint_names)
-            self.stiffness_id = torch.tensor(ids, device=self.device)
-            self.stiffness_default = self.asset.data.joint_stiffness[0, self.stiffness_id]
-            low, high = (torch.tensor(value, device=self.device) * self.stiffness_default.unsqueeze(1)).unbind(1)
-            self.stiffness_low = low
-            self.stiffness_scale = high - low
-        else:
-            self.stiffness_id = None
+            default = self.asset.data.joint_stiffness[0, ids]
+            low, high = (torch.tensor(value, device=self.device) * default.unsqueeze(1)).unbind(1)
+            self.indices["stiffness"] = torch.tensor(ids, device=self.device)
+            self.ranges["stiffness"] = (low, high - low)
+            self.write_func["stiffness"] = self.asset.write_joint_stiffness_to_sim
         
         if damping_range is not None:
             self.damping_range = dict(damping_range)
             ids, _, value = string_utils.resolve_matching_names_values(self.damping_range, self.asset.joint_names)
-            self.damping_id = torch.tensor(ids, device=self.device)
-            self.damping_default = self.asset.data.joint_damping[0, self.damping_id]
-            low, high = (torch.tensor(value, device=self.device) * self.damping_default.unsqueeze(1)).unbind(1)
-            self.damping_low = low
-            self.damping_scale = high - low
-        else:
-            self.damping_id = None
-        
+            default = self.asset.data.joint_damping[0, ids]
+            low, high = (torch.tensor(value, device=self.device) * default.unsqueeze(1)).unbind(1)
+            self.indices["damping"] = torch.tensor(ids, device=self.device)
+            self.ranges["damping"] = (low, high - low)
+            self.write_func["damping"] = self.asset.write_joint_damping_to_sim
+
         if armature_range is not None:
             self.armature_range = dict(armature_range)
             ids, _, value = string_utils.resolve_matching_names_values(self.armature_range, self.asset.joint_names)
-            self.armature_id = torch.tensor(ids, device=self.device)
             low, high = torch.tensor(value, device=self.device).unbind(1)
-            self.armature_low = low
-            self.armature_scale = high - low
-        else:
-            self.armature_id = None
-    
+            self.indices["armature"] = torch.tensor(ids, device=self.device)
+            self.ranges["armature"] = (low, high - low)
+            self.write_func["armature"] = self.asset.write_joint_armature_to_sim
+        
     def reset(self, env_ids):
-        if self.stiffness_id is not None:
-            stiffness = torch.rand(len(env_ids), len(self.stiffness_id), device=self.device) * self.stiffness_scale + self.stiffness_low
-            self.asset.write_joint_stiffness_to_sim(stiffness, self.stiffness_id, env_ids)
-        if self.damping_id is not None:
-            damping = torch.rand(len(env_ids), len(self.damping_id), device=self.device) * self.damping_scale + self.damping_low
-            self.asset.write_joint_damping_to_sim(damping, self.damping_id, env_ids)
-        if self.armature_id is not None:
-            armature = torch.rand(len(env_ids), len(self.armature_id), device=self.device) * self.armature_scale + self.armature_low
-            self.asset.write_joint_armature_to_sim(armature, self.armature_id, env_ids)
+        for key, indices in self.indices.items():
+            low, range = self.ranges[key]
+            values = torch.rand(len(env_ids), len(indices), device=self.device) * range + low
+            self.write_func[key](values, indices, env_ids)
 
 
 class motor_params_armature(Randomization):
@@ -528,13 +415,20 @@ class reset_joint_states_scale(Randomization):
         )
 
 
-class push(Randomization):
-    def __init__(self, env, body_names, force_range = (0.2, 0.9), min_interval=100, decay: float=0.9):
+class push_body(Randomization):
+    supported_backends = ("isaac", "mujoco")
+    def __init__(
+        self,
+        env,
+        body_names,
+        force_range = (20, 50),
+        min_interval=100,
+        decay: float=0.9
+    ):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.body_indices, self.body_names = self.asset.find_bodies(body_names)
         self.num_bodies = len(self.body_indices)
-        self.default_mass_total = self.asset.root_physx_view.get_masses()[0].sum() * 9.81
         self.force_range = force_range
         self.min_interval = min_interval
         self.decay = decay
@@ -548,25 +442,28 @@ class push(Randomization):
         self.forces[env_ids] = 0.
         self.last_push[env_ids] = 0.
 
-    def step(self, substep):
-        if substep == 0:
-            t = self.env.episode_length_buf.view(self.env.num_envs, 1, 1)
-            i = torch.rand(self.env.num_envs, len(self.body_indices), 1, device=self.env.device) < 0.02
-            i = i & ((t - self.last_push) > self.min_interval)
-            self.last_push = torch.where(i, t, self.last_push)
+    def pre_step(self, substep):
+        self.asset._external_force_b[:, self.body_indices] = self.forces
+        self.asset.has_external_wrench = True
 
-            push_forces = torch.zeros_like(self.forces)
-            push_forces[:, :, 0].uniform_(*self.force_range)
-            push_forces[:, :, 1].uniform_(*self.force_range)
-            self.forces = torch.where(i, push_forces * self.default_mass_total, self.forces * self.decay)
-        self.asset.set_external_force_and_torque(self.forces, self.torques, body_ids=self.body_indices)
+    def update(self) -> None:
+        t = self.env.episode_length_buf.view(self.env.num_envs, 1, 1)
+        i = torch.rand(self.env.num_envs, len(self.body_indices), 1, device=self.env.device) < 0.02
+        i = i & ((t - self.last_push) > self.min_interval)
+        self.last_push = torch.where(i, t, self.last_push)
 
+        push_forces = torch.zeros_like(self.forces)
+        push_forces[:, :, 0].uniform_(*self.force_range)
+        push_forces[:, :, 1].uniform_(*self.force_range)
+        self.forces = torch.where(i, push_forces, self.forces * self.decay)
+        
     def debug_draw(self):
-        self.env.debug_draw.vector(
-            self.asset.data.body_link_pos_w[:, self.body_indices],
-            self.forces / self.default_mass_total,
-            color=(1., 0.8, .4, 1.)
-        )
+        if self.env.backend == "isaac":
+            self.env.debug_draw.vector(
+                self.asset.data.body_link_pos_w[:, self.body_indices],
+                self.forces / 9.81,
+                color=(1., 0.8, .4, 1.)
+            )
         
     
 class drag(Randomization):

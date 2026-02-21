@@ -25,7 +25,7 @@ action:
   _target_: active_adaptation.envs.mdp.action.JointPosition
   action_scaling: {.*_joint: 0.5}
   max_delay: 1
-  alpha: [0.5, 1.0]
+  alpha_range: [0.5, 1.0]
 
 command:
   class: Twist
@@ -90,13 +90,14 @@ reward:
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 2.0, target_height: 0.35}
   reg:
-    energy_l1:          {weight: 0.0002}
+    energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7}
     joint_torques_l2:   {weight: 2.0e-4}
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
-    feet_air_time:      {weight: 0.2, body_names: .*_foot, thres: 0.4}
+    feet_air_time:      {weight: 0.4, body_names: .*_foot, thres: 0.5}
+    feet_sliding:       {weight: 0.2, body_names: .*_foot}
     undesired_contact:  {body_names: [.*_calf, .*thigh, Head.*], weight: 0.25}
   debug:
     _enabled_: false
@@ -119,28 +120,11 @@ randomization:
   #   static_friction_range:  {".*_foot": [0.5, 4.0]}
   #   dynamic_friction_range: {".*_foot": [0.5, 4.0]}
   #   restitution_range:      {".*_foot": [0.0, 0.5]}
-  # motor_params:
-  #   actuator_name: base_legs
-  #   stiffness_range:  
-  #     F[L,R]_hip_joint:   [0.8, 1.2]
-  #     F[L,R]_thigh_joint: [0.8, 1.2]
-  #     F[L,R]_calf_joint:  [0.8, 1.2]
-  #     R[L,R]_hip_joint:   [0.8, 1.2]
-  #     R[L,R]_thigh_joint: [0.8, 1.2]
-  #     R[L,R]_calf_joint:  [0.8, 1.2]
-  #   damping_range:
-  #     F[L,R]_hip_joint:   [0.8, 1.2]
-  #     F[L,R]_thigh_joint: [0.8, 1.2]
-  #     F[L,R]_calf_joint:  [0.8, 1.2]
-  #     R[L,R]_hip_joint:   [0.8, 1.2]
-  #     R[L,R]_thigh_joint: [0.8, 1.2]
-  #     R[L,R]_calf_joint:  [0.8, 1.2]
-  #   scale_factor_range:
-  #     .*_hip_joint:   [0.8, 1.2]
-  #     .*_thigh_joint: [0.8, 1.2]
-  #     .*_calf_joint:  [0.8, 1.2]
-  #   armature_range:
-  #     .*: [0.0, 0.02]
+  motor_params:
+    stiffness_range:
+      .*: [0.8, 1.1]
+    damping_range:
+      .*: [0.8, 1.1]
   reset_joint_states_scale:
     pos_scales:
       .*: [0.8, 1.2]
