@@ -146,8 +146,6 @@ class CrossAttnEncoder(nn.Module):
                     nn.Mish(), # nn.GroupNorm(num_channels=2, num_groups=2),
                     nn.Conv2d(8, 16, kernel_size=3, stride=2, padding=1),
                     nn.Mish(), # nn.GroupNorm(num_channels=4, num_groups=2),
-                    nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
-                    nn.Mish(), # nn.GroupNorm(num_channels=8, num_groups=2), 
                 ),
                 data_dim=3,
             ),
@@ -157,7 +155,7 @@ class CrossAttnEncoder(nn.Module):
             shape = self.cnn_encoder(torch.zeros(1, *extero_shape)).shape[-2:]
         self.pos_enc = PositionEncodingND(shape)
         
-        self.embed_dim = 128
+        self.embed_dim = 64
         self.propri_proj = nn.LazyLinear(self.embed_dim)
         self.extero_proj = nn.LazyLinear(self.embed_dim)
         self.attn = nn.MultiheadAttention(
@@ -165,16 +163,16 @@ class CrossAttnEncoder(nn.Module):
             num_heads=2,
             batch_first=True,
         )
-        self.mlp = nn.Sequential(
-            nn.Linear(self.embed_dim, self.embed_dim),
-            nn.Mish(),
-            nn.Linear(self.embed_dim, self.embed_dim),
-        )
+        # self.mlp = nn.Sequential(
+        #     nn.Linear(self.embed_dim, self.embed_dim),
+        #     nn.Mish(),
+        #     nn.Linear(self.embed_dim, self.embed_dim),
+        # )
         self.out = nn.LazyLinear(256)
 
     def forward(self, propri, extero, mask_cnn):
         propri_feature = self.mlp_encoder(propri)
-        propri_feature = einops.rearrange(propri_feature, "... (m c) -> ... m c", m=4)
+        propri_feature = einops.rearrange(propri_feature, "... (m c) -> ... m c", m=1)
         propri_feature = self.propri_proj(propri_feature)
         propri_slots = propri_feature.shape[-2]
 
@@ -185,18 +183,20 @@ class CrossAttnEncoder(nn.Module):
         extero_slots = extero_feature.shape[-2]
 
         Q = propri_feature
-        K = torch.cat([propri_feature, extero_feature], dim=-2) # [..., (m+h*w), c]
-        V = torch.cat([propri_feature, extero_feature], dim=-2) # [..., (m+h*w), c]
-        
-        if mask_cnn is not None:
-            key_padding_mask = torch.zeros(Q.shape[:-2], propri_slots + extero_slots, dtype=bool, device=Q.device)
-            key_padding_mask[:, propri_slots:] = ~mask_cnn
-            attn_output, attn_output_weights = self.attn(Q, K, V, key_padding_mask=key_padding_mask)
-        else:
-            attn_output, attn_output_weights = self.attn(Q, K, V)
+        K = extero_feature
+        V = extero_feature
+        attn_output, _ = self.attn(Q, K, V, need_weights=False)
         feature = propri_feature + attn_output
-        feature = feature + self.mlp(feature)
-        feature = self.out(feature.flatten(-2))
+        
+        # if mask_cnn is not None:
+        #     key_padding_mask = torch.zeros(*Q.shape[:-2], propri_slots + extero_slots, dtype=bool, device=Q.device)
+        #     key_padding_mask[..., propri_slots:] = ~mask_cnn
+        #     attn_output, attn_output_weights = self.attn(Q, K, V, key_padding_mask=key_padding_mask)
+        # else:
+        #     attn_output, attn_output_weights = self.attn(Q, K, V)
+        # feature = propri_feature + attn_output
+        # feature = feature + self.mlp(feature)
+        feature = self.out(attn_output.flatten(-2))
         return feature
         
         
@@ -337,13 +337,15 @@ class PPOPolicy(TensorDictModuleBase):
                     minibatch = torch.cat([minibatch, mirrored], dim=0)
                 infos.append(TensorDict(self._update(minibatch), []))
         
-        with torch.no_grad(), torch.device(self.device):
-            self.vecnorm(tensordict)
-            a = self.critic(tensordict.replace(cnn_mask=torch.zeros(*tensordict.shape, 1)))
-            b = self.critic(tensordict.replace(cnn_mask=torch.ones(*tensordict.shape, 1)))
+        with torch.no_grad(), torch.device(self.device), tensordict.view(-1) as tensordict_flat:
+            self.vecnorm(tensordict_flat)
+            ones = torch.ones(*tensordict_flat.shape, 1, dtype=torch.bool)
+            zeros = torch.zeros(*tensordict_flat.shape, 1, dtype=torch.bool)
+            a = self.critic(tensordict_flat.replace(cnn_mask=zeros))
+            b = self.critic(tensordict_flat.replace(cnn_mask=ones))
             value_diff = F.mse_loss(a["state_value"], b["state_value"])
-            a = self.actor.get_dist(tensordict.replace(cnn_mask=torch.zeros(*tensordict.shape, 1)))
-            b = self.actor.get_dist(tensordict.replace(cnn_mask=torch.ones(*tensordict.shape, 1)))
+            a = self.actor.get_dist(tensordict_flat.replace(cnn_mask=zeros))
+            b = self.actor.get_dist(tensordict_flat.replace(cnn_mask=ones))
             policy_diff = F.mse_loss(a.mean, b.mean)
 
         infos = {k: v.mean().item() for k, v in torch.stack(infos).items()}
@@ -376,7 +378,7 @@ class PPOPolicy(TensorDictModuleBase):
         values = tensordict["state_value"]
         next_values = tensordict["next", "state_value"]
 
-        rewards = tensordict[REWARD_KEY].sum(-1, keepdim=True)
+        rewards = tensordict[REWARD_KEY].sum(-1, keepdim=True).clamp(min=0.0)
         terms = tensordict[TERM_KEY]
         dones = tensordict[DONE_KEY]
         discount = tensordict["next", "discount"]
@@ -415,18 +417,24 @@ class PPOPolicy(TensorDictModuleBase):
         actor_cnn_grad_norm = grad_norm(self.actor_encoder.cnn_encoder.parameters())
         critic_cnn_grad_norm = grad_norm(self.critic_encoder.cnn_encoder.parameters())
         self.opt.step()
+
         explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
-        return {
+        info = {
             "actor/policy_loss": policy_loss,
             "actor/entropy": entropy,
             "actor/noise_std": tensordict["scale"].mean(),
             "actor/grad_norm": actor_grad_norm,
             'actor/approx_kl': ((ratio - 1) - log_ratio).mean(),
-            "actor/cnn_grad_norm": actor_cnn_grad_norm,
-            "critic/cnn_grad_norm": critic_cnn_grad_norm,
             "critic/value_loss": value_loss,
             "critic/grad_norm": critic_grad_norm,
             "critic/explained_var": explained_var,
+        }
+        if hasattr(self.actor_encoder, "cnn_encoder"):
+            info["actor/cnn_grad_norm"] = actor_cnn_grad_norm
+        if hasattr(self.critic_encoder, "cnn_encoder"):
+            info["critic/cnn_grad_norm"] = critic_cnn_grad_norm
+        return {
+            
         }
 
     def state_dict(self):

@@ -3,9 +3,9 @@ import hydra
 import numpy as np
 import wandb
 import logging
-import os
 import time
 import datetime
+from pathlib import Path
 
 from omegaconf import OmegaConf, DictConfig
 
@@ -26,11 +26,11 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
-FILE_PATH = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(FILE_PATH, "..", "cfg")
+FILE_PATH = Path(__file__).resolve().parent
+CONFIG_PATH = FILE_PATH.parent / "cfg"
 
 
-@hydra.main(config_path=CONFIG_PATH, config_name="train", version_base=None)
+@hydra.main(config_path=str(CONFIG_PATH), config_name="train", version_base=None)
 def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
@@ -58,11 +58,12 @@ def main(cfg: DictConfig):
         run.name = f"{run_idx}-{default_run_name}"
         setproctitle(run.name)
 
-        os.makedirs(run.dir, exist_ok=True)
-        cfg_save_path = os.path.join(run.dir, "cfg.yaml")
+        run_dir = Path(run.dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        cfg_save_path = run_dir / "cfg.yaml"
         OmegaConf.save(cfg, cfg_save_path)
-        run.save(cfg_save_path, policy="now")
-        run.save(os.path.join(run.dir, "config.yaml"), policy="now")
+        run.save(str(cfg_save_path), policy="now")
+        run.save(str(run_dir / "config.yaml"), policy="now")
 
     from helpers import make_env_policy, evaluate
     from active_adaptation.utils.helpers import EpisodeStats
@@ -74,7 +75,9 @@ def main(cfg: DictConfig):
     total_frames = cfg.get("total_frames", -1) // aa.get_world_size()
     total_frames = total_frames // frames_per_batch * frames_per_batch
     total_iters = total_frames // frames_per_batch
-    save_interval = cfg.get("save_interval", -1)
+    
+    checkpoint_interval = cfg.checkpoint_interval
+    upload_interval = cfg.upload_interval
 
     log_interval = (env.max_episode_length // cfg.algo.train_every) + 1
     logging.info(f"Log interval: {log_interval} steps")
@@ -86,24 +89,30 @@ def main(cfg: DictConfig):
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
 
-    def save(policy, checkpoint_name: str):
-        ckpt_path = os.path.join(run.dir, f"{checkpoint_name}.pt")
+    def save(policy, checkpoint_name: str, *, upload_to_wandb: bool = True):
+        run_dir = Path(run.dir)
+        ckpt_path = run_dir / f"{checkpoint_name}.pt"
         state_dict = OrderedDict()
         state_dict["wandb"] = {"name": run.name, "id": run.id}
         state_dict["policy"] = policy.state_dict()
-        state_dict["env"] = env.state_dict()
-        state_dict["cfg"] = cfg
+        
         torch.save(state_dict, ckpt_path)
-        run.save(ckpt_path, policy="now", base_path=run.dir)
-        logging.info(f"Saved checkpoint to {str(ckpt_path)}")
-        return ckpt_path
+        if upload_to_wandb:
+            run.save(str(ckpt_path), policy="now", base_path=run.dir)
+        
+        latest_link = run_dir / "checkpoint_latest.pt"
+        if latest_link.exists() or latest_link.is_symlink():
+            latest_link.unlink()
+        latest_link.symlink_to(ckpt_path.name)
+        logging.info(f"Saved checkpoint to {ckpt_path}" + (" (wandb)" if upload_to_wandb else ""))
+        return str(ckpt_path)
 
     assert env.training
 
     def should_save(i):
         if not aa.is_main_process():
             return False
-        return i > 0 and i % save_interval == 0
+        return i % checkpoint_interval == 0 or i % upload_interval == 0
 
     ckpt_path = None
     carry = env.reset()
@@ -203,7 +212,9 @@ def main(cfg: DictConfig):
             info["performance/iter_time"] = time.perf_counter() - rollout_start
 
             if should_save(i):
-                ckpt_path = save(policy, f"checkpoint_{i}")
+                should_upload = i % upload_interval == 0
+                checkpoint_name = f"checkpoint_{i}" if should_upload else "checkpoint_temp"
+                ckpt_path = save(policy, checkpoint_name, upload_to_wandb=should_upload)
 
             if aa.is_main_process():
                 ScopedTimer.print_summary(clear=True)

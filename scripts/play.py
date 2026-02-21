@@ -2,6 +2,7 @@
 This script is used to play and visualize a policy in the environment.
 """
 
+import time
 import torch
 import hydra
 import itertools
@@ -18,8 +19,10 @@ from active_adaptation.utils.export import export_onnx
 from active_adaptation.utils.timerfd import Timer
 from active_adaptation.utils.helpers import EpisodeStats
 from active_adaptation.learning.modules.vecnorm import VecNorm
+from active_adaptation.utils.wandb import parse_checkpoint
 
 FILE_PATH = Path(__file__).parent
+CONFIG_PATH = FILE_PATH.parent / "cfg"
 
 
 @VecNorm.freeze()
@@ -36,15 +39,16 @@ def export_policy(env, policy, export_dir):
     export_onnx(deploy_policy, fake_input, str(path))
 
 
-@hydra.main(config_path="../cfg", config_name="play", version_base=None)
+@hydra.main(config_path=str(CONFIG_PATH), config_name="play", version_base=None)
 def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    aa.init(cfg, auto_rank=False)
+    aa.init(cfg, auto_rank=True)
     
     from helpers import make_env_policy
-    env, policy = make_env_policy(cfg)
+    checkpoint = parse_checkpoint(cfg.checkpoint_path)
+    env, policy = make_env_policy(cfg, checkpoint)
     
     if cfg.export_policy:
         export_dir = FILE_PATH / "exports" / str(cfg.task.name)
@@ -64,9 +68,12 @@ def main(cfg: DictConfig):
 
     timer = Timer(env.step_dt)
 
+    # Optional: refresh from URL/wandb in background so play loop never blocks on updates
+    if checkpoint is not None and checkpoint.remote:
+        print("Starting background checkpoint refresh")
+        checkpoint.start_background_refresh(interval_sec=60)
+
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
-        # torch.compiler.cudagraph_mark_step_begin()
-        
         for i in itertools.count():
             carry = rollout_policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
