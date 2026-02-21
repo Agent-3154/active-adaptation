@@ -49,8 +49,8 @@ class SimpleEnvIsaac(_EnvBase):
     
     def setup_scene(self):
         import isaaclab.sim as sim_utils
-        from isaaclab.sim import SimulationContext
-        from isaaclab.sim.utils.stage import attach_stage_to_usd_context, use_stage
+        from isaaclab.sim import SimulationContext, attach_stage_to_usd_context, use_stage
+        # from isaaclab.sim.utils.stage import attach_stage_to_usd_context, use_stage
         from isaaclab.scene import InteractiveSceneCfg, InteractiveScene
         from isaaclab.assets import AssetBaseCfg, ArticulationCfg
         from isaaclab.sensors import ContactSensorCfg

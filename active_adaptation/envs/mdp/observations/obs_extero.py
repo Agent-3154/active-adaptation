@@ -6,7 +6,7 @@ from typing import Tuple, TYPE_CHECKING, Optional
 import active_adaptation
 from jaxtyping import Float
 from active_adaptation.envs.mdp.base import Observation
-from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
+from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat, quat_from_euler_xyz
 from active_adaptation.utils.symmetry import SymmetryTransform, cartesian_space_symmetry
 
 if TYPE_CHECKING:
@@ -29,7 +29,7 @@ def raymap(width: int, height: int, fov: float) -> Float[torch.Tensor, "height w
     
     The raymap represents normalized ray directions for a perspective camera model.
     Each pixel corresponds to a ray direction pointing from the camera center through
-    that pixel. The rays are in camera space, where +Z is forward, +X is right, and +Y is up.
+    that pixel. The rays are in camera space, where +X is forward, +Y is left, and +Z is up.
     
     Args:
         width: The width of the raymap in pixels.
@@ -124,7 +124,7 @@ class height_scan(Observation):
         y_range: Tuple[float, float],
         resolution: Tuple[float, float],
         flatten: bool=False,
-        noise_scale = 0.005,
+        noise_scale = 0.02,
         clamp_range: Tuple[float, float] = (-1., 1.)
     ):
         super().__init__(env)
@@ -160,7 +160,8 @@ class height_scan(Observation):
         self.scan_pos_w = root_pos_w + quat_rotate(root_quat, self.scan_pos_b.unsqueeze(0))
         self.height_map_w = self.env.get_ground_height_at(self.scan_pos_w)
         
-        height_map = (root_pos_w[:, :, :, 2] - self.height_map_w).clamp(*self.clamp_range)
+        height_map = root_pos_w[:, :, :, 2] - self.height_map_w
+        height_map = (height_map + self.noise_scale * torch.randn_like(height_map)).clamp(*self.clamp_range)
         if self.flatten:
             return height_map.reshape(self.num_envs, -1)
         else:
@@ -279,6 +280,7 @@ class raycast_camera(Observation):
         env,
         resolution: Tuple[int, int],
         fov: float,
+        rpy: Tuple[float, float, float] = (0.0, 0.0, 0.0),
         body_name: Optional[str] = None,
         near: float = 0.01,
         far: float = 100.0,
@@ -295,6 +297,9 @@ class raycast_camera(Observation):
 
         width, height = resolution
         self.raymap = raymap(width, height, fov).to(self.device)
+        quat = quat_from_euler_xyz(torch.tensor(rpy, device=self.device))
+        self.raymap = quat_rotate(quat.reshape(1, 1, 4), self.raymap)
+        
         self.shape = self.raymap.shape[:2]
         assert self.shape == (height, width), "Resolution must match the raymap shape"
         self.num_rays = self.raymap.shape[0] * self.raymap.shape[1]

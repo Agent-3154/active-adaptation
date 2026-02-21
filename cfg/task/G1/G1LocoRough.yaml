@@ -1,0 +1,21 @@
+# @package task
+name: G1LocoRough
+
+defaults:
+  # see https://hydra.cc/docs/advanced/overriding_packages/
+  - /task/G1/G1LocoFlat@_here_
+  - _self_
+
+terrain: medium_curriculum
+
+command:
+  curriculum: true
+
+observation:
+  extero:
+    height_scan: {
+      x_range: [-1.1, 1.1],
+      y_range: [-0.8, 0.8],
+      resolution: [0.1, 0.1],
+      flatten: true,
+    }

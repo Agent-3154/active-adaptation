@@ -15,7 +15,7 @@ from termcolor import colored
 from collections import OrderedDict
 from torchvision.io import write_video
 from omegaconf import OmegaConf, DictConfig
-from active_adaptation.utils.wandb import parse_checkpoint_path
+from active_adaptation.utils.wandb import parse_checkpoint_path, parse_checkpoint, CheckpointBase
 
 import active_adaptation
 
@@ -33,7 +33,7 @@ class Every:
         self.i += 1
 
 
-def make_env_policy(cfg: DictConfig):
+def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
     OmegaConf.set_struct(cfg, False)
     cfg.seed = cfg.seed + active_adaptation.get_local_rank()
     
@@ -55,7 +55,11 @@ def make_env_policy(cfg: DictConfig):
     
     base_env = env_cls(cfg.task, str(cfg.device), headless=cfg.headless)
 
-    checkpoint_path = parse_checkpoint_path(cfg.checkpoint_path)
+    if checkpoint is None:
+        checkpoint = parse_checkpoint(cfg.checkpoint_path)
+    if checkpoint is not None:
+        checkpoint.update()
+    checkpoint_path = checkpoint.get_path() if checkpoint else None
     if checkpoint_path is not None:
         state_dict = torch.load(checkpoint_path, weights_only=False)
     else:

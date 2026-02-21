@@ -31,7 +31,6 @@ import torch.utils._pytree as pytree
 
 from torchrl.data import CompositeSpec, TensorSpec
 from torchrl.modules import ProbabilisticActor
-from torchrl.envs.transforms import CatTensors, VecNorm
 from tensordict import TensorDict
 from tensordict.nn import (
     TensorDictModuleBase,

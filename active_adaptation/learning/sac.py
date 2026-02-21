@@ -6,9 +6,8 @@ import math
 
 from torchrl.data import CompositeSpec, TensorSpec, TensorDictReplayBuffer, LazyTensorStorage, ListStorage
 from torchrl.objectives import hold_out_net
-from torchrl.objectives.value import TD0Estimator, TD1Estimator, TDLambdaEstimator
-from torchrl.modules import ProbabilisticActor, TanhNormal, TruncatedNormal
-from torchrl.envs.transforms import CatTensors, ExcludeTransform, VecNorm, MultiStepTransform
+from torchrl.modules import ProbabilisticActor, TanhNormal
+from torchrl.envs.transforms import CatTensors, ExcludeTransform, MultiStepTransform
 from tensordict import TensorDict
 from tensordict.nn import TensorDictModuleBase, TensorDictModule, TensorDictSequential
 
