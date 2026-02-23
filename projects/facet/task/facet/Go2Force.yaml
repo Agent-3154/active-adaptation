@@ -26,7 +26,7 @@ action:
   alpha: [0.5, 1.0]
 
 command:
-  class: ImpedanceCommandManager
+  _target_: ImpedanceCommandManager
   virtual_mass_range: [2., 4., 6.]
   eef_body_name: null
   arm_body_name: null

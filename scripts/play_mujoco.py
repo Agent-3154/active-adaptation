@@ -21,7 +21,7 @@ def main(cfg):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    from helpers import EpisodeStats, make_env_policy
+    from active_adaptation.helpers import EpisodeStats, make_env_policy
     # TODO: maybe implement these
     cfg.task.randomization = {}
     cfg.task.reward = {}

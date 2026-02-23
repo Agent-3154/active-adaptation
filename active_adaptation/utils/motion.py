@@ -8,7 +8,10 @@ from tensordict import TensorClass, MemoryMappedTensor
 from typing import List
 from scipy.spatial.transform import Rotation as sRot, Slerp
 from concurrent.futures import ThreadPoolExecutor
-from isaaclab.utils.string import resolve_matching_names
+try:
+    from isaaclab.utils.string import resolve_matching_names
+except ModuleNotFoundError:
+    from mjlab.utils.lab_api.string import resolve_matching_names
 
 
 def lerp(x, xp, fp):
@@ -237,4 +240,3 @@ class MotionDataset:
 #         self.t = torch.where(ended, 0, self.t)
 #         self.motion_ids = torch.where(ended, torch.randint(self.dataset.num_motions, (self.num_motions,)), self.motion_ids)
 #         return self._slice, ended
-

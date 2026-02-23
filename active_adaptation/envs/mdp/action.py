@@ -7,7 +7,10 @@ from typing import Dict, Literal, Tuple, TYPE_CHECKING, List, Optional
 from typing_extensions import override
 
 from tensordict import TensorDictBase
-import isaaclab.utils.string as string_utils
+try:
+    import isaaclab.utils.string as string_utils
+except ModuleNotFoundError:
+    from mjlab.utils.lab_api import string as string_utils
 from active_adaptation.utils.math import (
     # quat_mul,
     # quat_conjugate,
@@ -536,4 +539,3 @@ class WriteJointPosition(ActionManager):
         self.asset.set_joint_position_target(self.target_joint_pos)
         self.asset.write_joint_position_to_sim(self.target_joint_pos)
         self.asset.write_joint_velocity_to_sim(torch.zeros_like(self.target_joint_pos))
-

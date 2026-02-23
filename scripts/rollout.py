@@ -48,7 +48,7 @@ def main(cfg):
 
     aa.init(cfg)
 
-    from helpers import make_env_policy
+    from active_adaptation.helpers import make_env_policy
     env, policy = make_env_policy(cfg)
     rollout_policy = policy.get_rollout_policy("eval")
 

@@ -1,7 +1,11 @@
 import os
 import json
 import torch
-from isaaclab.utils import configclass
+try:
+    from isaaclab.utils import configclass
+except ModuleNotFoundError:
+    def configclass(cls):
+        return cls
 
 import active_adaptation
 from active_adaptation.envs.env_base import _EnvBase
@@ -40,11 +44,12 @@ class SimpleEnvIsaac(_EnvBase):
         init_state = self.command_manager.sample_init(env_ids)
         if isinstance(init_state, torch.Tensor):
             init_state = {"robot": init_state}
-        for key, value in init_state.items():
-            self.scene[key].write_root_state_to_sim(
-                value, 
-                env_ids=env_ids
-            )
+        if init_state is not None:
+            for key, value in init_state.items():
+                self.scene[key].write_root_state_to_sim(
+                    value, 
+                    env_ids=env_ids
+                )
         self.stats[env_ids] = 0.
     
     def setup_scene(self):
@@ -207,7 +212,7 @@ class SimpleEnvMjlab(_EnvBase):
     
     def _reset_idx(self, env_ids: torch.Tensor):
         init_root_state = self.command_manager.sample_init(env_ids)
-        if not self.robot.is_fixed_base:
+        if (init_root_state is not None) and (not self.robot.is_fixed_base):
             self.robot.write_root_state_to_sim(
                 init_root_state, 
                 env_ids=env_ids
@@ -258,4 +263,3 @@ class SimpleEnvMjlab(_EnvBase):
             viewer = None
         self.sim = MjlabSimAdapter(self.sim, viewer)
         self.terrain_type = "plane"
-

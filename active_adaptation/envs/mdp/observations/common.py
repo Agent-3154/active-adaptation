@@ -4,7 +4,6 @@ import einops
 from typing import Tuple, TYPE_CHECKING
 from typing_extensions import override
 
-from isaaclab.utils.string import resolve_matching_names
 import active_adaptation
 from active_adaptation.envs.mdp.base import Observation
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat, EMA
@@ -611,4 +610,3 @@ class command_mode(Observation):
 
     def compute(self) -> torch.Tensor:
         return self.command_manager.command_mode
-

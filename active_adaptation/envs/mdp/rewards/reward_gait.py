@@ -7,7 +7,6 @@ if TYPE_CHECKING:
 
 from active_adaptation.envs.mdp.base import Reward
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
-from isaaclab.utils.string import resolve_matching_names
 
 
 class max_feet_height(Reward):
@@ -77,4 +76,3 @@ class quadruped_trot(Reward):
         rew = torch.logical_xor(FL_RR, FR_RL)
         active = ~self.command_manager.is_standing_env
         return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
-

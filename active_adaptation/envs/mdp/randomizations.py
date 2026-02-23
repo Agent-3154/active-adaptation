@@ -6,8 +6,10 @@ from typing import Union, TYPE_CHECKING, Dict, Tuple, Optional
 import active_adaptation
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
 
-import isaaclab.utils.string as string_utils
-
+try:
+    import isaaclab.utils.string as string_utils
+except ModuleNotFoundError:
+    from mjlab.utils.lab_api import string as string_utils
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -21,6 +23,30 @@ from .base import Randomization
 
 RangeType = Tuple[float, float]
 NestedRangeType = Union[RangeType, Dict[str, RangeType]]
+
+
+def _set_external_wrench(
+    asset,
+    forces: torch.Tensor,
+    torques: torch.Tensor,
+    body_ids=None,
+):
+    """Set external wrench across old/new simulator APIs."""
+    if hasattr(asset, "set_external_force_and_torque"):
+        kwargs = {}
+        if body_ids is not None:
+            kwargs["body_ids"] = body_ids
+        asset.set_external_force_and_torque(forces, torques, **kwargs)
+        return
+
+    if body_ids is None:
+        asset._external_force_b[:] = forces
+        asset._external_torque_b[:] = torques
+    else:
+        asset._external_force_b[:, body_ids] = forces
+        asset._external_torque_b[:, body_ids] = torques
+    if hasattr(asset, "has_external_wrench"):
+        asset.has_external_wrench = True
 
 
 class motor_params(Randomization):
@@ -443,8 +469,12 @@ class push_body(Randomization):
         self.last_push[env_ids] = 0.
 
     def pre_step(self, substep):
-        self.asset._external_force_b[:, self.body_indices] = self.forces
-        self.asset.has_external_wrench = True
+        _set_external_wrench(
+            self.asset,
+            self.forces,
+            self.torques,
+            body_ids=self.body_indices,
+        )
 
     def update(self) -> None:
         t = self.env.episode_length_buf.view(self.env.num_envs, 1, 1)
@@ -533,10 +563,13 @@ class stumble(Randomization):
             quat_rotate_inverse(feet_quat_w, self.forces_w),
             torch.zeros(self.num_envs, self.num_feet, 3, device=self.env.device)
         )
-        forces_b = self.asset._external_force_b.clone()
-        torques_b = self.asset._external_torque_b.clone()
-        forces_b[:, self.body_ids] += friction_forces
-        self.asset.set_external_force_and_torque(forces_b, torques_b)
+        torques = torch.zeros_like(friction_forces)
+        _set_external_wrench(
+            self.asset,
+            friction_forces,
+            torques,
+            body_ids=self.body_ids,
+        )
 
     def debug_draw(self):
         self.env.debug_draw.vector(
@@ -646,8 +679,14 @@ class spring_grf(Randomization):
             5. * (0. - feet_lin_vel[:, :, 2])
         ) * self.flag
         self.forces = forces.unsqueeze(-1) * self.axis 
-        self.asset._external_force_b[:, self.feet_ids] += quat_rotate_inverse(feet_quat, self.forces)
-        self.asset.has_external_wrench = True
+        forces_b = quat_rotate_inverse(feet_quat, self.forces)
+        torques_b = torch.zeros_like(forces_b)
+        _set_external_wrench(
+            self.asset,
+            forces_b,
+            torques_b,
+            body_ids=self.feet_ids,
+        )
 
     def debug_draw(self):
         feet_pos = self.asset.data.body_link_pos_w[:, self.feet_ids]
@@ -681,10 +720,15 @@ class random_impulse(Randomization):
         self.impulse_force = ImpulseForce.zeros(self.num_envs, device=self.device)
         
     def step(self, substep):
-        forces_b = self.asset._external_force_b
         impulse_force = self.impulse_force.get_force(None, None)
-        forces_b[:, self.body_id] += quat_rotate_inverse(self.asset.data.root_link_quat_w, impulse_force)
-        self.asset.has_external_wrench = True
+        forces_b = quat_rotate_inverse(self.asset.data.root_link_quat_w, impulse_force)
+        torques_b = torch.zeros_like(forces_b)
+        _set_external_wrench(
+            self.asset,
+            forces_b.unsqueeze(1),
+            torques_b.unsqueeze(1),
+            body_ids=[self.body_id],
+        )
 
     def update(self):
         self.impulse_force.time.add_(self.env.step_dt)
@@ -727,9 +771,14 @@ class constant_force(Randomization):
             quat.reshape(self.num_envs, 4),
             self.force.get_force()
         )
-        self.asset._external_force_b[arange, self.body_id] += forces_b
-        self.asset._external_torque_b[arange, self.body_id] += self.force.offset.cross(forces_b, dim=-1)
-        self.asset.has_external_wrench = True
+        torques_b = self.force.offset.cross(forces_b, dim=-1)
+        full_forces_b = torch.zeros(
+            self.num_envs, self.asset.num_bodies, 3, device=self.device
+        )
+        full_torques_b = torch.zeros_like(full_forces_b)
+        full_forces_b[arange, self.body_id] = forces_b
+        full_torques_b[arange, self.body_id] = torques_b
+        _set_external_wrench(self.asset, full_forces_b, full_torques_b)
     
     def reset(self, env_ids: torch.Tensor):
         self.force.duration.data[env_ids] = 0.

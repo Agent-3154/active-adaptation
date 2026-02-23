@@ -1,6 +1,6 @@
 """Adapter classes to provide a unified API for different simulation backends."""
 
-from typing import Protocol, TYPE_CHECKING, Union
+from typing import Protocol, TYPE_CHECKING, Union, Mapping
 from typing_extensions import override
 import torch
 
@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from isaaclab.scene import InteractiveScene
     from mjlab.sim import Simulation
     from mjlab.scene import Scene
+    from mjlab.entity import Entity
 
 
 class SimAdapter(Protocol):
@@ -177,7 +178,13 @@ class IsaacSceneAdapter(SceneAdapter):
     @override
     def zero_external_wrenches(self) -> None:
         for asset in self._scene.articulations.values():
-            if asset.has_external_wrench:
+            # IsaacLab >= 2.3 uses wrench composers instead of has_external_wrench buffers.
+            if hasattr(asset, "instantaneous_wrench_composer"):
+                asset.instantaneous_wrench_composer.reset()
+            if hasattr(asset, "permanent_wrench_composer"):
+                asset.permanent_wrench_composer.reset()
+            # Backward compatibility for older APIs.
+            if getattr(asset, "has_external_wrench", False):
                 asset._external_force_b.zero_()
                 asset._external_torque_b.zero_()
                 asset.has_external_wrench = False
@@ -237,10 +244,15 @@ class MjlabSceneAdapter(SceneAdapter):
     """Adapter for mjlab Scene."""
 
     def __init__(self, scene: "Scene"):
-        self._scene = scene
+        self._scene: "Scene" = scene
+
+    @override
+    def zero_external_wrenches(self) -> None:
+        for asset in self._scene.entities.values():
+            asset.data.data.xfrc_applied.zero_()
 
     @property
-    def articulations(self) -> dict:
+    def articulations(self) -> Mapping[str, Union["Entity", "Articulation"]]:
         # mjlab uses 'entities' instead of 'articulations'
         # Return entities dict for compatibility
         return self._scene.entities

@@ -2,7 +2,6 @@ import torch
 import numpy as np
 import hydra
 import inspect
-import re
 import warnings
 import warp as wp
 
@@ -16,7 +15,7 @@ from torchrl.data import (
 from collections import OrderedDict
 
 from abc import abstractmethod
-from typing import Dict, cast
+from typing import Dict, Mapping, cast
 
 import active_adaptation
 import active_adaptation.envs.mdp as mdp
@@ -64,13 +63,12 @@ if active_adaptation.get_backend() == "isaac":
 EMA_DECAY = 0.99
 
 
-def parse_name_and_class(s: str):
-    pattern = r"^(\w+)\((\w+)\)$"
-    match = re.match(pattern, s)
-    if match:
-        name, cls = match.groups()
-        return name, cls
-    return s, s
+def parse_component_spec(name: str, cfg):
+    if cfg is None or not hasattr(cfg, "items"):
+        raise ValueError(f"Component '{name}' must be a mapping.")
+    kwargs = dict(cfg)
+    target = kwargs.pop("_target_", name)
+    return name, target, kwargs
 
 
 class ObsGroup:
@@ -151,7 +149,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.sim = cast(SimAdapter, self.sim)
         self.scene = cast(SceneAdapter, self.scene)
 
-        self.max_episode_length = self.cfg.max_episode_length
+        self.max_episode_length: int = self.cfg.max_episode_length
         self.step_dt: float = self.cfg.sim.step_dt
         self.physics_dt: float = self.sim.get_physics_dt()
         self.decimation = int(self.step_dt / self.physics_dt)
@@ -186,16 +184,20 @@ class _EnvBase(EnvBase, RegistryMixin):
         ).to(self.device)
 
         command_cfg = dict(self.cfg.command)
-        class_name = command_cfg.pop("class")
+        class_name = command_cfg.pop("_target_", None)
+        if class_name is None:
+            raise ValueError(
+                "Command config must provide `_target_`."
+            )
         command = mdp.Command.make(class_name, self, **command_cfg)
         if not command:
             raise ValueError(f"Command class '{class_name}' not found")
         self.command_manager = cast(mdp.Command, command)
 
-        self.randomizations: Dict[str, mdp.Randomization] = OrderedDict()
-        self.observation_funcs: Dict[str, ObsGroup] = OrderedDict()
-        self.reward_groups: Dict[str, RewardGroup] = OrderedDict()
-        self.input_managers: Dict[str, mdp.ActionManager] = OrderedDict()
+        self.randomizations: Mapping[str, mdp.Randomization] = OrderedDict()
+        self.observation_funcs: Mapping[str, ObsGroup] = OrderedDict()
+        self.reward_groups: Mapping[str, RewardGroup] = OrderedDict()
+        self.input_managers: Mapping[str, mdp.ActionManager] = OrderedDict()
 
         self._startup_callbacks = []
         self._update_callbacks = []
@@ -213,8 +215,9 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         action_spec = {}
         for input_spec, input_cfg in input_cfg.items():
-            input_cls = mdp.ActionManager.registry[input_cfg.pop("class")]
-            input_manager: mdp.ActionManager = input_cls(self, **input_cfg)
+            _, input_cls_name, input_kwargs = parse_component_spec(input_spec, input_cfg)
+            input_cls = mdp.ActionManager.registry[input_cls_name]
+            input_manager: mdp.ActionManager = input_cls(self, **input_kwargs)
             self.input_managers[input_spec] = input_manager
             self._reset_callbacks.append(input_manager.reset)
             self._debug_draw_callbacks.append(input_manager.debug_draw)
@@ -228,10 +231,8 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         randomizations = self.cfg.get("randomization", {})
         for rand_spec, kwargs in randomizations.items():
-            rand_name, cls_name = parse_name_and_class(rand_spec)
-            rand = mdp.Randomization.make(
-                cls_name, self, **(kwargs if kwargs is not None else {})
-            )
+            rand_name, cls_name, rand_kwargs = parse_component_spec(rand_spec, kwargs)
+            rand = mdp.Randomization.make(cls_name, self, **rand_kwargs)
             if not rand:
                 continue
 
@@ -242,10 +243,8 @@ class _EnvBase(EnvBase, RegistryMixin):
         for group_key, group_cfg in self.cfg.observation.items():
             funcs = OrderedDict()
             for obs_spec, kwargs in group_cfg.items():
-                obs_name, obs_cls_name = parse_name_and_class(obs_spec)
-                obs = mdp.Observation.make(
-                    obs_cls_name, self, **(kwargs if kwargs is not None else {})
-                )
+                obs_name, obs_cls_name, obs_kwargs = parse_component_spec(obs_spec, kwargs)
+                obs = mdp.Observation.make(obs_cls_name, self, **obs_kwargs)
                 if not obs:
                     continue
                 obs = cast(mdp.Observation, obs)
@@ -275,10 +274,8 @@ class _EnvBase(EnvBase, RegistryMixin):
             enabled_groups += enabled
 
             for rew_spec, params in func_specs.items():
-                rew_name, cls_name = parse_name_and_class(rew_spec)
-                reward = mdp.Reward.make(
-                    cls_name, self, **(params if params is not None else {})
-                )
+                rew_name, cls_name, rew_kwargs = parse_component_spec(rew_spec, params)
+                reward = mdp.Reward.make(cls_name, self, **rew_kwargs)
                 if not reward:
                     continue
                 reward = cast(mdp.Reward, reward)
@@ -321,12 +318,10 @@ class _EnvBase(EnvBase, RegistryMixin):
             device=self.device,
         )
 
-        self.termination_funcs = OrderedDict()
+        self.termination_funcs: Mapping[str, mdp.Termination] = OrderedDict()
         for key, params in self.cfg.get("termination", {}).items():
-            term_name, cls_name = parse_name_and_class(key)
-            term = mdp.Termination.make(
-                cls_name, self, **(params if params is not None else {})
-            )
+            term_name, cls_name, term_kwargs = parse_component_spec(key, params)
+            term = mdp.Termination.make(cls_name, self, **term_kwargs)
             if not term:
                 continue
             term = cast(mdp.Termination, term)
@@ -338,7 +333,7 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         self.timestamp: int = 0  # global timestamp in steps
 
-        self.stats = self.reward_spec["stats"].zero()
+        self.stats: TensorDict = self.reward_spec["stats"].zero()
 
         self.input_tensordict = None
         self.extra = {}
@@ -356,9 +351,8 @@ class _EnvBase(EnvBase, RegistryMixin):
     def stats_ema(self):
         result = {}
         for group_key, group in self._stats_ema.items():
-            result[group_key] = {}
             for rew_key, (sum, cnt) in group.items():
-                result[group_key][rew_key] = (sum / cnt).item()
+                result[f"reward.{group_key}/{rew_key}"] = (sum / cnt).item()
         return result
 
     def _add_mdp_component(self, component: mdp.MDPComponent):
@@ -445,7 +439,7 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     def _compute_termination(self, tensordict: TensorDictBase) -> TensorDictBase:
         truncated = (self.episode_length_buf[:, None] >= self.max_episode_length)
-        terminated = torch.zeros((self.num_envs, 1), dtype=bool, device=self.device)
+        terminated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
         discount = torch.ones((self.num_envs, 1), device=self.device)
         for key, func in self.termination_funcs.items():
             result = func.compute(terminated)
@@ -453,7 +447,10 @@ class _EnvBase(EnvBase, RegistryMixin):
                 t, d = result
             else:
                 t, d = result, 1.0
-            terminated |= t
+            if func.is_timeout:
+                truncated |= t
+            else:
+                terminated |= t
             discount *= d
             self.stats["termination", key] = t.float()
         tensordict.set("truncated", truncated)
@@ -650,5 +647,3 @@ class RewardGroup:
             ema_cnt.mul_(EMA_DECAY).add_(count)
             all_rewards.append(reward)
         return self.eval_func(*all_rewards)
-
-

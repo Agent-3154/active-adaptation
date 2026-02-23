@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Sequence, Union, Any, Dict, Optional
 from dataclasses import dataclass, replace
 
-from isaaclab.utils import string as string_utils
+try:
+    from isaaclab.utils import string as string_utils
+except ModuleNotFoundError:
+    from mjlab.utils.lab_api import string as string_utils
 from scipy.spatial.transform import Rotation as sRot
 
 from active_adaptation.utils.math import quat_rotate_inverse, quat_rotate

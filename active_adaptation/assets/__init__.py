@@ -9,12 +9,16 @@ from .asset_cfg import (
 )
 from . import quadruped
 from . import humanoid
+from pathlib import Path
+
+ASSET_DIR = Path(__file__).parent
 
 __all__ = [
     "AssetCfg",
     "InitialStateCfg",
     "ActuatorCfg",
     "ContactSensorCfg",
+    "ASSET_DIR",
     "get_input_joint_indexing",
     "get_output_joint_indexing",
     "get_output_body_indexing",

@@ -18,14 +18,11 @@ _BACKEND = None
 _BACKEND_SET = False
 _CALLED_AT = None
 
-_LOCAL_RANK = os.getenv("LOCAL_RANK", "0")
-_LOCAL_RANK = int(_LOCAL_RANK)
-_WORLD_SIZE = os.getenv("WORLD_SIZE", "1")
-_WORLD_SIZE = int(_WORLD_SIZE)
+_LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
+_WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
 _MAIN_PROCESS = _LOCAL_RANK == 0
 
-_OMP_NUM_THREADS = os.getenv("OMP_NUM_THREADS", "1")
-_OMP_NUM_THREADS = int(_OMP_NUM_THREADS)
+_OMP_NUM_THREADS = int(os.getenv("OMP_NUM_THREADS", "1"))
 
 
 def is_main_process():
@@ -154,6 +151,12 @@ def import_projects():
     for project_name, project_info in projects["environment"].items():
         if project_info["enabled"]:
             print(f"Importing project: {project_name} from {project_info['path']}")
+            sys.path.insert(0, str(Path(project_info["path"]).parent))
+            importlib.import_module(project_info["value"])
+            sys.path.pop(0)
+    for project_name, project_info in projects["learning"].items():
+        if project_info["enabled"]:
+            print(f"Importing learning module: {project_name} from {project_info['path']}")
             sys.path.insert(0, str(Path(project_info["path"]).parent))
             importlib.import_module(project_info["value"])
             sys.path.pop(0)

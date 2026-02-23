@@ -65,7 +65,7 @@ def main(cfg: DictConfig):
         run.save(str(cfg_save_path), policy="now")
         run.save(str(run_dir / "config.yaml"), policy="now")
 
-    from helpers import make_env_policy, evaluate
+    from active_adaptation.helpers import make_env_policy, evaluate
     from active_adaptation.utils.helpers import EpisodeStats
 
     env, policy = make_env_policy(cfg)

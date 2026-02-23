@@ -21,7 +21,7 @@ sim:
 
 input:
   action:
-    class: JointPosition
+    _target_: JointPosition
     action_scaling: 
       .*hip_pitch.*: 0.548
       .*hip_roll.*: 0.351
@@ -40,7 +40,7 @@ input:
     alpha_range: [0.8, 1.0]
 
 command:
-  class: Twist
+  _target_: Twist
   linvel_x_range: [-0.8, 1.4]
   linvel_y_range: [-0.8, 0.8]
   angvel_range: [-2.0, 2.0]

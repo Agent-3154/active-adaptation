@@ -157,13 +157,34 @@ class ActuatorCfg:
         Returns:
             BuiltinPositionActuatorCfg: MuJoCo Lab compatible actuator configuration.
         """
+        def _to_scalar(value, default: float = 0.0) -> float:
+            if value is None:
+                return default
+            if isinstance(value, dict):
+                if ".*" in value:
+                    return float(value[".*"])
+                if len(value) == 0:
+                    return default
+                else:
+                    raise ValueError(f"Expected scalar or dict with '.*' key for actuator config value, got dict with keys {value.keys()}")
+            if isinstance(value, (list, tuple)):
+                if len(value) == 0:
+                    return default
+                return float(value[0])
+            return float(value)
+
+        target_names_expr = (
+            (self.joint_names_expr,)
+            if isinstance(self.joint_names_expr, str)
+            else tuple(self.joint_names_expr)
+        )
         return BuiltinPositionActuatorCfg(
-            target_names_expr=self.joint_names_expr,
-            effort_limit=self.effort_limit,
-            stiffness=self.stiffness,
-            damping=self.damping,
-            frictionloss=self.friction,
-            armature=self.armature,
+            target_names_expr=target_names_expr,
+            effort_limit=_to_scalar(self.effort_limit, default=None),
+            stiffness=_to_scalar(self.stiffness, default=0.0),
+            damping=_to_scalar(self.damping, default=0.0),
+            frictionloss=_to_scalar(self.friction, default=0.0),
+            armature=_to_scalar(self.armature, default=0.0),
         )
 
 

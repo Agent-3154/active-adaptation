@@ -1,0 +1,17 @@
+[project]
+name = "aa-mjlab-env"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "active_adaptation",
+    "hdmi",
+    "mjlab",
+]
+
+[tool.uv.sources]
+active_adaptation = { path = "../..", editable = true }
+hdmi = { path = "../../projects/hdmi", editable = true }
+mjlab = { git = "https://github.com/mujocolab/mjlab", rev = "main" }
+
+[tool.uv]
+package = false

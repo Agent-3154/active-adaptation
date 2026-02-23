@@ -35,7 +35,8 @@ class MjLabViewer:
         self._scene.env_idx = 0
 
         tabs = self._server.gui.add_tab_group()
-        self._scene.create_geom_groups_gui(tabs)
+        self._scene.create_groups_gui(tabs)
+        self._scene.create_visualization_gui()
     
     def add_batched_axes(self, name: str):
         axes_handle = self._server.scene.add_batched_axes(
@@ -70,7 +71,7 @@ class MjLabViewer:
         
         with self._render_timer.measure_time():
             with self._server.atomic():
-                self._scene.update(self.sim.wp_data)
+                self._scene.update(self.sim.data)
                 self._server.flush()
         
         return True

@@ -2,7 +2,6 @@ import torch
 from typing import TYPE_CHECKING, Optional, List, Union
 from typing_extensions import override
 
-import isaaclab.utils.string as string_utils
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
 from active_adaptation.envs.mdp.base import Reward
 from active_adaptation.envs.mdp.commands.locomotion import Twist
@@ -572,4 +571,3 @@ class action_rate2_l2(Reward):
         )
         rew = - action_diff.square().sum(dim=-1, keepdim=True)
         return rew
-

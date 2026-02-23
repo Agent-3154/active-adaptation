@@ -23,13 +23,13 @@ sim:
 
 input:
   action:
-    class: JointPosition
+    _target_: JointPosition
     action_scaling: {.*_joint: 0.5}
     max_delay: 1
     alpha_range: [0.5, 1.0]
 
 command:
-  class: Twist
+  _target_: Twist
   linvel_x_range: [-1.0, 1.6]
   linvel_y_range: [-0.8, 0.8]
   angvel_range:   [-2.0, 2.0]

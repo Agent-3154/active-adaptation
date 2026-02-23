@@ -61,6 +61,10 @@ class VecNorm(nn.Module):
         self.register_buffer("count", torch.tensor(1.0))
         # self.register_buffer("decay", torch.tensor(decay))
         self.register_buffer("count_factor", torch.tensor(count_factor))
+        self.sum: torch.Tensor
+        self.ssq: torch.Tensor
+        self.count: torch.Tensor
+        self.count_factor: torch.Tensor
 
         self.eps = 1e-5 # torch.finfo(torch.float32).eps
     

@@ -46,7 +46,7 @@ def main(cfg: DictConfig):
 
     aa.init(cfg, auto_rank=True)
     
-    from helpers import make_env_policy
+    from active_adaptation.helpers import make_env_policy
     checkpoint = parse_checkpoint(cfg.checkpoint_path)
     env, policy = make_env_policy(cfg, checkpoint)
     

@@ -25,7 +25,7 @@ def main(cfg):
 
     aa.init(cfg, auto_rank=False)
 
-    from scripts.helpers import make_env_policy, evaluate
+    from active_adaptation.helpers import make_env_policy, evaluate
     env, agent = make_env_policy(cfg)
     
     keys = [

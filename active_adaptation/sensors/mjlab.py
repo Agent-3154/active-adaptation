@@ -10,7 +10,10 @@ from mjlab.entity import Entity
 from mjlab.sim import WarpBridge
 from mjlab.sensor import Sensor, SensorCfg, ContactData
 from mjlab.sensor.contact_sensor import _AirTimeState
-from isaaclab.utils.string import resolve_matching_names
+try:
+    from isaaclab.utils.string import resolve_matching_names
+except ModuleNotFoundError:
+    from mjlab.utils.lab_api.string import resolve_matching_names
 
 
 @dataclass
@@ -28,6 +31,7 @@ class CfrcContactSensorCfg(SensorCfg):
 
 class CfrcContactSensor(Sensor[ContactData]):
     def __init__(self, cfg: CfrcContactSensorCfg) -> None:
+        super().__init__()
         self.cfg = cfg
         self._contact_data = ContactData()
         self._air_time_state = None
@@ -69,6 +73,9 @@ class CfrcContactSensor(Sensor[ContactData]):
     
     @property
     def data(self) -> ContactData:
+        return replace(self._contact_data)
+
+    def _compute_data(self) -> ContactData:
         return replace(self._contact_data)
         
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
@@ -141,4 +148,3 @@ class CfrcContactSensor(Sensor[ContactData]):
         currently_in_contact = self.data.current_contact_time > 0.0
         less_than_dt_in_contact = self.data.current_contact_time < (dt + abs_tol)
         return currently_in_contact * less_than_dt_in_contact
-

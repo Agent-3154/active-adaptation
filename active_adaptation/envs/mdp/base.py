@@ -199,10 +199,12 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
         self,
         env: _EnvBase,
         weight: float,
+        enabled: bool = True,
     ):
         super().__init__(env)
         self.command_manager: CT = env.command_manager
         self.weight = weight
+        self.enabled = enabled
 
     def __call__(self) -> torch.Tensor:
         result = self.compute()
@@ -212,7 +214,10 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
             rew, is_active = result
             rew = rew * is_active.float()
             count = is_active.sum()
-        return self.weight * rew, count 
+        rew = self.weight * rew
+        if not self.enabled:
+            rew.zero_()
+        return rew, count 
 
     @abc.abstractmethod
     def compute(self) -> torch.Tensor:
@@ -220,16 +225,22 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
 
 
 class Termination(Generic[CT], MDPComponent, RegistryMixin):
-    def __init__(self, env: _EnvBase):
+    def __init__(
+        self,
+        env: _EnvBase,
+        is_timeout: bool = False,
+    ):
         super().__init__(env)
         self.command_manager: CT = env.command_manager
+        # `is_timeout=True` means the condition contributes to `truncated`,
+        # otherwise it contributes to `terminated`.
+        self.is_timeout = is_timeout
     
     @abc.abstractmethod
-    def compute(self, termination: torch.Tensor) -> torch.Tensor:
+    def compute(self, termination: torch.Tensor) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
 
 class Randomization(MDPComponent, RegistryMixin):
     def __init__(self, env: _EnvBase):
         super().__init__(env)
-

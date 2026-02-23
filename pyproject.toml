@@ -9,7 +9,7 @@ authors = [
     {name = "btx0424@SUSTech"}
 ]
 keywords = ["robotics", "rl"]
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "setproctitle",
     "hydra-core",
@@ -20,8 +20,11 @@ dependencies = [
     "einops",
     "termcolor",
     "pygame",
-    "tensordict",
-    "torchrl",
+    "onnxruntime",
+    "jaxtyping",
+    "tensordict==0.7.0",
+    "torchrl==0.7.0",
+    "torch==2.7.0",
     "mujoco",
     "linuxfd",
 ]
@@ -49,6 +52,5 @@ find = { where = ["."], include = [
 "*" = ["**/*"]
 
 [tool.pyright]
-typeCheckingMode = "strict"
+# typeCheckingMode = "strict"
 reportIncompatibleMethodOverride = "error"
-
