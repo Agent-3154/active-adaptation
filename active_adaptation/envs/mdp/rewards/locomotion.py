@@ -221,47 +221,47 @@ class tracking_yaw(Reward):
         return torch.exp(- yaw_diff.square())
 
 
-# class feet_air_time(Reward):
+class feet_air_time(Reward):
     
-#     def __init__(self, env, body_names: str, thres: float, weight: float):
-#         super().__init__(env, weight)
-#         self.thres = thres
-#         self.asset: Articulation = self.env.scene["robot"]
-#         self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
+    def __init__(self, env, body_names: str, thres: float, weight: float):
+        super().__init__(env, weight)
+        self.thres = thres
+        self.asset: Articulation = self.env.scene["robot"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
 
-#         self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
-#         self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
-#         self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
+        self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
+        self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
+        self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
 
-#     @override
-#     def compute(self):
-#         first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[:, self.body_ids]
-#         last_air_time = self.contact_sensor.data.last_air_time[:, self.body_ids]
-#         reward = ((last_air_time - self.thres).clamp_max(0.0) * first_contact).sum(1)
-#         active = ~self.command_manager.is_standing_env
-#         return reward.reshape(self.num_envs, 1), active
+    @override
+    def compute(self):
+        first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[:, self.body_ids]
+        last_air_time = self.contact_sensor.data.last_air_time[:, self.body_ids]
+        reward = ((last_air_time - self.thres).clamp_max(0.0) * first_contact).sum(1)
+        active = ~self.command_manager.is_standing_env
+        return reward.reshape(self.num_envs, 1), active
 
 
-# class feet_contact_count(Reward):
-#     supported_backends = ("isaac", "mjlab")
-#     def __init__(self, env, body_names: str, weight: float):
-#         super().__init__(env, weight)
-#         self.asset: Articulation = self.env.scene["robot"]
-#         self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
+class feet_contact_count(Reward):
+    supported_backends = ("isaac", "mjlab")
+    def __init__(self, env, body_names: str, weight: float):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
 
-#         self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
-#         self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
-#         self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
-#         self.first_contact = torch.zeros(
-#             self.num_envs, len(self.body_ids), device=self.env.device
-#         )
+        self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
+        self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
+        self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
+        self.first_contact = torch.zeros(
+            self.num_envs, len(self.body_ids), device=self.env.device
+        )
 
-#     @override
-#     def compute(self):
-#         self.first_contact = self.contact_sensor.compute_first_contact(
-#             self.env.step_dt
-#         )[:, self.body_ids]
-#         return self.first_contact.sum(1, keepdim=True)
+    @override
+    def compute(self):
+        self.first_contact = self.contact_sensor.compute_first_contact(
+            self.env.step_dt
+        )[:, self.body_ids]
+        return self.first_contact.sum(1, keepdim=True)
 
 
 class root_upright(Reward):

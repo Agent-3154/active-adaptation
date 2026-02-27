@@ -169,7 +169,9 @@ class MJArticulation:
         body_adrs = []
         for i in range(1, self.mj_model.nbody): # skip the world body
             body = self.mj_model.body(i)
-            self.body_names_mjc.append(body.name)
+            # from mujoco 3.4.0 on, body names are prefixed with a path
+            # e.g., /left_hip_pitch_link
+            self.body_names_mjc.append(body.name.split("/")[-1])
             body_adrs.append(i)
         
         if not set(self.body_names_isaac) == set(self.body_names_mjc):
@@ -192,7 +194,9 @@ class MJArticulation:
             if actuator.trntype == mujoco.mjtTrn.mjTRN_JOINT:
                 joint_id = actuator.trnid[0]
                 joint = self.mj_model.joint(actuator.trnid[0])
-                self.joint_names_mjc.append(joint.name)
+                # from mujoco 3.4.0 on, joint names are prefixed with a path
+                # e.g., /left_hip_pitch_joint
+                self.joint_names_mjc.append(joint.name.split("/")[-1])
                 self.joint_pos_limits_mjc.append(joint.range)
                 joint_qposadr.append(self.mj_model.jnt_qposadr[joint_id])
                 joint_qveladr.append(self.mj_model.jnt_dofadr[joint_id])

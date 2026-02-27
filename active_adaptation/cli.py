@@ -4,6 +4,9 @@ import json
 import subprocess
 import warnings
 import argparse
+import importlib
+import importlib.util
+import importlib.metadata
 
 
 def aa_pull():
@@ -54,3 +57,41 @@ def aa_pull():
             warnings.warn(f"Failed to pull {project_path} with result: {result.returncode}")
             print(result.stderr)
         
+
+def aa_discover_projects(enabled: bool = False):
+    projects_file = CACHE_DIR / "projects.json"
+    if projects_file.exists():
+        projects = json.loads(projects_file.read_text())
+    else:
+        projects = {
+            "environment": {},
+            "learning": {},
+        }
+    for entry_point in importlib.metadata.entry_points(group="active_adaptation.projects"):
+        # get the module path
+        spec = importlib.util.find_spec(entry_point.value)
+        if entry_point.name not in projects["environment"]:
+            # note that `value` may differ from `name`
+            pkg_path = Path(spec.origin).parent.absolute()
+            projects["environment"][entry_point.name] = {
+                "value": entry_point.value,
+                "path": str(pkg_path),
+                "type": "environment",
+                "enabled": enabled,
+            }
+            print(f"Discovered project: {entry_point.name} at {pkg_path}")
+    for entry_point in importlib.metadata.entry_points(group="active_adaptation.learning"):
+        # get the module path
+        spec = importlib.util.find_spec(entry_point.value)
+        if entry_point.name not in projects["learning"]:
+            # note that `value` may differ from `name`
+            pkg_path = Path(spec.origin).parent.absolute()
+            projects["learning"][entry_point.name] = {
+                "value": entry_point.value,
+                "path": str(pkg_path),
+                "type": "learning",
+                "enabled": enabled,
+            }
+            print(f"Discovered learning module: {entry_point.name} at {pkg_path}")
+    projects_file.write_text(json.dumps(projects, indent=2))
+    return projects

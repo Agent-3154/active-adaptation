@@ -4,9 +4,8 @@ import json
 import datetime
 import active_adaptation.learning
 import builtins
-import importlib.metadata
-import importlib.util
 import inspect
+import importlib
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 from fractions import Fraction
@@ -100,45 +99,6 @@ _PROJECT_ENTRY_POINTS = []
 _LEARNING_ENTRY_POINTS = []
 
 
-def discover_projects(enabled: bool = False):
-    projects_file = CACHE_DIR / "projects.json"
-    if projects_file.exists():
-        projects = json.loads(projects_file.read_text())
-    else:
-        projects = {
-            "environment": {},
-            "learning": {},
-        }
-    for entry_point in importlib.metadata.entry_points(group="active_adaptation.projects"):
-        # get the module path
-        spec = importlib.util.find_spec(entry_point.value)
-        if entry_point.name not in projects["environment"]:
-            # note that `value` may differ from `name`
-            pkg_path = Path(spec.origin).parent.absolute()
-            projects["environment"][entry_point.name] = {
-                "value": entry_point.value,
-                "path": str(pkg_path),
-                "type": "environment",
-                "enabled": enabled,
-            }
-            print(f"Discovered project: {entry_point.name} at {pkg_path}")
-    for entry_point in importlib.metadata.entry_points(group="active_adaptation.learning"):
-        # get the module path
-        spec = importlib.util.find_spec(entry_point.value)
-        if entry_point.name not in projects["learning"]:
-            # note that `value` may differ from `name`
-            pkg_path = Path(spec.origin).parent.absolute()
-            projects["learning"][entry_point.name] = {
-                "value": entry_point.value,
-                "path": str(pkg_path),
-                "type": "learning",
-                "enabled": enabled,
-            }
-            print(f"Discovered learning module: {entry_point.name} at {pkg_path}")
-    projects_file.write_text(json.dumps(projects, indent=2))
-    return projects
-
-
 def import_projects():
     """
     Import the projects as specified in `.cache/projects.json`.
@@ -147,7 +107,8 @@ def import_projects():
     if projects_file.exists():
         projects = json.loads(projects_file.read_text())
     else:
-        projects = discover_projects(enabled=False)
+        from active_adaptation.cli import aa_discover_projects
+        projects = aa_discover_projects(enabled=False)
     for project_name, project_info in projects["environment"].items():
         if project_info["enabled"]:
             print(f"Importing project: {project_name} from {project_info['path']}")
@@ -182,8 +143,10 @@ def init(cfg: DictConfig, auto_rank: bool):
         argv_file.write_text(json.dumps(history, indent=2))
 
     set_backend(cfg.get("backend", "isaac"))
-    if get_backend() == "mjlab":
+    if _BACKEND == "mjlab":
         cfg.device = "cuda"  # force to use GPU for mjlab
+    elif _BACKEND == "mujoco":
+        cfg.device = "cpu"  # force to use CPU for mujoco
 
     if auto_rank and str(cfg.device).startswith("cuda"):
         cfg.device = f"cuda:{get_local_rank()}"

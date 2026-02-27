@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [project.scripts]
-aa-discover-projects = "active_adaptation:discover_projects"
+aa-discover-projects = "active_adaptation.cli:aa_discover_projects"
 aa-pull = "active_adaptation.cli:aa_pull"
 
 [project.entry-points."active_adaptation.projects"]

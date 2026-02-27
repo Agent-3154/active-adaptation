@@ -172,7 +172,7 @@ class Observation(Generic[CT], MDPComponent, RegistryMixin):
 
     def symmetry_transform(self) -> SymmetryTransform:
         """Called to apply symmetry transformations to the observation"""
-        pass
+        raise NotImplementedError
 
 
 class ActionManager(MDPComponent, RegistryMixin):
@@ -192,6 +192,10 @@ class ActionManager(MDPComponent, RegistryMixin):
     @abc.abstractmethod
     def apply_action(self, substep: int):
         """Apply the action. Called at every simulation step."""
+        raise NotImplementedError
+    
+    def symmetry_transform(self) -> SymmetryTransform:
+        """Called to apply symmetry transformations to the action"""
         raise NotImplementedError
 
 
