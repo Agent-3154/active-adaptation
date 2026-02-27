@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# projects/hdmi/
+outputs
+outputs_play
+
+
 # C extensions
 *.so
 
@@ -123,7 +128,7 @@ celerybeat.pid
 .env
 .venv
 env/
-venv/
+# venv/
 ENV/
 env.bak/
 venv.bak/

@@ -6,6 +6,7 @@ dependencies = [
     "active_adaptation",
     "hdmi",
     "isaaclab[isaacsim,all]==2.3.2.post1",
+    "xxhash",
 ]
 
 [[tool.uv.index]]

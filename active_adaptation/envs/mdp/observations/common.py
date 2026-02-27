@@ -332,23 +332,23 @@ class body_mass(Observation):
         return self.masses.reshape(self.num_envs, -1)
 
 
-class prev_actions(Observation):
-    def __init__(self, env, key: str="action", steps: int=1, flatten: bool=True):
-        super().__init__(env)
-        self.steps = steps
-        self.flatten = flatten
-        self.action_manager = self.env.input_managers[key]
+# class prev_actions(Observation):
+#     def __init__(self, env, key: str="action", steps: int=1, flatten: bool=True):
+#         super().__init__(env)
+#         self.steps = steps
+#         self.flatten = flatten
+#         self.action_manager = self.env.input_managers[key]
     
-    def compute(self):
-        action_buf = self.action_manager.action_buf[:, :self.steps]
-        if self.flatten:
-            return action_buf.reshape(self.num_envs, -1)
-        else:
-            return action_buf
+#     def compute(self):
+#         action_buf = self.action_manager.action_buf[:, :self.steps]
+#         if self.flatten:
+#             return action_buf.reshape(self.num_envs, -1)
+#         else:
+#             return action_buf
 
-    def symmetry_transform(self):
-        transform = self.action_manager.symmetry_transform()
-        return transform.repeat(self.steps)
+#     def symmetry_transform(self):
+#         transform = self.action_manager.symmetry_transform()
+#         return transform.repeat(self.steps)
 
 
 class incoming_wrench(Observation):

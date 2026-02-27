@@ -158,11 +158,6 @@ class PPOPolicy(TensorDictModuleBase):
         self.critic.apply(init_)
 
         if active_adaptation.is_distributed():
-            distr.init_process_group(
-                backend="nccl",
-                world_size=active_adaptation.get_world_size(),
-                rank=active_adaptation.get_local_rank()
-            )
             if USE_DDP:
                 self.actor = DDP(self.actor)
                 self.critic = DDP(self.critic)

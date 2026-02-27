@@ -27,6 +27,7 @@ dependencies = [
     "torch==2.7.0",
     "mujoco",
     "linuxfd",
+    "pdbpp",
 ]
 
 [project.scripts]

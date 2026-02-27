@@ -70,9 +70,14 @@ def export_onnx(
     )
     
     onnx_input = {}
-    # onnx_input = tuple(td[k] for k in module.in_keys)
-    for input in ort_session.get_inputs():
-        onnx_input[input.name] = to_numpy(td[input.name])
+    ort_inputs = ort_session.get_inputs()
+    if len(ort_inputs) != len(module.in_keys):
+        raise RuntimeError(
+            f"ONNX input count mismatch: ort={len(ort_inputs)} vs module.in_keys={len(module.in_keys)}"
+        )
+    # Map ORT inputs by position to preserve the original semantic order even when
+    # exporter rewrites names (e.g. nested keys can become next_*_orig).
+    for i, input_arg in enumerate(ort_inputs):
+        onnx_input[input_arg.name] = to_numpy(td[module.in_keys[i]])
     ort_output = ort_session.run(None, onnx_input)
     assert len(ort_output) == len(module.out_keys)
-

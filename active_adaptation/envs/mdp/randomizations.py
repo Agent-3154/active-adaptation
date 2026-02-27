@@ -178,54 +178,180 @@ class random_motor_failure(Randomization):
 
 
 class perturb_body_materials(Randomization):
-    supported_backends = ("isaac",)
+    supported_backends = ("isaac", "mjlab")
     def __init__(
         self,
         env,
         body_names,
-        static_friction_range = (0.6, 1.0),
-        dynamic_friction_range = (0.6, 1.0),
-        restitution_range=(0.0, 0.2),
+        static_friction_range = None,
+        dynamic_friction_range = None,
+        restitution_range=None,
+        solref_time_constant_range=None,
+        solref_dampratio_range=None,
         homogeneous: bool=False
     ):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset = self.env.scene.articulations["robot"]
         self.body_ids, self.body_names = self.asset.find_bodies(body_names)
 
         self.static_friction_range = static_friction_range
         self.dynamic_friction_range = dynamic_friction_range
         self.restitution_range = restitution_range
+        self.solref_time_constant_range = solref_time_constant_range
+        self.solref_dampratio_range = solref_dampratio_range
         self.homogeneous = homogeneous
-        
-        num_shapes_per_body = []
-        for link_path in self.asset.root_physx_view.link_paths[0]:
-            link_physx_view = self.asset._physics_sim_view.create_rigid_body_view(link_path)  # type: ignore
-            num_shapes_per_body.append(link_physx_view.max_shapes)
-        cumsum = np.cumsum([0,] + num_shapes_per_body)
-        self.shape_ids = torch.cat([
-            torch.arange(cumsum[i], cumsum[i+1]) 
-            for i in self.body_ids
-        ])
-        self.num_buckets = 64
-        self.static_friction_buckets = torch.linspace(*self.static_friction_range, self.num_buckets)
-        self.dynamic_friction_buckets = torch.linspace(*self.dynamic_friction_range, self.num_buckets)
-        self.restitution_buckets = torch.linspace(*self.restitution_range, self.num_buckets)
+        if self.solref_dampratio_range is not None and (
+            self.solref_dampratio_range[0] <= 0.0 or self.solref_dampratio_range[1] <= 0.0
+        ):
+            raise ValueError("solref_dampratio_range must be positive for log-uniform sampling.")
+
+        if self.env.backend == "isaac":
+            num_shapes_per_body = []
+            for link_path in self.asset.root_physx_view.link_paths[0]:
+                link_physx_view = self.asset._physics_sim_view.create_rigid_body_view(link_path)  # type: ignore
+                num_shapes_per_body.append(link_physx_view.max_shapes)
+            cumsum = np.cumsum([0,] + num_shapes_per_body)
+            self.shape_ids = torch.cat([
+                torch.arange(cumsum[i], cumsum[i+1]) 
+                for i in self.body_ids
+            ])
+            self.num_buckets = 64
+            if self.static_friction_range is not None:
+                self.static_friction_buckets = torch.linspace(*self.static_friction_range, self.num_buckets)
+            if self.dynamic_friction_range is not None:
+                self.dynamic_friction_buckets = torch.linspace(*self.dynamic_friction_range, self.num_buckets)
+            if self.restitution_range is not None:
+                self.restitution_buckets = torch.linspace(*self.restitution_range, self.num_buckets)
+        elif self.env.backend == "mjlab":
+            if self.dynamic_friction_range is not None or self.restitution_range is not None:
+                logging.info(
+                    "perturb_body_materials(mjlab): dynamic_friction_range/restitution_range are accepted for "
+                    "interface compatibility but not applied directly."
+                )
+            if len(self.body_ids) == 0:
+                raise ValueError(
+                    "No bodies matched the provided names for material perturbation."
+                )
+
+            local_body_ids = torch.as_tensor(
+                self.body_ids, device=self.device, dtype=torch.long
+            )
+            self.global_body_ids = self.asset.indexing.body_ids[local_body_ids]
+            selected_body_set = set(self.global_body_ids.cpu().tolist())
+
+            geom_global_ids = self.asset.indexing.geom_ids.cpu().tolist()
+            geom_names = self.asset.geom_names
+            selected_geom_local: list[int] = []
+            selected_geom_global: list[int] = []
+            selected_geom_names: list[str] = []
+
+            cpu_model = self.env.sim.mj_model
+            for local_idx, global_idx in enumerate(geom_global_ids):
+                body_id = int(cpu_model.geom_bodyid[global_idx])
+                if body_id in selected_body_set:
+                    selected_geom_local.append(local_idx)
+                    selected_geom_global.append(global_idx)
+                    selected_geom_names.append(geom_names[local_idx])
+
+            if not selected_geom_global:
+                raise ValueError(
+                    "No geoms found for the specified bodies when configuring material perturbation."
+                )
+
+            self.geom_local_ids = torch.as_tensor(
+                selected_geom_local, device=self.device, dtype=torch.long
+            )
+            self.geom_global_ids = torch.as_tensor(
+                selected_geom_global, device=self.device, dtype=torch.long
+            )
+            self.geom_names = selected_geom_names
 
     def startup(self):
-        logging.info(f"Randomize body materials of {self.body_names} upon startup.")
+        if self.env.backend == "isaac":
+            logging.info(f"Randomize body materials of {self.body_names} upon startup.")
 
-        materials = self.asset.root_physx_view.get_material_properties().clone()
-        if self.homogeneous:
-            shape = (self.num_envs, 1)
-        else:
-            shape = (self.num_envs, len(self.shape_ids))
-        materials[:, self.shape_ids, 0] = self.static_friction_buckets[torch.randint(0, self.num_buckets, shape)]
-        materials[:, self.shape_ids, 1] = self.dynamic_friction_buckets[torch.randint(0, self.num_buckets, shape)]
-        materials[:, self.shape_ids, 2] = self.restitution_buckets[torch.randint(0, self.num_buckets, shape)]
+            materials = self.asset.root_physx_view.get_material_properties().clone()
+            if self.homogeneous:
+                shape = (self.num_envs, 1)
+            else:
+                shape = (self.num_envs, len(self.shape_ids))
+            if self.static_friction_range is not None:
+                materials[:, self.shape_ids, 0] = self.static_friction_buckets[
+                    torch.randint(0, self.num_buckets, shape)
+                ]
+            if self.dynamic_friction_range is not None:
+                materials[:, self.shape_ids, 1] = self.dynamic_friction_buckets[
+                    torch.randint(0, self.num_buckets, shape)
+                ]
+            if self.restitution_range is not None:
+                materials[:, self.shape_ids, 2] = self.restitution_buckets[
+                    torch.randint(0, self.num_buckets, shape)
+                ]
 
-        indices = torch.arange(self.asset.num_instances)
-        self.asset.root_physx_view.set_material_properties(materials.flatten(), indices)
-        self.asset.data.body_materials = materials.to(self.device)
+            indices = torch.arange(self.asset.num_instances)
+            self.asset.root_physx_view.set_material_properties(materials.flatten(), indices)
+            self.asset.data.body_materials = materials.to(self.device)
+        elif self.env.backend == "mjlab":
+            logging.info(f"Randomize body materials of {self.geom_names} upon startup.")
+
+            cpu_model = self.env.sim.mj_model
+            # logging.info("perturb_body_materials(mjlab): selected geoms before randomization:")
+            # for gid in self.geom_global_ids.tolist():
+            #     geom_name = cpu_model.geom(gid).name
+            #     body_name = cpu_model.body(cpu_model.geom_bodyid[gid]).name
+            #     friction = cpu_model.geom_friction[gid]
+            #     priority = cpu_model.geom_priority[gid]
+            #     solmix = cpu_model.geom_solmix[gid]
+            #     logging.info(
+            #         f"  gid={gid} geom={geom_name} body={body_name} "
+            #         f"fric={friction} priority={priority} solmix={solmix}"
+            #     )
+
+            # logging.info("perturb_body_materials(mjlab): terrain-like geoms before randomization:")
+            # for gid in range(cpu_model.ngeom):
+            #     geom_name = (cpu_model.geom(gid).name or "")
+            #     body_name = (cpu_model.body(cpu_model.geom_bodyid[gid]).name or "")
+            #     key = f"{geom_name} {body_name}".lower()
+            #     if any(k in key for k in ("ground", "floor", "terrain", "plane")):
+            #         friction = cpu_model.geom_friction[gid]
+            #         priority = cpu_model.geom_priority[gid]
+            #         solmix = cpu_model.geom_solmix[gid]
+            #         logging.info(
+            #             f"  gid={gid} geom={geom_name} body={body_name} "
+            #             f"fric={friction} priority={priority} solmix={solmix}"
+            #         )
+
+            num_geoms = self.geom_global_ids.numel()
+            sample_cols = 1 if self.homogeneous else num_geoms
+            shape = (self.num_envs, sample_cols)
+
+            model = self.env.sim.model
+            # model.geom_priority[self.geom_global_ids] = 1
+            if self.static_friction_range is not None:
+                sf = sample_uniform(shape, *self.static_friction_range, device=self.device)
+                if sample_cols == 1:
+                    sf = sf.expand(-1, num_geoms)
+                model.geom_friction[:, self.geom_global_ids, 0] = sf
+                cpu_model.geom_friction[self.geom_global_ids.cpu().numpy()] = (
+                    model.geom_friction[0, self.geom_global_ids].to(device="cpu").numpy()
+                )
+            if self.solref_time_constant_range is not None:
+                tc = sample_uniform(shape, *self.solref_time_constant_range, device=self.device)
+                if sample_cols == 1:
+                    tc = tc.expand(-1, num_geoms)
+                model.geom_solref[:, self.geom_global_ids, 0] = tc
+                cpu_model.geom_solref[self.geom_global_ids.cpu().numpy(), 0] = (
+                    model.geom_solref[0, self.geom_global_ids, 0].to(device="cpu").numpy()
+                )
+            if self.solref_dampratio_range is not None:
+                dr_low, dr_high = self.solref_dampratio_range
+                dr = sample_uniform(shape, np.log(dr_low), np.log(dr_high), device=self.device).exp()
+                if sample_cols == 1:
+                    dr = dr.expand(-1, num_geoms)
+                model.geom_solref[:, self.geom_global_ids, 1] = dr
+                cpu_model.geom_solref[self.geom_global_ids.cpu().numpy(), 1] = (
+                    model.geom_solref[0, self.geom_global_ids, 1].to(device="cpu").numpy()
+                )
 
 
 class rand_body_materials(Randomization):
@@ -278,62 +404,125 @@ class rand_body_materials(Randomization):
 
 
 class perturb_body_mass(Randomization):
-    supported_backends = ("isaac",)
+    supported_backends = ("isaac", "mjlab")
     def __init__(
         self, env, **perturb_ranges: Tuple[float, float]
     ):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset = self.env.scene.articulations["robot"]
 
         self.body_ids, self.body_names, values = string_utils.resolve_matching_names_values(
             perturb_ranges, self.asset.body_names
         )
-        self.mass_ranges = torch.tensor(values)
-        print(self.body_names)
+        if len(self.body_ids) == 0:
+            raise ValueError("No bodies matched the provided names for mass perturbation.")
+        self.mass_ranges = torch.tensor(values, device=self.device, dtype=torch.float32)
+
+        if self.env.backend == "mjlab":
+            self.local_body_ids = torch.as_tensor(
+                self.body_ids, device=self.device, dtype=torch.long
+            )
+            self.global_body_ids = self.asset.indexing.body_ids[self.local_body_ids]
+            self._global_body_ids_cpu = self.global_body_ids.to(
+                device="cpu", dtype=torch.long
+            )
+            model = self.env.sim.model
+            self._default_body_mass = model.body_mass[:, self.global_body_ids].clone()
+            self._default_body_inertia = model.body_inertia[:, self.global_body_ids].clone()
 
     def startup(self):
         logging.info(f"Randomize body masses of {self.body_names} upon startup.")
-        masses = self.asset.data.default_mass.clone()
-        inertias = self.asset.data.default_inertia.clone()
-        print(f"Default masses: {masses[0]}")
-        scale = uniform(
-            self.mass_ranges[:, 0].expand_as(masses[:, self.body_ids]),
-            self.mass_ranges[:, 1].expand_as(masses[:, self.body_ids])
-        )
-        masses[:, self.body_ids] *= scale
-        inertias[:, self.body_ids] *= scale.unsqueeze(-1)
-        indices = torch.arange(self.asset.num_instances)
-        self.asset.root_physx_view.set_masses(masses, indices)
-        self.asset.root_physx_view.set_inertias(inertias, indices)
-        assert torch.allclose(self.asset.root_physx_view.get_masses(), masses)
+        if self.env.backend == "isaac":
+            masses = self.asset.data.default_mass.clone()
+            inertias = self.asset.data.default_inertia.clone()
+            scale = uniform(
+                self.mass_ranges[:, 0].expand_as(masses[:, self.body_ids]),
+                self.mass_ranges[:, 1].expand_as(masses[:, self.body_ids])
+            ).cpu()
+            masses[:, self.body_ids] *= scale
+            inertias[:, self.body_ids] *= scale.unsqueeze(-1)
+            indices = torch.arange(self.asset.num_instances)
+            self.asset.root_physx_view.set_masses(masses, indices)
+            self.asset.root_physx_view.set_inertias(inertias, indices)
+            assert torch.allclose(self.asset.root_physx_view.get_masses(), masses)
+        elif self.env.backend == "mjlab":
+            num_bodies = self.global_body_ids.numel()
+            low = self.mass_ranges[:, 0].unsqueeze(0).expand(self.num_envs, num_bodies)
+            high = self.mass_ranges[:, 1].unsqueeze(0).expand(self.num_envs, num_bodies)
+            scale = uniform(low, high)
+
+            model = self.env.sim.model
+            new_mass = self._default_body_mass * scale
+            model.body_mass[:, self.global_body_ids] = new_mass
+            model.body_inertia[:, self.global_body_ids] = (
+                self._default_body_inertia * scale.unsqueeze(-1)
+            )
+
+            cpu_model = self.env.sim.mj_model
+            cpu_model.body_mass[self._global_body_ids_cpu.numpy()] = (
+                model.body_mass[0, self.global_body_ids].to(device="cpu").numpy()
+            )
+            cpu_model.body_inertia[self._global_body_ids_cpu.numpy()] = (
+                model.body_inertia[0, self.global_body_ids].to(device="cpu").numpy()
+            )
 
 
 class perturb_body_com(Randomization):
-    supported_backends = ("isaac",)
+    supported_backends = ("isaac", "mjlab")
     def __init__(
         self, env, body_names, pos_range = (-0.05, 0.05)
     ):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset = self.env.scene.articulations["robot"]
 
         self.body_ids, self.body_names = self.asset.find_bodies(body_names)
-        
-        self.pos_ranges = torch.tensor(pos_range)
-        print(self.body_names)
+        if len(self.body_ids) == 0:
+            raise ValueError(
+                "No bodies matched the provided names for COM perturbation."
+            )
+
+        self.pos_range = tuple(pos_range)
+        self.pos_ranges = torch.tensor(self.pos_range)
+
+        if self.env.backend == "mjlab":
+            self.local_body_ids = torch.as_tensor(
+                self.body_ids, device=self.device, dtype=torch.long
+            )
+            self.global_body_ids = self.asset.indexing.body_ids[self.local_body_ids]
+            self._global_body_ids_cpu = self.global_body_ids.to(
+                device="cpu", dtype=torch.long
+            )
+            model = self.env.sim.model
+            self._default_body_ipos = model.body_ipos[:, self.global_body_ids].clone()
 
     def startup(self):
         logging.info(f"Randomize body CoM of {self.body_names} upon startup.")
-        rand_sample = torch.zeros(self.num_envs, len(self.body_ids), 3, device=self.device)
-        coms = self.asset.root_physx_view.get_coms().clone()
-        rand_sample[:, :, :] = uniform(
-            self.pos_ranges[0].expand_as(coms[:, self.body_ids, :3]),
-            self.pos_ranges[1].expand_as(coms[:, self.body_ids, :3])
-        )
-        rand_sample[:, :, 0] *= 0.5
-        coms[:, self.body_ids, :3] += rand_sample.to('cpu')
-        indices = torch.arange(self.asset.num_instances)
-        self.asset.root_physx_view.set_coms(coms, indices)
-        assert torch.allclose(self.asset.root_physx_view.get_coms(), coms)
+        if self.env.backend == "isaac":
+            rand_sample = torch.zeros(self.num_envs, len(self.body_ids), 3, device=self.device)
+            coms = self.asset.root_physx_view.get_coms().clone()
+            rand_sample[:, :, :] = uniform(
+                self.pos_ranges[0].expand_as(coms[:, self.body_ids, :3]),
+                self.pos_ranges[1].expand_as(coms[:, self.body_ids, :3])
+            )
+            rand_sample[:, :, 0] *= 0.5
+            coms[:, self.body_ids, :3] += rand_sample.to('cpu')
+            indices = torch.arange(self.asset.num_instances)
+            self.asset.root_physx_view.set_coms(coms, indices)
+            assert torch.allclose(self.asset.root_physx_view.get_coms(), coms)
+        elif self.env.backend == "mjlab":
+            num_bodies = self.global_body_ids.numel()
+            low, high = self.pos_range
+            offsets = torch.rand(self.num_envs, num_bodies, 3, device=self.device)
+            offsets = low + (high - low) * offsets
+
+            model = self.env.sim.model
+            new_ipos = self._default_body_ipos + offsets
+            model.body_ipos[:, self.global_body_ids] = new_ipos
+
+            cpu_model = self.env.sim.mj_model
+            cpu_model.body_ipos[self._global_body_ids_cpu.numpy()] = (
+                model.body_ipos[0, self.global_body_ids].to(device="cpu").numpy()
+            )
 
 
 class push_by_setting_velocity(Randomization):

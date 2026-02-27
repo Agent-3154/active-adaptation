@@ -160,11 +160,6 @@ class PPOPolicy(PPOBase):
         self.critic.apply(init_)
 
         if active_adaptation.is_distributed():
-            distr.init_process_group(
-                backend="nccl",
-                world_size=active_adaptation.get_world_size(),
-                rank=active_adaptation.get_local_rank()
-            )
             self.world_size = active_adaptation.get_world_size()
             if self.cfg.use_ddp:
                 self.actor = DDP(self.actor)

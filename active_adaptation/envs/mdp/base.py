@@ -11,6 +11,7 @@ from active_adaptation.utils.symmetry import SymmetryTransform
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
+    from mjlab.entity import Entity
     from active_adaptation.envs.env_base import _EnvBase
 
 
@@ -116,7 +117,7 @@ class MDPComponent:
 class Command(MDPComponent, RegistryMixin):
     def __init__(self, env: _EnvBase, teleop: bool=False) -> None:
         super().__init__(env)
-        self.asset: Articulation = env.scene["robot"]
+        self.asset: "Articulation" | "Entity" = env.scene["robot"]
         self.init_root_state = self.asset.data.default_root_state.clone()
         self.init_joint_pos = self.asset.data.default_joint_pos.clone()
         self.init_joint_vel = self.asset.data.default_joint_vel.clone()
@@ -214,10 +215,7 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
             rew, is_active = result
             rew = rew * is_active.float()
             count = is_active.sum()
-        rew = self.weight * rew
-        if not self.enabled:
-            rew.zero_()
-        return rew, count 
+        return self.weight * rew, count 
 
     @abc.abstractmethod
     def compute(self) -> torch.Tensor:
@@ -229,12 +227,14 @@ class Termination(Generic[CT], MDPComponent, RegistryMixin):
         self,
         env: _EnvBase,
         is_timeout: bool = False,
+        enabled: bool = True,
     ):
         super().__init__(env)
         self.command_manager: CT = env.command_manager
         # `is_timeout=True` means the condition contributes to `truncated`,
         # otherwise it contributes to `terminated`.
         self.is_timeout = is_timeout
+        self.enabled = enabled
     
     @abc.abstractmethod
     def compute(self, termination: torch.Tensor) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:

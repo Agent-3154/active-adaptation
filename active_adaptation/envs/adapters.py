@@ -1,12 +1,13 @@
 """Adapter classes to provide a unified API for different simulation backends."""
 
-from typing import Protocol, TYPE_CHECKING, Union, Mapping
+from typing import Dict, Protocol, TYPE_CHECKING, Union, Mapping
 from typing_extensions import override
 import torch
 
 if TYPE_CHECKING:
     from isaaclab.sim import SimulationContext
     from isaaclab.scene import InteractiveScene
+    from isaaclab.assets import Articulation
     from mjlab.sim import Simulation
     from mjlab.scene import Scene
     from mjlab.entity import Entity
@@ -71,7 +72,7 @@ class SceneAdapter(Protocol):
         )
 
     @property
-    def articulations(self) -> dict:
+    def articulations(self) -> Dict[str, Union["Articulation", "Entity"]]:
         """Dictionary of articulations (robots)."""
         ...
 

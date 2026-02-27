@@ -16,7 +16,6 @@ app:
 
 # total_frames: 300_000_000
 total_frames: 150_000_000
-total_iters: null
 max_iters: -1
 eval_interval: -1
 eval_render: false

@@ -5,32 +5,17 @@ hydra:
 headless: false
 
 backend: isaac
-device: cpu # cuda for mjlab, cpu for isaac and mujoco
+device: cuda
 
 app:
   headless: ${..headless}
   enable_cameras: false
 
-total_frames: -1
-max_iters: -1
-eval_interval: -1
-save_interval: -1
-seed: 0
+seed: 42
 checkpoint_path: null
 export_policy: false
 
 camera_follow: true
-
-wandb:
-  group: ${oc.select:..task.name}
-  run_name: ${oc.select:..task.name,test}-${oc.select:..algo.name,none}
-  job_type: train
-  entity: btx0424
-  project: adaptation
-  mode: online # set to 'disabled' when debugging locally
-  run_id: 
-  monitor_gym: True
-  tags: 
 
 
 defaults:
@@ -39,4 +24,4 @@ defaults:
   - _self_
 
 task:
-  num_envs: 16
+  num_envs: 4

@@ -32,8 +32,10 @@ if aa.get_backend() == "isaac":
         spatial_symmetry_mapping: Optional[Dict[str, str]] = None
         joint_names_isaac: Optional[List[str]] = None
         joint_names_mjlab: Optional[List[str]] = None
+        joint_names_simulation: Optional[List[str]] = None
         body_names_isaac: Optional[List[str]] = None
         body_names_mjlab: Optional[List[str]] = None
+        body_names_simulation: Optional[List[str]] = None
 
 elif aa.get_backend() == "mjlab":
     import mujoco
@@ -49,8 +51,10 @@ elif aa.get_backend() == "mjlab":
         spatial_symmetry_mapping: Optional[Dict[str, str]] = None
         joint_names_isaac: Optional[List[str]] = None
         joint_names_mjlab: Optional[List[str]] = None
+        joint_names_simulation: Optional[List[str]] = None
         body_names_isaac: Optional[List[str]] = None
         body_names_mjlab: Optional[List[str]] = None
+        body_names_simulation: Optional[List[str]] = None
 
 elif aa.get_backend() == "mujoco":
     import mujoco
@@ -263,8 +267,10 @@ class AssetCfg:
     
     joint_names_isaac: Optional[List[str]] = None
     joint_names_mjlab: Optional[List[str]] = None
+    joint_names_simulation: Optional[List[str]] = None
     body_names_isaac: Optional[List[str]] = None
     body_names_mjlab: Optional[List[str]] = None
+    body_names_simulation: Optional[List[str]] = None
 
     self_collisions: bool = True
 
@@ -303,10 +309,12 @@ class AssetCfg:
             friction = {}
             armature = {}
             
-            def parse_cfg(expr, cfg):
+            def parse_cfg(expr, cfg, all_joints_expr):
                 if isinstance(cfg, (float, int)):
                     return {expr: cfg}
                 else:
+                    if cfg.keys() == {".*"}:
+                        return {all_joints_expr: float(cfg[".*"])}
                     return cfg
             
             # merge all actuator configurations into a single implicit actuator configuration
@@ -315,12 +323,12 @@ class AssetCfg:
                 if not isinstance(expr, str):
                     expr = "|".join(expr)
                 joint_names_expr += f"({expr})|"
-                effort_limit.update(parse_cfg(expr, actuator.effort_limit))
-                velocity_limit.update(parse_cfg(expr, actuator.velocity_limit))
-                stiffness.update(parse_cfg(expr, actuator.stiffness))
-                damping.update(parse_cfg(expr, actuator.damping))
-                friction.update(parse_cfg(expr, actuator.friction))
-                armature.update(parse_cfg(expr, actuator.armature))
+                effort_limit.update(parse_cfg(expr, actuator.effort_limit, all_joints_expr=expr))
+                velocity_limit.update(parse_cfg(expr, actuator.velocity_limit, all_joints_expr=expr))
+                stiffness.update(parse_cfg(expr, actuator.stiffness, all_joints_expr=expr))
+                damping.update(parse_cfg(expr, actuator.damping, all_joints_expr=expr))
+                friction.update(parse_cfg(expr, actuator.friction, all_joints_expr=expr))
+                armature.update(parse_cfg(expr, actuator.armature, all_joints_expr=expr))
             actuators = {
                 "all": ImplicitActuatorCfg(
                     joint_names_expr=joint_names_expr,
@@ -367,8 +375,10 @@ class AssetCfg:
             spatial_symmetry_mapping=self.spatial_symmetry_mapping,
             joint_names_isaac=self.joint_names_isaac,
             joint_names_mjlab=self.joint_names_mjlab,
+            joint_names_simulation=self.joint_names_simulation,
             body_names_isaac=self.body_names_isaac,
             body_names_mjlab=self.body_names_mjlab,
+            body_names_simulation=self.body_names_simulation,
         )
     
     def mujoco(self):
@@ -439,12 +449,18 @@ class AssetCfg:
         if self.self_collisions:
             collision_cfg = CollisionCfg(
                 geom_names_expr=(".*_collision",),
+                condim={r"^(left|right)_foot[1-7]_collision$": 3, ".*_collision": 1},
+                priority={r"^(left|right)_foot[1-7]_collision$": 1},
+                friction={r"^(left|right)_foot[1-7]_collision$": (0.6,)},
             )
         else:
             collision_cfg = CollisionCfg(
                 geom_names_expr=(".*_collision",),
                 contype=0,
                 conaffinity=1,
+                condim={r"^(left|right)_foot[1-7]_collision$": 3, ".*_collision": 1},
+                priority={r"^(left|right)_foot[1-7]_collision$": 1},
+                friction={r"^(left|right)_foot[1-7]_collision$": (0.6,)},
             )
         
         spec = mujoco.MjSpec.from_file(str(self.mjcf_path))
@@ -464,8 +480,10 @@ class AssetCfg:
             spatial_symmetry_mapping=self.spatial_symmetry_mapping,
             joint_names_isaac=self.joint_names_isaac,
             joint_names_mjlab=self.joint_names_mjlab,
+            joint_names_simulation=self.joint_names_simulation,
             body_names_isaac=self.body_names_isaac,
             body_names_mjlab=self.body_names_mjlab,
+            body_names_simulation=self.body_names_simulation,
         )
 
 
@@ -501,9 +519,8 @@ class RigidObjectCfg:
     def mjlab(self):
         raise NotImplementedError("MuJoCo Lab backend does not support rigid objects")
 
-
 def get_input_joint_indexing(
-    input_order: Literal["isaac", "mujoco", "mjlab"],
+    input_order: Literal["isaac", "mujoco", "mjlab", "simulation"],
     asset_cfg: AssetCfg,
     target_joint_names: List[str],
     device: str = "cpu",
@@ -515,6 +532,8 @@ def get_input_joint_indexing(
         source_joint_names = [name for name in asset_cfg.joint_names_isaac if name in target_joint_names]
     elif input_order == "mjlab":
         source_joint_names = [name for name in asset_cfg.joint_names_mjlab if name in target_joint_names]
+    elif input_order == "simulation":
+        source_joint_names = [name for name in asset_cfg.joint_names_simulation if name in target_joint_names]
     else:
         raise ValueError(f"Invalid input_order: {input_order}")
     if not len(source_joint_names) == len(target_joint_names):
@@ -524,7 +543,7 @@ def get_input_joint_indexing(
 
 
 def get_output_joint_indexing(
-    output_order: Literal["isaac", "mujoco", "mjlab"],
+    output_order: Literal["isaac", "mujoco", "mjlab", "simulation"],
     asset_cfg: AssetCfg,
     source_joint_names: List[str],
     device: str = "cpu",
@@ -535,6 +554,8 @@ def get_output_joint_indexing(
         target_joint_names = [name for name in asset_cfg.joint_names_isaac if name in source_joint_names]
     elif output_order == "mjlab":
         target_joint_names = [name for name in asset_cfg.joint_names_mjlab if name in source_joint_names]
+    elif output_order == "simulation":
+        target_joint_names = [name for name in asset_cfg.joint_names_simulation if name in source_joint_names]
     else:
         raise ValueError(f"Invalid output_order: {output_order}")
     if not len(target_joint_names) == len(source_joint_names):
@@ -544,7 +565,7 @@ def get_output_joint_indexing(
 
 
 def get_output_body_indexing(
-    output_order: Literal["isaac", "mujoco", "mjlab"],
+    output_order: Literal["isaac", "mujoco", "mjlab", "simulation"],
     asset_cfg: AssetCfg,
     source_body_names: List[str],
     device: str = "cpu",
@@ -555,6 +576,8 @@ def get_output_body_indexing(
         target_body_names = [name for name in asset_cfg.body_names_isaac if name in source_body_names]
     elif output_order == "mjlab":
         target_body_names = [name for name in asset_cfg.body_names_mjlab if name in source_body_names]
+    elif output_order == "simulation":
+        target_body_names = [name for name in asset_cfg.body_names_simulation if name in source_body_names]
     else:
         raise ValueError(f"Invalid output_order: {output_order}")
     if not len(target_body_names) == len(source_body_names):

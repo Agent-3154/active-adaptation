@@ -268,7 +268,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             print(f"Reward group: {group_name}")
             funcs = OrderedDict()
             self._stats_ema[group_name] = {}
-            eval_func = eval(func_specs.pop("_eval_", "lambda *args: sum(args)"))
             enabled = func_specs.pop("_enabled_", True)
             compile = func_specs.pop("_compile_", False)
             enabled_groups += enabled
@@ -291,7 +290,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                 )
 
             self.reward_groups[group_name] = RewardGroup(
-                self, group_name, funcs, eval_func, enabled, compile
+                self, group_name, funcs, enabled, compile
             )
             reward_spec["stats", group_name, "return"] = Unbounded(
                 1, device=self.device
@@ -424,7 +423,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             self.stats[group, "return"].add_(reward)
             if reward_group.enabled:
                 all_rewards.append(reward)
-        rewards = torch.cat(all_rewards, 1)
+        rewards = torch.cat(all_rewards, dim=1)
         if self.mult_dt:
             rewards *= self.step_dt
 
@@ -447,6 +446,8 @@ class _EnvBase(EnvBase, RegistryMixin):
                 t, d = result
             else:
                 t, d = result, 1.0
+            if not func.enabled:
+                t.zero_()
             if func.is_timeout:
                 truncated |= t
             else:
@@ -623,27 +624,32 @@ class RewardGroup:
         env: _EnvBase,
         name: str,
         funcs: OrderedDict[str, mdp.Reward],
-        eval_func,
         enabled: bool = True,
         compile: bool = False,
     ):
         self.env = env
         self.name = name
         self.funcs = funcs
-        self.eval_func = eval_func
         self.enabled = enabled
         self.compile = compile
 
+        self.enabled_rewards = sum([func.enabled for func in funcs.values()])
+        self.rew_buf = torch.zeros(
+            env.num_envs, self.enabled_rewards, device=env.device
+        )
         if compile:
             self.compute = torch.compile(self.compute, fullgraph=True)
 
     def compute(self) -> torch.Tensor:
-        all_rewards = []
+        rewards = []
         for key, func in self.funcs.items():
             reward, count = func()
             self.env.stats[self.name, key].add_(reward)
             ema_sum, ema_cnt = self.env._stats_ema[self.name][key]
             ema_sum.mul_(EMA_DECAY).add_(reward.sum())
             ema_cnt.mul_(EMA_DECAY).add_(count)
-            all_rewards.append(reward)
-        return self.eval_func(*all_rewards)
+            if func.enabled:
+                rewards.append(reward)
+        if len(rewards):
+            self.rew_buf[:] = torch.cat(rewards, 1)
+        return self.rew_buf.sum(dim=1, keepdim=True)

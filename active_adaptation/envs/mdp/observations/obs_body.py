@@ -51,59 +51,59 @@ class body_link_pos_w(body_observation):
         return body_link_pos_w[:, self.output_indexing].reshape(self.num_envs, -1)
 
 
-class body_pos_b(body_observation):
-    def __init__(self, env, body_names: str, yaw_only: bool=False, output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac"):
-        super().__init__(env, body_names, output_order)
-        self.yaw_only = yaw_only
-        self.root_link_pos_w = self.asset.data.root_link_pos_w.unsqueeze(1)
-        self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
-        self.body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
+# class body_pos_b(body_observation):
+#     def __init__(self, env, body_names: str, yaw_only: bool=False, output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac"):
+#         super().__init__(env, body_names, output_order)
+#         self.yaw_only = yaw_only
+#         self.root_link_pos_w = self.asset.data.root_link_pos_w.unsqueeze(1)
+#         self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
+#         self.body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
 
-    @override
-    def update(self):
-        if self.yaw_only:
-            self.root_link_quat_w = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
-        else:
-            self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
-        self.root_link_pos_w = self.asset.data.root_link_pos_w.unsqueeze(1)
-        self.body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
+#     @override
+#     def update(self):
+#         if self.yaw_only:
+#             self.root_link_quat_w = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
+#         else:
+#             self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
+#         self.root_link_pos_w = self.asset.data.root_link_pos_w.unsqueeze(1)
+#         self.body_link_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
         
-    @override
-    def compute(self):
-        body_pos_b = quat_rotate_inverse(
-            self.root_link_quat_w,
-            self.body_link_pos_w - self.root_link_pos_w
-        )
-        return body_pos_b[:, self.output_indexing].reshape(self.num_envs, -1)
+#     @override
+#     def compute(self):
+#         body_pos_b = quat_rotate_inverse(
+#             self.root_link_quat_w,
+#             self.body_link_pos_w - self.root_link_pos_w
+#         )
+#         return body_pos_b[:, self.output_indexing].reshape(self.num_envs, -1)
     
-    @override
-    def symmetry_transform(self):
-        return cartesian_space_symmetry(self.asset, self.output_body_names)
+#     @override
+#     def symmetry_transform(self):
+#         return cartesian_space_symmetry(self.asset, self.output_body_names)
     
 
-class body_vel_b(body_observation):
+# class body_vel_b(body_observation):
 
-    def __init__(self, env, body_names: str, yaw_only: bool=False, output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac"):
-        super().__init__(env, body_names, output_order)
-        self.yaw_only = yaw_only
-        self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
-        self.body_link_vel_w = self.asset.data.body_link_vel_w[:, self.body_ids]
+#     def __init__(self, env, body_names: str, yaw_only: bool=False, output_order: Literal["isaac", "mujoco", "mjlab"] = "isaac"):
+#         super().__init__(env, body_names, output_order)
+#         self.yaw_only = yaw_only
+#         self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
+#         self.body_link_vel_w = self.asset.data.body_link_vel_w[:, self.body_ids]
     
-    @override
-    def update(self):
-        if self.yaw_only:
-            self.root_link_quat_w = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
-        else:
-            self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
-        self.body_link_vel_w = self.asset.data.body_link_vel_w[:, self.body_ids]
+#     @override
+#     def update(self):
+#         if self.yaw_only:
+#             self.root_link_quat_w = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
+#         else:
+#             self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
+#         self.body_link_vel_w = self.asset.data.body_link_vel_w[:, self.body_ids]
         
-    @override
-    def compute(self):
-        body_lin_vel_b = quat_rotate_inverse(self.root_link_quat_w, self.body_link_vel_w[:, :, :3])
-        body_ang_vel_b = quat_rotate_inverse(self.root_link_quat_w, self.body_link_vel_w[:, :, 3:])
-        return body_lin_vel_b[:, self.output_indexing].reshape(self.num_envs, -1)
+#     @override
+#     def compute(self):
+#         body_lin_vel_b = quat_rotate_inverse(self.root_link_quat_w, self.body_link_vel_w[:, :, :3])
+#         body_ang_vel_b = quat_rotate_inverse(self.root_link_quat_w, self.body_link_vel_w[:, :, 3:])
+#         return body_lin_vel_b[:, self.output_indexing].reshape(self.num_envs, -1)
     
-    @override
-    def symmetry_transform(self):
-        return cartesian_space_symmetry(self.asset, self.output_body_names)
+#     @override
+#     def symmetry_transform(self):
+#         return cartesian_space_symmetry(self.asset, self.output_body_names)
 

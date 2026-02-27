@@ -54,10 +54,10 @@ def _ranked_print(*args, **kwargs):
 if is_distributed():
     builtins.print = _ranked_print
 
-if is_distributed() and _OMP_NUM_THREADS <= 1:
-    raise ValueError(
-        "Please set OMP_NUM_THREADS to a value greater than 1 when using distributed training."
-    )
+# if is_distributed() and _OMP_NUM_THREADS <= 1:
+#     raise ValueError(
+#         "Please set OMP_NUM_THREADS to a value greater than 1 when using distributed training."
+#     )
 
 CONFIG_PATH = Path(__file__).parent.parent / "cfg"
 ASSET_PATH = Path(__file__).parent / "assets"
@@ -154,13 +154,6 @@ def import_projects():
             sys.path.insert(0, str(Path(project_info["path"]).parent))
             importlib.import_module(project_info["value"])
             sys.path.pop(0)
-    for project_name, project_info in projects["learning"].items():
-        if project_info["enabled"]:
-            print(f"Importing learning module: {project_name} from {project_info['path']}")
-            sys.path.insert(0, str(Path(project_info["path"]).parent))
-            importlib.import_module(project_info["value"])
-            sys.path.pop(0)
-
 
 from hydra.core.plugins import Plugins
 from hydra_plugins.aa_searchpath_plugin.aa_searchpath_plugin import (
@@ -195,6 +188,16 @@ def init(cfg: DictConfig, auto_rank: bool):
     if auto_rank and str(cfg.device).startswith("cuda"):
         cfg.device = f"cuda:{get_local_rank()}"
 
+    if is_distributed():
+        import torch.distributed as dist
+
+        if dist.is_available() and not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl",
+                world_size=get_world_size(),
+                rank=get_local_rank(),
+            )
+
     if get_backend() == "isaac":
         from isaaclab.app import AppLauncher
 
@@ -204,4 +207,3 @@ def init(cfg: DictConfig, auto_rank: bool):
     import_projects()
 
     return cfg
-
