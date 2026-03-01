@@ -11,11 +11,9 @@ from omegaconf import OmegaConf
 from isaaclab.app import AppLauncher
 from play import main as play_main
 from eval import main as eval_main
-from play_mujoco import main as play_mujoco_main
 
 play = play_main.__wrapped__
 eval = eval_main.__wrapped__
-play_mujoco = play_mujoco_main.__wrapped__
 
 FILE_PATH = os.path.dirname(__file__)
 
@@ -100,10 +98,11 @@ def main():
         cfg["export_policy"] = args.export
         play(cfg)
     elif args.play_mujoco:
+        cfg["backend"] = "mujoco"
         cfg["app"]["headless"] = False
-        cfg["task"]["num_envs"] = 16
+        cfg["task"]["num_envs"] = 1
         cfg["export_policy"] = args.export
-        play_mujoco(cfg)
+        play(cfg)
     else:
         if args.video:
             cfg["task"]["num_envs"] = 16

@@ -71,27 +71,33 @@ def aa_discover_projects(enabled: bool = False):
         # get the module path
         spec = importlib.util.find_spec(entry_point.value)
         if entry_point.name not in projects["environment"]:
-            # note that `value` may differ from `name`
-            pkg_path = Path(spec.origin).parent.absolute()
-            projects["environment"][entry_point.name] = {
-                "value": entry_point.value,
-                "path": str(pkg_path),
-                "type": "environment",
-                "enabled": enabled,
-            }
-            print(f"Discovered project: {entry_point.name} at {pkg_path}")
+            try:
+                # note that `value` may differ from `name`
+                pkg_path = Path(spec.origin).parent.absolute()
+                projects["environment"][entry_point.name] = {
+                    "value": entry_point.value,
+                    "path": str(pkg_path),
+                    "type": "environment",
+                    "enabled": enabled,
+                }
+                print(f"Discovered project: {entry_point.name} at {pkg_path}")
+            except Exception as e:
+                raise ValueError(f"Entrypoint {str(entry_point)} is invalid.") from e
     for entry_point in importlib.metadata.entry_points(group="active_adaptation.learning"):
         # get the module path
         spec = importlib.util.find_spec(entry_point.value)
         if entry_point.name not in projects["learning"]:
-            # note that `value` may differ from `name`
-            pkg_path = Path(spec.origin).parent.absolute()
-            projects["learning"][entry_point.name] = {
-                "value": entry_point.value,
-                "path": str(pkg_path),
-                "type": "learning",
-                "enabled": enabled,
-            }
-            print(f"Discovered learning module: {entry_point.name} at {pkg_path}")
+            try:
+                # note that `value` may differ from `name`
+                pkg_path = Path(spec.origin).parent.absolute()
+                projects["learning"][entry_point.name] = {
+                    "value": entry_point.value,
+                    "path": str(pkg_path),
+                    "type": "learning",
+                    "enabled": enabled,
+                }
+                print(f"Discovered learning module: {entry_point.name} at {pkg_path}")
+            except Exception as e:
+                raise ValueError(f"Entrypoint {str(entry_point)} is invalid.") from e
     projects_file.write_text(json.dumps(projects, indent=2))
     return projects
