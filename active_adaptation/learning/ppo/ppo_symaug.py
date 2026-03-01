@@ -121,14 +121,17 @@ class PPOPolicy(TensorDictModuleBase):
         self.act_transform = env.action_manager.symmetry_transform().to(self.device)
         self.action_dim = env.action_manager.action_dim
 
-        vecnorm = VecNorm(
-            input_shape=observation_spec[OBS_KEY].shape[-1:],
-            stats_shape=observation_spec[OBS_KEY].shape[-1:],
-            decay=1.0
-        )
+        self.vecnorm = Mod(
+            VecNorm(
+                input_shape=observation_spec[OBS_KEY].shape[-1:],
+                stats_shape=observation_spec[OBS_KEY].shape[-1:],
+                decay=1.0
+            ),
+            in_keys=[OBS_KEY],
+            out_keys=["_obs_normed"]
+        ).to(self.device)
         
         actor_modules = [
-            Mod(vecnorm, [OBS_KEY], ["_obs_normed"]),
             Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_actor_feature"]),
             Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
         ]
@@ -144,11 +147,11 @@ class PPOPolicy(TensorDictModuleBase):
         ).to(self.device)
         
         self.critic = Seq(
-            Mod(vecnorm, [OBS_KEY], ["_obs_normed"]),
             Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_critic_feature"]),
             Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 
+        self.vecnorm(fake_input)
         self.actor(fake_input)
         self.critic(fake_input)
 
@@ -190,9 +193,9 @@ class PPOPolicy(TensorDictModuleBase):
 
     def get_rollout_policy(self, mode: str="train", critic: bool = False):
         if critic:
-            policy = Seq(self.critic, self.actor)
+            policy = Seq(self.vecnorm, self.actor, self.critic)
         else:
-            policy = self.actor
+            policy = Seq(self.vecnorm, self.actor)
         if self.cfg.compile:
             policy = torch.compile(policy, fullgraph=True)
         return policy
@@ -237,6 +240,8 @@ class PPOPolicy(TensorDictModuleBase):
         infos["critic/value_mean"] = tensordict["ret"].mean().item()
         infos["critic/value_std"] = tensordict["ret"].std().item()
         infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
+        if active_adaptation.is_distributed():
+            self.vecnorm.module.synchronize(mode="broadcast")
         return dict(sorted(infos.items()))
 
     @torch.no_grad()
@@ -254,8 +259,8 @@ class PPOPolicy(TensorDictModuleBase):
         keys = tensordict.keys(True, True)
         if not ("state_value" in keys and ("next", "state_value") in keys):
             with tensordict.view(-1) as tensordict_flat:
-                critic(tensordict_flat)
-                critic(tensordict_flat["next"])
+                critic(self.vecnorm(tensordict_flat))
+                critic(self.vecnorm(tensordict_flat["next"]))
 
         values = tensordict["state_value"]
         next_values = tensordict["next", "state_value"]
@@ -284,6 +289,8 @@ class PPOPolicy(TensorDictModuleBase):
         symmetry["is_init"] = tensordict["is_init"]
         tensordict = torch.cat([tensordict.select(*symmetry.keys(True, True)), symmetry], dim=0)
 
+        self.vecnorm(tensordict)
+        
         valid = (~tensordict["is_init"]).float()
         valid_cnt = valid.sum()
         action_data = tensordict[ACTION_KEY]
