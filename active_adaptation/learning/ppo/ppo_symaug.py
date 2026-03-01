@@ -44,8 +44,23 @@ from typing import Union, Tuple
 from collections import OrderedDict
 
 from active_adaptation.learning.modules import VecNorm, IndependentNormal
-from ..utils.valuenorm import ValueNorm1, ValueNormFake
-from .common import *
+from active_adaptation.learning.ppo.common import (
+    ppo_clipped_loss,
+    spo_loss,
+    normalize,
+    OBS_KEY,
+    OBS_PRIV_KEY,
+    OBS_HIST_KEY,
+    ACTION_KEY,
+    REWARD_KEY,
+    TERM_KEY,
+    DONE_KEY,
+    CMD_KEY,
+    GAE,
+    make_batch,
+    make_mlp,
+    Actor,
+)
 
 USE_DDP = True
 
@@ -64,6 +79,7 @@ class PPOConfig:
     desired_kl: Union[float, None] = None
     clip_param: float = 0.2
     entropy_coef: float = 0.002
+    spo: bool = False # use Simple Policy Optimization Loss
     
     aux_coef: float = 0.0 # loss coefficient for auxiliary prediction loss
     value_norm: bool = False
@@ -95,14 +111,9 @@ class PPOPolicy(TensorDictModuleBase):
         self.max_grad_norm = 1.0
         self.desired_kl = self.cfg.desired_kl
         self.clip_param = self.cfg.clip_param
+        self.actor_loss_fn = spo_loss if self.cfg.spo else ppo_clipped_loss
         self.critic_loss_fn = nn.MSELoss(reduction="none")
-        self.gae = GAE(0.99, 0.95)
-        
-        if cfg.value_norm:
-            value_norm_cls = ValueNorm1
-        else:
-            value_norm_cls = ValueNormFake
-        self.value_norm = value_norm_cls(input_shape=1).to(self.device)
+        self.gae = GAE(0.99, 0.95)  
 
         fake_input = observation_spec.zero()
         
@@ -192,7 +203,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         tensordict = tensordict.exclude("stats")
         infos = []
-        self.compute_advantage(tensordict, self.critic, "adv", "ret", update_value_norm=True)
+        self.compute_advantage(tensordict, self.critic, "adv", "ret")
         action = tensordict[ACTION_KEY]
         adv_unnormalized = tensordict["adv"]
         log_probs_before = tensordict["action_log_prob"]
@@ -239,7 +250,6 @@ class PPOPolicy(TensorDictModuleBase):
         critic: Mod, 
         adv_key: str="adv",
         ret_key: str="ret",
-        update_value_norm: bool=True,
     ):
         keys = tensordict.keys(True, True)
         if not ("state_value" in keys and ("next", "state_value") in keys):
@@ -254,13 +264,8 @@ class PPOPolicy(TensorDictModuleBase):
         discount = tensordict["next", "discount"]
         terms = tensordict[TERM_KEY]
         dones = tensordict[DONE_KEY]
-        values = self.value_norm.denormalize(values)
-        next_values = self.value_norm.denormalize(next_values)
 
         adv, ret = self.gae(rewards, terms, dones, values, next_values, discount)
-        if update_value_norm:
-            self.value_norm.update(ret)
-        ret = self.value_norm.normalize(ret)
 
         tensordict.set(adv_key, adv)
         tensordict.set(ret_key, ret)
@@ -293,11 +298,9 @@ class PPOPolicy(TensorDictModuleBase):
         ret = tensordict["ret"] # [bsize, 1]
         log_ratio = (log_probs - log_probs_data).reshape_as(adv) # [bsize, 1]
         ratio = torch.exp(log_ratio)
-        surr1 = adv * ratio
-        surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
         clamped = ((ratio.detach() - 1.0).abs() > self.clip_param).reshape_as(ret)
-
-        policy_loss = - (torch.min(surr1, surr2).reshape_as(valid) * valid).sum() / valid_cnt
+        
+        policy_loss = self.actor_loss_fn(ratio, adv, self.clip_param)
         entropy_loss = - self.entropy_coef * entropy
 
         values = self.critic(tensordict)["state_value"]

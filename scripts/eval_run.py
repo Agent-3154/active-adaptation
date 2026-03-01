@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--task", type=str, default=None)
     parser.add_argument("-p", "--play", action="store_true", default=False)
     parser.add_argument("-pm", "--play_mujoco", action="store_true", default=False)
+    parser.add_argument("-pl", "--play_mjlab", action="store_true", default=False)
     # whether to override terrain and command
     parser.add_argument("-t", "--terrain", action="store_true", default=False)
     parser.add_argument("-c", "--command", action="store_true", default=False)
@@ -91,7 +92,8 @@ def main():
         if args.command:
             cfg["task"]["command"] = _cfg.task.command
     
-    assert not (args.play and args.play_mujoco), "Cannot play and play_mujoco at the same time"
+    play_modes = sum([args.play, args.play_mujoco, args.play_mjlab])
+    assert play_modes <= 1, "Use at most one of --play, --play_mujoco, --play_mjlab"
     if args.play:
         cfg["app"]["headless"] = False
         cfg["task"]["num_envs"] = 16
@@ -101,6 +103,12 @@ def main():
         cfg["backend"] = "mujoco"
         cfg["app"]["headless"] = False
         cfg["task"]["num_envs"] = 1
+        cfg["export_policy"] = args.export
+        play(cfg)
+    elif args.play_mjlab:
+        cfg["backend"] = "mjlab"
+        cfg["app"]["headless"] = False
+        cfg["task"]["num_envs"] = 16
         cfg["export_policy"] = args.export
         play(cfg)
     else:

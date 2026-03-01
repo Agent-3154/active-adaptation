@@ -41,6 +41,23 @@ DONE_KEY = ("next", "done")
 CMD_KEY = "command"
 
 
+def ppo_clipped_loss(ratio: torch.Tensor, adv: torch.Tensor, clip_param: float) -> torch.Tensor:
+    assert ratio.shape == adv.shape
+    surr1 = adv * ratio
+    surr2 = adv * ratio.clamp(1.0 - clip_param, 1.0 + clip_param)
+    return torch.min(surr1, surr2).mean()
+
+
+def spo_loss(ratio: torch.Tensor, adv: torch.Tensor, clip_param: float) -> torch.Tensor:
+    """
+    Simple Policy Optimization Loss from https://arxiv.org/pdf/2401.16025.
+    """
+    assert ratio.shape == adv.shape
+    loss = ratio * adv - adv.abs() / (2.0 * clip_param) * (ratio - 1.0).square()
+    return loss.mean()
+
+
+
 class DtypeConversion(nn.Module):
     def __init__(self, dtype: torch.dtype):
         super().__init__()
