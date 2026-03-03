@@ -27,7 +27,7 @@ import torch.nn.functional as F
 import torch.distributions as D
 import einops
 
-from torchrl.data import CompositeSpec, TensorSpec, UnboundedContinuous
+from torchrl.data import Composite, TensorSpec, UnboundedContinuous
 from torchrl.modules import ProbabilisticActor
 from torchrl.envs.transforms import TensorDictPrimer, ExcludeTransform, VecNorm
 from tensordict import TensorDict
@@ -94,8 +94,8 @@ class PPOPolicy(ModBase):
     def __init__(
         self, 
         cfg: PPOConfig, 
-        observation_spec: CompositeSpec, 
-        action_spec: CompositeSpec, 
+        observation_spec: Composite, 
+        action_spec: Composite, 
         reward_spec: TensorSpec,
         vecnorm: VecNorm=None,
         device: str="cuda:0"

@@ -28,7 +28,7 @@ import torch.distributions as D
 import torch.utils._pytree as pytree
 import warnings
 
-from torchrl.data import CompositeSpec, TensorSpec
+from torchrl.data import Composite, TensorSpec
 from torchrl.modules import ProbabilisticActor
 from torchrl.envs.transforms import CatTensors
 from tensordict import TensorDict
@@ -88,8 +88,8 @@ class PPOPolicy(PPOBase):
     def __init__(
         self, 
         cfg: PPOConfig, 
-        observation_spec: CompositeSpec, 
-        action_spec: CompositeSpec, 
+        observation_spec: Composite, 
+        action_spec: Composite, 
         reward_spec: TensorSpec,
         device,
         env=None,

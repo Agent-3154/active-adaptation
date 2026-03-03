@@ -28,7 +28,7 @@ import torch.distributions as D
 import warnings
 import functools
 
-from torchrl.data import CompositeSpec, TensorSpec
+from torchrl.data import Composite, TensorSpec
 from torchrl.modules import ProbabilisticActor
 from tensordict import TensorDict
 from tensordict.nn import (
@@ -82,8 +82,8 @@ class PPOHIMPolicy(TensorDictModuleBase):
     def __init__(
         self, 
         cfg: PPOConfig, 
-        observation_spec: CompositeSpec, 
-        action_spec: CompositeSpec, 
+        observation_spec: Composite, 
+        action_spec: Composite, 
         reward_spec: TensorSpec,
         device,
         env

@@ -30,7 +30,7 @@ import einops
 import copy
 import torch.utils._pytree as pytree
 
-from torchrl.data import CompositeSpec, TensorSpec, Unbounded
+from torchrl.data import Composite, TensorSpec, Unbounded
 from torchrl.modules import ProbabilisticActor
 from torchrl.envs.transforms import TensorDictPrimer
 from tensordict import TensorDict
@@ -140,8 +140,8 @@ class PPOPolicy(PPOBase):
     def __init__(
         self, 
         cfg: PPOConfig, 
-        observation_spec: CompositeSpec, 
-        action_spec: CompositeSpec, 
+        observation_spec: Composite, 
+        action_spec: Composite, 
         reward_spec: TensorSpec,
         device,
         env

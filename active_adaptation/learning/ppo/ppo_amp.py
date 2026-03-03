@@ -30,7 +30,7 @@ import functools
 import einops
 import copy
 
-from torchrl.data import CompositeSpec, TensorSpec, UnboundedContinuous
+from torchrl.data import Composite, TensorSpec, UnboundedContinuous
 from torchrl.modules import ProbabilisticActor
 from torchrl.envs.transforms import TensorDictPrimer
 from torchrl.objectives.utils import hold_out_net
@@ -179,8 +179,8 @@ class PPOPolicy(TensorDictModuleBase):
     def __init__(
         self, 
         cfg: PPOConfig, 
-        observation_spec: CompositeSpec, 
-        action_spec: CompositeSpec, 
+        observation_spec: Composite, 
+        action_spec: Composite, 
         reward_spec: TensorSpec,
         device
     ):

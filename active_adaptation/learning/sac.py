@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.distributions as D
 import math
 
-from torchrl.data import CompositeSpec, TensorSpec, TensorDictReplayBuffer, LazyTensorStorage, ListStorage
+from torchrl.data import Composite, TensorSpec, TensorDictReplayBuffer, LazyTensorStorage, ListStorage
 from torchrl.objectives import hold_out_net
 from torchrl.modules import ProbabilisticActor, TanhNormal
 from torchrl.envs.transforms import CatTensors, ExcludeTransform, MultiStepTransform
@@ -39,8 +39,8 @@ class SAC(TensorDictModuleBase):
     def __init__(
         self,
         cfg: SACConfig,
-        observation_spec: CompositeSpec, 
-        action_spec: CompositeSpec, 
+        observation_spec: Composite, 
+        action_spec: Composite, 
         reward_spec: TensorSpec,
         device
     ):

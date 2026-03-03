@@ -37,7 +37,7 @@ from tensordict.nn import (
     TensorDictSequential as Seq, 
 )
 
-from torchrl.data import CompositeSpec, TensorSpec, UnboundedContinuous
+from torchrl.data import Composite, TensorSpec, UnboundedContinuous
 from torchrl.envs import CatTensors, TensorDictPrimer
 from torchrl.modules import ProbabilisticActor
 
@@ -90,7 +90,7 @@ class PPORNNPolicy(PPOBase):
     def __init__(
         self,
         cfg: PPOConfig,
-        observation_spec: CompositeSpec,
+        observation_spec: Composite,
         action_spec: TensorSpec,
         reward_spec: TensorSpec,
         device,
