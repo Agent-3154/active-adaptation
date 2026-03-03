@@ -26,7 +26,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as D
 import warnings
-import functools
 import torch.utils._pytree as pytree
 
 from torchrl.data import CompositeSpec, TensorSpec
@@ -39,7 +38,7 @@ from tensordict.nn import (
 )
 
 from hydra.core.config_store import ConfigStore
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Union, Tuple
 from collections import OrderedDict
 
@@ -61,6 +60,7 @@ from active_adaptation.learning.ppo.common import (
     make_mlp,
     Actor,
 )
+from active_adaptation.learning.utils.opt import OptimizerGroup
 
 USE_DDP = True
 
@@ -80,6 +80,7 @@ class PPOConfig:
     clip_param: float = 0.2
     entropy_coef: float = 0.002
     spo: bool = False # use Simple Policy Optimization Loss
+    muon: bool = False # use Muon optimizer
     
     aux_coef: float = 0.0 # loss coefficient for auxiliary prediction loss
     value_norm: bool = False
@@ -155,13 +156,29 @@ class PPOPolicy(TensorDictModuleBase):
         self.actor(fake_input)
         self.critic(fake_input)
 
-        self.opt = torch.optim.Adam(
-            [
-                {"params": self.actor.parameters()},
-                {"params": self.critic.parameters()},
-            ],
-            lr=cfg.lr
-        )
+        def is_matrix_shaped(param: torch.Tensor) -> bool:
+            return param.dim() >= 2
+
+        if self.cfg.muon:
+            muon = torch.optim.Muon([
+                {"params": [p for p in self.actor.parameters() if is_matrix_shaped(p)]},
+                {"params": [p for p in self.critic.parameters() if is_matrix_shaped(p)]},
+            ], lr=cfg.lr, adjust_lr_fn="match_rms_adamw", weight_decay=0.01)
+
+            adamw = torch.optim.AdamW([
+                {"params": [p for p in self.actor.parameters() if not is_matrix_shaped(p)]},
+                {"params": [p for p in self.critic.parameters() if not is_matrix_shaped(p)]},
+            ], lr=cfg.lr, weight_decay=0.01)
+            self.opt = OptimizerGroup([muon, adamw])
+        else:
+            self.opt = torch.optim.AdamW(
+                [
+                    {"params": self.actor.parameters()},
+                    {"params": self.critic.parameters()},
+                ],
+                lr=cfg.lr,
+                weight_decay=0.01
+            )
         
         def init_(module):
             if isinstance(module, nn.Linear):
