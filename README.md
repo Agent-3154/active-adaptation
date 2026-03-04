@@ -12,6 +12,16 @@ Meanwhile, the code for the live demo (runinng Mujoco in browsers) is here [http
 * Easy symmetry augmentation.
 * Seamless Mujoco sim2sim.
 
+Projects using this codebase:
+
+* [FACET: Force-Adaptive Control via Impedance Reference Tracking for Legged Robots](https://arxiv.org/abs/2505.06883)
+
+* [HDMI: Learning Interactive Humanoid Whole-Body Control from * Human Videos](https://arxiv.org/abs/2509.16757)
+
+* [GentleHumanoid: Learning Upper-body Compliance for Contact-rich Human and Object Interaction](https://arxiv.org/abs/2511.04679)
+
+* [Gallant: Voxel Grid-based Humanoid Locomotion and Local-navigation across 3D Constrained Terrains](https://arxiv.org/abs/2511.14625)
+
 ## Installation
 
 1. For the following steps, the recommended way to structure the (VSCode or Cursor) workspace is:
