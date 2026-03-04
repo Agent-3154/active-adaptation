@@ -104,11 +104,9 @@ def import_projects():
     Import the projects as specified in `.cache/projects.json`.
     """
     projects_file = CACHE_DIR / "projects.json"
-    if projects_file.exists():
-        projects = json.loads(projects_file.read_text())
-    else:
-        from active_adaptation.cli import aa_discover_projects
-        projects = aa_discover_projects(enabled=False)
+    if not projects_file.exists():
+        return
+    projects = json.loads(projects_file.read_text())
     for project_name, project_info in projects["environment"].items():
         if project_info["enabled"]:
             print(f"Importing project: {project_name} from {project_info['path']}")

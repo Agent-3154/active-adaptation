@@ -172,7 +172,7 @@ class Observation(Generic[CT], MDPComponent, RegistryMixin):
 
     def symmetry_transform(self) -> SymmetryTransform:
         """Called to apply symmetry transformations to the observation"""
-        raise NotImplementedError
+        raise NotImplementedError(f"Symmetry transform not implemented for Observation {self.__class__.__name__}")
 
 
 class ActionManager(MDPComponent, RegistryMixin):
@@ -196,7 +196,7 @@ class ActionManager(MDPComponent, RegistryMixin):
     
     def symmetry_transform(self) -> SymmetryTransform:
         """Called to apply symmetry transformations to the action"""
-        raise NotImplementedError
+        raise NotImplementedError(f"Symmetry transform not implemented for ActionManager {self.__class__.__name__}")
 
 
 class Reward(Generic[CT], MDPComponent, RegistryMixin):

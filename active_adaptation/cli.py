@@ -70,37 +70,55 @@ def aa_discover_projects(enabled: bool = False):
     for entry_point in importlib.metadata.entry_points(group="active_adaptation.projects"):
         # get the module path
         spec = importlib.util.find_spec(entry_point.value)
-        if entry_point.name not in projects["environment"]:
-            try:
-                # note that `value` may differ from `name`
-                pkg_path = Path(spec.origin).parent.absolute()
-                projects["environment"][entry_point.name] = {
-                    "value": entry_point.value,
-                    "path": str(pkg_path),
-                    "type": "environment",
-                    "enabled": enabled,
-                }
-                print(f"Discovered project: {entry_point.name} at {pkg_path}")
-            except Exception as e:
-                raise ValueError(f"Entrypoint {str(entry_point)} is invalid.") from e
+        try:
+            # note that `value` may differ from `name`
+            pkg_path = Path(spec.origin).parent.absolute()
+        except Exception as e:
+            raise ValueError(f"Entrypoint {str(entry_point)} is invalid.") from e
+
+        env_projects = projects.setdefault("environment", {})
+        project_info = env_projects.setdefault(
+            entry_point.name,
+            {
+                "value": entry_point.value,
+                "path": str(pkg_path),
+                "type": "environment",
+                "enabled": enabled,
+            },
+        )
+        # Ensure path/value stay in sync with the entry point
+        project_info.setdefault("value", entry_point.value)
+        project_info.setdefault("path", str(pkg_path))
+
+        task_dir = _task_dir_for_path(Path(project_info["path"]))
+        project_info["task_dir"] = str(task_dir) if task_dir is not None else None
+        print(f"Discovered project: {entry_point.name} at {project_info['path']}")
+
     for entry_point in importlib.metadata.entry_points(group="active_adaptation.learning"):
         # get the module path
         spec = importlib.util.find_spec(entry_point.value)
-        if entry_point.name not in projects["learning"]:
-            try:
-                # note that `value` may differ from `name`
-                pkg_path = Path(spec.origin).parent.absolute()
-                projects["learning"][entry_point.name] = {
-                    "value": entry_point.value,
-                    "path": str(pkg_path),
-                    "type": "learning",
-                    "enabled": enabled,
-                }
-                print(f"Discovered learning module: {entry_point.name} at {pkg_path}")
-            except Exception as e:
-                raise ValueError(f"Entrypoint {str(entry_point)} is invalid.") from e
+        try:
+            # note that `value` may differ from `name`
+            pkg_path = Path(spec.origin).parent.absolute()
+        except Exception as e:
+            raise ValueError(f"Entrypoint {str(entry_point)} is invalid.") from e
+
+        learning_projects = projects.setdefault("learning", {})
+        project_info = learning_projects.setdefault(
+            entry_point.name,
+            {
+                "value": entry_point.value,
+                "path": str(pkg_path),
+                "type": "learning",
+                "enabled": enabled,
+            },
+        )
+        # Ensure path/value stay in sync with the entry point
+        project_info.setdefault("value", entry_point.value)
+        project_info.setdefault("path", str(pkg_path))
+        print(f"Discovered learning module: {entry_point.name} at {project_info['path']}")
     projects_file.write_text(json.dumps(projects, indent=2))
-    return projects
+    print(f"Modify {projects_file} to enable/disable projects.")
 
 
 def _task_dir_for_path(project_path: Path) -> Path | None:
@@ -130,9 +148,10 @@ def aa_list_tasks():
     if projects_file.exists():
         projects = json.loads(projects_file.read_text())
         for project_name, project_info in projects.get("environment", {}).items():
-            project_path = Path(project_info["path"])
-            task_dir = _task_dir_for_path(project_path)
-            if task_dir is not None and not any(
+            task_dir_str = project_info.get("task_dir")
+            if task_dir_str:
+                task_dir = Path(task_dir_str)
+            if task_dir is not None and task_dir.is_dir() and not any(
                 d == task_dir for _, d in task_dirs
             ):
                 task_dirs.append((project_name, task_dir))
