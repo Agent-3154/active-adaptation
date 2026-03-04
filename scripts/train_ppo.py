@@ -217,7 +217,7 @@ def main(cfg: DictConfig):
                 ckpt_path = save(policy, checkpoint_name, upload_to_wandb=should_upload)
 
             if aa.is_main_process():
-                ScopedTimer.print_summary(clear=True)
+                ScopedTimer.print_summary(clear=True, depth=3)
                 print(
                     OmegaConf.to_yaml(
                         {k: v for k, v in info.items() if isinstance(v, (float, int))}

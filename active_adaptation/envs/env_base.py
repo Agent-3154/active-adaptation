@@ -364,7 +364,8 @@ class _EnvBase(EnvBase, RegistryMixin):
         if mdp.is_method_implemented(component, mdp.MDPComponent, "post_step"):
             self._post_step_callbacks.append(component.post_step)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "update"):
-            self._update_callbacks.append(component.update)
+            cb = ScopedTimer(component.__class__.__name__)(component.update)
+            self._update_callbacks.append(cb)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "debug_draw"):
             self._debug_draw_callbacks.append(component.debug_draw)
 
