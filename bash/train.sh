@@ -7,10 +7,11 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 python scripts/train_ppo.py \
-    task=SiriusAilabRoom \
+    task=SiriusAilabRoomNav \
     task.num_envs=4 \
     algo=ppo \
     headless=false \
     wandb.mode=disabled \
     task.scene.point_lights=true \
+    task.command.vis_waypoints=false \
     "$@"
