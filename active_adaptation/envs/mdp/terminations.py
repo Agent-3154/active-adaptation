@@ -162,3 +162,18 @@ class root_height_below(Termination):
         ground_height = self.env.get_ground_height_at(self.asset.data.root_pos_w)
         height = self.asset.data.root_pos_w[:, 2] - ground_height
         return (height < self.thres).reshape(self.num_envs, 1)
+
+
+class force_contact(Termination):
+    def __init__(self, env, body_names: str, threshold: float):
+        super().__init__(env)
+        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.body_indices, self.body_names = self.contact_sensor.find_bodies(body_names)
+        self.threshold = threshold
+
+    def compute(self, termination: torch.Tensor):
+        forces = self.contact_sensor.data.net_forces_w[:, self.body_indices].norm(
+            dim=-1
+        )
+        in_contact = forces.sum(dim=1, keepdim=True) > self.threshold
+        return in_contact

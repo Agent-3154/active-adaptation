@@ -15,16 +15,15 @@ dependencies = [
     "hydra-core",
     "omegaconf",
     "wandb",
-    "moviepy",
-    "av",
     "einops",
     "termcolor",
     "pygame",
     "onnxruntime",
+    "onnxscript",
     "jaxtyping",
-    "tensordict==0.7.0",
-    "torchrl==0.7.0",
-    "torch==2.7.0",
+    "tensordict",
+    "torchrl",
+    "torch",
     "mujoco",
     "linuxfd",
     "pdbpp",
@@ -32,6 +31,7 @@ dependencies = [
 
 [project.scripts]
 aa-discover-projects = "active_adaptation.cli:aa_discover_projects"
+aa-list-tasks = "active_adaptation.cli:aa_list_tasks"
 aa-pull = "active_adaptation.cli:aa_pull"
 
 [project.entry-points."active_adaptation.projects"]

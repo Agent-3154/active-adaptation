@@ -101,3 +101,45 @@ def aa_discover_projects(enabled: bool = False):
                 raise ValueError(f"Entrypoint {str(entry_point)} is invalid.") from e
     projects_file.write_text(json.dumps(projects, indent=2))
     return projects
+
+
+def _task_dir_for_path(project_path: Path) -> Path | None:
+    """Return cfg/task directory for a project path, or None if not found."""
+    for candidate in (project_path, project_path.parent, project_path.parent.parent):
+        task_dir = candidate / "cfg" / "task"
+        if task_dir.is_dir():
+            return task_dir
+    return None
+
+
+def aa_list_tasks():
+    """
+    List task names from YAML files under cfg/task in active-adaptation and in
+    all projects from projects.json. Task names preserve the directory prefix
+    (e.g. "G1/G1LocoFlat" instead of "G1LocoFlat").
+    """
+    # active-adaptation's own cfg/task
+    repo_root = Path(__file__).parent.parent
+    task_dirs: list[tuple[str, Path]] = []
+    main_task_dir = repo_root / "cfg" / "task"
+    if main_task_dir.is_dir():
+        task_dirs.append(("active-adaptation", main_task_dir))
+
+    # cfg/task from each project in projects.json
+    projects_file = CACHE_DIR / "projects.json"
+    if projects_file.exists():
+        projects = json.loads(projects_file.read_text())
+        for project_name, project_info in projects.get("environment", {}).items():
+            project_path = Path(project_info["path"])
+            task_dir = _task_dir_for_path(project_path)
+            if task_dir is not None and not any(
+                d == task_dir for _, d in task_dirs
+            ):
+                task_dirs.append((project_name, task_dir))
+
+    for source_name, task_dir in task_dirs:
+        for yaml_path in sorted(task_dir.rglob("*.yaml")):
+            rel = yaml_path.relative_to(task_dir)
+            task_id = str(rel.with_suffix("")).replace("\\", "/")
+            print(f"  {task_id}  (from {source_name})")
+

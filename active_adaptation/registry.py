@@ -149,10 +149,27 @@ class RegistryMixin:
     supported_backends: tuple[str, ...] = ("isaac", "mujoco", "mjlab")
     """List of supported backends. Subclasses should override this to declare which backends they support."""
 
-    def __init_subclass__(cls, namespace: str | None = None) -> None:
+    namespace: str | None = None
+    """Optional namespace for registration. Subclasses can override this as a class attribute."""
+
+    def __init_subclass__(cls, **kwargs) -> None:
         """Put the subclass in the global registry"""
         if not hasattr(cls, "registry"):
             cls.registry = {}
+
+        # Backwards compatibility: allow deprecated 'namespace' kwarg
+        namespace = kwargs.pop("namespace", None)
+        if namespace is not None:
+            warnings.warn(
+                "Passing 'namespace' as a keyword argument to a registered class "
+                "is deprecated. Set 'namespace' as a class attribute instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        # New style: read namespace from class attribute if not provided via kwarg
+        if namespace is None:
+            namespace = getattr(cls, "namespace", None)
 
         if namespace is None:
             cls_name = cls.__name__
