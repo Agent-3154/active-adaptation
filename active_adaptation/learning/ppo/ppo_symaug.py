@@ -162,10 +162,10 @@ class PPOPolicy(TensorDictModuleBase):
             if torch.cuda.is_available():
                 torch.cuda.set_device(active_adaptation.get_local_rank())
             if not distr.is_initialized():
-                distr.init_process_group(
-                    backend="nccl",
-                    world_size=active_adaptation.get_world_size(),
-                    rank=active_adaptation.get_rank()
+                raise RuntimeError(
+                    "torch.distributed is not initialized. "
+                    "Call active_adaptation.init(..., auto_rank=True) before "
+                    "creating PPOPolicy."
                 )
             if USE_DDP:
                 self.actor = DDP(self.actor, device_ids=[active_adaptation.get_local_rank()])

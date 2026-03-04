@@ -7,6 +7,8 @@ import builtins
 import importlib.metadata
 import importlib.util
 import inspect
+import torch
+import torch.distributed as dist
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 from fractions import Fraction
@@ -185,6 +187,18 @@ def init(cfg: DictConfig, auto_rank: bool):
         entry = {"timestamp": datetime.datetime.now().isoformat(), "args": sys.argv}
         history.append(entry)
         argv_file.write_text(json.dumps(history, indent=2))
+
+    # Initialize NCCL process group early to avoid CUDA IPC issues after
+    # heavy GPU initialization (e.g., Isaac Sim).
+    if is_distributed() and torch.cuda.is_available() and str(cfg.device).startswith("cuda"):
+        local_rank = get_local_rank()
+        torch.cuda.set_device(local_rank)
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl",
+                world_size=get_world_size(),
+                rank=get_rank(),
+            )
 
     set_backend(cfg.get("backend", "isaac"))
     if get_backend() == "mjlab":
