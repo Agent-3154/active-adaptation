@@ -1,5 +1,5 @@
 # @package task
-name: Go2Flat
+name: A2Flat
 
 viewer:
   resolution: [1280, 720]
@@ -7,7 +7,7 @@ viewer:
   eye: [4.0, 4.0, 4.0]
 
 robot:
-  name: go2
+  name: a2
 # terrain: slopes_boxes
 terrain: plane
 
@@ -79,7 +79,7 @@ reward:
     action_rate2_l2:    {weight: 0.002}
     feet_air_time:      {weight: 0.4, body_names: .*_foot, thres: 0.5}
     feet_sliding:       {weight: 0.2, body_names: .*_foot}
-    undesired_contact:  {body_names: [.*_calf, .*thigh, Head.*], weight: 0.25}
+    undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:
     _enabled_: false
     linvel_projection:  {weight: 0.5}
@@ -87,15 +87,14 @@ reward:
     # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
-  crash: {body_names_expr: [Head.*, base], t_thres: 0.06}
+  crash: {body_names_expr: base_link, t_thres: 0.06}
   fall_over: {xy_thres: 0.9}
-  undesired_contact: {body_names: [Head.*, .*_calf]}
+  undesired_contact: {body_names: [.*_calf]}
 
 randomization:
   perturb_body_mass:
-    (?!(payload|base|Head.*)).*: [0.8, 1.2]
-    base: [0.8, 1.4]
-    # Head.*: [25.0, 250.0]
+    (?!(payload|base_link)).*: [0.8, 1.2]
+    base_link: [0.8, 1.2]
   # rand_body_materials:
   #   static_friction_range:  {".*_foot": [0.5, 4.0]}
   #   dynamic_friction_range: {".*_foot": [0.5, 4.0]}
