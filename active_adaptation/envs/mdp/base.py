@@ -133,7 +133,7 @@ class Command(MDPComponent, RegistryMixin):
                 self._origins = self.env.scene.env_origins.reshape(-1, 3).clone()
                 if hasattr(terrain, "valid_spawn_points") and terrain.valid_spawn_points is not None:
                     self._mesh_spawn_points = terrain.valid_spawn_points.clone()
-                    self._mesh_sub_origins = terrain.env_origins.clone()
+                    self._mesh_sub_origins = terrain.sub_terrain_origins.clone()
             else:
                 self._origins = self.env.scene.env_origins.reshape(-1, 3).clone()
         elif self.env.backend == "mujoco":

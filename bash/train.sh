@@ -13,5 +13,5 @@ python scripts/train_ppo.py \
     headless=false \
     wandb.mode=disabled \
     task.scene.point_lights=true \
-    task.command.vis_waypoints=false \
+    task.command.vis_waypoints=true \
     "$@"
