@@ -7,7 +7,7 @@ viewer:
   eye: [4.0, 4.0, 4.0]
 
 robot:
-  name: a2
+  name: unitree_a2
 # terrain: slopes_boxes
 terrain: plane
 
@@ -69,7 +69,7 @@ reward:
     angvel_z_exp:       {weight: 0.8}
     angvel_xy_l2:       {weight: 0.02}
     linvel_z_l2:        {weight: 2.0}
-    base_height_exp:    {weight: 2.0, target_height: 0.35}
+    base_height_exp:    {weight: 2.0, target_height: 0.4}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7}
@@ -87,7 +87,7 @@ reward:
     # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
-  crash: {body_names_expr: base_link, t_thres: 0.06}
+  crash: {body_names_expr: [base_link, .*thigh], t_thres: 0.06}
   fall_over: {xy_thres: 0.9}
   undesired_contact: {body_names: [.*_calf]}
 

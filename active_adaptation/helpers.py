@@ -53,6 +53,18 @@ def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
     else:
         raise ValueError(f"Unknown backend: {backend}")
     
+    policy_in_keys = cfg.algo.get("in_keys", None)
+    if policy_in_keys is None:
+        raise ValueError("Specify `in_keys` (e.g., `policy`, `priv`) in `cfg.algo`.")
+
+    for obs_group_key in list(cfg.task.observation.keys()):
+        if (
+            obs_group_key not in policy_in_keys
+            and not obs_group_key.endswith("_")
+        ):
+            cfg.task.observation.pop(obs_group_key)
+            print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
+    
     base_env = env_cls(cfg.task, str(cfg.device), headless=cfg.headless)
 
     if checkpoint is None:
@@ -64,16 +76,6 @@ def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
         state_dict = torch.load(checkpoint_path, weights_only=False)
     else:
         state_dict = {}
-    
-    policy_in_keys = cfg.algo.get("in_keys", ["policy", "priv"])
-
-    for obs_group_key in list(cfg.task.observation.keys()):
-        if (
-            obs_group_key not in policy_in_keys
-            and not obs_group_key.endswith("_")
-        ):
-            cfg.task.observation.pop(obs_group_key)
-            print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
     
     transform = Compose(InitTracker(), StepCounter())
 
