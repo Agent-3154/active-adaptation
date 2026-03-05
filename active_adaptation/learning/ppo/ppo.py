@@ -182,9 +182,10 @@ class PPOPolicy(PPOBase):
                     "creating PPOPolicy."
                 )
             self.world_size = active_adaptation.get_world_size()
+
             if self.cfg.use_ddp:
-                self.actor = DDP(self.actor, device_ids=[active_adaptation.get_local_rank()])
-                self.critic = DDP(self.critic, device_ids=[active_adaptation.get_local_rank()])
+                self.actor = DDP(self.actor, device_ids=[local_rank], output_device=local_rank)
+                self.critic = DDP(self.critic, device_ids=[local_rank], output_device=local_rank)
             else:
                 for param in self.actor.parameters():
                     distr.broadcast(param, src=0)

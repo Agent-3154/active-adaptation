@@ -121,10 +121,19 @@ class Command(MDPComponent, RegistryMixin):
         self.init_joint_pos = self.asset.data.default_joint_pos.clone()
         self.init_joint_vel = self.asset.data.default_joint_vel.clone()
         self.teleop = teleop
+
+        self._mesh_spawn_points = None
+        self._mesh_sub_origins = None
         
         if self.env.backend == "isaac":
             if self.env.terrain_type == "generator":
                 self._origins = self.env.scene.terrain.terrain_origins.reshape(-1, 3).clone()
+            elif self.env.terrain_type == "mesh":
+                terrain = self.env.scene.terrain
+                self._origins = self.env.scene.env_origins.reshape(-1, 3).clone()
+                if hasattr(terrain, "valid_spawn_points") and terrain.valid_spawn_points is not None:
+                    self._mesh_spawn_points = terrain.valid_spawn_points.clone()
+                    self._mesh_sub_origins = terrain.env_origins.clone()
             else:
                 self._origins = self.env.scene.env_origins.reshape(-1, 3).clone()
         elif self.env.backend == "mujoco":
@@ -136,12 +145,24 @@ class Command(MDPComponent, RegistryMixin):
         This can be used for implementing curriculum learning.
         """
         init_root_state = self.init_root_state[env_ids]
-        if self.env.terrain_type == "plane":
+        if self._mesh_spawn_points is not None:
+            n_spawn = len(self._mesh_spawn_points)
+            n_sub = len(self._mesh_sub_origins)
+            spawn_idx = torch.randint(0, n_spawn, (len(env_ids),), device=self.device)
+            sub_idx = torch.randint(0, n_sub, (len(env_ids),), device=self.device)
+            spawn_xy_z = self._mesh_spawn_points[spawn_idx]
+            sub_offset = self._mesh_sub_origins[sub_idx]
+            default_z = self.init_root_state[0, 2].item()
+            init_root_state[:, 0] = spawn_xy_z[:, 0] + sub_offset[:, 0]
+            init_root_state[:, 1] = spawn_xy_z[:, 1] + sub_offset[:, 1]
+            init_root_state[:, 2] = spawn_xy_z[:, 2] + default_z + sub_offset[:, 2]
+        elif self.env.terrain_type == "plane":
             origins = self.env.scene.env_origins[env_ids]
+            init_root_state[:, :3] += origins
         else:
             idx = torch.randint(0, len(self._origins), (len(env_ids),), device=self.device)
             origins = self._origins[idx]
-        init_root_state[:, :3] += origins
+            init_root_state[:, :3] += origins
         init_root_state[:, 3:7] = quat_mul(
             init_root_state[:, 3:7],
             sample_quat_yaw(len(env_ids), device=self.device)

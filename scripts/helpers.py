@@ -13,7 +13,6 @@ from tensordict.nn import TensorDictModuleBase as ModBase
 
 from termcolor import colored
 from collections import OrderedDict
-from torchvision.io import write_video
 from omegaconf import OmegaConf, DictConfig
 from active_adaptation.utils.wandb import parse_checkpoint_path
 
@@ -165,6 +164,7 @@ def evaluate(
 
     # log video
     if len(frames):
+        from torchvision.io import write_video
         time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
         video_array = np.stack(frames)
         frames.clear()
