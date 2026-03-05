@@ -121,6 +121,28 @@ def main(cfg: DictConfig):
             return False
         return cfg.get("render_interval", -1) > 0 and i > 0 and i % cfg.render_interval == 0
     
+    vis_gs_rgb = cfg.get("vis_gs_rgb", False)
+    vis_gs_rgb_interval = cfg.get("vis_gs_rgb_interval", None)
+    if vis_gs_rgb_interval is None:
+        vis_gs_rgb_interval = log_interval
+    vis_gs_rgb_cv = False
+    if vis_gs_rgb:
+        try:
+            import cv2
+            cv2.namedWindow("GS RGB env0", cv2.WINDOW_NORMAL)
+            vis_gs_rgb_cv = True
+        except ImportError:
+            pass
+
+    dump_gs_imgs = cfg.get("dump_gs_imgs", False)
+    dump_gs_imgs_interval = cfg.get("dump_gs_imgs_interval", None)
+    if dump_gs_imgs_interval is None:
+        dump_gs_imgs_interval = log_interval
+    dump_gs_imgs_dir = cfg.get("dump_gs_imgs_dir", "gs_dump")
+    if dump_gs_imgs and aa.is_main_process():
+        os.makedirs(dump_gs_imgs_dir, exist_ok=True)
+        print(f"[dump_gs] Will save all-env GS images every {dump_gs_imgs_interval} iters -> {dump_gs_imgs_dir}")
+
     ckpt_path = None
     carry = env.reset()
     observation_keys = list(env.observation_spec.keys(True, True))
@@ -243,6 +265,25 @@ def main(cfg: DictConfig):
                     )
                 env.train()
                 carry = env.reset()
+
+            if vis_gs_rgb and aa.is_main_process() and i % vis_gs_rgb_interval == 0:
+                base_env = env.base_env if hasattr(env, "base_env") else env
+                if hasattr(base_env, "debug_gs_render"):
+                    rgb_np = base_env.debug_gs_render(env_id=0)
+                    if rgb_np is not None:
+                        info["debug/gs_rgb_env0"] = wandb.Image(rgb_np)
+                        if vis_gs_rgb_cv:
+                            import cv2
+                            cv2.imshow("GS RGB env0", cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR))
+                            cv2.waitKey(1)
+
+            if dump_gs_imgs and aa.is_main_process() and i % dump_gs_imgs_interval == 0:
+                base_env = env.base_env if hasattr(env, "base_env") else env
+                if hasattr(base_env, "debug_dump_all_gs"):
+                    base_env.debug_dump_all_gs(
+                        out_dir=dump_gs_imgs_dir,
+                        step=i,
+                    )
 
             if aa.is_main_process():
                 ScopedTimer.print_summary(clear=True)

@@ -7,6 +7,7 @@ import hydra
 import itertools
 import datetime
 import copy
+import numpy as np
 from pathlib import Path
 
 from omegaconf import OmegaConf, DictConfig
@@ -62,6 +63,26 @@ def main(cfg: DictConfig):
     
     assert not env.base_env.training
 
+    vis_gs_rgb = cfg.get("vis_gs_rgb", False)
+    vis_gs_rgb_interval = cfg.get("vis_gs_rgb_interval", 5)
+    cv_window = None
+    if vis_gs_rgb:
+        try:
+            import cv2
+            cv2.namedWindow("GS RGB env0", cv2.WINDOW_NORMAL)
+            cv_window = True
+        except ImportError:
+            print("[warn] vis_gs_rgb requires opencv-python, falling back to disabled")
+            vis_gs_rgb = False
+
+    dump_gs_imgs = cfg.get("dump_gs_imgs", False)
+    dump_gs_imgs_interval = cfg.get("dump_gs_imgs_interval", 5)
+    dump_gs_imgs_dir = cfg.get("dump_gs_imgs_dir", "gs_dump")
+    if dump_gs_imgs:
+        import os
+        os.makedirs(dump_gs_imgs_dir, exist_ok=True)
+        print(f"[dump_gs] Will save all-env GS images every {dump_gs_imgs_interval} steps -> {dump_gs_imgs_dir}")
+
     timer = Timer(env.step_dt)
 
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
@@ -77,7 +98,21 @@ def main(cfg: DictConfig):
                 print("Step", i)
                 for k, v in sorted(episode_stats.pop().items(True, True)):
                     print(k, torch.mean(v).item())
-            
+
+            if vis_gs_rgb and i % vis_gs_rgb_interval == 0:
+                base = env.base_env if hasattr(env, "base_env") else env
+                if hasattr(base, "debug_gs_render"):
+                    rgb_np = base.debug_gs_render(env_id=0)
+                    if rgb_np is not None:
+                        import cv2
+                        cv2.imshow("GS RGB env0", cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR))
+                        cv2.waitKey(1)
+
+            if dump_gs_imgs and i % dump_gs_imgs_interval == 0:
+                base = env.base_env if hasattr(env, "base_env") else env
+                if hasattr(base, "debug_dump_all_gs"):
+                    base.debug_dump_all_gs(out_dir=dump_gs_imgs_dir, step=i)
+
             timer.sleep()
     
     env.close()
