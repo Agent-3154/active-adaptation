@@ -19,5 +19,5 @@ export WANDB_API_KEY=wandb_v1_Pb07iIu7o6H9TxpPzQOrFIhiIvy_u688U8FxP4Jsg2vaUd35tU
 
 torchrun --nnodes=${WORLD_SIZE} --nproc_per_node=8 --node_rank=${RANK} --master_addr=${MASTER_ADDR} --master_port=${MASTER_PORT} train_ppo.py \
   task=SiriusAilabRoomNav task.num_envs=4096 \
-  wandb.project=parallel_test wandb.run_name=AilabRoomNav \
-  algo=ppo headless=True
+  wandb.project=go2_room wandb.run_name=AilabRoomNav \
+  algo=ppo_staged2 headless=True
