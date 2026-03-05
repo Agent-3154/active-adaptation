@@ -65,15 +65,12 @@ def main(cfg: DictConfig):
 
     vis_gs_rgb = cfg.get("vis_gs_rgb", False)
     vis_gs_rgb_interval = cfg.get("vis_gs_rgb_interval", 5)
-    cv_window = None
+    vis_gs_rgb_port = cfg.get("vis_gs_rgb_port", 8890)
+    viser_img_handle = None
     if vis_gs_rgb:
-        try:
-            import cv2
-            cv2.namedWindow("GS RGB env0", cv2.WINDOW_NORMAL)
-            cv_window = True
-        except ImportError:
-            print("[warn] vis_gs_rgb requires opencv-python, falling back to disabled")
-            vis_gs_rgb = False
+        import viser
+        viser_server = viser.ViserServer(port=vis_gs_rgb_port)
+        print(f"[vis_gs_rgb] Open http://localhost:{vis_gs_rgb_port} to see env0 GS RGB")
 
     dump_gs_imgs = cfg.get("dump_gs_imgs", False)
     dump_gs_imgs_interval = cfg.get("dump_gs_imgs_interval", 5)
@@ -85,13 +82,12 @@ def main(cfg: DictConfig):
 
     timer = Timer(env.step_dt)
 
-    with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
-        # torch.compiler.cudagraph_mark_step_begin()
-        
+    with set_exploration_type(ExplorationType.MODE):
         for i in itertools.count():
-            carry = rollout_policy(carry)
-            td, carry = env.step_and_maybe_reset(carry)
-            # td_.update(td["next"])
+            with torch.inference_mode():
+                carry = rollout_policy(carry)
+                td, carry = env.step_and_maybe_reset(carry)
+
             episode_stats.add(td)
 
             if len(episode_stats) >= env.num_envs:
@@ -104,9 +100,15 @@ def main(cfg: DictConfig):
                 if hasattr(base, "debug_gs_render"):
                     rgb_np = base.debug_gs_render(env_id=0)
                     if rgb_np is not None:
-                        import cv2
-                        cv2.imshow("GS RGB env0", cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR))
-                        cv2.waitKey(1)
+                        if viser_img_handle is None:
+                            viser_img_handle = viser_server.scene.add_image(
+                                "/gs_rgb_env0",
+                                rgb_np,
+                                render_width=2.0,
+                                render_height=2.0 * rgb_np.shape[0] / rgb_np.shape[1],
+                            )
+                        else:
+                            viser_img_handle.image = rgb_np
 
             if dump_gs_imgs and i % dump_gs_imgs_interval == 0:
                 base = env.base_env if hasattr(env, "base_env") else env

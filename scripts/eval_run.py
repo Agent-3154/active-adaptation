@@ -33,6 +33,12 @@ def main():
     parser.add_argument("-e", "--export", action="store_true", default=False)
     parser.add_argument("-v", "--video", action="store_true", default=False)
     parser.add_argument("-i", "--iterations", type=int, default=None)
+    parser.add_argument("-l", "--lights", action="store_true", default=False,
+                        help="Enable point lights in the scene")
+    parser.add_argument("--vis-rgb", action="store_true", default=False,
+                        help="Show GS-rendered RGB for env0 in a separate window")
+    parser.add_argument("--num-envs", type=int, default=None,
+                        help="Override number of environments")
     args = parser.parse_args()
 
     api = wandb.Api()
@@ -93,15 +99,25 @@ def main():
         if args.command:
             cfg["task"]["command"] = _cfg.task.command
     
+    if args.lights:
+        cfg["task"]["scene"]["point_lights"] = True
+    if args.vis_rgb:
+        cfg["vis_gs_rgb"] = True
+        cfg["vis_gs_rgb_interval"] = 5
+
+    num_envs = args.num_envs or 1
+
     assert not (args.play and args.play_mujoco), "Cannot play and play_mujoco at the same time"
     if args.play:
         cfg["app"]["headless"] = False
-        cfg["task"]["num_envs"] = 16
+        cfg["task"]["num_envs"] = num_envs
+        cfg["task"]["scene"]["n_repeats"] = num_envs
         cfg["export_policy"] = args.export
         play(cfg)
     elif args.play_mujoco:
         cfg["app"]["headless"] = False
-        cfg["task"]["num_envs"] = 16
+        cfg["task"]["num_envs"] = num_envs
+        cfg["task"]["scene"]["n_repeats"] = num_envs
         cfg["export_policy"] = args.export
         play_mujoco(cfg)
     else:

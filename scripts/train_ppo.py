@@ -125,14 +125,17 @@ def main(cfg: DictConfig):
     vis_gs_rgb_interval = cfg.get("vis_gs_rgb_interval", None)
     if vis_gs_rgb_interval is None:
         vis_gs_rgb_interval = log_interval
-    vis_gs_rgb_cv = False
-    if vis_gs_rgb:
+    vis_gs_rgb_port = cfg.get("vis_gs_rgb_port", 8890)
+    viser_server = None
+    viser_img_handle = None
+    if vis_gs_rgb and aa.is_main_process():
         try:
-            import cv2
-            cv2.namedWindow("GS RGB env0", cv2.WINDOW_NORMAL)
-            vis_gs_rgb_cv = True
-        except ImportError:
-            pass
+            import viser
+            viser_server = viser.ViserServer(port=vis_gs_rgb_port)
+            print(f"[vis_gs_rgb] Open http://localhost:{vis_gs_rgb_port} to see env0 GS RGB")
+        except Exception as e:
+            print(f"[vis_gs_rgb] Could not start viser server: {e}")
+            vis_gs_rgb = False
 
     dump_gs_imgs = cfg.get("dump_gs_imgs", False)
     dump_gs_imgs_interval = cfg.get("dump_gs_imgs_interval", None)
@@ -272,10 +275,16 @@ def main(cfg: DictConfig):
                     rgb_np = base_env.debug_gs_render(env_id=0)
                     if rgb_np is not None:
                         info["debug/gs_rgb_env0"] = wandb.Image(rgb_np)
-                        if vis_gs_rgb_cv:
-                            import cv2
-                            cv2.imshow("GS RGB env0", cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR))
-                            cv2.waitKey(1)
+                        if viser_server is not None:
+                            if viser_img_handle is None:
+                                viser_img_handle = viser_server.scene.add_image(
+                                    "/gs_rgb_env0",
+                                    rgb_np,
+                                    render_width=2.0,
+                                    render_height=2.0 * rgb_np.shape[0] / rgb_np.shape[1],
+                                )
+                            else:
+                                viser_img_handle.image = rgb_np
 
             if dump_gs_imgs and aa.is_main_process() and i % dump_gs_imgs_interval == 0:
                 base_env = env.base_env if hasattr(env, "base_env") else env
