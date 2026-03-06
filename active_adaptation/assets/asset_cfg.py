@@ -6,7 +6,7 @@ backends (Isaac Sim, MuJoCo Lab, MuJoCo).
 """
 
 from dataclasses import dataclass, field, MISSING
-from typing import Dict, Tuple, List, Optional, Literal
+from typing import Dict, Tuple, List, Optional, Literal, Sequence
 from pathlib import Path
 
 import torch
@@ -30,11 +30,7 @@ if aa.get_backend() == "isaac":
     class ArticulationCfg(_ArticulationCfg):
         joint_symmetry_mapping: Optional[Dict[str, Tuple[int, str]]] = None
         spatial_symmetry_mapping: Optional[Dict[str, str]] = None
-        joint_names_isaac: Optional[List[str]] = None
-        joint_names_mjlab: Optional[List[str]] = None
         joint_names_simulation: Optional[List[str]] = None
-        body_names_isaac: Optional[List[str]] = None
-        body_names_mjlab: Optional[List[str]] = None
         body_names_simulation: Optional[List[str]] = None
 
 elif aa.get_backend() == "mjlab":
@@ -43,17 +39,12 @@ elif aa.get_backend() == "mjlab":
     from mjlab.actuator import BuiltinPositionActuatorCfg
     from mjlab.utils.spec_config import CollisionCfg
     from mjlab.sensor import ContactSensorCfg as MjlabContactSensorCfg, ContactMatch
-    from active_adaptation.sensors.mjlab import CfrcContactSensorCfg
 
     @dataclass
     class EntityCfg(_EntityCfg):
         joint_symmetry_mapping: Optional[Dict[str, Tuple[int, str]]] = None
         spatial_symmetry_mapping: Optional[Dict[str, str]] = None
-        joint_names_isaac: Optional[List[str]] = None
-        joint_names_mjlab: Optional[List[str]] = None
         joint_names_simulation: Optional[List[str]] = None
-        body_names_isaac: Optional[List[str]] = None
-        body_names_mjlab: Optional[List[str]] = None
         body_names_simulation: Optional[List[str]] = None
 
 elif aa.get_backend() == "mujoco":
@@ -116,8 +107,7 @@ class ActuatorCfg:
     Supports both individual joint specifications and pattern-based matching.
     
     Attributes:
-        joint_names_expr: Joint name pattern(s) to match. Can be a regex string
-            or list of strings. Defaults to ".*" (all joints).
+        joint_names_expr: Regex pattern used to match joints. Defaults to ".*" (all joints).
         effort_limit: Dictionary mapping joint name patterns to maximum effort/torque limits.
             Required field.
         velocity_limit: Dictionary mapping joint name patterns to maximum velocity limits.
@@ -131,13 +121,13 @@ class ActuatorCfg:
         armature: Dictionary mapping joint name patterns to armature values.
             Required field. Note: Not used in mjlab backend.
     """
-    joint_names_expr: str | List[str] = ".*"
-    effort_limit: Dict[str, float] = MISSING
-    velocity_limit: Dict[str, float] = MISSING
-    stiffness: Dict[str, float] = MISSING
-    damping: Dict[str, float] = MISSING
-    friction: Dict[str, float] = MISSING
-    armature: Dict[str, float] = MISSING
+    joint_names_expr: str = ".*"
+    effort_limit: float | Dict[str, float] = MISSING
+    velocity_limit: float | Dict[str, float] = MISSING
+    stiffness: float | Dict[str, float] = MISSING
+    damping: float | Dict[str, float] = MISSING
+    friction: float | Dict[str, float] = MISSING
+    armature: float | Dict[str, float] = MISSING
 
     def isaaclab(self):
         """Convert to Isaac Sim actuator configuration.
@@ -161,34 +151,27 @@ class ActuatorCfg:
         Returns:
             BuiltinPositionActuatorCfg: MuJoCo Lab compatible actuator configuration.
         """
-        def _to_scalar(value, default: float = 0.0) -> float:
-            if value is None:
-                return default
-            if isinstance(value, dict):
-                if ".*" in value:
-                    return float(value[".*"])
-                if len(value) == 0:
-                    return default
-                else:
-                    raise ValueError(f"Expected scalar or dict with '.*' key for actuator config value, got dict with keys {value.keys()}")
-            if isinstance(value, (list, tuple)):
-                if len(value) == 0:
-                    return default
-                return float(value[0])
-            return float(value)
+        def _assert_scalar(name: str, value):
+            if not isinstance(value, (float, int)):
+                raise AssertionError(
+                    f"ActuatorCfg.{name} must be a scalar float/int for mjlab, got {type(value).__name__}"
+                )
 
-        target_names_expr = (
-            (self.joint_names_expr,)
-            if isinstance(self.joint_names_expr, str)
-            else tuple(self.joint_names_expr)
-        )
+        _assert_scalar("effort_limit", self.effort_limit)
+        _assert_scalar("velocity_limit", self.velocity_limit)
+        _assert_scalar("stiffness", self.stiffness)
+        _assert_scalar("damping", self.damping)
+        _assert_scalar("friction", self.friction)
+        _assert_scalar("armature", self.armature)
+
+        target_names_expr = (self.joint_names_expr,)
         return BuiltinPositionActuatorCfg(
             target_names_expr=target_names_expr,
-            effort_limit=_to_scalar(self.effort_limit, default=None),
-            stiffness=_to_scalar(self.stiffness, default=0.0),
-            damping=_to_scalar(self.damping, default=0.0),
-            frictionloss=_to_scalar(self.friction, default=0.0),
-            armature=_to_scalar(self.armature, default=0.0),
+            effort_limit=float(self.effort_limit),
+            stiffness=float(self.stiffness),
+            damping=float(self.damping),
+            frictionloss=float(self.friction),
+            armature=float(self.armature),
         )
 
 
@@ -200,40 +183,47 @@ class ContactSensorCfg:
     name: str = MISSING
     primary: str = MISSING
     # for isaaclab, secondary is a list of strings
-    secondary: str | Tuple[str, ...] = MISSING
+    secondary: str | Sequence[str] | None = MISSING
 
     track_air_time: bool = False
-
-    # isaaclab specific
     history_length: int = 1
 
     # mjlab specific
     num_slots: int = 1
     fields: Tuple[str, ...] = ("found", "force")
-    reduce: Literal["none", "mindist", "netforce"] = "maxforce"
+    reduce: Literal["none", "mindist", "maxforce", "netforce"] = "maxforce"
 
     def isaaclab(self):
-        return IsaaclabContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/" + f"Robot/{self.primary}",
-            track_air_time=self.track_air_time,
-            filter_prim_paths_expr=self.secondary,
-            history_length=self.history_length,
-        )
+        kwargs = {
+            "prim_path": "{ENV_REGEX_NS}/" + f"Robot/{self.primary}",
+            "track_air_time": self.track_air_time,
+            "history_length": self.history_length,
+        }
+        if isinstance(self.secondary, str):
+            kwargs["filter_prim_paths_expr"] = [self.secondary]
+        elif isinstance(self.secondary, Sequence) and len(self.secondary) > 0:
+            kwargs["filter_prim_paths_expr"] = list(self.secondary)
+        return IsaaclabContactSensorCfg(**kwargs)
 
     def mjlab(self):
-        return CfrcContactSensorCfg(
-            name=self.name,
-            entity="robot",
-            track_air_time=self.track_air_time,
-        )
+        secondary: ContactMatch | None = None
+        if isinstance(self.secondary, str):
+            secondary = ContactMatch(mode="subtree", pattern=self.secondary, entity="robot")
+        elif isinstance(self.secondary, Sequence) and len(self.secondary) > 0:
+            secondary = ContactMatch(
+                mode="subtree",
+                pattern=tuple(self.secondary),
+                entity="robot",
+            )
         return MjlabContactSensorCfg(
             name=self.name,
             primary=ContactMatch(mode="subtree", pattern=self.primary, entity="robot"),
-            secondary=ContactMatch(**self.secondary),
+            secondary=secondary,
             fields=self.fields,
             reduce=self.reduce,
             num_slots=self.num_slots,
             track_air_time=self.track_air_time,
+            history_length=self.history_length,
         )
 
 
@@ -265,11 +255,7 @@ class AssetCfg:
     sensors_isaaclab: List[ContactSensorCfg] = field(default_factory=list)
     sensors_mjlab: List[ContactSensorCfg] = field(default_factory=list)
     
-    joint_names_isaac: Optional[List[str]] = None
-    joint_names_mjlab: Optional[List[str]] = None
     joint_names_simulation: Optional[List[str]] = None
-    body_names_isaac: Optional[List[str]] = None
-    body_names_mjlab: Optional[List[str]] = None
     body_names_simulation: Optional[List[str]] = None
 
     self_collisions: bool = True
@@ -284,6 +270,84 @@ class AssetCfg:
     #     if self.usd_path is not MISSING:
     #         usd_path = Path(self.usd_path)
     #         assert usd_path.exists(), f"USD file not found: {usd_path}"
+
+    @staticmethod
+    def _as_pattern_dict(
+        expr: str,
+        value: float | Dict[str, float],
+    ) -> Dict[str, float]:
+        if isinstance(value, (float, int)):
+            return {expr: float(value)}
+        return value
+
+    def _merge_actuator_dicts(self):
+        joint_names_exprs = []
+        effort_limit = {}
+        velocity_limit = {}
+        stiffness = {}
+        damping = {}
+        friction = {}
+        armature = {}
+
+        def _checked_update(dst: Dict[str, float], src: Dict[str, float], field: str, actuator_name: str):
+            overlap = set(dst).intersection(src)
+            if overlap:
+                overlap_str = ", ".join(sorted(overlap))
+                raise ValueError(
+                    f"Duplicate actuator pattern(s) for '{field}': {overlap_str}. "
+                    f"Actuator '{actuator_name}' would overwrite existing values."
+                )
+            dst.update(src)
+
+        for actuator_name, actuator in self.actuators.items():
+            expr = actuator.joint_names_expr
+            joint_names_exprs.append(f"({expr})")
+            _checked_update(
+                effort_limit,
+                self._as_pattern_dict(expr, actuator.effort_limit),
+                "effort_limit",
+                actuator_name,
+            )
+            _checked_update(
+                velocity_limit,
+                self._as_pattern_dict(expr, actuator.velocity_limit),
+                "velocity_limit",
+                actuator_name,
+            )
+            _checked_update(
+                stiffness,
+                self._as_pattern_dict(expr, actuator.stiffness),
+                "stiffness",
+                actuator_name,
+            )
+            _checked_update(
+                damping,
+                self._as_pattern_dict(expr, actuator.damping),
+                "damping",
+                actuator_name,
+            )
+            _checked_update(
+                friction,
+                self._as_pattern_dict(expr, actuator.friction),
+                "friction",
+                actuator_name,
+            )
+            _checked_update(
+                armature,
+                self._as_pattern_dict(expr, actuator.armature),
+                "armature",
+                actuator_name,
+            )
+
+        return {
+            "joint_names_expr": "|".join(joint_names_exprs),
+            "effort_limit": effort_limit,
+            "velocity_limit": velocity_limit,
+            "stiffness": stiffness,
+            "damping": damping,
+            "friction": friction,
+            "armature": armature,
+        }
 
     def isaaclab(self):
         """Convert to Isaac Sim asset configuration.
@@ -300,50 +364,18 @@ class AssetCfg:
                 - Collision properties (contact/rest offsets)
                 - Initial state and actuator configurations
         """
-        if len(self.actuators) > 1:
-            joint_names_expr = ""
-            effort_limit = {}
-            velocity_limit = {}
-            stiffness = {}
-            damping = {}
-            friction = {}
-            armature = {}
-            
-            def parse_cfg(expr, cfg, all_joints_expr):
-                if isinstance(cfg, (float, int)):
-                    return {expr: cfg}
-                else:
-                    if cfg.keys() == {".*"}:
-                        return {all_joints_expr: float(cfg[".*"])}
-                    return cfg
-            
-            # merge all actuator configurations into a single implicit actuator configuration
-            for _, actuator in self.actuators.items():
-                expr = actuator.joint_names_expr
-                if not isinstance(expr, str):
-                    expr = "|".join(expr)
-                joint_names_expr += f"({expr})|"
-                effort_limit.update(parse_cfg(expr, actuator.effort_limit, all_joints_expr=expr))
-                velocity_limit.update(parse_cfg(expr, actuator.velocity_limit, all_joints_expr=expr))
-                stiffness.update(parse_cfg(expr, actuator.stiffness, all_joints_expr=expr))
-                damping.update(parse_cfg(expr, actuator.damping, all_joints_expr=expr))
-                friction.update(parse_cfg(expr, actuator.friction, all_joints_expr=expr))
-                armature.update(parse_cfg(expr, actuator.armature, all_joints_expr=expr))
-            actuators = {
-                "all": ImplicitActuatorCfg(
-                    joint_names_expr=joint_names_expr,
-                    effort_limit_sim=effort_limit,
-                    velocity_limit_sim=velocity_limit,
-                    stiffness=stiffness,
-                    damping=damping,
-                    friction=friction,
-                    armature=armature,
-                )
-            }
-        else:
-            actuators = {
-                name: actuator.isaaclab() for name, actuator in self.actuators.items()
-            }
+        merged = self._merge_actuator_dicts()
+        actuators = {
+            "all": ImplicitActuatorCfg(
+                joint_names_expr=merged["joint_names_expr"],
+                effort_limit_sim=merged["effort_limit"],
+                velocity_limit_sim=merged["velocity_limit"],
+                stiffness=merged["stiffness"],
+                damping=merged["damping"],
+                friction=merged["friction"],
+                armature=merged["armature"],
+            )
+        }
         
         return ArticulationCfg(
             spawn=sim_utils.UsdFileCfg(
@@ -373,41 +405,12 @@ class AssetCfg:
             soft_joint_pos_limit_factor=0.9,
             joint_symmetry_mapping=self.joint_symmetry_mapping,
             spatial_symmetry_mapping=self.spatial_symmetry_mapping,
-            joint_names_isaac=self.joint_names_isaac,
-            joint_names_mjlab=self.joint_names_mjlab,
             joint_names_simulation=self.joint_names_simulation,
-            body_names_isaac=self.body_names_isaac,
-            body_names_mjlab=self.body_names_mjlab,
             body_names_simulation=self.body_names_simulation,
         )
     
     def mujoco(self):
-        joint_names_expr = ""
-        effort_limit = {}
-        velocity_limit = {}
-        stiffness = {}
-        damping = {}
-        friction = {}
-        armature = {}
-        
-        def parse_cfg(expr, cfg):
-            if isinstance(cfg, float):
-                return {expr: cfg}
-            else:
-                return cfg
-        
-        # merge all actuator configurations into a single implicit actuator configuration
-        for _, actuator in self.actuators.items():
-            expr = actuator.joint_names_expr
-            if not isinstance(expr, str):
-                expr = "|".join(expr)
-            joint_names_expr += f"({expr})|"
-            effort_limit.update(parse_cfg(expr, actuator.effort_limit))
-            velocity_limit.update(parse_cfg(expr, actuator.velocity_limit))
-            stiffness.update(parse_cfg(expr, actuator.stiffness))
-            damping.update(parse_cfg(expr, actuator.damping))
-            friction.update(parse_cfg(expr, actuator.friction))
-            armature.update(parse_cfg(expr, actuator.armature))
+        merged = self._merge_actuator_dicts()
         
         return MJArticulationCfg(
             mjcf_path=str(self.mjcf_path),
@@ -419,17 +422,17 @@ class AssetCfg:
             },
             actuators={
                 "all": {
-                    "joint_names_expr": joint_names_expr,
+                    "joint_names_expr": merged["joint_names_expr"],
                     # "effort_limit_sim": effort_limit, # TODO: add effort limit
                     # "velocity_limit_sim": velocity_limit, # TODO: add velocity limit
-                    "stiffness": stiffness,
-                    "damping": damping,
-                    "friction": friction,
-                    "armature": armature,
+                    "stiffness": merged["stiffness"],
+                    "damping": merged["damping"],
+                    "friction": merged["friction"],
+                    "armature": merged["armature"],
                 }
             },
-            body_names_isaac=self.body_names_isaac,
-            joint_names_isaac=self.joint_names_isaac,
+            body_names_simulation=self.body_names_simulation,
+            joint_names_simulation=self.joint_names_simulation,
             joint_symmetry_mapping=self.joint_symmetry_mapping,
             spatial_symmetry_mapping=self.spatial_symmetry_mapping,
         )
@@ -469,7 +472,7 @@ class AssetCfg:
             init_state=self.init_state.mjlab(),
             spec_fn=lambda: spec,
             articulation=EntityArticulationInfoCfg(
-                actuators=(
+                actuators=tuple(
                     actuator.mjlab()
                     for actuator in self.actuators.values()
                 ),
@@ -478,11 +481,7 @@ class AssetCfg:
             collisions=(collision_cfg,),
             joint_symmetry_mapping=self.joint_symmetry_mapping,
             spatial_symmetry_mapping=self.spatial_symmetry_mapping,
-            joint_names_isaac=self.joint_names_isaac,
-            joint_names_mjlab=self.joint_names_mjlab,
             joint_names_simulation=self.joint_names_simulation,
-            body_names_isaac=self.body_names_isaac,
-            body_names_mjlab=self.body_names_mjlab,
             body_names_simulation=self.body_names_simulation,
         )
 
@@ -528,14 +527,11 @@ def get_input_joint_indexing(
     if input_order == aa.get_backend() or input_order == "mujoco":
         # aa's mujoco backend uses the same joint order as isaaclab
         return slice(None), target_joint_names
-    if input_order == "isaac":
-        source_joint_names = [name for name in asset_cfg.joint_names_isaac if name in target_joint_names]
-    elif input_order == "mjlab":
-        source_joint_names = [name for name in asset_cfg.joint_names_mjlab if name in target_joint_names]
-    elif input_order == "simulation":
-        source_joint_names = [name for name in asset_cfg.joint_names_simulation if name in target_joint_names]
-    else:
+    if input_order not in {"isaac", "mjlab", "simulation"}:
         raise ValueError(f"Invalid input_order: {input_order}")
+    if asset_cfg.joint_names_simulation is None:
+        raise ValueError("asset_cfg.joint_names_simulation is required")
+    source_joint_names = [name for name in asset_cfg.joint_names_simulation if name in target_joint_names]
     if not len(source_joint_names) == len(target_joint_names):
         raise ValueError(f"Source joint names {source_joint_names} do not match target joint names {target_joint_names}")
     indexing = [source_joint_names.index(name) for name in target_joint_names]
@@ -550,14 +546,11 @@ def get_output_joint_indexing(
 ) -> Tuple[torch.Tensor, List[str]]:
     if output_order == aa.get_backend() or output_order == "mujoco":
         return slice(None), source_joint_names
-    if output_order == "isaac":
-        target_joint_names = [name for name in asset_cfg.joint_names_isaac if name in source_joint_names]
-    elif output_order == "mjlab":
-        target_joint_names = [name for name in asset_cfg.joint_names_mjlab if name in source_joint_names]
-    elif output_order == "simulation":
-        target_joint_names = [name for name in asset_cfg.joint_names_simulation if name in source_joint_names]
-    else:
+    if output_order not in {"isaac", "mjlab", "simulation"}:
         raise ValueError(f"Invalid output_order: {output_order}")
+    if asset_cfg.joint_names_simulation is None:
+        raise ValueError("asset_cfg.joint_names_simulation is required")
+    target_joint_names = [name for name in asset_cfg.joint_names_simulation if name in source_joint_names]
     if not len(target_joint_names) == len(source_joint_names):
         raise ValueError(f"Target joint names {target_joint_names} do not match source joint names {source_joint_names}")
     indexing = [source_joint_names.index(name) for name in target_joint_names]
@@ -572,14 +565,11 @@ def get_output_body_indexing(
 ) -> Tuple[torch.Tensor, List[str]]:
     if output_order == aa.get_backend() or output_order == "mujoco":
         return slice(None), source_body_names
-    if output_order == "isaac":
-        target_body_names = [name for name in asset_cfg.body_names_isaac if name in source_body_names]
-    elif output_order == "mjlab":
-        target_body_names = [name for name in asset_cfg.body_names_mjlab if name in source_body_names]
-    elif output_order == "simulation":
-        target_body_names = [name for name in asset_cfg.body_names_simulation if name in source_body_names]
-    else:
+    if output_order not in {"isaac", "mjlab", "simulation"}:
         raise ValueError(f"Invalid output_order: {output_order}")
+    if asset_cfg.body_names_simulation is None:
+        raise ValueError("asset_cfg.body_names_simulation is required")
+    target_body_names = [name for name in asset_cfg.body_names_simulation if name in source_body_names]
     if not len(target_body_names) == len(source_body_names):
         raise ValueError(f"Target body names {target_body_names} do not match source body names {source_body_names}")
     indexing = [source_body_names.index(name) for name in target_body_names]

@@ -29,7 +29,7 @@ UNITREE_GO2_CFG = AssetCfg(
     self_collisions=False,
     actuators={
         "base_legs": ActuatorCfg(
-            joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+            joint_names_expr=".*_hip_joint|.*_thigh_joint|.*_calf_joint",
             # effort_limit={
             #     ".*_hip_joint": 23.5,
             #     ".*_thigh_joint": 23.5,
@@ -96,7 +96,7 @@ UNITREE_GO2_CFG = AssetCfg(
             history_length=3
         ),
     ],
-    body_names_isaac=[
+    body_names_simulation=[
         "base",
         "FL_hip",
         "FR_hip",
@@ -117,7 +117,7 @@ UNITREE_GO2_CFG = AssetCfg(
         "RL_foot",
         "RR_foot"
     ],
-    joint_names_isaac=[
+    joint_names_simulation=[
         "FL_hip_joint",
         "FR_hip_joint",
         "RL_hip_joint",
@@ -188,4 +188,3 @@ UNITREE_B1Z1_CFG = AssetCfg(
     ],
 )
 registry.register("asset", "b1z1", UNITREE_B1Z1_CFG)
-

@@ -5,8 +5,30 @@ import torch
 
 from mjlab.sim import Simulation
 from mjlab.viewer.viser import ViserMujocoScene
-from mjlab.viewer.base import Timer
 from active_adaptation.envs.env_base import _EnvBase
+
+import contextlib
+class Timer:
+  def __init__(self):
+    self._previous_time = time.time()
+    self._measured_time = 0.0
+
+  def tick(self):
+    curr_time = time.time()
+    self._measured_time = curr_time - self._previous_time
+    self._previous_time = curr_time
+    return self._measured_time
+
+  @contextlib.contextmanager
+  def measure_time(self):
+    start_time = time.time()
+    yield
+    self._measured_time = time.time() - start_time
+
+  @property
+  def measured_time(self):
+    return self._measured_time
+
 
 
 class MjLabViewer:

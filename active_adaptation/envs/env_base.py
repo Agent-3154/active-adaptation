@@ -163,6 +163,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         )
         self.episode_id = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.episode_count = 0
+        self.current_iter = 0
 
         # parse obs and reward functions
         self.done_spec = Composite(
@@ -336,6 +337,8 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         self.input_tensordict = None
         self.extra = {}
+    def set_progress(self, progress: int):
+        self.current_iter = progress
 
     @property
     def num_envs(self) -> int:

@@ -27,8 +27,8 @@ class MJArticulationCfg:
     mjcf_path: str
     init_state: Any
     actuators: Dict
-    body_names_isaac: Sequence[str]
-    joint_names_isaac: Sequence[str]
+    body_names_simulation: Sequence[str]
+    joint_names_simulation: Sequence[str]
     joint_symmetry_mapping: Dict=None
     spatial_symmetry_mapping: Dict=None
 
@@ -164,7 +164,7 @@ class MJArticulation:
         self.mj_model = mj_model
         self.mj_data = mj_data
         
-        self.body_names_isaac = list(self.cfg.body_names_isaac)
+        self.body_names_isaac = list(self.cfg.body_names_simulation)
         self.body_names_mjc = []
         body_adrs = []
         for i in range(1, self.mj_model.nbody): # skip the world body
@@ -181,7 +181,7 @@ class MJArticulation:
             )
 
         # find only the actuated joints
-        self.joint_names_isaac = list(self.cfg.joint_names_isaac)
+        self.joint_names_isaac = list(self.cfg.joint_names_simulation)
         self.joint_names_mjc = []
         self.joint_pos_limits_mjc = []
 
