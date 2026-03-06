@@ -5,6 +5,8 @@ cd /cpfs/user/benqingwei/gsloco/active-adaptation/ && pip install -e .
 cd /cpfs/user/benqingwei/gsloco/gs-scene/ && pip install -e .
 cd /cpfs/user/benqingwei/gsloco/sirius-wheel-learning/ && pip install -e .
 
+sync && sleep 5
+
 cd /cpfs/user/benqingwei/gsloco/active-adaptation/scripts/
 
 export OMP_NUM_THREADS=4
