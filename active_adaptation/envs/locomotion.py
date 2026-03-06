@@ -113,6 +113,7 @@ class SimpleEnvIsaac(_EnvBase):
                         rigid_body_enabled=True,
                         kinematic_enabled=False
                     ),
+                    mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
                     **kwargs
                 )
                 obj_cfg = RigidObjectCfg(

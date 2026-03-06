@@ -2,14 +2,14 @@ import torch
 import numpy as np
 import warnings
 from isaaclab.terrains import (
-    TerrainGenerator as _TerrainGenerator,
+    TerrainGenerator,
     TerrainGeneratorCfg,
-    TerrainImporter as _TerrainImporter,
+    TerrainImporter,
     TerrainImporterCfg,
 )
 import isaaclab.sim as sim_utils
 
-class TerrainGenerator(_TerrainGenerator):
+class BetterTerrainGenerator(TerrainGenerator):
     def __init__(self, cfg: TerrainGeneratorCfg, device: str = "cpu"):
         super().__init__(cfg, device)
         self.num_cols = self.cfg.num_cols
@@ -25,9 +25,14 @@ class TerrainGenerator(_TerrainGenerator):
         sub_terrains_cfgs = list(self.cfg.sub_terrains.values())
 
         # randomly sample sub-terrains
-        self.sub_terrain_types = torch.zeros(self.cfg.num_rows * self.cfg.num_cols, dtype=torch.int32)
-        self.sub_terrain_names = []
-        self.terrain_type_names = list(self.cfg.sub_terrains.keys())
+        # different from the original TerrainGenerator, we store the sub-terrain type mapping
+        self.sub_terrain_types = torch.zeros(
+            self.cfg.num_rows * self.cfg.num_cols,
+            dtype=torch.int32,
+            device=self.device
+        )
+        self.sub_terrain_type_mapping = {key: i for i, key in enumerate(self.cfg.sub_terrains.keys())}
+
         for index in range(self.cfg.num_rows * self.cfg.num_cols):
             # coordinate index of the sub-terrain
             (sub_row, sub_col) = np.unravel_index(index, (self.cfg.num_rows, self.cfg.num_cols))
@@ -40,8 +45,6 @@ class TerrainGenerator(_TerrainGenerator):
             # add to sub-terrains
             self._add_sub_terrain(mesh, origin, sub_row, sub_col, sub_terrains_cfgs[sub_index])
             self.sub_terrain_types[index] = sub_index
-            self.sub_terrain_names.append(self.terrain_type_names[sub_index])
-        self.sub_terrain_names = np.array(self.sub_terrain_names)
 
     def _generate_curriculum_terrains(self):
         """Add terrains based on the difficulty parameter."""
@@ -60,9 +63,13 @@ class TerrainGenerator(_TerrainGenerator):
         sub_terrains_cfgs = list(self.cfg.sub_terrains.values())
 
         # curriculum-based sub-terrains
-        self.sub_terrain_types = torch.zeros(self.cfg.num_rows * self.cfg.num_cols, dtype=torch.int32)
-        self.sub_terrain_names = []
-        self.terrain_type_names = list(self.cfg.sub_terrains.keys())
+        self.sub_terrain_types = torch.zeros(
+            self.cfg.num_rows * self.cfg.num_cols,
+            dtype=torch.int32,
+            device=self.device
+        )
+        self.sub_terrain_type_mapping = {key: i for i, key in enumerate(self.cfg.sub_terrains.keys())}
+
         for sub_col in range(self.cfg.num_cols):
             for sub_row in range(self.cfg.num_rows):
                 # vary the difficulty parameter linearly over the number of rows
@@ -79,11 +86,46 @@ class TerrainGenerator(_TerrainGenerator):
                 # add to sub-terrains
                 self._add_sub_terrain(mesh, origin, sub_row, sub_col, sub_terrains_cfgs[sub_indices[sub_col]])
                 self.sub_terrain_types[sub_row * self.cfg.num_cols + sub_col] = sub_indices[sub_col]
-                self.sub_terrain_names.append(self.terrain_type_names[sub_indices[sub_col]])
-        self.sub_terrain_names = np.array(self.sub_terrain_names)
+
+    def get_terrain_origin_id(self, pos_w: torch.Tensor) -> torch.Tensor:
+        """Return the terrain cell index (flat) for each world position using grid layout.
+
+        Assumes axis-aligned grid: cell (row, col) has origin at
+        origin_00 + (row * size[0], col * size[1], 0). Positions are clamped to valid range.
+
+        Args:
+            pos_w: World positions, shape (N, 3).
+
+        Returns:
+            Flat cell indices in [0, num_rows*num_cols), shape (N,), dtype long, same device as pos_w.
+        """
+        device = pos_w.device
+        size_x, size_y = self.cfg.size[0], self.cfg.size[1]
+        origin_x = - 0.5 * size_x * self.cfg.num_rows
+        origin_y = - 0.5 * size_y * self.cfg.num_cols
+        # Cell in grid: row = floor((pos_x - origin_00_x) / size_x), col = floor((pos_y - origin_00_y) / size_y)
+        delta_x = pos_w[:, 0] - origin_x
+        delta_y = pos_w[:, 1] - origin_y
+        row = (delta_x / size_x).long().clamp(0, self.num_rows - 1)
+        col = (delta_y / size_y).long().clamp(0, self.num_cols - 1)
+        return (row * self.num_cols + col).to(device)
+
+    def get_sub_terrain_type(self, pos_w: torch.Tensor) -> torch.Tensor:
+        """Return the sub-terrain type index for each world position.
+
+        Uses grid layout and cell sizes to compute the containing cell (no distance computation).
+
+        Args:
+            pos_w: World positions, shape (N, 3).
+
+        Returns:
+            Sub-terrain type indices, shape (N,), dtype int32, on the same device as pos_w.
+        """
+        cell_ids = self.get_terrain_origin_id(pos_w)
+        return self.sub_terrain_types[cell_ids]
 
 
-class TerrainImporter(_TerrainImporter):
+class BetterTerrainImporter(TerrainImporter):
     def __init__(self, cfg: TerrainImporterCfg):
         warnings.warn("Hacking TerrainImporter. Check IsaacLab regularly for updates and compatibility.")
         """Initialize the terrain importer.
@@ -109,6 +151,7 @@ class TerrainImporter(_TerrainImporter):
         self.env_origins = None  # assigned later when `configure_env_origins` is called
         # private variables
         self._terrain_flat_patches = dict()
+        self.terrain_generator = None
         
         # auto-import the terrain based on the config
         if self.cfg.terrain_type == "generator":
@@ -124,9 +167,7 @@ class TerrainImporter(_TerrainImporter):
             self.configure_env_origins(terrain_generator.terrain_origins)
             # refer to the flat patches
             self._terrain_flat_patches = terrain_generator.flat_patches
-            self.sub_terrain_types = terrain_generator.sub_terrain_types
-            self.sub_terrain_names = terrain_generator.sub_terrain_names
-            self.terrain_type_names = terrain_generator.terrain_type_names
+            self.terrain_generator = terrain_generator
         elif self.cfg.terrain_type == "usd":
             # check if config is provided
             if self.cfg.usd_path is None:
