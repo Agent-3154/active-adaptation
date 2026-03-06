@@ -70,6 +70,9 @@ class SceneAdapter(Protocol):
         raise NotImplementedError(
             f"Zero external wrenches is not implemented for {self.__class__.__name__}."
         )
+    
+    def get(self, name, default=None):
+        raise NotImplementedError
 
     @property
     def articulations(self) -> Dict[str, Union["Articulation", "Entity"]]:
@@ -205,6 +208,13 @@ class IsaacSceneAdapter(SceneAdapter):
     def __getitem__(self, name):
         return self._scene[name]
 
+    def get(self, name, default=None):
+        """Dict-like access with a default value."""
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
 
 class MujocoSceneAdapter(SceneAdapter):
     """Adapter for MuJoCo MJScene."""
@@ -240,6 +250,13 @@ class MujocoSceneAdapter(SceneAdapter):
     def __getitem__(self, name):
         return self._scene[name]
 
+    def get(self, name, default=None):
+        """Dict-like access with a default value."""
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
 
 class MjlabSceneAdapter(SceneAdapter):
     """Adapter for mjlab Scene."""
@@ -260,6 +277,13 @@ class MjlabSceneAdapter(SceneAdapter):
 
     def __getitem__(self, name):
         return self._scene.entities[name]
+
+    def get(self, name, default=None):
+        """Dict-like access with a default value."""
+        try:
+            return self[name]
+        except KeyError:
+            return default
 
 
 def wrap_sim(sim, backend: str) -> SimAdapter:

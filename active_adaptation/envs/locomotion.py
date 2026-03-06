@@ -93,10 +93,33 @@ class SimpleEnvIsaac(_EnvBase):
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
         scene_cfg.terrain = registry.get("terrain", self.cfg.terrain)
 
-        for obj in self.cfg.get("objects", []):
-            obj_cfg = registry.get("asset", obj.name).isaaclab()
-            obj_cfg.prim_path = "{ENV_REGEX_NS}/" + obj.name
-            setattr(scene_cfg, obj.name, obj_cfg)
+        # TODO@btx0424: more general object spawning support.
+        if (objects := self.cfg.get("objects", [])):
+            from isaaclab.assets import RigidObjectCfg
+            from omegaconf import OmegaConf
+
+            objects = OmegaConf.to_container(objects)
+            for obj_name, kwargs in objects.items():
+                spawner_cfg = {
+                    "box": sim_utils.CuboidCfg,
+                    "sphere": sim_utils.SphereCfg,
+                    "cylinder": sim_utils.CylinderCfg,
+                    "capsule": sim_utils.CapsuleCfg,
+                    "cone": sim_utils.ConeCfg,
+                }[obj_name]
+                spawner_cfg = spawner_cfg(
+                    collision_props=sim_utils.CollisionPropertiesCfg(),
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                        rigid_body_enabled=True,
+                        kinematic_enabled=False
+                    ),
+                    **kwargs
+                )
+                obj_cfg = RigidObjectCfg(
+                    prim_path="{ENV_REGEX_NS}/" + obj_name,
+                    spawn=spawner_cfg
+                )
+                setattr(scene_cfg, obj_name, obj_cfg)
 
         sim_cfg = sim_utils.SimulationCfg(
             dt=self.cfg.sim.isaac_physics_dt,
@@ -196,6 +219,9 @@ class SimpleEnvMujoco(_EnvBase):
             contact_forces = "robot"
             terrain = TERRAINS_MUJOCO.get(self.cfg.terrain, TERRAINS_MUJOCO["plane"])
         
+        if (objects := self.cfg.get("objects", [])):
+            raise NotImplementedError("Objects are not supported in the MuJoCo backend yet.")
+        
         scene = MJScene(SceneCfg())
         sim = MJSim(scene)
         self.scene = MujocoSceneAdapter(scene)
@@ -229,6 +255,10 @@ class SimpleEnvMjlab(_EnvBase):
         asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
         # Initialize scene and simulation.
         sensors = tuple(sensor.mjlab() for sensor in asset_cfg.sensors_mjlab)
+        
+        if (objects := self.cfg.get("objects", [])):
+            raise NotImplementedError("Objects are not supported in the MjLab backend yet.")
+        
         scene_cfg = SceneCfg(
             num_envs=self.cfg.num_envs,
             env_spacing=2.5,
