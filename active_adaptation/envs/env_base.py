@@ -65,7 +65,7 @@ EMA_DECAY = 0.99
 
 
 def parse_name_and_class(s: str):
-    pattern = r"^(\w+)\((\w+)\)$"
+    pattern = r"^(\w+)\(([\w.]+)\)$"
     match = re.match(pattern, s)
     if match:
         name, cls = match.groups()

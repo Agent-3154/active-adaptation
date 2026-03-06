@@ -194,6 +194,10 @@ class IsaacSceneAdapter(SceneAdapter):
     def terrain(self):
         return self._scene.terrain
 
+    @property
+    def env_origins(self):
+        return self._scene.env_origins
+
     def __getitem__(self, name):
         return self._scene[name]
 

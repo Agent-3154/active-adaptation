@@ -315,7 +315,7 @@ class base_height_exp(Reward[Twist]):
         root_link_pos_w = self.asset.data.root_link_pos_w
         height = root_link_pos_w[:, 2] - self.env.get_ground_height_at(root_link_pos_w)
         error_l2 = (height.unsqueeze(1) - target_height).square()
-        rew = torch.exp(-error_l2 / 0.2)
+        rew = torch.exp(-error_l2 / 0.1)
         return rew.reshape(self.num_envs, 1)
 
 
