@@ -6,9 +6,10 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_DIR"
 
-python scripts/eval_run.py \
-    -r elgceben/g1_room/7nvm145x \
-    -p \
-    --lights \
-    --vis-rgb \
+python scripts/play.py \
+    task=G1AilabRoomVel \
+    task.num_envs=1 \
+    task.scene.n_repeats=1 \
+    headless=false \
+    task.scene.point_lights=true \
     "$@"
