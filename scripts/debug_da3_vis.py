@@ -2,7 +2,7 @@
 
 Usage:
     cd /home/elgce/gsloco/active-adaptation
-    python scripts/debug_da3_vis.py task=G1AilabRoomNavDepth task.num_envs=1 \
+    python scripts/debug_da3_vis.py task=G1AilabRoomNavDA3 task.num_envs=1 \
         headless=true wandb.mode=disabled task.scene.point_lights=false \
         task.command.vis_waypoints=false
 
