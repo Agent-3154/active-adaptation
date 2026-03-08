@@ -36,6 +36,36 @@ class knee_distance(Reward):
         super().__init__(env, weight, enabled, clip_range)
 
 
+class leg_spacing(Reward):
+    """Penalize lateral distance between a left-right body pair outside [least, most].
+
+    Computes lateral (y) distance in the root body frame, then penalizes
+    being below least_distance or above most_distance.
+    Returns clamp(d_y - least, max=0) + clamp(most - d_y, max=0), in [-inf, 0].
+    """
+    def __init__(self, env, body_names, least_distance: float, most_distance: float, weight: float):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.body_ids = self.asset.find_bodies(body_names)[0]
+        self.least_distance = least_distance
+        self.most_distance = most_distance
+
+    def compute(self) -> torch.Tensor:
+        pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]
+        rel = pos_w - self.asset.data.root_pos_w.unsqueeze(1)
+        root_yaw = yaw_quat(self.asset.data.root_link_quat_w)
+        n = len(self.body_ids)
+        body_b = torch.zeros(self.num_envs, n, 3, device=self.device)
+        for i in range(n):
+            body_b[:, i] = quat_rotate_inverse(root_yaw, rel[:, i])
+        lat_dist = torch.abs(body_b[:, 0, 1] - body_b[:, 1, 1])
+        rew = (
+            (lat_dist - self.least_distance).clamp_max(0.0)
+            + (self.most_distance - lat_dist).clamp_max(0.0)
+        )
+        return rew.reshape(self.num_envs, 1)
+
+
 class feet_swing(Reward):
     def __init__(self, env, feet_names, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
