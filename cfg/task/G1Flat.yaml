@@ -1,0 +1,122 @@
+# @package task
+# G1 blind flat-ground velocity tracking.
+# Uses Twist command (random velocity sampling) on plane terrain.
+project: sirius
+name: G1Flat
+
+viewer:
+  resolution: [1280, 720]
+  lookat: [0., 0., 0.]
+  eye: [4.0, 4.0, 4.0]
+
+robot: 
+  name: g1_waist_unlocked
+terrain: plane
+
+# common
+num_envs: 4096
+max_episode_length: 1000
+
+sim:
+  step_dt: 0.02
+  isaac_physics_dt: 0.005
+  mujoco_physics_dt: 0.002
+
+input:
+  action:
+    class: JointPosition
+    action_scaling:
+      .*hip_pitch.*: 0.548
+      .*hip_roll.*: 0.351
+      .*hip_yaw.*: 0.548
+      .*knee.*: 0.351
+      waist_yaw_joint: 0.541
+      waist_roll_joint: 0.439
+      waist_pitch_joint: 0.439
+      .*ankle.*: 0.439
+      .*shoulder.*: 0.173
+      .*elbow_joint: 0.173
+    max_delay: 1
+    alpha_range: [0.8, 1.0]
+
+command:
+  class: Twist
+  linvel_x_range: [-0.8, 0.8]
+  linvel_y_range: [-0.4, 0.4]
+  angvel_range: [-1.5, 1.5]
+  yaw_stiffness_range: [0.5, 1.0]
+  use_stiffness_ratio: 0.9
+  base_height_range: [0.73, 0.74]
+  stand_prob: 0.05
+
+observation:
+  policy:
+    command:
+    gravity_multistep: {steps: 4, noise_std: 0.05}
+    joint_pos_multistep: {joint_names: "(?!(.*wrist.*)).*", steps: 4, noise_std: 0.05}
+    joint_vel_multistep: {joint_names: "(?!(.*wrist.*)).*", steps: 4, noise_std: 0.2}
+    prev_actions: {steps: 2}
+
+reward:
+  loco:
+    linvel_exp:         {weight: 2.0, dim: 2}
+    linvel_projection:  {weight: 0.5}
+    angvel_z_exp:       {weight: 2.0}
+    base_height_exp:    {weight: 1.5}
+    angvel_xy_l2:       {weight: 0.02, body_names: ["pelvis", "torso_link"]}
+    linvel_z_l2:        {weight: 0.5}
+    single_foot_contact: {weight: 0.75, body_names: .*ankle_roll_link, margin: 0.1}
+  body_reg:
+    torso_upright(body_upright):   {weight: 1.0, body_name: "torso_link"}
+    pelvis_upright(body_upright):  {weight: 1.0, body_name: "pelvis"}
+    feet_spacing(leg_spacing):     {weight: 1.0, body_names: [left_ankle_roll_link, right_ankle_roll_link], least_distance: 0.26, most_distance: 0.28}
+    knee_spacing(leg_spacing):     {weight: 1.0, body_names: [left_knee_link, right_knee_link], least_distance: 0.26, most_distance: 0.28}
+    survival:           {weight: 1.0}
+  joint_reg:
+    energy_l2:          {weight: 2.0e-10}
+    joint_acc_l2:       {weight: 2.5e-7}
+    torques_scaled:     {weight: 2.5e-6}
+    action_rate_l2:     {weight: 1e-2}
+    action_rate2_l2:    {weight: 5e-3}
+    dof_vel(joint_vel_l2):                   {weight: 1.0e-4}
+    dof_vel_limits(joint_vel_limits):        {weight: 2.0e-3, factor: 0.8}
+    dof_pos_limits(joint_pos_soft_limits):   {weight: 1.0}
+    tau_limits(joint_tau_limits):            {weight: 0.01, factor: 0.95}
+    hip_yaw_dev(joint_deviation_l2):         {weight: 0.5,  joint_names: [.*hip_yaw_joint]}
+    hip_roll_dev(joint_deviation_l2):        {weight: 1.0,  joint_names: [.*hip_roll_joint]}
+    hip_pitch_dev(joint_deviation_l2):       {weight: 0.05, joint_names: [.*hip_pitch_joint]}
+    ankle_pitch_dev(joint_deviation_l2):     {weight: 0.1,  joint_names: ".*ankle_pitch.*"}
+    ankle_roll_dev(joint_deviation_l2):      {weight: 1.5,  joint_names: ".*ankle_roll.*"}
+    waist_roll_yaw_dev(joint_deviation_l2):  {weight: 1.0,  joint_names: ".*waist_(roll|yaw).*"}
+    waist_pitch_dev(joint_deviation_l2):     {weight: 0.5,  joint_names: ".*waist_pitch.*"}
+    arm_roll_yaw_dev(joint_deviation_l2):    {weight: 1.0,  joint_names: [.*shoulder_(roll|yaw).*]}
+    arm_dev(joint_deviation_l2):             {weight: 0.5,  joint_names: [.*shoulder_pitch.*, .*elbow.*]}
+    knee_dev(joint_deviation_l2):            {weight: 0.02, joint_names: ".*knee.*"}
+
+randomization:
+  perturb_body_mass:
+    .*: [0.8, 1.2]
+  perturb_body_materials:
+    body_names: ".*ankle_roll_link"
+    static_friction_range: [0.6, 2.0]
+    dynamic_friction_range: [0.6, 2.0]
+    restitution_range: [0.0, 0.2]
+  motor_params:
+    stiffness_range:
+      .*: [0.8, 1.1]
+    damping_range:
+      .*: [0.8, 1.1]
+  reset_joint_states_uniform:
+    pos_ranges:
+      .*: [-0.1, 0.1]
+    rel: true
+
+termination:
+  crash: 
+    body_names_expr:
+    - "pelvis"
+    - "torso_link"
+    - ".*_hip_.*_link"
+    - ".*shoulder_.*_link"
+    - ".*(wrist|elbow).*"
+  fall_over: {xy_thres: 0.9}
