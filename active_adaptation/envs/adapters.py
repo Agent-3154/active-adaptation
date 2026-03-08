@@ -215,6 +215,34 @@ class IsaacSceneAdapter(SceneAdapter):
         except KeyError:
             return default
 
+    def create_sphere_marker(
+        self,
+        prim_path: str,
+        color: tuple[float, float, float],
+        radius: float = 0.05,
+    ):
+        """Create an Isaac Lab VisualizationMarkers with a single sphere (for GUI debug).
+
+        Returns a VisualizationMarkers instance. Call .set_visibility(True) and
+        .visualize(positions_tensor) to use it.
+        """
+        from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+        import isaaclab.sim as sim_utils
+
+        marker = VisualizationMarkers(
+            VisualizationMarkersCfg(
+                prim_path=prim_path,
+                markers={
+                    "sphere": sim_utils.SphereCfg(
+                        radius=radius,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+                    ),
+                },
+            )
+        )
+        marker.set_visibility(True)
+        return marker
+
 
 class MujocoSceneAdapter(SceneAdapter):
     """Adapter for MuJoCo MJScene."""
