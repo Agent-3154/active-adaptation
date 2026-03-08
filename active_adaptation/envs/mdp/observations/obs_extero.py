@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import einops
-from typing import Tuple, TYPE_CHECKING, Optional
+from typing import Tuple, TYPE_CHECKING, Optional, List
 
 import active_adaptation
 from jaxtyping import Float
@@ -117,6 +117,19 @@ class external_torques(Observation):
 
 
 class height_scan(Observation):
+    """
+    Ground height sampled on a 2D grid in the robot's horizontal plane via downward raycasts.
+
+    Builds a grid over (x_range × y_range) at the given resolution, casts rays straight down
+    from each grid point (in world frame, transformed by the robot's pose), and records
+    hit height. The observation is the height relative to the robot root (root_z - hit_z),
+    with optional additive Gaussian noise (noise_scale) and clamping to clamp_range.
+
+    The raycaster uses the env ground mesh by default; pass ``targets`` (scene asset names)
+    to also raycast against additional meshes (e.g. obstacles). Output shape is either
+    (num_envs, n_points) when ``flatten=True`` or (num_envs, 1, H, W) when ``flatten=False``.
+    """
+
     def __init__(
         self,
         env,
@@ -125,42 +138,76 @@ class height_scan(Observation):
         resolution: Tuple[float, float],
         flatten: bool=False,
         noise_scale = 0.02,
-        clamp_range: Tuple[float, float] = (-1., 1.)
+        clamp_range: Tuple[float, float] = (-1., 1.),
+        targets: Optional[List[str]] = None,
     ):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.flatten = flatten
         self.noise_scale = noise_scale
         self.clamp_range = clamp_range
+
+        with torch.device(self.device):
+            x = torch.linspace(x_range[0], x_range[1], int((x_range[1] - x_range[0]) / resolution[0])+1)
+            y = torch.linspace(y_range[0], y_range[1], int((y_range[1] - y_range[0]) / resolution[1])+1)
+            xx, yy = torch.meshgrid(x, y, indexing="ij")
+            self.scan_pos_b = torch.stack([xx, yy, torch.zeros_like(xx)], dim=-1).to(self.device)
+            self.shape = self.scan_pos_b.shape[:2]
+            self.n_rays = self.shape.numel()
+
+            self.ground_mesh_pos_w = torch.tensor([0., 0., 0.,]).expand(self.num_envs, 3)
+            self.ground_mesh_quat_w = torch.tensor([1., 0., 0., 0.]).expand(self.num_envs, 4)
+            self.ray_dirs_w = torch.tensor([0., 0., -1.]).expand(self.num_envs, self.n_rays, 3)
+
+        from simple_raycaster import MultiMeshRaycaster
+        self.raycaster = MultiMeshRaycaster([self.env.ground_mesh], device=self.device)
+        self.target_assets = []
         
-        x = torch.linspace(x_range[0], x_range[1], int((x_range[1] - x_range[0]) / resolution[0])+1)
-        y = torch.linspace(y_range[0], y_range[1], int((y_range[1] - y_range[0]) / resolution[1])+1)
-        xx, yy = torch.meshgrid(x, y, indexing="ij")
-        self.scan_pos_b = torch.stack([xx, yy, torch.zeros_like(xx)], dim=-1).to(self.device)
-        self.shape = self.scan_pos_b.shape[:2]
+        if targets is not None:
+            if self.env.backend == "isaac":
+                from isaacsim.core.utils.stage import get_current_stage
+                stage = get_current_stage()
+                for target in targets:
+                    target_asset = self.env.scene[target]
+                    prim_path = target_asset.root_physx_view.prim_paths[0]
+                    self.raycaster.add_from_path(prim_path, stage=stage)
+                    self.target_assets.append(target_asset)
+            else:
+                raise NotImplementedError(f"Unsupported backend: {self.env.backend}")
         
         if self.env.backend == "isaac" and self.env.sim.has_gui():
-            self.marker = VisualizationMarkers(
-                VisualizationMarkersCfg(
-                    prim_path=f"/Visuals/Command/height_scan",
-                    markers={
-                        "scandot": sim_utils.SphereCfg(
-                            radius=0.02,
-                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.0, 0.0)),
-                        ),
-                    }
-                )
+            from active_adaptation.envs.adapters import IsaacSceneAdapter
+            scene: IsaacSceneAdapter = self.env.scene
+            self.marker = scene.create_sphere_marker(
+                "/Visuals/Command/height_scan", (0.8, 0.0, 0.0), radius=0.02
             )
-            self.marker.set_visibility(True)
 
     def compute(self):
         root_pos_w = self.asset.data.root_com_pos_w.reshape(self.num_envs, 1, 1, 3)
         root_quat = yaw_quat(self.asset.data.root_link_quat_w).reshape(self.num_envs, 1, 1, 4)
         
-        self.scan_pos_w = root_pos_w + quat_rotate(root_quat, self.scan_pos_b.unsqueeze(0))
-        self.height_map_w = self.env.get_ground_height_at(self.scan_pos_w)
+        self.scan_pos_w = (
+            root_pos_w
+            + torch.tensor([0., 0., 10.], device=self.device)
+            + quat_rotate(root_quat, self.scan_pos_b.unsqueeze(0))
+        )
         
-        height_map = root_pos_w[:, :, :, 2] - self.height_map_w
+        if len(self.target_assets) > 0:
+            mesh_pos_w = torch.stack([self.ground_mesh_pos_w] + [target_asset.data.root_link_pos_w for target_asset in self.target_assets], dim=1)
+            mesh_quat_w = torch.stack([self.ground_mesh_quat_w] + [target_asset.data.root_link_quat_w for target_asset in self.target_assets], dim=1)
+        else:
+            mesh_pos_w = self.ground_mesh_pos_w
+            mesh_quat_w = self.ground_mesh_quat_w
+        
+        hit_pos_w, _ = self.raycaster.raycast_fused(
+            mesh_pos_w=mesh_pos_w,
+            mesh_quat_w=mesh_quat_w,
+            ray_starts_w=self.scan_pos_w.reshape(self.num_envs, self.n_rays, 3),
+            ray_dirs_w=self.ray_dirs_w,
+        )
+        self.hit_pos_w = hit_pos_w.reshape(self.num_envs, *self.shape, 3) # [N, X, Y, 3]
+        
+        height_map = root_pos_w[:, :, :, 2] - self.hit_pos_w[:, :, :, 2]
         height_map = (height_map + self.noise_scale * torch.randn_like(height_map)).clamp(*self.clamp_range)
         if self.flatten:
             return height_map.reshape(self.num_envs, -1)
@@ -169,9 +216,7 @@ class height_scan(Observation):
     
     def debug_draw(self):
         if self.env.backend == "isaac":
-            pos = self.scan_pos_w.clone()
-            pos[:, :, :, 2] = self.height_map_w
-            self.marker.visualize(pos.reshape(-1, 3))
+            self.marker.visualize(self.hit_pos_w.reshape(-1, 3))
 
     def symmetry_transform(self):
         if self.flatten:
@@ -213,18 +258,11 @@ class forward_scan(Observation):
         self.num_rays = self.directions.shape[0]
 
         if self.env.backend == "isaac" and self.env.sim.has_gui():
-            self.marker = VisualizationMarkers(
-                VisualizationMarkersCfg(
-                    prim_path=f"/Visuals/Command/forward_scan",
-                    markers={
-                        "scandot": sim_utils.SphereCfg(
-                            radius=0.02,
-                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.0, 0.8)),
-                        ),
-                    }
-                )
+            from active_adaptation.envs.adapters import IsaacSceneAdapter
+            scene: IsaacSceneAdapter = self.env.scene
+            self.marker = scene.create_sphere_marker(
+                "/Visuals/Command/forward_scan", (0.8, 0.0, 0.0), radius=0.02
             )
-            self.marker.set_visibility(True)
     
     def compute(self) -> torch.Tensor:
         directions = quat_rotate(

@@ -131,6 +131,23 @@ class Twist(Command):
         ], dim=-1)
 
     @override
+    def sample_init(self, env_ids):
+        if self.curriculum and self.env.episode_count > 1: # and self.env.training:
+            distance_traveled = self.distance_traveled[env_ids]
+            distance_commanded = self.distance_commanded[env_ids].clamp_min(1.0)
+            move_up = distance_traveled > distance_commanded * 0.8
+            move_down = distance_traveled < distance_commanded * 0.4
+            move_up = move_up & ~move_down
+            self.terrain.update_env_origins(env_ids, move_up.squeeze(-1), move_down.squeeze(-1))
+            self._origins = self.terrain.env_origins.clone()
+            self.env.extra["curriculum/terrain_level"] = self.terrain.terrain_levels.float().mean()
+        self.env.extra["curriculum/distance_commanded"] = self.distance_commanded.mean()
+        self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
+        self.distance_commanded[env_ids] = 0.0
+        self.distance_traveled[env_ids] = 0.0
+        return super().sample_init(env_ids)
+
+    @override
     def reset(self, env_ids):
         self.next_command_linvel[env_ids] = 0.0
         self.cmd_linvel_b[env_ids] = 0.0
