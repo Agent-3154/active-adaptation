@@ -54,6 +54,7 @@ class MjLabViewer:
             mj_model=self.sim.mj_model,
             num_envs=self.env.num_envs,
         )
+        self._scene.camera_tracking_enabled = False
         self._scene.env_idx = 0
 
         tabs = self._server.gui.add_tab_group()

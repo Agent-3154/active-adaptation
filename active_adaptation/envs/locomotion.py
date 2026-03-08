@@ -91,7 +91,12 @@ class SimpleEnvIsaac(_EnvBase):
             raise ValueError(f"Asset configuration must be an instance of AssetCfg or ArticulationCfg, got {type(asset_cfg)}")
         
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
-        scene_cfg.terrain = registry.get("terrain", self.cfg.terrain)
+        terrain = self.cfg.get("terrain", "plane")
+        if terrain != "plane":
+            raise ValueError(
+                f"Isaac backend only supports `terrain: plane` for now, got `{terrain}`."
+            )
+        scene_cfg.terrain = registry.get("terrain", "plane")
 
         for obj in self.cfg.get("objects", []):
             obj_cfg = registry.get("asset", obj.name).isaaclab()
@@ -223,25 +228,59 @@ class SimpleEnvMjlab(_EnvBase):
         from mjlab.scene import Scene, SceneCfg
         from mjlab.sim import Simulation, SimulationCfg, MujocoCfg
         from mjlab.terrains import TerrainImporterCfg
+        # from mjlab.terrains import TerrainEntityCfg
         from active_adaptation.viewer import MjLabViewer
+        import mjlab.terrains as terrain_gen
+        from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 
         registry = Registry.instance()
         asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
         # Initialize scene and simulation.
         sensors = tuple(sensor.mjlab() for sensor in asset_cfg.sensors_mjlab)
+        terrain = self.cfg.get("terrain", "plane")
+
+        env_spacing = 2.5
+        if terrain == "plane":
+            terrain_cfg = TerrainImporterCfg(terrain_type="plane")
+        elif terrain == "rough":
+            terrain_cfg = TerrainImporterCfg(
+                terrain_type="generator",
+                terrain_generator=TerrainGeneratorCfg(
+                    size=(5.0, 5.0),
+                    border_width=20.0,
+                    num_rows=8,
+                    num_cols=8,
+                    sub_terrains={
+                        "boxes": terrain_gen.BoxRandomGridTerrainCfg(
+                            proportion=1.0,
+                            grid_width=0.5,
+                            grid_height_range=(0.001, 0.005),
+                            platform_width=0.5,
+                        ),
+                    },
+                    add_lights=False,
+                ),
+                env_spacing=env_spacing,
+                num_envs=self.cfg.num_envs,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported terrain `{terrain}`. Expected one of: `plane`, `rough`."
+            )
         scene_cfg = SceneCfg(
             num_envs=self.cfg.num_envs,
-            env_spacing=2.5,
+            env_spacing=env_spacing,
             entities={"robot": asset_cfg.mjlab()},
             sensors=sensors,
-            terrain=TerrainImporterCfg(terrain_type="plane"),
+            terrain=terrain_cfg,
         )
         scene = Scene(scene_cfg, device=str(self.device))
         self.sim = Simulation(
             num_envs=scene.num_envs,
             cfg=SimulationCfg(
-                nconmax=50,
-                njmax=300,
+                nconmax=200,
+                njmax=500,
+                contact_sensor_maxmatch=80,
                 mujoco=MujocoCfg(
                     timestep=0.005,
                     iterations=10,
@@ -262,4 +301,4 @@ class SimpleEnvMjlab(_EnvBase):
         else:
             viewer = None
         self.sim = MjlabSimAdapter(self.sim, viewer)
-        self.terrain_type = "plane"
+        self.terrain_type = terrain
