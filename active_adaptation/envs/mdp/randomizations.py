@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 if active_adaptation.get_backend() == "isaac":
     from isaaclab.actuators import DCMotor, ImplicitActuator
     from active_adaptation.envs.actuator import HybridActuator
+elif active_adaptation.get_backend() == "mjlab":
+    import mujoco_warp
 
 from .base import Randomization
 
@@ -457,14 +459,15 @@ class perturb_body_mass(Randomization):
             model.body_inertia[:, self.global_body_ids] = (
                 self._default_body_inertia * scale.unsqueeze(-1)
             )
+            # mujoco_warp.set_const(self.env.sim.wp_model, self.env.sim.wp_data)
 
-            cpu_model = self.env.sim.mj_model
-            cpu_model.body_mass[self._global_body_ids_cpu.numpy()] = (
-                model.body_mass[0, self.global_body_ids].to(device="cpu").numpy()
-            )
-            cpu_model.body_inertia[self._global_body_ids_cpu.numpy()] = (
-                model.body_inertia[0, self.global_body_ids].to(device="cpu").numpy()
-            )
+            # cpu_model = self.env.sim.mj_model
+            # cpu_model.body_mass[self._global_body_ids_cpu.numpy()] = (
+            #     model.body_mass[0, self.global_body_ids].to(device="cpu").numpy()
+            # )
+            # cpu_model.body_inertia[self._global_body_ids_cpu.numpy()] = (
+            #     model.body_inertia[0, self.global_body_ids].to(device="cpu").numpy()
+            # )
 
 
 class perturb_body_com(Randomization):
@@ -518,11 +521,12 @@ class perturb_body_com(Randomization):
             model = self.env.sim.model
             new_ipos = self._default_body_ipos + offsets
             model.body_ipos[:, self.global_body_ids] = new_ipos
+            mujoco_warp.set_const(self.env.sim.wp_model, self.env.sim.wp_data)
 
-            cpu_model = self.env.sim.mj_model
-            cpu_model.body_ipos[self._global_body_ids_cpu.numpy()] = (
-                model.body_ipos[0, self.global_body_ids].to(device="cpu").numpy()
-            )
+            # cpu_model = self.env.sim.mj_model
+            # cpu_model.body_ipos[self._global_body_ids_cpu.numpy()] = (
+            #     model.body_ipos[0, self.global_body_ids].to(device="cpu").numpy()
+            # )
 
 
 class push_by_setting_velocity(Randomization):

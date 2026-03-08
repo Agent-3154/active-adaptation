@@ -227,8 +227,8 @@ class SimpleEnvMjlab(_EnvBase):
     def setup_scene(self):
         from mjlab.scene import Scene, SceneCfg
         from mjlab.sim import Simulation, SimulationCfg, MujocoCfg
-        from mjlab.terrains import TerrainImporterCfg
-        # from mjlab.terrains import TerrainEntityCfg
+        # from mjlab.terrains import TerrainImporterCfg
+        from mjlab.terrains import TerrainEntityCfg
         from active_adaptation.viewer import MjLabViewer
         import mjlab.terrains as terrain_gen
         from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
@@ -241,9 +241,9 @@ class SimpleEnvMjlab(_EnvBase):
 
         env_spacing = 2.5
         if terrain == "plane":
-            terrain_cfg = TerrainImporterCfg(terrain_type="plane")
+            terrain_cfg = TerrainEntityCfg(terrain_type="plane")
         elif terrain == "rough":
-            terrain_cfg = TerrainImporterCfg(
+            terrain_cfg = TerrainEntityCfg(
                 terrain_type="generator",
                 terrain_generator=TerrainGeneratorCfg(
                     size=(5.0, 5.0),
