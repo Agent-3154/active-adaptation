@@ -20,6 +20,6 @@ export WANDB_API_KEY=wandb_v1_Pb07iIu7o6H9TxpPzQOrFIhiIvy_u688U8FxP4Jsg2vaUd35tU
 
 
 torchrun --nnodes=${WORLD_SIZE} --nproc_per_node=8 --node_rank=${RANK} --master_addr=${MASTER_ADDR} --master_port=${MASTER_PORT} train_ppo.py \
-  task=G1AilabRoomNav task.num_envs=4096 \
+  task=G1AilabRoomNav task.num_envs=1024 \
   wandb.project=g1_room wandb.run_name=G1AilabRoomNav \
   algo=ppo_staged2 headless=True total_frames=10_000_000_000
