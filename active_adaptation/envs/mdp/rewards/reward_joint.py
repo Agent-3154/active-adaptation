@@ -235,3 +235,28 @@ class joint_torques_l2(Reward):
     def compute(self) -> torch.Tensor:
         return -self.applied_torque.square().sum(1, keepdim=True)
 
+
+class torques_scaled(Reward):
+    """Penalize torques normalized by joint stiffness."""
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene["robot"]
+
+    def compute(self) -> torch.Tensor:
+        torques = self.asset.data.applied_torque / self.asset.data.joint_stiffness
+        return -torques.square().sum(1, keepdim=True)
+
+
+class joint_pos_soft_limits(Reward):
+    """Penalize joint positions outside soft limits."""
+    def __init__(self, env, weight: float):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.soft_limits = self.asset.data.soft_joint_pos_limits
+
+    def compute(self) -> torch.Tensor:
+        pos = self.asset.data.joint_pos
+        v_min = (pos - self.soft_limits[:, :, 0]).clamp_max(0.0)
+        v_max = (self.soft_limits[:, :, 1] - pos).clamp_max(0.0)
+        return (v_min + v_max).sum(1, keepdim=True)
+
