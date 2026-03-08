@@ -84,6 +84,69 @@ Projects using this codebase:
    ```
 
 
+## CLI commands
+
+These commands are available after `pip install -e .` and help manage projects and tasks.
+
+| Command | Description |
+|--------|-------------|
+| `aa-create-project` | Create a new active-adaptation project scaffold. |
+| `aa-discover-projects` | Discover installed projects and learning modules, write/update `projects.json`. |
+| `aa-list-tasks` | List task names from `cfg/task` in active-adaptation and discovered projects. |
+| `aa-pull` | Run `git pull` for active-adaptation and all enabled projects. |
+| `aa-recent-commands` | List recent training/eval commands from stored history. |
+
+### aa-create-project
+
+Create a new project with packages `{name}/` and `{name}_learning/`, `pyproject.toml`, `cfg/task`, `cfg/exp`, and optional README/`.gitignore` (existing files are not overwritten, e.g. when scaffolding inside a new git repo).
+
+```bash
+aa-create-project -n myproject
+aa-create-project -n myproject -d /path/to/parent
+```
+
+- **`-n`, `--name`** (required): Project/package name (lowercase, alphanumeric + underscores).
+- **`-d`, `--dir`**: Parent directory for the new project folder (default: current directory).
+
+### aa-discover-projects
+
+Scans entry points `active_adaptation.projects` and `active_adaptation.learning` and updates `projects.json` (under the cache directory) with project paths and task dirs. Use this after installing or adding projects so that `aa-list-tasks` and `aa-pull` know about them. Edit `projects.json` to enable or disable projects.
+
+```bash
+aa-discover-projects
+```
+
+### aa-list-tasks
+
+Prints task IDs from YAML files under `cfg/task` for active-adaptation and for each enabled project in `projects.json`. Task names keep the directory prefix (e.g. `G1/G1LocoFlat`). Useful to see which tasks are available for `task=...` in training/eval.
+
+```bash
+aa-list-tasks
+```
+
+### aa-pull
+
+Runs `git pull` in the active-adaptation repo and in all **enabled** projects listed in `projects.json`. Use after `aa-discover-projects` so projects are registered.
+
+```bash
+aa-pull           # active projects only
+aa-pull --all     # all discovered projects, including disabled
+```
+
+### aa-recent-commands
+
+Shows the last N commands (training/eval runs) from the stored command history. Optional filter by script name.
+
+```bash
+aa-recent-commands
+aa-recent-commands -n 10
+aa-recent-commands -s train_ppo -s eval_run
+```
+
+- **`-n`, `--num`**: Number of recent commands (default: 5).
+- **`-s`, `--script`**: Filter by script name (e.g. `train_ppo`, `eval_run`); can be repeated (OR).
+
+
 ## Basic Usage
 
 ### Training

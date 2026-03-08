@@ -162,3 +162,189 @@ def aa_list_tasks():
             task_id = str(rel.with_suffix("")).replace("\\", "/")
             print(f"  {task_id}  (from {source_name})")
 
+
+def aa_recent_commands(n: int = 5):
+    """
+    List the n most recent commands (training runs / entry-point invocations)
+    from the stored command history. Optionally filter by script name.
+    """
+    parser = argparse.ArgumentParser(description="List recent commands")
+    parser.add_argument(
+        "-n", "--num",
+        type=int,
+        default=5,
+        help="Number of recent commands to show (default: 5)",
+    )
+    parser.add_argument(
+        "-s", "--script",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Filter by script name (e.g. train_ppo, eval_run). Can be given multiple times (OR).",
+    )
+    args = parser.parse_args()
+    n = max(1, args.num)
+    script_filters = args.script
+
+    history_file = CACHE_DIR / "command_history.json"
+    if not history_file.exists():
+        print("No command history found.")
+        return
+
+    history = json.loads(history_file.read_text())
+
+    # Apply script filter: keep entries whose command line matches any of the script names
+    if script_filters:
+        filtered = []
+        for entry in history:
+            cmd = entry.get("args", [])
+            line = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if any(s in line for s in script_filters):
+                filtered.append(entry)
+        history = filtered
+
+    recent = history[-n:]
+    if not recent:
+        print("No command history found." if not script_filters else "No matching commands found.")
+        return
+
+    title = f"Last {len(recent)} command(s)"
+    if script_filters:
+        title += f" (script: {' | '.join(script_filters)})"
+    print(f"\n{title}:\n")
+    for i, entry in enumerate(reversed(recent), start=1):
+        ts = entry.get("timestamp", "?")
+        cmd = entry.get("args", [])
+        line = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        print(f"  {i}. [{ts}]")
+        print(f"     {line}")
+        print()
+
+
+def aa_create_project():
+    """
+    Create a new active-adaptation project scaffold: packages {name}/ and {name}_learning/,
+    pyproject.toml with entry points, cfg/task and cfg/exp, README, and .gitignore.
+    Usage: aa-create-project -n myproject [-d /path/to/parent]
+    """
+    parser = argparse.ArgumentParser(
+        description="Create a new active-adaptation project scaffold",
+    )
+    parser.add_argument(
+        "-n", "--name",
+        required=True,
+        metavar="NAME",
+        help="Project/package name (e.g. myproject → myproject/ and myproject_learning/)",
+    )
+    parser.add_argument(
+        "-d", "--dir",
+        default=".",
+        metavar="PATH",
+        help="Parent directory in which to create the project folder (default: current directory)",
+    )
+    args = parser.parse_args()
+
+    name = args.name.strip()
+    if not name.replace("_", "").isalnum():
+        raise SystemExit("Project name must be alphanumeric (and underscores only).")
+    if name != name.lower():
+        raise SystemExit("Project name must be lowercase.")
+
+    parent = Path(args.dir).resolve()
+    root: Path = parent / name
+    if root.exists():
+        raise SystemExit(f"Directory already exists: {root}")
+
+    root.mkdir(parents=True, exist_ok=True)
+
+    # pyproject.toml
+    pyproject = f'''[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{name}"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "active_adaptation",
+]
+
+[project.entry-points."active_adaptation.projects"]
+{name} = "{name}"
+
+[project.entry-points."active_adaptation.learning"]
+{name} = "{name}_learning"
+
+[tool.setuptools.package-data]
+"*" = ["**/*"]
+'''
+    (root / "pyproject.toml").write_text(pyproject)
+
+    # Main package
+    pkg_dir: Path = root / "src" / name
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text(
+        f"# {name} environment package. Register tasks and assets here.\n"
+    )
+
+    # Learning package
+    learning_dir = root / "src" / f"{name}_learning"
+    learning_dir.mkdir(parents=True)
+    (learning_dir / "__init__.py").write_text(
+        "# Learning scripts and entry points.\n"
+    )
+
+    # cfg/task and cfg/exp
+    (root / "cfg" / "task").mkdir(parents=True)
+    (root / "cfg" / "task" / ".gitkeep").write_text("")
+    (root / "cfg" / "exp").mkdir(parents=True)
+    (root / "cfg" / "exp" / ".gitkeep").write_text("")
+
+    # README and .gitignore: do not overwrite if present (e.g. existing git repo)
+    readme_path = root / "README.md"
+    gitignore_path = root / ".gitignore"
+    if not readme_path.exists():
+        readme_path.write_text(
+            f"# {name}\n\nActive-adaptation project. Add tasks under `cfg/task/`, experiments under `cfg/exp/`.\n"
+        )
+    else:
+        print(f"  (kept existing README.md)")
+    if not gitignore_path.exists():
+        gitignore_path.write_text("""# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+
+# robot assets
+*.usd
+*.xml
+*.urdf
+
+""")
+    else:
+        print(f"  (kept existing .gitignore)")
+
+    print(f"Created project at: {root}")
+    print(f"  - {name}/")
+    print(f"  - {name}_learning/")
+    print(f"  - pyproject.toml")
+    print(f"  - cfg/task/, cfg/exp/")
+    print(f"  - README.md, .gitignore")

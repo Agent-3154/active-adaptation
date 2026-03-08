@@ -86,28 +86,30 @@ class ScopedTimer(_DecoratorContextManager):
             print("No timers recorded.")
             return
 
-        print("\n" + "=" * 60)
-        print(f"{'Timer Name':<30} {'Count':>8} {'Total (s)':>10} {'Avg (ms)':>10}")
-        print("=" * 60)
+        total_time = sum(r.time for r in ScopedTimer._root_nodes)
+        print("\n" + "=" * 70)
+        print(f"{'Timer Name':<30} {'Count':>8} {'Total (s)':>10} {'Avg (ms)':>10} {'%':>8}")
+        print("=" * 70)
 
         for root in ScopedTimer._root_nodes:
-            root.print_recursive(root, 0, clear=clear, max_depth=depth)
+            root.print_recursive(root, 0, clear=clear, max_depth=depth, total_time=total_time)
 
-        print("=" * 60 + "\n")
+        print("=" * 70 + "\n")
 
-    def print_recursive(self, node: "ScopedTimer", depth: int = 0, clear: bool = True, max_depth: int = -1):
+    def print_recursive(self, node: "ScopedTimer", depth: int = 0, clear: bool = True, max_depth: int = -1, total_time: float = 0.0):
         """Recursively print timer nodes in DFS order."""
         if depth >= max_depth:
             return
         indent = "  " * depth
         avg_ms = (node.time / node.count * 1000) if node.count > 0 else 0
+        pct = (node.time / total_time * 100) if total_time > 0 else 0.0
         print(
-            f"{indent}{node.name:<30} {node.count:>8} {node.time:>10.4f} {avg_ms:>10.2f}"
+            f"{indent}{node.name:<30} {node.count:>8} {node.time:>10.4f} {avg_ms:>10.2f} {pct:>7.1f}%"
         )
         if clear:
             node.time = 0
             node.count = 0
 
         for child in node.children:
-            self.print_recursive(child, depth + 1, clear=clear, max_depth=max_depth)
+            self.print_recursive(child, depth + 1, clear=clear, max_depth=max_depth, total_time=total_time)
 

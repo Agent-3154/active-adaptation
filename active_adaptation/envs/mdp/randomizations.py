@@ -183,11 +183,14 @@ class perturb_body_materials(Randomization):
         self,
         env,
         body_names,
+        # isaac only
         static_friction_range = None,
         dynamic_friction_range = None,
         restitution_range=None,
+        # mujoco only
         solref_time_constant_range=None,
         solref_dampratio_range=None,
+        # common
         homogeneous: bool=False
     ):
         super().__init__(env)
