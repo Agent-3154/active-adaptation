@@ -7,7 +7,8 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 python scripts/eval_run.py \
-    -r elgceben/g1_room/lfx1izdl \
+    -r elgceben/g1_room/2e4cosnu \
+    -i 3000 \
     -p \
     --lights \
     --vis-rgb \

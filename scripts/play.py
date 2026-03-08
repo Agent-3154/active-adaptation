@@ -90,6 +90,14 @@ def main(cfg: DictConfig):
 
             episode_stats.add(td)
 
+            base = env.base_env if hasattr(env, "base_env") else env
+            if i % 50 == 0:
+                root_vel = base.scene["robot"].data.root_com_lin_vel_w[0, :2]
+                cmd = base.command_manager.command[0]
+                speed = root_vel.norm().item()
+                print(f"[step {i:5d}] vel=({root_vel[0].item():+.2f}, {root_vel[1].item():+.2f}) |v|={speed:.2f}  "
+                      f"cmd=({cmd[0].item():+.2f}, {cmd[1].item():+.2f}, yaw={cmd[2].item():+.2f}, h={cmd[3].item():.2f})")
+
             if len(episode_stats) >= env.num_envs:
                 print("Step", i)
                 for k, v in sorted(episode_stats.pop().items(True, True)):
