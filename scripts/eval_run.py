@@ -99,9 +99,9 @@ def main():
         if args.command:
             cfg["task"]["command"] = _cfg.task.command
     
-    if args.lights:
+    if args.lights and "scene" in cfg.get("task", {}):
         cfg["task"]["scene"]["point_lights"] = True
-    if args.play:
+    if args.play and "vis_waypoints" in cfg.get("task", {}).get("command", {}):
         cfg["task"]["command"]["vis_waypoints"] = True
     if args.vis_rgb:
         cfg["vis_gs_rgb"] = True
@@ -110,16 +110,19 @@ def main():
     num_envs = args.num_envs or 1
 
     assert not (args.play and args.play_mujoco), "Cannot play and play_mujoco at the same time"
+    has_scene = "scene" in cfg.get("task", {})
     if args.play:
         cfg["app"]["headless"] = False
         cfg["task"]["num_envs"] = num_envs
-        cfg["task"]["scene"]["n_repeats"] = num_envs
+        if has_scene:
+            cfg["task"]["scene"]["n_repeats"] = num_envs
         cfg["export_policy"] = args.export
         play(cfg)
     elif args.play_mujoco:
         cfg["app"]["headless"] = False
         cfg["task"]["num_envs"] = num_envs
-        cfg["task"]["scene"]["n_repeats"] = num_envs
+        if has_scene:
+            cfg["task"]["scene"]["n_repeats"] = num_envs
         cfg["export_policy"] = args.export
         play_mujoco(cfg)
     else:
