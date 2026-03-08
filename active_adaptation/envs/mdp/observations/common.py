@@ -226,6 +226,53 @@ class gravity_multistep(Observation):
         return transform.repeat(self.steps)
 
 
+class gravity_multistep_bodies(Observation):
+    """Projected gravity for multiple bodies, stacked as [body0_xyz, body1_xyz, ...] per step."""
+
+    GRAVITY_W = torch.tensor([0.0, 0.0, -1.0])
+
+    def __init__(
+        self, env, body_names: str, steps: int = 4, interval: int = 1, noise_std: float = 0.0,
+    ):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.body_ids, self.body_name_list = self.asset.find_bodies(body_names)
+        self.body_ids = torch.as_tensor(self.body_ids, device=self.device)
+        self.num_bodies = len(self.body_ids)
+        self.steps = steps
+        self.interval = interval
+        self.noise_std = noise_std
+        self.gravity_w = self.GRAVITY_W.to(self.device)
+        dim_per_step = self.num_bodies * 3
+        self.buffer = torch.zeros(
+            (self.num_envs, self.steps * interval, dim_per_step), device=self.device
+        )
+
+    @override
+    def update(self):
+        quats = self.asset.data.body_link_quat_w[:, self.body_ids]  # (E, B, 4)
+        grav = self.gravity_w.expand(self.num_envs, self.num_bodies, 3)
+        proj = quat_rotate_inverse(
+            quats.reshape(-1, 4), grav.reshape(-1, 3)
+        ).reshape(self.num_envs, self.num_bodies, 3)
+        proj = random_noise(proj, self.noise_std)
+        proj = proj / proj.norm(dim=-1, keepdim=True)
+        self.buffer = self.buffer.roll(1, dims=1)
+        self.buffer[:, 0] = proj.reshape(self.num_envs, -1)
+
+    @override
+    def compute(self):
+        return self.buffer[:, :: self.interval].reshape(self.num_envs, -1)
+
+    @override
+    def symmetry_transform(self):
+        single_body = sym_utils.SymmetryTransform(
+            perm=torch.arange(3), signs=[1, -1, 1]
+        )
+        single_step = single_body.repeat(self.num_bodies)
+        return single_step.repeat(self.steps)
+
+
 class gravity_substep(Observation):
     def __init__(self, env, steps: int=None, flatten: bool=False):
         super().__init__(env)
