@@ -101,6 +101,8 @@ def main():
     
     if args.lights:
         cfg["task"]["scene"]["point_lights"] = True
+    if args.play:
+        cfg["task"]["command"]["vis_waypoints"] = True
     if args.vis_rgb:
         cfg["vis_gs_rgb"] = True
         cfg["vis_gs_rgb_interval"] = 5
