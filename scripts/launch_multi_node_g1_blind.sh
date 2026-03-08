@@ -7,6 +7,9 @@ cd /cpfs/user/benqingwei/gsloco/sirius-wheel-learning/ && pip install -e .
 
 sync && sleep 5
 
+# Pre-compile gsplat CUDA kernels before torchrun to avoid multi-process race
+python -c "from gsplat.cuda._backend import _C; print('gsplat CUDA compiled OK')"
+
 cd /cpfs/user/benqingwei/gsloco/active-adaptation/scripts/
 
 export OMP_NUM_THREADS=4
