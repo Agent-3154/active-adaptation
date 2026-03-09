@@ -7,16 +7,15 @@ headless: false
 backend: isaac
 device: cuda
 
-app:
+record_video: false
+
+app: # isaac-specific
   headless: ${..headless}
-  enable_cameras: false
+  enable_cameras: ${..record_video}
 
 seed: 42
 checkpoint_path: null
 export_policy: false
-
-camera_follow: true
-
 
 defaults:
   - task: Velocity

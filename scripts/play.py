@@ -73,19 +73,33 @@ def main(cfg: DictConfig):
         print("Starting background checkpoint refresh")
         checkpoint.start_background_refresh(interval_sec=60)
 
-    with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
-        for i in itertools.count():
-            carry = rollout_policy(carry)
-            td, carry = env.step_and_maybe_reset(carry)
-            # td_.update(td["next"])
-            episode_stats.add(td)
+    # Optional video recording (Isaac backend only). This remains safe under
+    # KeyboardInterrupt because the recorder is a context manager that flushes
+    # buffered frames on exit.
+    record_enabled = bool(cfg.record_video)
+    video_dir = FILE_PATH / "videos"
+    time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
+    video_path = video_dir / f"{cfg.task.name}-{time_str}.mp4"
 
-            if len(episode_stats) >= env.num_envs:
-                print("Step", i)
-                for k, v in sorted(episode_stats.pop().items(True, True)):
-                    print(k, torch.mean(v).item())
-            
-            timer.sleep()
+    with env.get_recorder(video_path, enabled=record_enabled)as rec, \
+        torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
+        try:
+            for i in itertools.count():
+                carry = rollout_policy(carry)
+                td, carry = env.step_and_maybe_reset(carry)
+                episode_stats.add(td)
+
+                if record_enabled:
+                    rec.add_frame()
+
+                if len(episode_stats) >= env.num_envs:
+                    print("Step", i)
+                    for k, v in sorted(episode_stats.pop().items(True, True)):
+                        print(k, torch.mean(v).item())
+
+                timer.sleep()
+        except KeyboardInterrupt:
+            print(f"Interrupted by user, video saved to: {video_path}" if record_enabled else "Interrupted by user.")
     
     env.close()
 

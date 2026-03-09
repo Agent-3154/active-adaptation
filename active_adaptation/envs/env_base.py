@@ -22,6 +22,11 @@ import active_adaptation.envs.mdp as mdp
 import active_adaptation.utils.symmetry as symmetry_utils
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
+from active_adaptation.utils.video_recorder import (
+    VideoRecorder,
+    NullVideoRecorder,
+    IsaacVideoRecorder,
+)
 from active_adaptation.registry import RegistryMixin
 
 
@@ -557,6 +562,27 @@ class _EnvBase(EnvBase, RegistryMixin):
         )[0]
         ray_distance = (ray_hits - ray_starts).norm(dim=-1).nan_to_num(posinf=100.0)
         return (ray_starts[:, 2] - ray_distance).to(pos.device).reshape(*bshape)
+
+    # ------------------------------------------------------------------
+    # Video recording
+    # ------------------------------------------------------------------
+    def get_recorder(self, path, enabled: bool = True) -> VideoRecorder:
+        """Return a backend-specific video recorder as a context manager.
+
+        Usage:
+            with env.get_recorder(\"video.mp4\", enabled) as rec:
+                ...
+                rec.add_frame()
+
+        For non-Isaac backends, or when ``enabled`` is False, this returns a
+        no-op recorder so call sites don't need to branch.
+        """
+        if not enabled:
+            return NullVideoRecorder()
+        if self.backend == "isaac":
+            return IsaacVideoRecorder(self, path, enabled=True)
+        # Other backends: return a no-op recorder by default.
+        return NullVideoRecorder()
 
     def _set_seed(self, seed: int = -1):
         if self.backend == "isaac":

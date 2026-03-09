@@ -24,10 +24,11 @@ dependencies = [
     "tensordict",
     "torchrl",
     "torch",
+    "imageio",
     "mujoco",
     "linuxfd",
     "pdbpp",
-    "git+https://github.com/btx0424/simple-raycaster.git
+    "git+https://github.com/btx0424/simple-raycaster.git"
 ]
 
 [project.scripts]
