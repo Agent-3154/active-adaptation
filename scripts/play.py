@@ -51,7 +51,7 @@ def _save_video(frames, path, fps):
     print(f"[record] Saved {len(frames)} frames -> {path}")
 
 
-def _follow_camera_eye(robot_pos, offset=(3.0, 3.0, 2.0), smooth_state=None, alpha=0.1):
+def _follow_camera_eye(robot_pos, offset=(1.2, 1.2, 1.2), smooth_state=None, alpha=0.1):
     """Fixed-offset camera that always looks at the robot."""
     rx, ry, rz = robot_pos
     target = (rx, ry, rz + 0.5)
