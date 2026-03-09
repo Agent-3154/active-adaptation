@@ -37,6 +37,14 @@ def main():
                         help="Enable point lights in the scene")
     parser.add_argument("--vis-rgb", action="store_true", default=False,
                         help="Show GS-rendered RGB for env0 in a separate window")
+    parser.add_argument("--record", action="store_true", default=False,
+                        help="Record Isaac Sim viewport video (robot motion)")
+    parser.add_argument("--record-gs", action="store_true", default=False,
+                        help="Record GS-rendered third-person + first-person video")
+    parser.add_argument("--record-steps", type=int, default=3000,
+                        help="Number of env steps to record")
+    parser.add_argument("--record-res", type=str, default="1280x720",
+                        help="GS recording resolution WxH")
     parser.add_argument("--num-envs", type=int, default=None,
                         help="Override number of environments")
     args = parser.parse_args()
@@ -107,15 +115,29 @@ def main():
         cfg["vis_gs_rgb"] = True
         cfg["vis_gs_rgb_interval"] = 5
 
+    if args.record:
+        cfg["record_sim"] = True
+        cfg["record_steps"] = args.record_steps
+        cfg["app"]["enable_cameras"] = True
+    if args.record_gs:
+        cfg["record_gs"] = True
+        cfg["record_gs_steps"] = args.record_steps
+        w, h = args.record_res.split("x")
+        cfg["record_gs_width"] = int(w)
+        cfg["record_gs_height"] = int(h)
+
     num_envs = args.num_envs or 1
 
+    any_record = args.record or args.record_gs
     assert not (args.play and args.play_mujoco), "Cannot play and play_mujoco at the same time"
     has_scene = "scene" in cfg.get("task", {})
-    if args.play:
-        cfg["app"]["headless"] = False
+    if args.play or any_record:
+        cfg["app"]["headless"] = not args.play
         cfg["task"]["num_envs"] = num_envs
         if has_scene:
             cfg["task"]["scene"]["n_repeats"] = num_envs
+            if any_record:
+                cfg["task"]["scene"]["point_lights"] = True
         cfg["export_policy"] = args.export
         play(cfg)
     elif args.play_mujoco:
