@@ -32,37 +32,7 @@ from active_adaptation.registry import RegistryMixin
 
 if active_adaptation.get_backend() == "isaac":
     import isaacsim.core.utils.torch as torch_utils
-    import isaaclab.sim as sim_utils
-    from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
-    from isaaclab.terrains.trimesh.utils import make_plane
-    from pxr import UsdGeom, UsdPhysics
-
-    def initialize_warp_meshes(mesh_prim_path, device):
-        # check if the prim is a plane - handle PhysX plane as a special case
-        # if a plane exists then we need to create an infinite mesh that is a plane
-        mesh_prim = sim_utils.get_first_matching_child_prim(
-            mesh_prim_path, lambda prim: prim.GetTypeName() == "Plane"
-        )
-        # if we did not find a plane then we need to read the mesh
-        if mesh_prim is None:
-            # obtain the mesh prim
-            mesh_prim = sim_utils.get_first_matching_child_prim(
-                mesh_prim_path, lambda prim: prim.GetTypeName() == "Mesh"
-            )
-            # check if valid
-            if mesh_prim is None or not mesh_prim.IsValid():
-                raise RuntimeError(f"Invalid mesh prim path: {mesh_prim_path}")
-            # cast into UsdGeomMesh
-            mesh_prim = UsdGeom.Mesh(mesh_prim)
-            # read the vertices and faces
-            points = np.asarray(mesh_prim.GetPointsAttr().Get())
-            indices = np.asarray(mesh_prim.GetFaceVertexIndicesAttr().Get())
-            wp_mesh = convert_to_warp_mesh(points, indices, device=device)
-        else:
-            mesh = make_plane(size=(2e6, 2e6), height=0.0, center_zero=True)
-            wp_mesh = convert_to_warp_mesh(mesh.vertices, mesh.faces, device=device)
-        # add the warp mesh to the list
-        return wp_mesh
+    from isaaclab.utils.warp import raycast_mesh
 
 
 EMA_DECAY = 0.99
@@ -141,15 +111,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.cfg = cfg
         self.headless = headless
 
-        self.terrain_type = None
-        self._ground_mesh = None
-
         self.setup_scene()
-        # raise an warning if terrain type is still None
-        if self.terrain_type is None:
-            warnings.warn(
-                "Terrain type is not set. Please check if the scene is properly initialized."
-            )
 
         self.sim = cast(SimAdapter, self.sim)
         self.scene = cast(SceneAdapter, self.scene)
@@ -266,13 +228,10 @@ class _EnvBase(EnvBase, RegistryMixin):
         # parse rewards
         self.mult_dt = self.cfg.reward.pop("_mult_dt_", True)
 
-        self._stats_ema = {}
-
         enabled_groups = 0
         for group_name, func_specs in self.cfg.reward.items():
             print(f"Reward group: {group_name}")
             funcs = OrderedDict()
-            self._stats_ema[group_name] = {}
             enabled = func_specs.pop("_enabled_", True)
             compile = func_specs.pop("_compile_", False)
             enabled_groups += enabled
@@ -289,10 +248,6 @@ class _EnvBase(EnvBase, RegistryMixin):
                 )
                 self._add_mdp_component(reward)
                 print(f"\t{rew_name}: \t{reward.weight:.2f}")
-                self._stats_ema[group_name][rew_name] = (
-                    torch.tensor(0.0, device=self.device),
-                    torch.tensor(0.0, device=self.device),
-                )
 
             self.reward_groups[group_name] = RewardGroup(
                 self, group_name, funcs, enabled, compile
@@ -353,10 +308,17 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     @property
     def stats_ema(self):
+        """Exponential moving-average statistics for individual reward terms.
+
+        The returned dict maps ``"reward.<group>/<name>"`` to a scalar float that
+        summarizes the long-term average value of that reward component.
+        """
         result = {}
-        for group_key, group in self._stats_ema.items():
-            for rew_key, (sum, cnt) in group.items():
-                result[f"reward.{group_key}/{rew_key}"] = (sum / cnt).item()
+        for group_name, reward_group in self.reward_groups.items():
+            for rew_key, (ema_sum, ema_cnt) in reward_group.ema.items():
+                # Guard against division by zero if a term has not been updated yet.
+                value = (ema_sum / ema_cnt).item() if ema_cnt.item() > 0 else 0.0
+                result[f"reward.{group_name}/{rew_key}"] = value
         return result
 
     def _add_mdp_component(self, component: mdp.MDPComponent):
@@ -525,27 +487,13 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     @property
     def ground_mesh(self):
-        if self._ground_mesh is None:
-            if self.backend == "isaac":
-                self._ground_mesh = initialize_warp_meshes(
-                    "/World/ground", self.device.type
-                )
-            elif self.backend == "mujoco":
-                self._ground_mesh = wp.Mesh(
-                    points=wp.array(
-                        self.scene.ground_mesh.vertices,
-                        dtype=wp.vec3,
-                        device=self.device.type,
-                    ),
-                    indices=wp.array(
-                        self.scene.ground_mesh.faces.flatten(),
-                        dtype=wp.int32,
-                        device=self.device.type,
-                    ),
-                )
-            else:
-                raise NotImplementedError
-        return self._ground_mesh
+        """Warp ground mesh used for ray-based height queries.
+
+        The concrete mesh construction is delegated to the backend-specific
+        ``SceneAdapter`` implementations so that this environment stays
+        agnostic to how ground geometry is represented per backend.
+        """
+        return self.scene.ground_mesh
 
     def get_ground_height_at(self, pos: torch.Tensor) -> torch.Tensor:
         if self.terrain_type == "plane":
@@ -664,19 +612,38 @@ class RewardGroup:
         self.rew_buf = torch.zeros(
             env.num_envs, self.enabled_rewards, device=env.device
         )
+        # Local EMA buffers for per-reward statistics. Each entry stores a pair
+        # ``(ema_sum, ema_cnt)`` which are updated on every call to ``compute``.
+        self._ema: Dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        for key in funcs.keys():
+            self._ema[key] = (
+                torch.zeros(1, device=env.device),
+                torch.zeros(1, device=env.device),
+            )
         if compile:
             self.compute = torch.compile(self.compute, fullgraph=True)
 
     def compute(self) -> torch.Tensor:
+        """Compute the total reward for this group and update statistics.
+
+        Returns a tensor of shape ``[num_envs, 1]`` containing the sum of all
+        enabled reward terms in this group.
+        """
         rewards = []
         for key, func in self.funcs.items():
             reward, count = func()
             self.env.stats[self.name, key].add_(reward)
-            ema_sum, ema_cnt = self.env._stats_ema[self.name][key]
+            ema_sum, ema_cnt = self._ema[key]
             ema_sum.mul_(EMA_DECAY).add_(reward.sum())
             ema_cnt.mul_(EMA_DECAY).add_(count)
+            self._ema[key] = (ema_sum, ema_cnt)
             if func.enabled:
                 rewards.append(reward)
         if len(rewards):
             self.rew_buf[:] = torch.cat(rewards, 1)
         return self.rew_buf.sum(dim=1, keepdim=True)
+
+    @property
+    def ema(self) -> Dict[str, tuple[torch.Tensor, torch.Tensor]]:
+        """Raw EMA buffers for this group, keyed by reward name."""
+        return self._ema

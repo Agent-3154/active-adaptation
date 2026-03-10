@@ -3,6 +3,8 @@
 from typing import Dict, Protocol, TYPE_CHECKING, Union, Mapping
 from typing_extensions import override
 import torch
+import warp as wp
+import numpy as np
 
 if TYPE_CHECKING:
     from isaaclab.sim import SimulationContext
@@ -88,6 +90,16 @@ class SceneAdapter(Protocol):
     def env_origins(self) -> torch.Tensor:
         """Origins of the environments."""
         return self._scene.env_origins
+
+    @property
+    def ground_mesh(self):
+        """Warp ground mesh used for ray-based height queries.
+
+        Backends that support ground raycasting must provide a warp-compatible
+        mesh here. Backends without a concept of a shared ground can raise
+        ``NotImplementedError``.
+        """
+        raise NotImplementedError
 
 
 class IsaacSimAdapter:
@@ -242,6 +254,80 @@ class IsaacSceneAdapter(SceneAdapter):
         )
         marker.set_visibility(True)
         return marker
+    
+    def create_arrow_marker(
+        self,
+        prim_path: str,
+        color: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        scale: tuple[float, float, float] = (1.0, 0.1, 0.1),
+    ):
+        """Create an Isaac Lab VisualizationMarkers with a single arrow (for GUI debug).
+
+        Returns a VisualizationMarkers instance. Call .set_visibility(True) and
+        .visualize(positions_tensor) to use it.
+        """
+        from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, ISAAC_NUCLEUS_DIR
+        import isaaclab.sim as sim_utils
+        marker = VisualizationMarkers(
+            VisualizationMarkersCfg(
+                prim_path=prim_path,
+                markers={
+                    "arrow": sim_utils.UsdFileCfg(
+                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                        scale=scale,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+                    )
+                },
+            )
+        )
+        marker.set_visibility(True)
+        return marker
+
+    @property
+    def ground_mesh(self):
+        """Warp ground mesh for the Isaac ground plane or mesh.
+
+        This mirrors the logic previously implemented at the environment
+        level, but keeps the backend-specific USD and warp handling inside
+        the Isaac scene adapter.
+        """
+        if hasattr(self, "_ground_mesh"):
+            return self._ground_mesh
+
+        # Local imports to avoid making IsaacLab a hard dependency when other
+        # backends are used.
+        from isaaclab.utils.warp import convert_to_warp_mesh
+        from isaaclab.terrains.trimesh.utils import make_plane
+        from pxr import UsdGeom
+        import isaaclab.sim as sim_utils
+
+        mesh_prim_path = "/World/ground"
+        device = (
+            self._scene.device.type
+            if hasattr(self._scene, "device") and hasattr(self._scene.device, "type")
+            else "cuda"
+        )
+
+        # Check if there is a PhysX plane; otherwise fall back to a mesh prim.
+        mesh_prim = sim_utils.get_first_matching_child_prim(
+            mesh_prim_path, lambda prim: prim.GetTypeName() == "Plane"
+        )
+        if mesh_prim is None:
+            mesh_prim = sim_utils.get_first_matching_child_prim(
+                mesh_prim_path, lambda prim: prim.GetTypeName() == "Mesh"
+            )
+            if mesh_prim is None or not mesh_prim.IsValid():
+                raise RuntimeError(f"Invalid mesh prim path: {mesh_prim_path}")
+            mesh_prim = UsdGeom.Mesh(mesh_prim)
+            points = np.asarray(mesh_prim.GetPointsAttr().Get())
+            indices = np.asarray(mesh_prim.GetFaceVertexIndicesAttr().Get())
+            wp_mesh = convert_to_warp_mesh(points, indices, device=device)
+        else:
+            mesh = make_plane(size=(2e6, 2e6), height=0.0, center_zero=True)
+            wp_mesh = convert_to_warp_mesh(mesh.vertices, mesh.faces, device=device)
+
+        self._ground_mesh = wp_mesh
+        return self._ground_mesh
 
 
 class MujocoSceneAdapter(SceneAdapter):
@@ -284,6 +370,28 @@ class MujocoSceneAdapter(SceneAdapter):
             return self[name]
         except KeyError:
             return default
+
+    @property
+    def ground_mesh(self):
+        """Warp ground mesh for MuJoCo scenes.
+
+        Converts the underlying scene's ground mesh (with vertices/faces) into
+        a warp mesh suitable for raycasting.
+        """
+        if hasattr(self, "_ground_mesh"):
+            return self._ground_mesh
+
+        device = (
+            self._scene.device.type
+            if hasattr(self._scene, "device") and hasattr(self._scene.device, "type")
+            else "cuda"
+        )
+        gm = self._scene.ground_mesh
+        self._ground_mesh = wp.Mesh(
+            points=wp.array(gm.vertices, dtype=wp.vec3, device=device),
+            indices=wp.array(gm.faces.flatten(), dtype=wp.int32, device=device),
+        )
+        return self._ground_mesh
 
 
 class MjlabSceneAdapter(SceneAdapter):

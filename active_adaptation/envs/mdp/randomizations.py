@@ -357,55 +357,6 @@ class perturb_body_materials(Randomization):
                 )
 
 
-class rand_body_materials(Randomization):
-    
-    supported_backends = ("isaac",)
-
-    def __init__(
-        self,
-        env,
-        static_friction_range: NestedRangeType,
-        dynamic_friction_range: NestedRangeType,
-        restitution_range: NestedRangeType,
-    ):
-        super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
-        
-        num_shapes_per_body = []
-        for link_path in self.asset.root_physx_view.link_paths[0]:
-            link_physx_view = self.asset._physics_sim_view.create_rigid_body_view(link_path)  # type: ignore
-            num_shapes_per_body.append(link_physx_view.max_shapes)
-        shape_start_id = np.cumsum([0,] + num_shapes_per_body)
-        
-        def parse(body_ids, values):
-            shape_ids = []
-            ranges = []
-            for body_id, value in zip(body_ids, values):
-                body_shape_ids = torch.arange(shape_start_id[body_id], shape_start_id[body_id+1])
-                shape_ids.append(body_shape_ids)
-                ranges.extend([value] * len(body_shape_ids))
-            return torch.cat(shape_ids), torch.as_tensor(ranges).T
-
-        body_ids, body_names, values = string_utils.resolve_matching_names_values(dict(static_friction_range), self.asset.body_names)
-        self.static_friction_shape_ids, self.static_friction_range = parse(body_ids, values)
-        
-        body_ids, body_names, values = string_utils.resolve_matching_names_values(dict(dynamic_friction_range), self.asset.body_names)
-        self.dynamic_friction_shape_ids, self.dynamic_friction_range = parse(body_ids, values)
-
-        body_ids, body_names, values = string_utils.resolve_matching_names_values(dict(restitution_range), self.asset.body_names)
-        self.restitution_shape_ids, self.restitution_range = parse(body_ids, values)
-
-        self.default_materials = self.asset.root_physx_view.get_material_properties()
-    
-    def startup(self):
-        materials = self.default_materials.clone()
-        materials[:, self.static_friction_shape_ids, 0] = sample_uniform(len(self.static_friction_shape_ids), *self.static_friction_range)
-        materials[:, self.dynamic_friction_shape_ids, 1] = sample_uniform(len(self.dynamic_friction_shape_ids), *self.dynamic_friction_range)
-        materials[:, self.restitution_shape_ids, 2] = sample_uniform(len(self.restitution_shape_ids), *self.restitution_range)
-        indices = torch.arange(self.asset.num_instances)
-        self.asset.root_physx_view.set_material_properties(materials.flatten(), indices)
-
-
 class perturb_body_mass(Randomization):
     supported_backends = ("isaac", "mjlab")
     def __init__(

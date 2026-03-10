@@ -28,7 +28,7 @@ dependencies = [
     "mujoco",
     "linuxfd",
     "pdbpp",
-    "git+https://github.com/btx0424/simple-raycaster.git"
+    "simple-raycaster @ git+https://github.com/btx0424/simple-raycaster.git"
 ]
 
 [project.scripts]

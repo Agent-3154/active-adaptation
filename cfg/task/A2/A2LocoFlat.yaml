@@ -53,14 +53,13 @@ observation:
   # priv:
     root_linvel_b:    {yaw_only: true}
     root_angvel_b:    {}
-    body_height:      {body_names: .*_foot}
-  # ext:
-  #   external_forces:  {body_names: ["base"]}
-  #   external_torques: {body_names: ["base"]}
-  # aux_target_:
-  #   root_linvel_b:
-  #   root_angvel_b:
-    # rewards: {}
+  extero:
+    height_scan: {
+      x_range: [-1.2, 1.2],
+      y_range: [-1.0, 1.0],
+      resolution: [0.1, 0.1],
+      flatten: false,
+    }
 
 reward:
   loco:
@@ -95,10 +94,11 @@ randomization:
   perturb_body_mass:
     (?!(payload|base_link)).*: [0.8, 1.2]
     base_link: [0.8, 1.2]
-  # rand_body_materials:
-  #   static_friction_range:  {".*_foot": [0.5, 4.0]}
-  #   dynamic_friction_range: {".*_foot": [0.5, 4.0]}
-  #   restitution_range:      {".*_foot": [0.0, 0.5]}
+  perturb_body_materials:
+    body_names: .*_foot
+    static_friction_range:  [0.5, 3.0]
+    dynamic_friction_range: [0.5, 3.0]
+    restitution_range:      [0.0, 0.5]
   motor_params:
     stiffness_range:
       .*: [0.8, 1.1]

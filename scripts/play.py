@@ -76,7 +76,7 @@ def main(cfg: DictConfig):
     # Optional video recording (Isaac backend only). This remains safe under
     # KeyboardInterrupt because the recorder is a context manager that flushes
     # buffered frames on exit.
-    record_enabled = bool(cfg.record_video)
+    record_enabled = bool(cfg.get("record_video", False))
     video_dir = FILE_PATH / "videos"
     time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
     video_path = video_dir / f"{cfg.task.name}-{time_str}.mp4"
