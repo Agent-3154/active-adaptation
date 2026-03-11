@@ -155,8 +155,8 @@ class height_scan(Observation):
             self.shape = self.scan_pos_b.shape[:2]
             self.n_rays = self.shape.numel()
 
-            self.ground_mesh_pos_w = torch.tensor([0., 0., 0.,]).expand(self.num_envs, 3)
-            self.ground_mesh_quat_w = torch.tensor([1., 0., 0., 0.]).expand(self.num_envs, 4)
+            self.ground_mesh_pos_w = torch.tensor([0., 0., 0.,]).expand(self.num_envs, 1, 3)
+            self.ground_mesh_quat_w = torch.tensor([1., 0., 0., 0.]).expand(self.num_envs, 1, 4)
             self.ray_dirs_w = torch.tensor([0., 0., -1.]).expand(self.num_envs, self.n_rays, 3)
 
         from simple_raycaster import MultiMeshRaycaster
