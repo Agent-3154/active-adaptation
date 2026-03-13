@@ -16,7 +16,8 @@ class MjlabBackendEnv(_EnvBase):
         super().__init__(cfg, device, headless)
         self.robot = self.scene.articulations["robot"]
         if self.sim.has_gui():
-            self.sim.viewer.run_async()
+            self.sim.viewer.setup()
+            self.sim.viewer.update()
 
     def setup_scene(self):
         from mjlab.sim import MujocoCfg, Simulation, SimulationCfg

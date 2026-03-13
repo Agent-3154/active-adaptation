@@ -1,9 +1,9 @@
 from typing_extensions import override
 
-from active_adaptation.envs.adapters import SceneAdapter
+from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
 
 
-class MujocoSimAdapter:
+class MujocoSimAdapter(SimAdapter):
     def __init__(self, sim):
         self._sim = sim
 

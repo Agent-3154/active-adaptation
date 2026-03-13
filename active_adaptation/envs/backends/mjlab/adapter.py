@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING
 
 from typing_extensions import override
 
-from active_adaptation.envs.adapters import SceneAdapter
+from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
 
 if TYPE_CHECKING:
     from active_adaptation.envs.backends.mjlab.viewer import MjLabViewer
@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from mjlab.sim import Simulation
 
 
-class MjlabSimAdapter:
+class MjlabSimAdapter(SimAdapter):
     def __init__(self, sim: "Simulation", viewer: "MjLabViewer" = None):
         self._sim = sim
         self.viewer = viewer

@@ -43,4 +43,4 @@ def import_learning_modules(
         if not project_info["enabled"]:
             continue
         import_module_from_project(project_info)
-        print(f"imported learning module {project_name} from {project_info['path']}")
+        print(f"Importing learning module: {project_name} from {project_info['path']}")

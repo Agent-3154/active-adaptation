@@ -3,14 +3,14 @@ from typing import TYPE_CHECKING
 import torch
 from typing_extensions import override
 
-from active_adaptation.envs.adapters import SceneAdapter
+from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
 
 if TYPE_CHECKING:
     from isaaclab.scene import InteractiveScene
     from isaaclab.sim import SimulationContext
 
 
-class IsaacSimAdapter:
+class IsaacSimAdapter(SimAdapter):
     def __init__(self, sim: "SimulationContext"):
         self._sim = sim
 

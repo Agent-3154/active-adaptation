@@ -450,13 +450,13 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict["stats"] = self.stats.clone()
 
         if self.sim.has_gui():
-            if hasattr(self, "debug_draw"):
+            if self.backend == "isaac":
                 self.debug_draw.clear()
-            if self.backend == "mjlab":
-                viewer = getattr(self.sim, "viewer", None)
-                if viewer is not None and viewer.scene is not None:
-                    viewer.scene.clear()
+            elif self.backend == "mjlab":
+                self.sim.viewer.clear()
             [callback() for callback in self._debug_draw_callbacks]
+            if self.backend == "mjlab":
+                self.sim.viewer.update()
 
         return tensordict
 
@@ -583,4 +583,6 @@ class _EnvBase(EnvBase, RegistryMixin):
                 del self.scene
                 self.sim.clear_all_callbacks()
                 self.sim.clear_instance()
+            elif self.backend == "mjlab" and self.sim.has_gui():
+                self.sim.viewer.close()
             super().close(raise_if_closed=raise_if_closed)
