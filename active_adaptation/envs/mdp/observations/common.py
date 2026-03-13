@@ -5,7 +5,7 @@ from typing import Tuple, TYPE_CHECKING
 from typing_extensions import override
 
 import active_adaptation
-from active_adaptation.envs.mdp.base import Observation
+from .base import Observation
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat, EMA
 import active_adaptation.utils.symmetry as sym_utils
 
@@ -23,7 +23,7 @@ if active_adaptation.get_backend() == "isaac":
 class root_pose_w(Observation):
     def __init__(self, env):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
 
     @override
     def compute(self):
@@ -34,7 +34,7 @@ class root_linacc_substep(Observation):
     def __init__(self, env, steps: int=None, flatten: bool=False):
         super().__init__(env)
         self.flatten = flatten
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         if steps is None:
             steps = self.env.decimation
         shape = (self.num_envs, steps, 3)
@@ -97,7 +97,7 @@ class root_angvel_b(Observation):
     def __init__(self, env, steps: int=1, noise_std: float=0., yaw_only: bool=False):
         super().__init__(env)
         self.steps = steps
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.noise_std = noise_std
         self.yaw_only = yaw_only
         self.buffer = torch.zeros((self.num_envs, steps, 3), device=self.device)
@@ -133,7 +133,7 @@ class root_angvel_b(Observation):
 class root_gyro_substep(Observation):
     def __init__(self, env, steps: int=None,flatten: bool=False):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         if steps is None:
             steps = self.env.decimation
         shape = (self.num_envs, steps, 3)
@@ -154,7 +154,7 @@ class root_gyro_substep(Observation):
 class root_gyro_multistep(Observation):
     def __init__(self, env, steps: int=4, noise_std: float=0.):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.noise_std = noise_std
         self.gyro_multistep = torch.zeros((self.num_envs, steps, 3), device=self.device)
     
@@ -171,7 +171,7 @@ class root_gyro_multistep(Observation):
 class projected_gravity_b(Observation):
     def __init__(self, env, noise_std: float=0.):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.init_quat = self.asset.data.root_link_quat_w.clone()
         self.noise_std = noise_std
     
@@ -198,7 +198,7 @@ class gravity_multistep(Observation):
     def __init__(
         self, env, steps: int=4, interval: int=1, noise_std: float=0.):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.steps = steps
         self.interval = interval
         self.noise_std = noise_std
@@ -228,7 +228,7 @@ class gravity_multistep(Observation):
 class gravity_substep(Observation):
     def __init__(self, env, steps: int=None, flatten: bool=False):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         if steps is None:
             steps = self.env.decimation
         shape = (self.num_envs, steps, 3)
@@ -250,7 +250,7 @@ class gravity_substep(Observation):
 class root_linvel_b(Observation):
     def __init__(self, env, yaw_only: bool=False):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.yaw_only = yaw_only
 
         self.quat_w = torch.zeros(self.num_envs, 4, device=self.device)
@@ -291,7 +291,7 @@ class body_materials(Observation):
     def __init__(self, env, body_names, homogeneous: bool=False):
         super().__init__(env)
         self.homogeneous = homogeneous
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.body_ids, self.body_names = self.asset.find_bodies(body_names)
 
         num_shapes_per_body = []
@@ -315,7 +315,7 @@ class body_mass(Observation):
     def __init__(self, env, body_names, homogeneous: bool=False):
         super().__init__(env)
         self.homogeneous = homogeneous
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.body_ids, self.body_names = self.asset.find_bodies(body_names)
         
         masses = self.asset.root_physx_view.get_masses()[0]
@@ -354,7 +354,7 @@ class body_mass(Observation):
 class incoming_wrench(Observation):
     def __init__(self, env):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.default_mass_total = (
             self.asset.root_physx_view.get_masses()[0]
             .sum().to(self.env.device) * 9.81
@@ -408,7 +408,7 @@ class clock(Observation):
 class phase(Observation):
     def __init__(self, env, cycle_range = (1.0, 1.2), deriv: bool=False):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.cycle_range = cycle_range
         self.deriv = deriv
         self.offset_range= [torch.pi/3, 2 * torch.pi/3]
@@ -474,7 +474,7 @@ meshes = {}
 class root_pos_w(Observation):
     def __init__(self, env):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
 
     def compute(self):
         return self.asset.data.root_pos_w
@@ -483,7 +483,7 @@ class root_pos_w(Observation):
 class feet_orientation(Observation):
     def __init__(self, env, feet_names: str):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.feet_id = self.asset.find_bodies(feet_names)[0]
         self.heading_feet = torch.tensor([[[1., 0., 0.]]], device=self.device)
     
@@ -498,7 +498,7 @@ class oscillator(Observation):
     def __init__(self, env, history: bool=False):
         super().__init__(env)
         self.history = history
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.phi_history = torch.zeros(self.num_envs, 4, 4, device=self.device)
 
     def update(self):
@@ -520,7 +520,7 @@ class oscillator(Observation):
 class oscillator_biped(Observation):
     def __init__(self, env, omega_range=(2.0, 3.0)):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.asset.phi = torch.zeros(self.num_envs, 2, device=self.device)
         self.omega_range = omega_range
         self.omega = torch.zeros(self.num_envs, 1, device=self.device)
@@ -554,7 +554,7 @@ class feet_contact_multistep(Observation):
     def __init__(self, env, steps: int=4, thres: float=1.):
         super().__init__(env)
         self.thres = thres
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.contact_sensor: ContactSensor = self.env.scene["contact_sensor"]
         self.feet_id = self.asset.find_bodies(".*_foot")[0]
         self.contact = torch.zeros(self.num_envs, steps, device=self.device, dtype=bool)
@@ -575,7 +575,7 @@ class feet_contact_multistep(Observation):
 class cartesian_force(Observation):
     def __init__(self, env):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.feet_ids = torch.as_tensor(self.asset.find_bodies(".*_foot")[0], device=self.device)
         self.feet_names = self.asset.find_bodies(".*_foot")[1]
         # print(self.feet_names)

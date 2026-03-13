@@ -1,5 +1,8 @@
+# ruff: noqa: F401
+
+from .base import Observation
+from . import body
 from . import common
-from . import obs_joint
-from . import obs_extero
-from . import obs_contact
-from . import obs_body
+from . import contact
+from . import extero
+from . import joint

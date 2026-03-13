@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
 
-from active_adaptation.envs.mdp import Command
+from .base import Command
 from active_adaptation.utils.motion import MotionDataset
 from active_adaptation.utils.math import (
     quat_rotate_inverse,

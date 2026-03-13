@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from isaaclab.sensors import ContactSensor
 
-from active_adaptation.envs.mdp.base import Reward
+from .base import Reward
 
 def dot(a: torch.Tensor, b: torch.Tensor):
     return (a * b).sum(-1, True)
@@ -20,12 +20,12 @@ class feet_clearance(Reward):
     """
     def __init__(self, env, feet_names: str, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.feet_id, feet_names = self.asset.find_bodies(feet_names)
         self.feet_id = torch.tensor(self.feet_id, device=self.device)
         self.thres = 0.16
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         feet_pos_w = self.asset.data.body_link_pos_w[:, self.feet_id]
         distance_xy = (feet_pos_w[:, 0, :2] - feet_pos_w[:, 1, :2]).norm(dim=-1, keepdim=True)
         return (- self.thres + distance_xy).clamp_max(0.) / self.thres
@@ -39,7 +39,7 @@ class knee_distance(Reward):
 class feet_swing(Reward):
     def __init__(self, env, feet_names, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.feet_id = self.asset.find_bodies(feet_names)[0]
         self.phase: torch.Tensor = self.asset.data.phase
         self.command_manager = self.env.command_manager
@@ -53,7 +53,7 @@ class feet_swing(Reward):
     def reset(self, env_ids):
         self.feet_vel_buf[env_ids] = 0.
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         feet_linvel = self.feet_vel_buf.mean(-1)
         swing_vel = torch.zeros_like(feet_linvel)
         swing_vel[:] = self.command_manager.command_linvel.unsqueeze(1)
@@ -83,13 +83,13 @@ class feet_swing(Reward):
 class leg_swing(Reward):
     def __init__(self, env, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.phase: torch.Tensor = self.asset.data.phase
         self.command_manager = self.env.command_manager
         self.hip_ids = self.asset.find_joints(".*leg_joint1")[0]
         self.knee_ids = self.asset.find_joints(".*leg_joint4")[0]
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         phase_sin = self.phase.sin()
         self.hip_pos = self.asset.data.joint_pos[:, self.hip_ids]
         self.knee_pos = self.asset.data.joint_pos[:, self.knee_ids]
@@ -106,7 +106,7 @@ class feet_orientation(Reward):
 
     def __init__(self, env, feet_names: str, weight: float, enabled: bool = True, body_name: str=None):
         super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.feet_id = self.asset.find_bodies(feet_names)[0]
         self.heading_feet = torch.tensor([[[1., 0., 0.]]], device=self.device)
         self.heading_root = torch.tensor([[[1., 0., 0.]]], device=self.device)
@@ -126,7 +126,7 @@ class feet_orientation(Reward):
             quat_body = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
         self.body_fwd = quat_rotate(quat_body, self.heading_root)
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         reward_alignment = - (self.feet_fwd - self.body_fwd).square().sum(-1)
         # reward_alignment = dot(self.feet_fwd, self.body_fwd).square().squeeze(-1)
         return (reward_alignment).sum(1, True)
@@ -148,26 +148,26 @@ class feet_orientation(Reward):
 class joint_pos_default(Reward):
     def __init__(self, env, weight: float, enabled: bool = True, joint_names: str=".*"):
         super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.joint_ids = self.asset.find_joints(joint_names)[0]
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         dev = self.asset.data.joint_pos[:, self.joint_ids] - self.default_joint_pos
         return - dev.square().mean(1, True)
 
 class feet_step(Reward):
     def __init__(self, env, feet_names, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.feet_id, feet_names = self.asset.find_bodies(feet_names)
         self.phase: torch.Tensor = self.asset.data.phase
         self.heading_root = torch.tensor([[1., 0., 0.]], device=self.device)
         self.command_manager = self.env.command_manager
         print(f"Feet names: {feet_names}, be aware of the order!")
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         quat_root = yaw_quat(self.asset.data.root_link_quat_w)
         feet_displacement = (
             - self.asset.data.body_link_pos_w[:, self.feet_id[0]]
@@ -203,7 +203,7 @@ class feet_step(Reward):
 class body_orientation(Reward):
     def __init__(self, env, body_name, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.body_id, body_name = self.asset.find_bodies(body_name)
         self.body_id = self.body_id[0]
         self.x_vec = torch.tensor([1., 0., 0.], device=self.device)
@@ -217,7 +217,7 @@ class body_orientation(Reward):
         self.body_heading_vec[:] = quat_rotate(body_yaw_quat, self.y_vec)
         self.root_heading_vec[:] = quat_rotate(root_yaw_quat, self.x_vec)
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         reward = dot(self.body_heading_vec, self.root_heading_vec)
         return (reward.square() * reward.sign()).reshape(self.num_envs, 1)
 
@@ -234,10 +234,10 @@ class body_upright(Reward):
     """
     def __init__(self, env, body_name: str, weight):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.body_id, body_name = self.asset.find_bodies(body_name)
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         down = torch.tensor([[0., 0., -1.]], device=self.device)
         g = quat_rotate_inverse(
             self.asset.data.body_quat_w[:, self.body_id],
@@ -250,7 +250,7 @@ class body_upright(Reward):
 class arm_swing(Reward):
     def __init__(self, env, arm_names: str, weight: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.body_ids, body_names = self.asset.find_bodies(arm_names)
         self.phase: torch.Tensor = self.asset.data.phase
         self.command_manager = self.env.command_manager
@@ -264,7 +264,7 @@ class arm_swing(Reward):
     def reset(self, env_ids):
         self.arm_vel_buf[env_ids] = 0.
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         arm_linvel = self.arm_vel_buf.mean(-1)
         phase_sin = self.phase.sin()
         swing_vel = torch.zeros_like(arm_linvel)
@@ -283,10 +283,10 @@ class arm_swing(Reward):
 class arm_velocity(Reward):
     def __init__(self, env, arm_names: str, weight: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.body_ids, body_names = self.asset.find_bodies(arm_names)
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         arm_linvel = self.asset.data.body_lin_vel_w[:, self.body_ids]
         root_linvel = self.asset.data.root_link_lin_vel_w
         d = (arm_linvel - root_linvel.unsqueeze(1)).square().sum(-1)
@@ -296,7 +296,7 @@ class arm_velocity(Reward):
 class arm_well_being(Reward):
     def __init__(self, env, arm_names: str, weight: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.body_ids, body_names = self.asset.find_bodies(arm_names)
         # self.target_x = torch.tensor([0.0, 0.0], device=self.device)
         # self.target_y = torch.tensor([0.21, -0.21], device=self.device)
@@ -306,7 +306,7 @@ class arm_well_being(Reward):
         self.root_pos = self.asset.data.root_pos_w
         self.root_quat = self.asset.data.root_link_quat_w
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         arm_pos_b = quat_rotate_inverse(
             self.root_quat.unsqueeze(1), 
             self.arm_pos - self.root_pos.unsqueeze(1)
@@ -320,7 +320,7 @@ class feet_impact(Reward):
     def __init__(self, env, feet_names: str, weight):
         super().__init__(env, weight)
 
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
         self.body_ids, self.body_names = self.contact_sensor.find_bodies(feet_names)
         self.body_ids = torch.tensor(self.body_ids, device=self.device)
@@ -348,7 +348,7 @@ class feet_impact(Reward):
         self.impact_point[self.impact] = feet_pos_w[self.impact]
         self.detach_point[self.detach] = feet_pos_w[self.detach]
     
-    def compute(self):
+    def _compute(self):
         r = self.contact_force.mean(1).square().sum(-1)
         return - (self.impact * r).sum(1, True)
 
@@ -359,7 +359,7 @@ class angular_momentum(Reward):
     """
     def __init__(self, env, weight: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.body_mass = self.asset.root_physx_view.get_masses().to(self.device).reshape(self.num_envs, -1, 1)
         self.body_inertia = self.asset.root_physx_view.get_inertias().to(self.device).reshape(self.num_envs, -1, 3, 3)
         self.com_offset = self.asset.root_physx_view.get_coms()[:, :, :3].to(self.device)
@@ -372,7 +372,7 @@ class angular_momentum(Reward):
         self.root_pos = self.asset.data.root_pos_w
         self.root_lin_vel = self.asset.data.root_link_lin_vel_w
     
-    def compute(self):
+    def _compute(self):
         body_com_pos = self.body_pos + quat_rotate(
             self.asset.data.body_quat_w,
             self.com_offset
@@ -389,4 +389,3 @@ class angular_momentum(Reward):
         m2 = quat_rotate(self.asset.data.body_quat_w, m2)
         r = (m1 + m2).sum(1).square().sum(-1)
         return r.reshape(self.num_envs, 1)
-

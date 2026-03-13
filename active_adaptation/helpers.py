@@ -43,13 +43,13 @@ def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
     # Select the appropriate backend-specific environment class
     backend = active_adaptation.get_backend()
     if backend == "isaac":
-        env_cls = _EnvBase.registry[cfg.task.get("env_class", "SimpleEnvIsaac")]
+        env_cls = _EnvBase.registry[cfg.task.get("env_class", "IsaacBackendEnv")]
     elif backend == "mujoco":
-        env_cls = _EnvBase.registry[cfg.task.get("env_class", "SimpleEnvMujoco")]
+        env_cls = _EnvBase.registry[cfg.task.get("env_class", "MujocoBackendEnv")]
         cfg.task.num_envs = 1
         cfg.task.reward = {}
     elif backend == "mjlab":
-        env_cls = _EnvBase.registry[cfg.task.get("env_class", "SimpleEnvMjlab")]
+        env_cls = _EnvBase.registry[cfg.task.get("env_class", "MjlabBackendEnv")]
     else:
         raise ValueError(f"Unknown backend: {backend}")
     

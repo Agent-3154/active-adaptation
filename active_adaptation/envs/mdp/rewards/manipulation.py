@@ -9,7 +9,7 @@ from ..commands import CommandEEPose
 class ee_pose_tracking(Reward):
     def __init__(self, env, ee_name: str, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.ee_id, self.ee_name = self.asset.find_bodies(ee_name)
         self.ee_id =self.ee_id[0]
         self.command_manager: CommandEEPose = self.env.command_manager
@@ -24,7 +24,7 @@ class ee_pose_tracking(Reward):
         self.ee_forward_w[:] = quat_rotate(ee_quat_w, forward)
         self.ee_upward_w[:] = quat_rotate(ee_quat_w, upward)
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         ee_pos = self.asset.data.body_link_pos_w[:, self.ee_id]
         # r_linvel = torch.exp(-self.asset.data.body_lin_vel_w.square().sum(1, True) / 0.25)
         pos_error = (ee_pos - self.command_manager.command_ee_pos_w).square().sum(1, True)
@@ -48,10 +48,10 @@ class ee_pose_tracking(Reward):
 class ee_vel_tracking(Reward):
     def __init__(self, env, ee_name: str, weight: float, enabled: bool = True):
         super().__init__(env, weight, enabled)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.ee_id, self.ee_name = self.asset.find_bodies(ee_name)
         self.ee_id =self.ee_id[0]
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         ee_vel = self.asset.data.body_lin_vel_w[:, self.ee_id]
         return torch.exp(-ee_vel.norm(dim=-1, keepdim=True) / 0.25)

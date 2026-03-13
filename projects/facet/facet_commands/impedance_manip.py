@@ -2,7 +2,7 @@ from typing import Optional, Tuple
 import torch
 import einops
 import warp as wp
-from active_adaptation.envs.mdp.base import Command
+from active_adaptation.envs.mdp.commands.base import Command
 from active_adaptation.utils.math import (
     quat_rotate,
     quat_rotate_inverse,
@@ -561,4 +561,3 @@ class ImpedanceCommandManager(Command):
             color=(1.0, 0.6, 0.0, 1.0), # orange
             size=3.0,
         )
-

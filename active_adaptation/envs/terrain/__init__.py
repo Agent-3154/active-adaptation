@@ -25,7 +25,7 @@ if active_adaptation.get_backend() == "isaac":
         print(f"Importing terrains from {file}")
         module = importlib.import_module(f".{module_name}", package=__package__)
 else:
-    from active_adaptation.envs.mujoco import MjTerrainCfg
+    from active_adaptation.envs.backends.mujoco.mujoco import MjTerrainCfg
     path = Path(active_adaptation.__path__[0]) / "assets_mjcf" / "plane.xml"
     TERRAINS_MUJOCO["plane"] = MjTerrainCfg(mjcf_path=str(path))
 

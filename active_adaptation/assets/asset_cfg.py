@@ -49,7 +49,7 @@ elif aa.get_backend() == "mjlab":
 
 elif aa.get_backend() == "mujoco":
     import mujoco
-    from active_adaptation.envs.mujoco import MJArticulationCfg
+    from active_adaptation.envs.backends.mujoco.mujoco import MJArticulationCfg
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -181,19 +181,26 @@ class ContactSensorCfg:
     Configuration for ContactSensors.
     """
     name: str = MISSING
-    primary: str = MISSING
-    # for isaaclab, secondary is a list of strings
-    secondary: str | Sequence[str] | None = MISSING
-
     track_air_time: bool = False
     history_length: int = 1
 
-    # mjlab specific
+    # for isaaclab, secondary is a list of strings
+    primary: str = None
+    secondary: str | Sequence[str] | None = None
+
+    # for mjlab, contact match is defined by mode/pattern/entity
+    primary_contact_match_mode: Literal["geom", "subtree", "body"] = None
+    primary_contact_match_pattern: str = None
+    primary_contact_match_entity: str | None = None
+    secondary_contact_match_mode: Optional[Literal["geom", "subtree", "body"]] = None
+    secondary_contact_match_pattern: Optional[str] = None
+    secondary_contact_match_entity: str | None = None
     num_slots: int = 1
     fields: Tuple[str, ...] = ("found", "force")
     reduce: Literal["none", "mindist", "maxforce", "netforce"] = "maxforce"
 
     def isaaclab(self):
+        assert self.primary is not None, "ContactSensorCfg.primary is required for isaaclab backend"
         kwargs = {
             "prim_path": "{ENV_REGEX_NS}/" + f"Robot/{self.primary}",
             "track_air_time": self.track_air_time,
@@ -206,18 +213,23 @@ class ContactSensorCfg:
         return IsaaclabContactSensorCfg(**kwargs)
 
     def mjlab(self):
-        secondary: ContactMatch | None = None
-        if isinstance(self.secondary, str):
-            secondary = ContactMatch(mode="subtree", pattern=self.secondary, entity="robot")
-        elif isinstance(self.secondary, Sequence) and len(self.secondary) > 0:
-            secondary = ContactMatch(
-                mode="subtree",
-                pattern=tuple(self.secondary),
-                entity="robot",
-            )
+        assert self.primary_contact_match_mode is not None, "ContactSensorCfg.primary_contact_match_mode is required for mjlab backend"
+        assert self.primary_contact_match_pattern is not None, "ContactSensorCfg.primary_contact_match_pattern is required for mjlab backend"
+        assert self.secondary_contact_match_mode is not None, "ContactSensorCfg.secondary_contact_match_mode is required for mjlab backend"
+        assert self.secondary_contact_match_pattern is not None, "ContactSensorCfg.secondary_contact_match_pattern is required for mjlab backend"
+        primary = ContactMatch(
+            mode=self.primary_contact_match_mode,
+            pattern=self.primary_contact_match_pattern,
+            entity=self.primary_contact_match_entity,
+        )
+        secondary = ContactMatch(
+            mode=self.secondary_contact_match_mode,
+            pattern=self.secondary_contact_match_pattern,
+            entity=self.secondary_contact_match_entity,
+        )
         return MjlabContactSensorCfg(
             name=self.name,
-            primary=ContactMatch(mode="subtree", pattern=self.primary, entity="robot"),
+            primary=primary,
             secondary=secondary,
             fields=self.fields,
             reduce=self.reduce,
@@ -248,8 +260,8 @@ class AssetCfg:
     
     mjcf_path: str | Path = MISSING
     usd_path: str | Path = MISSING
+
     init_state: InitialStateCfg = MISSING
-    key_frames: Optional[Dict[str, InitialStateCfg]] = None
     actuators: Dict[str, ActuatorCfg] = MISSING
 
     sensors_isaaclab: List[ContactSensorCfg] = field(default_factory=list)
@@ -449,6 +461,7 @@ class AssetCfg:
                 - Articulation info with actuator configurations
                 - Empty collisions tuple (collisions handled by MJCF)
         """
+        # TODO: this is only for g1 mjcf
         if self.self_collisions:
             collision_cfg = CollisionCfg(
                 geom_names_expr=(".*_collision",),
@@ -518,6 +531,7 @@ class RigidObjectCfg:
     def mjlab(self):
         raise NotImplementedError("MuJoCo Lab backend does not support rigid objects")
 
+# WARNING: will be deprecated: now used in _DelayedJointAction, check projects/hdmi/hdmi/tasks/actions.py:JointPosition
 def get_input_joint_indexing(
     input_order: Literal["isaac", "mujoco", "mjlab", "simulation"],
     asset_cfg: AssetCfg,
@@ -537,7 +551,7 @@ def get_input_joint_indexing(
     indexing = [source_joint_names.index(name) for name in target_joint_names]
     return torch.tensor(indexing, device=device), source_joint_names
 
-
+# WARNING: will be deprecated: now used in joint_observation, check projects/hdmi/hdmi/tasks/observations/common.py:joint_pos_history
 def get_output_joint_indexing(
     output_order: Literal["isaac", "mujoco", "mjlab", "simulation"],
     asset_cfg: AssetCfg,
@@ -557,6 +571,7 @@ def get_output_joint_indexing(
     return torch.tensor(indexing, device=device), target_joint_names
 
 
+# WARNING: will be deprecated: now used in body_observation, check projects/hdmi/hdmi/tasks/observations/common.py:body_pos_b
 def get_output_body_indexing(
     output_order: Literal["isaac", "mujoco", "mjlab", "simulation"],
     asset_cfg: AssetCfg,
@@ -575,15 +590,44 @@ def get_output_body_indexing(
     indexing = [source_body_names.index(name) for name in target_body_names]
     return torch.tensor(indexing, device=device), target_body_names
 
+def sort_names_by_preferred_order(
+    matched_names: Sequence[str],
+    preferred_names: Sequence[str],
+) -> List[str]:
+    """Return ``matched_names`` reordered to follow ``preferred_names``.
 
-if __name__ == "__main__":
-    from active_adaptation.assets import UNITREE_GO2_CFG
-    from mjlab.entity.entity import Entity
+    This is used when task code resolves a subset of joints or bodies through
+    regex matching but still needs the final tensor layout to respect the
+    asset's canonical simulation order.
+    """
+    matched_names = list(matched_names)
+    preferred_names = list(preferred_names)
+    ordered_names = [name for name in preferred_names if name in matched_names]
+    if len(ordered_names) != len(matched_names):
+        missing_names = [name for name in matched_names if name not in preferred_names]
+        raise ValueError(
+            f"Failed to resolve names {missing_names} in preferred order."
+        )
+    return ordered_names
 
-    import mujoco.viewer as viewer
-    cfg = UNITREE_GO2_CFG
-    # print(cfg.isaaclab())
-    print(cfg.mjlab())
 
-    entity = Entity(cfg.mjlab())
-    viewer.launch(entity.spec.compile())
+def to_simulation_joint_order(
+    joint_names: Sequence[str],
+    asset_cfg: AssetCfg,
+) -> List[str]:
+    preferred_joint_names = asset_cfg.joint_names_simulation
+    if preferred_joint_names is None:
+        return list(joint_names)
+    return sort_names_by_preferred_order(joint_names, preferred_joint_names)
+
+
+def to_simulation_body_order(
+    body_names: Sequence[str],
+    asset_cfg: AssetCfg,
+) -> List[str]:
+    preferred_body_names = asset_cfg.body_names_simulation
+    if preferred_body_names is None:
+        return list(body_names)
+    return sort_names_by_preferred_order(body_names, preferred_body_names)
+
+

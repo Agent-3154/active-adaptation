@@ -1,4 +1,15 @@
-from .mujoco import MJArticulationCfg
+from .backends.mujoco.mujoco import MJArticulationCfg
 from .env_base import _EnvBase
-from .locomotion import SimpleEnvIsaac, SimpleEnvMujoco, SimpleEnvMjlab
+from .backends.isaac import IsaacBackendEnv
+from .backends.mjlab import MjlabBackendEnv
+from .backends.mujoco import MujocoBackendEnv
 from . import terrain
+
+__all__ = [
+    "MJArticulationCfg",
+    "_EnvBase",
+    "IsaacBackendEnv",
+    "MujocoBackendEnv",
+    "MjlabBackendEnv",
+    "terrain",
+]

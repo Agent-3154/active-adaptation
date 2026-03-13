@@ -163,6 +163,8 @@ randomization:
   perturb_body_mass:
     (?!(payload|base|Head.*)).*: [0.8, 1.2]
     base: [0.8, 1.4]
+  perturb_body_com:
+    "base|torso_link": [-0.03, 0.03]
 ```
 
 Observations are grouped by keys and the observation of the same group is concatenated.

@@ -31,8 +31,8 @@ dependencies = [
 ]
 
 [project.scripts]
-aa-discover-projects = "active_adaptation:discover_projects"
-aa-pull = "active_adaptation.cli:aa_pull"
+aa-discover-projects = "active_adaptation.project_loading.discovery:discover_projects"
+aa-pull = "active_adaptation.project_loading.cli:aa_pull"
 
 [project.entry-points."active_adaptation.projects"]
 facet = "projects.facet"
@@ -43,7 +43,6 @@ metamorph = "projects.metamorph"
 find = { where = ["."], include = [
     "active_adaptation*",
     "scripts*",
-    "hydra_plugins.*",
     "projects.facet*",
     "projects.mimic*",
     "projects.metamorph*"
