@@ -22,15 +22,15 @@ def main(cfg: DictConfig):
 
     aa.init(cfg, import_projects=True)        
 
-    from active_adaptation.envs.locomotion import (
-        SimpleEnvIsaac,
-        SimpleEnvMujoco,
-        SimpleEnvMjlab
+    from active_adaptation.envs.backends import (
+        IsaacBackendEnv,
+        MujocoBackendEnv,
+        MjlabBackendEnv,
     )
     EnvClass = {
-        "isaac": SimpleEnvIsaac,
-        "mujoco": SimpleEnvMujoco,
-        "mjlab": SimpleEnvMjlab,
+        "isaac": IsaacBackendEnv,
+        "mujoco": MujocoBackendEnv,
+        "mjlab": MjlabBackendEnv,
     }[cfg.backend]
 
     env = EnvClass(cfg.task, str(cfg.device), headless=cfg.headless)

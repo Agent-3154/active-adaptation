@@ -34,7 +34,7 @@ QUADRUPED_CONFIG = ArticulationCfg(
     ),
     actuators={
         ".*": ImplicitActuatorCfg(
-            joint_names_expr=[".*"],
+            joint_names_expr=".*",
             effort_limit_sim=1000.0,
             stiffness=80.0,
             damping=2.0,

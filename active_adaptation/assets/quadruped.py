@@ -32,7 +32,7 @@ UNITREE_GO2_CFG = AssetCfg(
     self_collisions=False,
     actuators={
         "base_legs": ActuatorCfg(
-            joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+            joint_names_expr=".*_hip_joint|.*_thigh_joint|.*_calf_joint",
             # effort_limit={
             #     ".*_hip_joint": 23.5,
             #     ".*_thigh_joint": 23.5,
@@ -99,7 +99,7 @@ UNITREE_GO2_CFG = AssetCfg(
             history_length=3
         ),
     ],
-    body_names_isaac=[
+    body_names_simulation=[
         "base",
         "FL_hip",
         "FR_hip",
@@ -120,7 +120,7 @@ UNITREE_GO2_CFG = AssetCfg(
         "RL_foot",
         "RR_foot"
     ],
-    joint_names_isaac=[
+    joint_names_simulation=[
         "FL_hip_joint",
         "FR_hip_joint",
         "RL_hip_joint",
@@ -255,7 +255,7 @@ UNITREE_A2_CFG = AssetCfg(
             history_length=3
         ),
     ],
-    body_names_isaac=[
+    body_names_simulation=[
         "base_link",
         "FL_hip",
         "FR_hip",
@@ -274,7 +274,7 @@ UNITREE_A2_CFG = AssetCfg(
         "RL_foot",
         "RR_foot"
     ],
-    joint_names_isaac=[
+    joint_names_simulation=[
         "FL_hip_joint",
         "FR_hip_joint",
         "RL_hip_joint",
@@ -344,14 +344,15 @@ UNITREE_B2_CFG = AssetCfg(
         "RL_calf_joint": (1, "RR_calf_joint"),
     }),
     spatial_symmetry_mapping=mirrored({
-        "FL_hip_joint": (-1, "FR_hip_joint"),
-        "FL_thigh_joint": (1, "FR_thigh_joint"),
-        "FL_calf_joint": (1, "FR_calf_joint"),
-        "RL_hip_joint": (-1, "RR_hip_joint"),
-        "RL_thigh_joint": (1, "RR_thigh_joint"),
-        "RL_calf_joint": (1, "RR_calf_joint"),
-        "FR_foot_joint": (1, "FL_foot_joint"),
-        "RR_foot_joint": (1, "RL_foot_joint"),
+        "base_link": "base_link",
+        "FL_hip": "FR_hip",
+        "RL_hip": "RR_hip",
+        "FL_thigh": "FR_thigh",
+        "RL_thigh": "RR_thigh",
+        "FL_calf": "FR_calf",
+        "RL_calf": "RR_calf",
+        "FL_foot": "FR_foot",
+        "RL_foot": "RR_foot",
     }),
 )
 

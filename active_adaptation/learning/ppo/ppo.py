@@ -191,6 +191,10 @@ class PPOPolicy(PPOBase):
             policy = torch.compile(policy, fullgraph=True)
         return policy
 
+    def compute_value(self, tensordict):
+        self.vecnorm(tensordict)
+        return self.critic(tensordict)
+
     @VecNorm.freeze()
     def train_op(self, tensordict: TensorDict):
         assert VecNorm.FROZEN, "VecNorm must be frozen before training"
@@ -204,7 +208,7 @@ class PPOPolicy(PPOBase):
         
         action = tensordict[ACTION_KEY]
         adv_unnormalized = tensordict["adv"]
-        log_probs_before = tensordict["action_log_prob"]
+        log_probs_before = tensordict["sample_log_prob"]
         tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
 
         for epoch in range(self.cfg.ppo_epochs):
@@ -249,7 +253,7 @@ class PPOPolicy(PPOBase):
 
     def _update(self, tensordict: TensorDict):
         action_data = tensordict[ACTION_KEY]
-        log_probs_data = tensordict["action_log_prob"]
+        log_probs_data = tensordict["sample_log_prob"]
         
         valid = (~tensordict["is_init"])
         valid_cnt = valid.sum()

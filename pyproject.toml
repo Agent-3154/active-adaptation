@@ -47,7 +47,6 @@ metamorph = "projects.metamorph"
 find = { where = ["."], include = [
     "active_adaptation*",
     "scripts*",
-    "hydra_plugins.*",
     "projects.facet*",
     "projects.mimic*",
     "projects.metamorph*"

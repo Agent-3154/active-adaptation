@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Optional, List, Union
 from typing_extensions import override
 
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
-from active_adaptation.envs.mdp.base import Reward
+from .base import Reward
 from active_adaptation.envs.mdp.commands.locomotion import Twist
 
 if TYPE_CHECKING:
@@ -14,14 +14,14 @@ Names = Union[str, List[str]]
 
 class survival(Reward):
     @override
-    def compute(self):
+    def _compute(self):
         return torch.ones(self.num_envs, 1, device=self.device)
 
 
 class linvel_z_l2(Reward):
     def __init__(self, env, weight: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.linvel_z = torch.zeros(self.num_envs, 1, device=self.device)
 
     @override
@@ -29,14 +29,14 @@ class linvel_z_l2(Reward):
         self.linvel_z = self.asset.data.root_com_lin_vel_b[:, 2].unsqueeze(1)
 
     @override
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         return -self.linvel_z.square()
 
 
 class angvel_xy_l2(Reward):
     def __init__(self, env, weight: float, body_names: Optional[Names] = None):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         if body_names is not None:
             self.body_ids, self.body_names = self.asset.find_bodies(body_names)
             self.body_ids = torch.tensor(self.body_ids, device=self.device)
@@ -44,7 +44,7 @@ class angvel_xy_l2(Reward):
             self.body_ids = None
             self.body_names = [self.asset.body_names[0]]
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         if self.body_ids is not None:
             angvel = quat_rotate_inverse(
                 self.asset.data.body_quat_w[:, self.body_ids],
@@ -61,8 +61,8 @@ class undesired_contact(Reward):
     supported_backends = ("isaac",)
     def __init__(self, env, body_names: Names, weight: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
 
         self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
         self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
@@ -72,7 +72,7 @@ class undesired_contact(Reward):
         contact = self.contact_sensor.data.current_contact_time[:, self.body_ids] > 0.0
         self.undesired_contact = - contact.float().sum(1, keepdim=True)
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         return self.undesired_contact.reshape(self.num_envs, 1)
 
     # def debug_draw(self):
@@ -94,7 +94,7 @@ class linvel_exp(Reward[Twist]):
         gamma: float = 0.0,
     ):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.sigma = sigma
         self.dim = dim
         self.gamma = gamma
@@ -111,7 +111,7 @@ class linvel_exp(Reward[Twist]):
         self.linvel_w_sum.mul_(self.gamma).add_(linvel_w)
         self.count.mul_(self.gamma).add_(1.0)
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         linvel_w = self.linvel_w_sum / self.count.clamp_min(1.0)
         cmd_linvel_w = self.command_manager.cmd_linvel_w[:, : self.dim]
         linvel_error = (linvel_w[:, : self.dim] - cmd_linvel_w).square().sum(-1, True)
@@ -133,10 +133,10 @@ class linvel_exp(Reward[Twist]):
 class root_pos_exp(Reward):
     def __init__(self, env, weight: float, dim: int = 2):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.dim = dim
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         target_pos = self.command_manager.cmd_pos_w[:, : self.dim]
         pos_error = (self.asset.data.root_link_pos_w[:, : self.dim] - target_pos).square().sum(-1, True)
         rew = torch.exp(-pos_error / 0.25)
@@ -146,10 +146,10 @@ class root_pos_exp(Reward):
 class root_pos_l2(Reward):
     def __init__(self, env, weight: float, dim: int = 2):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.dim = dim
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         target_pos = self.command_manager.cmd_pos_w[:, : self.dim]
         pos_error = (self.asset.data.root_link_pos_w[:, : self.dim] - target_pos).square().sum(-1, True)
         rew = - pos_error
@@ -164,11 +164,11 @@ class linvel_projection(Reward[Twist]):
         dim: int = 2,
     ):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.dim = dim
 
     @override
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         linvel_w = self.asset.data.root_com_lin_vel_w[:, : self.dim]
         cmd_linvel_w = self.command_manager.cmd_linvel_w[:, : self.dim]
         projection = (linvel_w * cmd_linvel_w).sum(dim=-1, keepdim=True)
@@ -185,7 +185,7 @@ class angvel_z_exp(Reward[Twist]):
         gamma: float = 0.0,
     ):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.world_frame = world_frame
         self.gamma = gamma
         self.count = torch.zeros(self.num_envs, 1, device=self.device)
@@ -201,7 +201,7 @@ class angvel_z_exp(Reward[Twist]):
         self.count.mul_(self.gamma).add_(1)
 
     @override
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         angvel = self.angvel_sum / self.count.clamp_min(1.0)
         target_angvel = self.command_manager.cmd_yawvel_b
         angvel_error = (target_angvel - angvel[:, 2:3]).square()
@@ -212,11 +212,11 @@ class angvel_z_exp(Reward[Twist]):
 class tracking_yaw(Reward):
     def __init__(self, env, weight):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.command_manager = self.env.command_manager
 
     @override
-    def compute(self):
+    def _compute(self):
         yaw_diff = self.command_manager.ref_yaw - self.asset.data.heading_w.unsqueeze(1)
         return torch.exp(- yaw_diff.square())
 
@@ -226,7 +226,7 @@ class feet_air_time(Reward):
     def __init__(self, env, body_names: str, thres: float, weight: float):
         super().__init__(env, weight)
         self.thres = thres
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
 
         self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
@@ -234,7 +234,7 @@ class feet_air_time(Reward):
         self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
 
     @override
-    def compute(self):
+    def _compute(self):
         first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[:, self.body_ids]
         last_air_time = self.contact_sensor.data.last_air_time[:, self.body_ids]
         reward = ((last_air_time - self.thres).clamp_max(0.0) * first_contact).sum(1)
@@ -246,7 +246,7 @@ class feet_contact_count(Reward):
     supported_backends = ("isaac", "mjlab")
     def __init__(self, env, body_names: str, weight: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
 
         self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
@@ -257,7 +257,7 @@ class feet_contact_count(Reward):
         )
 
     @override
-    def compute(self):
+    def _compute(self):
         self.first_contact = self.contact_sensor.compute_first_contact(
             self.env.step_dt
         )[:, self.body_ids]
@@ -267,7 +267,7 @@ class feet_contact_count(Reward):
 class root_upright(Reward):
     def __init__(self, env, weight: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.projected_gravity_b = torch.zeros(self.num_envs, 3, device=self.device)
     
     @override
@@ -275,7 +275,7 @@ class root_upright(Reward):
         self.projected_gravity_b = self.asset.data.projected_gravity_b
 
     @override
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         rew = 1. - self.projected_gravity_b[:, :2].square().sum(1)
         return rew.reshape(self.num_envs, 1)
 
@@ -283,11 +283,11 @@ class root_upright(Reward):
 class base_height_l1(Reward[Twist]):
     def __init__(self, env, weight: float, target_height: Optional[float] = None):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.target_height = target_height
 
     @override
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         if self.target_height is None:
             target_height = self.command_manager.cmd_base_height
         else:
@@ -301,11 +301,11 @@ class base_height_l1(Reward[Twist]):
 class base_height_exp(Reward[Twist]):
     def __init__(self, env, weight: float, target_height: Optional[float] = None):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.target_height = target_height
     
     @override
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         if self.target_height is None:
             target_height = self.command_manager.cmd_base_height
         else:
@@ -320,14 +320,14 @@ class base_height_exp(Reward[Twist]):
 class single_foot_contact(Reward):
     def __init__(self, env, body_names: str, margin: float, weight: float):
         super().__init__(env, weight)
-        # self.asset: Articulation = self.env.scene["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
+        # self.asset: Articulation = self.env.scene.articulations["robot"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
         self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
         self.margin = margin
 
     @override
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         in_contact = self.contact_sensor.data.current_contact_time[:, self.body_ids] > self.margin
         single_contact = torch.where(torch.sum(in_contact, dim=1) == 1, 0., -1.)
         valid = ~self.command_manager.is_standing_env
@@ -339,14 +339,14 @@ class is_standing_env(Reward):
         super().__init__(env, weight)
 
     @override
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         return self.env.command_manager.is_standing_env.reshape(self.num_envs, 1)
 
 
 # class feet_swing_height(Reward):
 #     def __init__(self, env, target_height: float, weight: float):
 #         super().__init__(env, weight)
-#         self.asset: Articulation = self.env.scene["robot"]
+#         self.asset: Articulation = self.env.scene.articulations["robot"]
 #         self.target_height = target_height
 #         self.feet_ids = self.asset.find_bodies(".*foot.*")[0]
 
@@ -361,7 +361,7 @@ class is_standing_env(Reward):
 #             self.asset.data.body_lin_vel_w[:, self.feet_ids],
 #         )
 
-#     def compute(self) -> torch.Tensor:
+#     def _compute(self) -> torch.Tensor:
 #         hight_error = (self.feet_height - self.target_height).abs()
 #         lateral_speed = (
 #             self.feet_vel_b[:, :, :2].square().sum(-1)
@@ -373,13 +373,13 @@ class is_standing_env(Reward):
 class joint_limits(Reward):
     def __init__(self, env, joint_names: str, offset: float, weight: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.joint_ids = self.asset.find_joints(joint_names)[0]
         self.joint_limits = self.asset.data.joint_limits[:, self.joint_ids].clone()
         self.joint_limits_max = self.joint_limits[:, :, 1] - offset
         self.joint_limits_min = self.joint_limits[:, :, 0] + offset
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         joint_pos = self.asset.data.joint_pos[:, self.joint_ids]
         violation_min = (joint_pos - self.joint_limits_min).clamp_max(0.0)
         violation_max = (self.joint_limits_max - joint_pos).clamp_max(0.0)
@@ -399,10 +399,10 @@ class oscillator(Reward):
         self.margin = margin
         self.target_swing_height = 0.08
 
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.art_feet_ids = self.asset.find_bodies(feet_names)[0]
-        self.contact_sensor: ContactSensor = self.env.scene["contact_forces"]
-        self.command_manager: Command2 = self.env.command_manager
+        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
+        self.command_manager = self.env.command_manager
 
         self.feet_ids, feet_names = self.contact_sensor.find_bodies(feet_names)
         self.mass = self.asset.data.default_mass[0].sum().to(self.device)
@@ -454,7 +454,7 @@ class oscillator(Reward):
         # self.asset.phi += self.asset.phi_dot * self.env.step_dt
         # self.asset.phi = torch.where((self.asset.phi > torch.pi * 2).all(1, True), self.asset.phi - torch.pi * 2, self.asset.phi)
 
-    def compute(self):
+    def _compute(self):
         phi_sin = self.asset.phi.sin()
         feet_height = self.asset.data.feet_height.clamp_max(self.target_swing_height)
         r = (
@@ -485,12 +485,12 @@ class oscillator(Reward):
 class oscillator_biped(Reward):
     def __init__(self, env, weight):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.gravity = self.asset.data.default_mass[0].sum().item() * 9.81
-        self.contact_forces: ContactSensor = self.env.scene["contact_forces"]
+        self.contact_forces: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.feet_ids = self.contact_forces.find_bodies(".*_ankle_roll_link")[0]
 
-    def compute(self):
+    def _compute(self):
         self.sin_phase = self.asset.phi.sin()
         grf = self.contact_forces.data.net_forces_w[:, self.feet_ids].norm(dim=-1)
         r = (-grf/self.gravity * self.sin_phase).clamp_max(0.8).sum(1, True)
@@ -500,13 +500,13 @@ class oscillator_biped(Reward):
 class quadruped_stand(Reward):
     def __init__(self, env, feet_names: str, weight: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.feet_ids = self.asset.find_bodies(feet_names)[0]
         if not hasattr(self.env.command_manager, "is_standing_env"):
             raise ValueError("is_standing_env is not defined in command_manager")
         self.command_manager = self.env.command_manager
 
-    def compute(self):
+    def _compute(self):
         jpos_errors = (self.asset.data.joint_pos - self.asset.data.default_joint_pos).abs()
         feet_pos_w = self.asset.data.body_link_pos_w[:, self.feet_ids]
         feet_pos_b = quat_rotate_inverse(
@@ -523,11 +523,11 @@ class quadruped_stand(Reward):
 class lateral_swing_height(Reward):
     def __init__(self, env, weight: float, feet_names: str, target_height: float):
         super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene["robot"]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.feet_ids = self.asset.find_bodies(feet_names)[0]
         self.target_height = target_height
         
-    def compute(self):
+    def _compute(self):
         feet_pos_w = self.asset.data.body_link_pos_w[:, self.feet_ids]
         feet_lin_vel_w = self.asset.data.body_lin_vel_w[:, self.feet_ids]
         feet_lin_vel_b = quat_rotate_inverse(
@@ -550,7 +550,7 @@ class action_rate_l2(Reward):
         self.action_manager = self.env.input_managers[key]
         assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         action_buf = self.action_manager.action_buf
         action_diff = action_buf[:, 0] - action_buf[:, 1]
         rew = - action_diff.square().sum(dim=-1, keepdim=True)
@@ -564,7 +564,7 @@ class action_rate2_l2(Reward):
         self.action_manager = self.env.input_managers[key]
         assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
     
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         action_buf = self.action_manager.action_buf
         action_diff = (
             action_buf[:, 0] - 2 * action_buf[:, 1] + action_buf[:, 2]

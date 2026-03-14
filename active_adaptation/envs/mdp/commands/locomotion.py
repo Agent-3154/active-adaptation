@@ -19,7 +19,7 @@ from active_adaptation.utils.math import (
     sample_quat_yaw
 )
 import active_adaptation.utils.symmetry as symmetry_utils
-from active_adaptation.envs.mdp.base import Command
+from .base import Command
 
 
 class Twist(Command):
@@ -116,7 +116,7 @@ class Twist(Command):
         
         if self.env.sim.has_gui():
             if self.env.backend == "mjlab":
-                from active_adaptation.viewer import MjLabViewer
+                from active_adaptation.envs.backends.mjlab.viewer import MjLabViewer
                 self.viewer: MjLabViewer = self.env.sim.viewer
                 self.axes_handle = self.viewer.add_batched_axes("target_yaw")
                 self.lines_handle = self.viewer.add_line_segments("cmd_linvel_w", (1., 0., 0.))
@@ -474,5 +474,3 @@ def quat_to_yaw(quat: torch.Tensor):
     cos_yaw = 1 - 2 * (q_y * q_y + q_z * q_z)
     yaw = torch.atan2(sin_yaw, cos_yaw)
     return yaw % (2 * torch.pi)
-
-

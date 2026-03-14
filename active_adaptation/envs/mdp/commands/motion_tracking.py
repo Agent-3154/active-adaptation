@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
 
-from active_adaptation.envs.mdp import Command
+from .base import Command
 from active_adaptation.utils.motion import MotionDataset
 from active_adaptation.utils.math import (
     quat_rotate_inverse,
@@ -18,7 +18,7 @@ from active_adaptation.utils.math import (
 class MotionTrackingCommand(Command):
     def __init__(self, env, data_path: str):
         super().__init__(env)
-        self.contact_forces: ContactSensor = self.env.scene["contact_forces"]
+        self.contact_forces: ContactSensor = self.env.scene.sensors["contact_forces"]
 
         self.dataset = MotionDataset.create_from_path(
             data_path,

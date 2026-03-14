@@ -1,30 +1,31 @@
-from .base import (
-    MDPComponent,
-    is_method_implemented,
-    Command,
-    Observation,
-    Reward,
-    Termination,
-    Randomization
-)
+from .base import MDPComponent, is_method_implemented
+from .actions.base import Action
+from .commands.base import Command
+from .observations.base import Observation
+from .rewards.base import Reward
+from .randomizations.base import Randomization
+from .terminations.base import Termination
 
-from .randomizations import *
-from .observations import *
-from .rewards import *
-from .terminations import *
-from .commands import *
-from .action import *
+from . import actions
+from . import commands
+from . import observations
+from . import randomizations
+from . import rewards
+from . import terminations
 
 __all__ = [
     "MDPComponent",
     "is_method_implemented",
+    "Action",
     "Command",
     "Observation",
     "Reward",
     "Termination",
     "Randomization",
-    "randomizations",
+    "actions",
+    "commands",
     "observations",
+    "randomizations",
     "rewards",
     "terminations",
 ]

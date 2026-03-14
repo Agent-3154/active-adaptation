@@ -1,3 +1,7 @@
+# ruff: noqa: F401
+
+from .base import Command
+
 import os
 import importlib
 
@@ -10,4 +14,3 @@ for file in os.listdir(dir_path):
         importlib.import_module(f".{file[:-3]}", __package__)
     elif os.path.isdir(os.path.join(dir_path, file)): # dir module
         importlib.import_module(f".{file}", __package__)
-

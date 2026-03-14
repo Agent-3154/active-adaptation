@@ -1,6 +1,7 @@
 import torch
 
-from active_adaptation.envs.mdp.base import Command, Reward
+from .base import Command
+from ..rewards.base import Reward
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
 from active_adaptation.utils.symmetry import SymmetryTransform
 import active_adaptation.utils.spline as spline
@@ -88,4 +89,3 @@ class SplineCommand(Command):
                 torch.cat([self.traj_vis, torch.ones(self.traj_vis.shape[0], 1) * 0.5], dim=-1),
                 color=(1., 1., 1., 1.),
             )
-

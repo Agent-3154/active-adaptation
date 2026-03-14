@@ -1,7 +1,7 @@
 import torch
 import einops
 
-from active_adaptation.envs.mdp import Reward
+from active_adaptation.envs.mdp.rewards.base import Reward
 from active_adaptation.utils.math import wrap_to_pi
 from .impedance import Impedance
 from .impedance_manip import ImpedanceCommandManager
@@ -12,7 +12,7 @@ class impedance_pos(Reward[ImpedanceCommandManager]):
         super().__init__(env, weight)
         self.asset = self.command_manager.asset
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         target_pos_xy = self.command_manager.surr_pos_target[:, :, :2]
         current_pos_xy = self.asset.data.root_pos_w[:, :2].unsqueeze(1)
         diff = target_pos_xy - current_pos_xy
@@ -27,7 +27,7 @@ class impedance_eef_pos(Reward[ImpedanceCommandManager]):
         self.asset = self.command_manager.asset
         self.eef_body_id = self.command_manager.eef_body_id
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         target_pos_xy = self.command_manager.surr_eef_pos_target
         current_pos_xy = self.asset.data.body_pos_w[:, self.eef_body_id].unsqueeze(1)
         diff = target_pos_xy - current_pos_xy
@@ -41,7 +41,7 @@ class impedance_vel(Reward[ImpedanceCommandManager]):
         super().__init__(env, weight)
         self.asset = self.command_manager.asset
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         target_vel_xy = self.command_manager.surr_lin_vel_target[:, :, :2]
         diff = target_vel_xy - self.asset.data.root_lin_vel_w[:, :2].unsqueeze(1)
         error_l2 = diff.square().sum(dim=-1, keepdim=True)
@@ -55,7 +55,7 @@ class impedance_eef_vel(Reward[ImpedanceCommandManager]):
         self.asset = self.command_manager.asset
         self.eef_body_id = self.command_manager.eef_body_id
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         target_vel_xy = self.command_manager.surr_eef_lin_vel_target
         current_vel_xy = self.asset.data.body_lin_vel_w[:, self.eef_body_id].unsqueeze(1)
         diff = target_vel_xy - current_vel_xy
@@ -70,7 +70,7 @@ class impedance_acc(Reward):
         self.command_manager: Impedance = self.env.command_manager
         self.asset = self.command_manager.asset
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         lin_acc_w = self.asset.data.body_acc_w[:, 0, :2]
         error_l2 = (self.command_manager.ref_lin_acc_w[:, 0, :2] - lin_acc_w).square().sum(1, True)
         return torch.exp(- error_l2 / 2.0)
@@ -81,7 +81,7 @@ class impedance_yaw_pos(Reward[ImpedanceCommandManager]):
         super().__init__(env, weight)
         self.asset = self.command_manager.asset
         
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         target_yaw = self.command_manager.surr_yaw_target 
         diff = target_yaw - self.asset.data.heading_w.reshape(-1, 1, 1)
         diff = wrap_to_pi(diff)
@@ -95,7 +95,7 @@ class impedance_yaw_vel(Reward[ImpedanceCommandManager]):
         super().__init__(env, weight)
         self.asset = self.command_manager.asset
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         target_yaw_vel = self.command_manager.surr_yaw_vel_target
         current_yaw_vel = self.asset.data.root_ang_vel_w[:, 2:3].unsqueeze(1)
         diff = target_yaw_vel - current_yaw_vel
@@ -109,7 +109,7 @@ class impedance_pos_error(Reward[ImpedanceCommandManager]):
         super().__init__(env, weight)
         self.asset = self.command_manager.asset
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         target = self.command_manager.surr_pos_target[:, :, :2]
         current = self.asset.data.root_pos_w[:, :2].unsqueeze(1)
         diff = target - current
@@ -122,7 +122,7 @@ class impedance_vel_error(Reward[ImpedanceCommandManager]):
         super().__init__(env, weight)
         self.asset = self.command_manager.asset
 
-    def compute(self) -> torch.Tensor:
+    def _compute(self) -> torch.Tensor:
         target = self.command_manager.surr_lin_vel_target[:, :, :2]
         current = self.asset.data.root_lin_vel_w[:, :2].unsqueeze(1)
         diff = target - current
@@ -139,4 +139,3 @@ class impedance_vel_error(Reward[ImpedanceCommandManager]):
 #         diff = self.impedance.ref_lin_acc_w[:, 0] - self.impedance.asset.data.body_acc_w[:, 0, :3]
 #         error_l2 = diff[:, :2].square().sum(dim=-1, keepdim=True)
 #         return error_l2
-

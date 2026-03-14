@@ -70,11 +70,7 @@
     "actuators": {
         "base_legs": {
             "class_type": "isaaclab.actuators.actuator_pd:ImplicitActuator",
-            "joint_names_expr": [
-                ".*_hip_joint",
-                ".*_thigh_joint",
-                ".*_calf_joint"
-            ],
+            "joint_names_expr": ".*_hip_joint|.*_thigh_joint|.*_calf_joint",
             "effort_limit": {
                 ".*_hip_joint": 23.5,
                 ".*_thigh_joint": 23.5,

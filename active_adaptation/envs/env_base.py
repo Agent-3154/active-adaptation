@@ -1,21 +1,12 @@
-import torch
-import numpy as np
-import hydra
-import inspect
 import warnings
-import warp as wp
-
-from tensordict.tensordict import TensorDictBase, TensorDict
-from torchrl.envs import EnvBase
-from torchrl.data import (
-    Composite,
-    Binary,
-    Unbounded,
-)
 from collections import OrderedDict
+from typing import Dict, Mapping, Tuple, cast
 
-from abc import abstractmethod
-from typing import Dict, Mapping, cast
+import numpy as np
+import torch
+from tensordict.tensordict import TensorDict, TensorDictBase
+from torchrl.data import Binary, Composite, Unbounded
+from torchrl.envs import EnvBase
 
 import active_adaptation
 import active_adaptation.envs.mdp as mdp
@@ -27,12 +18,12 @@ from active_adaptation.utils.video_recorder import (
     NullVideoRecorder,
     IsaacVideoRecorder,
 )
+from active_adaptation.envs.utils import GroundQuery
 from active_adaptation.registry import RegistryMixin
-
+from active_adaptation.utils.profiling import ScopedTimer
 
 if active_adaptation.get_backend() == "isaac":
     import isaacsim.core.utils.torch as torch_utils
-    from isaaclab.utils.warp import raycast_mesh
 
 
 EMA_DECAY = 0.99
@@ -47,7 +38,6 @@ def parse_component_spec(name: str, cfg):
 
 
 class ObsGroup:
-
     def __init__(
         self,
         name: str,
@@ -66,38 +56,86 @@ class ObsGroup:
     @property
     def spec(self):
         if not hasattr(self, "_spec"):
-            foo = self.compute({}, 0)
-            spec = {}
-            spec[self.name] = Unbounded(
-                foo[self.name].shape, dtype=foo[self.name].dtype
-            )
-            self._spec = Composite(spec, shape=[foo[self.name].shape[0]]).to(
-                foo[self.name].device
+            sample = self.compute({}, 0)
+            spec = {
+                self.name: Unbounded(
+                    sample[self.name].shape,
+                    dtype=sample[self.name].dtype,
+                )
+            }
+            self._spec = Composite(spec, shape=[sample[self.name].shape[0]]).to(
+                sample[self.name].device
             )
         return self._spec
 
-    def compute(self, tensordict: TensorDictBase, timestamp: int) -> torch.Tensor:
-        # torch.compiler.cudagraph_mark_step_begin()
-        output = self._compute()
-        tensordict[self.name] = output
+    def compute(self, tensordict: TensorDictBase, timestamp: int) -> TensorDictBase:
+        tensordict[self.name] = self._compute()
         return tensordict
 
-    # @torch.compile(mode="reduce-overhead")
     def _compute(self) -> torch.Tensor:
-        # update only if outdated
-        tensors = []
-        for obs_key, func in self.funcs.items():
-            tensor = func()
-            tensors.append(tensor)
-        return torch.cat(tensors, dim=-1)
+        return torch.cat([func.compute() for func in self.funcs.values()], dim=-1)
 
     def symmetry_transform(self):
-        transforms = []
-        for obs_key, func in self.funcs.items():
-            transform = func.symmetry_transform()
-            transforms.append(transform.to(func.device))
-        transform = symmetry_utils.SymmetryTransform.cat(transforms)
-        return transform
+        transforms = [
+            func.symmetry_transform().to(func.device) for func in self.funcs.values()
+        ]
+        return symmetry_utils.SymmetryTransform.cat(transforms)
+
+
+class RewardGroup:
+    """Group of reward terms with internal EMA tracking for logging."""
+
+    def __init__(
+        self,
+        env: "_EnvBase",
+        name: str,
+        funcs: OrderedDict[str, mdp.Reward],
+        enabled: bool = True,
+        compile: bool = False,
+    ):
+        self.env = env
+        self.name = name
+        self.funcs = funcs
+        self.enabled = enabled
+        self.compile = compile
+
+        self.enabled_rewards = sum(func.enabled for func in funcs.values())
+        self.rew_buf = torch.zeros(
+            env.num_envs, self.enabled_rewards, device=env.device
+        )
+        # EMA state per reward term (sum, count) for logging
+        self._ema: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {
+            key: (
+                torch.zeros(1, device=env.device),
+                torch.zeros(1, device=env.device),
+            )
+            for key in funcs.keys()
+        }
+        if compile:
+            self.compute = torch.compile(self.compute, fullgraph=True)
+
+    def compute(self) -> torch.Tensor:
+        rewards = []
+        for key, func in self.funcs.items():
+            reward, count = func.compute()
+            self.env.stats[self.name, key].add_(reward)
+            ema_sum, ema_cnt = self._ema[key]
+            ema_sum.mul_(EMA_DECAY).add_(reward.sum())
+            cnt = count.item() if torch.is_tensor(count) else count
+            ema_cnt.mul_(EMA_DECAY).add_(cnt)
+            if func.enabled:
+                rewards.append(reward)
+        if len(rewards):
+            self.rew_buf[:] = torch.cat(rewards, 1)
+        return self.rew_buf.sum(dim=1, keepdim=True)
+
+    def get_ema_stats(self) -> Dict[str, float]:
+        """Return EMA mean per reward term (for logging)."""
+        result = {}
+        for key, (ema_sum, ema_cnt) in self._ema.items():
+            cnt = ema_cnt.clamp(min=1e-8)
+            result[key] = (ema_sum / cnt).item()
+        return result
 
 
 class _EnvBase(EnvBase, RegistryMixin):
@@ -111,27 +149,145 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.cfg = cfg
         self.headless = headless
 
-        self.setup_scene()
+        self._setup_simulation()
+        self._setup_mdp_managers()
+        self._build_tensor_specs()
 
+        [callback() for callback in self._startup_callbacks]
+
+        self.timestamp: int = 0
+        self.stats: TensorDict = self.reward_spec["stats"].zero()
+        self.input_tensordict = None
+        self.extra = {}
+
+    # ---------------------------------------------------------------------
+    # Initialization helpers
+    # ---------------------------------------------------------------------
+    def _setup_simulation(self):
+        self.terrain_type = None
+        self.setup_scene()
         self.sim = cast(SimAdapter, self.sim)
         self.scene = cast(SceneAdapter, self.scene)
-
-        self.max_episode_length: int = self.cfg.max_episode_length
-        self.step_dt: float = self.cfg.sim.step_dt
-        self.physics_dt: float = self.sim.get_physics_dt()
+        if self.terrain_type is None:
+            warnings.warn(
+                "Terrain type is not set. Please check if the scene is properly initialized."
+            )
+        self.max_episode_length = int(self.cfg.max_episode_length)
+        self.step_dt = float(self.cfg.sim.step_dt)
+        self.physics_dt = float(self.sim.get_physics_dt())
         self.decimation = int(self.step_dt / self.physics_dt)
-
-        print(
-            f"Step dt: {self.step_dt}, physics dt: {self.physics_dt}, decimation: {self.decimation}"
-        )
 
         self.episode_length_buf = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device
         )
-        self.episode_id = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.episode_id = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
         self.episode_count = 0
+        self.current_iter = 0
 
-        # parse obs and reward functions
+    def _setup_mdp_managers(self):
+        self.randomizations: Mapping[str, mdp.Randomization] = OrderedDict()
+        self.observation_funcs: Mapping[str, ObsGroup] = OrderedDict()
+        self.reward_groups: Mapping[str, RewardGroup] = OrderedDict()
+        self.input_managers: Mapping[str, mdp.Action] = OrderedDict()
+        self.termination_funcs: Mapping[str, mdp.Termination] = OrderedDict()
+
+        self._enabled_reward_groups = 0
+
+        self._startup_callbacks = []
+        self._reset_callbacks = []
+        self._pre_step_callbacks = []
+        self._post_step_callbacks = []
+        self._update_callbacks = []
+        self._debug_draw_callbacks = []
+
+        # MDP: command manager
+        command_cfg = dict(self.cfg.command)
+        class_name = command_cfg.pop("_target_", None)
+        if class_name is None:
+            raise ValueError("Command config must provide `_target_`.")
+        command = mdp.Command.make(class_name, self, **command_cfg)
+        if not command:
+            raise ValueError(f"Command class '{class_name}' not found")
+        self.command_manager = cast(mdp.Command, command)
+        self._pre_step_callbacks.append(self.command_manager.pre_step)
+        self._reset_callbacks.append(self.command_manager.reset)
+        self._debug_draw_callbacks.append(self.command_manager.debug_draw)
+
+        # MDP: input managers
+        for input_name, input_cfg in dict(self.cfg.get("input", {})).items():
+            _, input_cls_name, input_kwargs = parse_component_spec(
+                input_name, input_cfg
+            )
+            input_cls = mdp.Action.registry[input_cls_name]
+            input_manager = cast(mdp.Action, input_cls(self, **input_kwargs))
+            self.input_managers[input_name] = input_manager
+            self._reset_callbacks.append(input_manager.reset)
+            self._debug_draw_callbacks.append(input_manager.debug_draw)
+
+        # MDP: randomizations
+        for rand_name, rand_cfg in self.cfg.get("randomization", {}).items():
+            rand_name, cls_name, rand_kwargs = parse_component_spec(rand_name, rand_cfg)
+            rand = mdp.Randomization.make(cls_name, self, **rand_kwargs)
+            if not rand:
+                continue
+            rand = cast(mdp.Randomization, rand)
+            self.randomizations[rand_name] = rand
+            self._add_mdp_component(rand)
+
+        # MDP: observations
+        for group_name, group_cfg in self.cfg.observation.items():
+            funcs = OrderedDict()
+            for obs_name, obs_cfg in group_cfg.items():
+                obs_name, obs_cls_name, obs_kwargs = parse_component_spec(
+                    obs_name, obs_cfg
+                )
+                obs = mdp.Observation.make(obs_cls_name, self, **obs_kwargs)
+                if not obs:
+                    continue
+                obs = cast(mdp.Observation, obs)
+                funcs[obs_name] = obs
+                self._add_mdp_component(obs)
+            self.observation_funcs[group_name] = ObsGroup(group_name, funcs)
+
+        # MDP: rewards
+        reward_cfg = dict(self.cfg.reward)
+        self.mult_dt = reward_cfg.pop("_mult_dt_", True)
+        for group_name, group_cfg in reward_cfg.items():
+            print(f"Reward group: {group_name}")
+            funcs = OrderedDict()
+
+            group_cfg = dict(group_cfg)
+            enabled = group_cfg.pop("_enabled_", True)
+            compile = group_cfg.pop("_compile_", False)
+            self._enabled_reward_groups += int(enabled)
+
+            for rew_name, rew_cfg in group_cfg.items():
+                rew_name, cls_name, rew_kwargs = parse_component_spec(rew_name, rew_cfg)
+                reward = mdp.Reward.make(cls_name, self, **rew_kwargs)
+                if not reward:
+                    continue
+                reward = cast(mdp.Reward, reward)
+                funcs[rew_name] = reward
+                self._add_mdp_component(reward)
+                print(f"\t{rew_name}: \t{reward.weight:.2f}")
+
+            self.reward_groups[group_name] = RewardGroup(
+                self, group_name, funcs, enabled, compile
+            )
+
+        # MDP: terminations
+        for term_name, term_cfg in self.cfg.get("termination", {}).items():
+            term_name, cls_name, term_kwargs = parse_component_spec(term_name, term_cfg)
+            term = mdp.Termination.make(cls_name, self, **term_kwargs)
+            if not term:
+                continue
+            term = cast(mdp.Termination, term)
+            self.termination_funcs[term_name] = term
+            self._add_mdp_component(term)
+
+    def _build_tensor_specs(self):
         self.done_spec = Composite(
             done=Binary(1, [self.num_envs, 1], dtype=bool, device=self.device),
             terminated=Binary(1, [self.num_envs, 1], dtype=bool, device=self.device),
@@ -140,186 +296,59 @@ class _EnvBase(EnvBase, RegistryMixin):
             device=self.device,
         )
 
-        self.reward_spec = Composite(
-            {
-                "stats": {
-                    "episode_len": Unbounded([self.num_envs, 1]),
-                    "success": Unbounded([self.num_envs, 1]),
-                },
-            },
-            shape=[self.num_envs],
-        ).to(self.device)
-
-        command_cfg = dict(self.cfg.command)
-        class_name = command_cfg.pop("_target_", None)
-        if class_name is None:
-            raise ValueError(
-                "Command config must provide `_target_`."
-            )
-        command = mdp.Command.make(class_name, self, **command_cfg)
-        if not command:
-            raise ValueError(f"Command class '{class_name}' not found")
-        self.command_manager = cast(mdp.Command, command)
-
-        self.randomizations: Mapping[str, mdp.Randomization] = OrderedDict()
-        self.observation_funcs: Mapping[str, ObsGroup] = OrderedDict()
-        self.reward_groups: Mapping[str, RewardGroup] = OrderedDict()
-        self.input_managers: Mapping[str, mdp.ActionManager] = OrderedDict()
-
-        self._startup_callbacks = []
-        self._update_callbacks = []
-        self._reset_callbacks = []
-        self._debug_draw_callbacks = []
-        self._pre_step_callbacks = []
-        self._post_step_callbacks = []
-
-        self._pre_step_callbacks.append(self.command_manager.pre_step)
-        # self._update_callbacks.append(self.command_manager.update)
-        self._reset_callbacks.append(self.command_manager.reset)
-        self._debug_draw_callbacks.append(self.command_manager.debug_draw)
-
-        input_cfg = dict(self.cfg.get("input", {}))
-
-        action_spec = {}
-        for input_spec, input_cfg in input_cfg.items():
-            _, input_cls_name, input_kwargs = parse_component_spec(input_spec, input_cfg)
-            input_cls = mdp.ActionManager.registry[input_cls_name]
-            input_manager: mdp.ActionManager = input_cls(self, **input_kwargs)
-            self.input_managers[input_spec] = input_manager
-            self._reset_callbacks.append(input_manager.reset)
-            self._debug_draw_callbacks.append(input_manager.debug_draw)
-            action_spec[input_spec] = Unbounded(
+        action_spec = {
+            input_name: Unbounded(
                 [self.num_envs, input_manager.action_dim], device=self.device
             )
-
+            for input_name, input_manager in self.input_managers.items()
+        }
         self.action_spec = Composite(
             action_spec, shape=[self.num_envs], device=self.device
         )
 
-        randomizations = self.cfg.get("randomization", {})
-        for rand_spec, kwargs in randomizations.items():
-            rand_name, cls_name, rand_kwargs = parse_component_spec(rand_spec, kwargs)
-            rand = mdp.Randomization.make(cls_name, self, **rand_kwargs)
-            if not rand:
-                continue
-
-            rand = cast(mdp.Randomization, rand)
-            self.randomizations[rand_name] = rand
-            self._add_mdp_component(rand)
-
-        for group_key, group_cfg in self.cfg.observation.items():
-            funcs = OrderedDict()
-            for obs_spec, kwargs in group_cfg.items():
-                obs_name, obs_cls_name, obs_kwargs = parse_component_spec(obs_spec, kwargs)
-                obs = mdp.Observation.make(obs_cls_name, self, **obs_kwargs)
-                if not obs:
-                    continue
-                obs = cast(mdp.Observation, obs)
-                funcs[obs_name] = obs
-                self._add_mdp_component(obs)
-
-            self.observation_funcs[group_key] = ObsGroup(group_key, funcs)
-
-        for callback in self._startup_callbacks:
-            callback()
-
-        reward_spec = Composite({})
-
-        # parse rewards
-        self.mult_dt = self.cfg.reward.pop("_mult_dt_", True)
-
-        enabled_groups = 0
-        for group_name, func_specs in self.cfg.reward.items():
-            print(f"Reward group: {group_name}")
-            funcs = OrderedDict()
-            enabled = func_specs.pop("_enabled_", True)
-            compile = func_specs.pop("_compile_", False)
-            enabled_groups += enabled
-
-            for rew_spec, params in func_specs.items():
-                rew_name, cls_name, rew_kwargs = parse_component_spec(rew_spec, params)
-                reward = mdp.Reward.make(cls_name, self, **rew_kwargs)
-                if not reward:
-                    continue
-                reward = cast(mdp.Reward, reward)
-                funcs[rew_name] = reward
-                reward_spec["stats", group_name, rew_name] = Unbounded(
-                    1, device=self.device
-                )
-                self._add_mdp_component(reward)
-                print(f"\t{rew_name}: \t{reward.weight:.2f}")
-
-            self.reward_groups[group_name] = RewardGroup(
-                self, group_name, funcs, enabled, compile
-            )
-            reward_spec["stats", group_name, "return"] = Unbounded(
-                1, device=self.device
-            )
-
-        reward_spec["reward"] = Unbounded(max(1, enabled_groups), device=self.device)
-        reward_spec["discount"] = Unbounded(1, device=self.device)
-        self.reward_spec.update(reward_spec.expand(self.num_envs).to(self.device))
-
         observation_spec = {}
-        for group_key, group in self.observation_funcs.items():
-            try:
-                observation_spec.update(group.spec)
-            except Exception as e:
-                print(f"Error in computing observation spec for {group_key}: {e}")
-                raise e
-
+        [
+            observation_spec.update(group.spec)
+            for group in self.observation_funcs.values()
+        ]
         self.observation_spec = Composite(
             observation_spec, shape=[self.num_envs], device=self.device
         )
         self.observation_spec["episode_id"] = Unbounded(
-            [self.num_envs],
-            dtype=torch.long,
-            device=self.device,
+            [self.num_envs], dtype=torch.long, device=self.device
         )
 
-        self.termination_funcs: Mapping[str, mdp.Termination] = OrderedDict()
-        for key, params in self.cfg.get("termination", {}).items():
-            term_name, cls_name, term_kwargs = parse_component_spec(key, params)
-            term = mdp.Termination.make(cls_name, self, **term_kwargs)
-            if not term:
-                continue
-            term = cast(mdp.Termination, term)
-            self.termination_funcs[term_name] = term
-            self._add_mdp_component(term)
-            self.reward_spec["stats", "termination", term_name] = Unbounded(
-                (self.num_envs, 1), device=self.device
+        reward_spec = Composite(
+            {
+                "stats": {
+                    "episode_len": Unbounded([self.num_envs, 1]),
+                    "success": Unbounded([self.num_envs, 1]),
+                }
+            },
+            shape=[self.num_envs],
+        ).to(self.device)
+        reward_spec_extensions = Composite({})
+
+        for group_name, reward_group in self.reward_groups.items():
+            for rew_name in reward_group.funcs.keys():
+                reward_spec_extensions["stats", group_name, rew_name] = Unbounded(
+                    1, device=self.device
+                )
+            reward_spec_extensions["stats", group_name, "return"] = Unbounded(
+                1, device=self.device
             )
 
-        self.timestamp: int = 0  # global timestamp in steps
+        for term_name in self.termination_funcs.keys():
+            reward_spec_extensions["stats", "termination", term_name] = Unbounded(
+                1, device=self.device
+            )
 
-        self.stats: TensorDict = self.reward_spec["stats"].zero()
-
-        self.input_tensordict = None
-        self.extra = {}
-
-    @property
-    def num_envs(self) -> int:
-        """The number of instances of the environment that are running."""
-        return self.scene.num_envs
-
-    @property
-    def action_manager(self):
-        return self.input_managers["action"]
-
-    @property
-    def stats_ema(self):
-        """Exponential moving-average statistics for individual reward terms.
-
-        The returned dict maps ``"reward.<group>/<name>"`` to a scalar float that
-        summarizes the long-term average value of that reward component.
-        """
-        result = {}
-        for group_name, reward_group in self.reward_groups.items():
-            for rew_key, (ema_sum, ema_cnt) in reward_group.ema.items():
-                # Guard against division by zero if a term has not been updated yet.
-                value = (ema_sum / ema_cnt).item() if ema_cnt.item() > 0 else 0.0
-                result[f"reward.{group_name}/{rew_key}"] = value
-        return result
+        reward_spec_extensions["reward"] = Unbounded(
+            self._enabled_reward_groups, device=self.device
+        )
+        reward_spec_extensions["discount"] = Unbounded(1, device=self.device)
+        reward_spec.update(reward_spec_extensions.expand(self.num_envs).to(self.device))
+        self.reward_spec = reward_spec
 
     def _add_mdp_component(self, component: mdp.MDPComponent):
         if mdp.is_method_implemented(component, mdp.MDPComponent, "startup"):
@@ -338,6 +367,29 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     def setup_scene(self):
         raise NotImplementedError
+
+    # ---------------------------------------------------------------------
+    # Runtime helpers
+    # ---------------------------------------------------------------------
+    def set_progress(self, progress: int):
+        self.current_iter = progress
+
+    @property
+    def num_envs(self) -> int:
+        return self.scene.num_envs
+
+    @property
+    def action_manager(self):
+        return self.input_managers["action"]
+
+    @property
+    def stats_ema(self) -> Dict[str, float]:
+        """Aggregate EMA stats from all reward groups."""
+        result = {}
+        for group_key, group in self.reward_groups.items():
+            for rew_key, value in group.get_ema_stats().items():
+                result[f"reward.{group_key}/{rew_key}"] = value
+        return result
 
     def _reset(
         self, tensordict: TensorDictBase | None = None, **kwargs
@@ -358,27 +410,82 @@ class _EnvBase(EnvBase, RegistryMixin):
 
             self._reset_idx(env_ids)
             self.scene.reset(env_ids)
-            for callback in self._reset_callbacks:
-                callback(env_ids)
+            [callback(env_ids) for callback in self._reset_callbacks]
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
         tensordict.update(self.observation_spec.zero())
         tensordict.set("episode_id", self.episode_id.clone())
-        # self._compute_observation(tensordict)
         return tensordict
 
-    @abstractmethod
     def _reset_idx(self, env_ids: torch.Tensor):
-        raise NotImplementedError
+        init_state = self.command_manager.sample_init(env_ids)
+        if not isinstance(init_state, dict):
+            init_state = {"robot": init_state}
+        for key, value in init_state.items():
+            if value is not None:
+                self.scene.articulations[key].write_root_state_to_sim(
+                    value, env_ids=env_ids
+                )
+        self.stats[env_ids] = 0.0
 
-    def apply_action(self, substep: int):
-        for input_manager in self.input_managers.values():
-            input_manager.apply_action(substep)
+    def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
+        with ScopedTimer("simulation", sync=False):
+            with ScopedTimer("process_action", sync=False):
+                for input_key, input_manager in self.input_managers.items():
+                    if (action := tensordict.get(input_key)) is not None:
+                        input_manager.process_action(action)
 
-    def _compute_observation(self, tensordict: TensorDictBase) -> TensorDictBase:
-        for group_key, obs_group in self.observation_funcs.items():
-            obs_group.compute(tensordict, self.timestamp)
+            for substep in range(self.decimation):
+                with ScopedTimer("simulation_pre_step", sync=False):
+                    self.scene.zero_external_wrenches()
+                    self._apply_action(substep)
+                    [callback(substep) for callback in self._pre_step_callbacks]
+                    self.scene.write_data_to_sim()
+                with ScopedTimer("simulation_step", sync=False):
+                    self.sim.step(render=False)
+                with ScopedTimer("simulation_post_step", sync=False):
+                    self.scene.update(self.physics_dt)
+                    [callback(substep) for callback in self._post_step_callbacks]
+
+            with ScopedTimer("update_callbacks", sync=False):
+                [callback() for callback in self._update_callbacks]
+
+        if self.sim.has_gui():
+            self.sim.render()
+
+        self.episode_length_buf.add_(1)
+        self.timestamp += 1
+
+        tensordict = TensorDict({}, self.num_envs, device=self.device)
+
+        with ScopedTimer("reward", sync=False):
+            tensordict = self._compute_reward(tensordict)
+        with ScopedTimer("termination", sync=False):
+            tensordict = self._compute_termination(tensordict)
+        with ScopedTimer("command", sync=False):
+            self.command_manager.update()
+        with ScopedTimer("observation", sync=False):
+            tensordict = self._compute_observation(tensordict)
+
+        tensordict.set("episode_id", self.episode_id.clone())
+        tensordict["stats"] = self.stats.clone()
+
+        if self.sim.has_gui():
+            if self.backend == "isaac":
+                self.debug_draw.clear()
+            elif self.backend == "mjlab":
+                self.sim.viewer.clear()
+            [callback() for callback in self._debug_draw_callbacks]
+            if self.backend == "mjlab":
+                self.sim.viewer.update()
+
         return tensordict
+
+    def _apply_action(self, substep: int):
+        [
+            input_manager.apply_action(substep)
+            for input_manager in self.input_managers.values()
+        ]
 
     def _compute_reward(self, tensordict: TensorDictBase) -> TensorDictBase:
         if not self.reward_groups:
@@ -405,85 +512,43 @@ class _EnvBase(EnvBase, RegistryMixin):
         return tensordict
 
     def _compute_termination(self, tensordict: TensorDictBase) -> TensorDictBase:
-        truncated = (self.episode_length_buf[:, None] >= self.max_episode_length)
+        truncated = self.episode_length_buf[:, None] >= self.max_episode_length
         terminated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
         discount = torch.ones((self.num_envs, 1), device=self.device)
         for key, func in self.termination_funcs.items():
             result = func.compute(terminated)
             if isinstance(result, tuple):
-                t, d = result
+                term_value, term_discount = result
             else:
-                t, d = result, 1.0
+                term_value, term_discount = result, 1.0
             if not func.enabled:
-                t.zero_()
+                term_value.zero_()
             if func.is_timeout:
-                truncated |= t
+                truncated |= term_value
             else:
-                terminated |= t
-            discount *= d
-            self.stats["termination", key] = t.float()
+                terminated |= term_value
+            discount *= term_discount
+            self.stats["termination", key] = term_value.float()
         tensordict.set("truncated", truncated)
         tensordict.set("terminated", terminated)
         tensordict.set("done", terminated | truncated)
         tensordict.set("discount", discount)
         return tensordict
 
-    def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
-
-        with ScopedTimer("simulation", sync=False):
-            with ScopedTimer("process_action", sync=False):
-                for input_key, input_manager in self.input_managers.items():
-                    if (action := tensordict.get(input_key)) is not None:
-                        input_manager.process_action(action)
-            for substep in range(self.decimation):
-                with ScopedTimer("simulation_pre_step", sync=False):
-                    self.scene.zero_external_wrenches()
-                    self.apply_action(substep)
-                    for callback in self._pre_step_callbacks:
-                        callback(substep)
-                    self.scene.write_data_to_sim()
-                with ScopedTimer("simulation_step", sync=False):
-                    self.sim.step(render=False)
-                with ScopedTimer("simulation_post_step", sync=False):
-                    self.scene.update(self.physics_dt)
-                    for callback in self._post_step_callbacks:
-                        callback(substep)
-            with ScopedTimer("update_callbacks", sync=False):
-                for callback in self._update_callbacks:
-                    callback()
-
-        if self.sim.has_gui():
-            self.sim.render()
-
-        self.episode_length_buf.add_(1)
-        self.timestamp += 1
-
-        tensordict = TensorDict({}, self.num_envs, device=self.device)
-
-        with ScopedTimer("reward", sync=False):
-            tensordict = self._compute_reward(tensordict)
-
-        with ScopedTimer("termination", sync=False):
-            tensordict = self._compute_termination(tensordict)
-
-        # Note that command update is a special case
-        # it should take place after reward computation
-        with ScopedTimer("command", sync=False):
-            self.command_manager.update()
-
-        with ScopedTimer("observation", sync=False):
-            tensordict = self._compute_observation(tensordict)
-
-        tensordict.set("episode_id", self.episode_id.clone())
-        tensordict["stats"] = self.stats.clone()
-
-        if self.sim.has_gui():
-            if hasattr(self, "debug_draw"):  # isaac only
-                self.debug_draw.clear()
-            for callback in self._debug_draw_callbacks:
-                callback()
-
+    def _compute_observation(self, tensordict: TensorDictBase) -> TensorDictBase:
+        [
+            group.compute(tensordict, self.timestamp)
+            for group in self.observation_funcs.values()
+        ]
         return tensordict
+
+    @property
+    def ground(self):
+        if not hasattr(self, "_ground"):
+            self._ground = GroundQuery(
+                self.scene, self.backend, self.terrain_type, self.device
+            )
+        return self._ground
 
     @property
     def ground_mesh(self):
@@ -496,20 +561,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         return self.scene.ground_mesh
 
     def get_ground_height_at(self, pos: torch.Tensor) -> torch.Tensor:
-        if self.terrain_type == "plane":
-            return torch.zeros(pos.shape[:-1], device=self.device)
-        bshape = pos.shape[:-1]
-        ray_starts = pos.reshape(-1, 3)
-        ray_directions = torch.tensor([0.0, 0.0, -1.0], device=self.device)
-        ray_hits = raycast_mesh(
-            ray_starts=ray_starts.reshape(-1, 3),
-            ray_directions=ray_directions.expand(bshape.numel(), 3),
-            max_dist=100.0,
-            mesh=self.ground_mesh,
-            return_distance=False,
-        )[0]
-        ray_distance = (ray_hits - ray_starts).norm(dim=-1).nan_to_num(posinf=100.0)
-        return (ray_starts[:, 2] - ray_distance).to(pos.device).reshape(*bshape)
+        return self.ground.height_at(pos)
 
     # ------------------------------------------------------------------
     # Video recording
@@ -534,16 +586,14 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     def _set_seed(self, seed: int = -1):
         if self.backend == "isaac":
-            # set seed for replicator
             try:
                 import omni.replicator.core as rep
 
                 rep.set_global_seed(seed)
             except ModuleNotFoundError:
                 pass
-            # set seed for torch and other libraries
             return torch_utils.set_seed(seed)
-        elif self.backend == "mujoco":
+        if self.backend == "mujoco":
             torch.manual_seed(seed)
             np.random.seed(seed)
             return seed
@@ -552,31 +602,25 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.sim.render()
         if mode == "human":
             return None
-        elif mode == "rgb_array":
-            # Backend-specific rendering - only Isaac supports rgb_array via replicator
+        if mode == "rgb_array":
             if hasattr(self, "_rgb_annotator"):
-                # obtain the rgb data
                 rgb_data = self._rgb_annotator.get_data()
-                # convert to numpy array
                 rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(
                     *rgb_data.shape
                 )
-                # return the rgb data
                 return rgb_data[:, :, :3]
-            else:
-                raise NotImplementedError(
-                    f"rgb_array mode not supported for backend '{self.backend}'. "
-                    "Only Isaac backend supports rgb_array rendering."
-                )
-        else:
-            raise NotImplementedError(f"Render mode '{mode}' not supported.")
+            raise NotImplementedError(
+                f"rgb_array mode not supported for backend '{self.backend}'. "
+                "Only Isaac backend supports rgb_array rendering."
+            )
+        raise NotImplementedError(f"Render mode '{mode}' not supported.")
 
     def state_dict(self):
-        sd = super().state_dict()
-        sd["observation_spec"] = self.observation_spec
-        sd["action_spec"] = self.action_spec
-        sd["reward_spec"] = self.reward_spec
-        return sd
+        state_dict = super().state_dict()
+        state_dict["observation_spec"] = self.observation_spec
+        state_dict["action_spec"] = self.action_spec
+        state_dict["reward_spec"] = self.reward_spec
+        return state_dict
 
     def get_extra_state(self) -> dict:
         return dict(self.extra)
@@ -584,66 +628,10 @@ class _EnvBase(EnvBase, RegistryMixin):
     def close(self, *, raise_if_closed: bool = True):
         if not self.is_closed:
             if self.backend == "isaac":
-                # destructor is order-sensitive
                 del self.scene
-                # clear callbacks and instance
                 self.sim.clear_all_callbacks()
                 self.sim.clear_instance()
-                # update closing status
+            elif self.backend == "mjlab" and self.sim.has_gui():
+                self.sim.viewer.close()
             super().close(raise_if_closed=raise_if_closed)
 
-
-class RewardGroup:
-    def __init__(
-        self,
-        env: _EnvBase,
-        name: str,
-        funcs: OrderedDict[str, mdp.Reward],
-        enabled: bool = True,
-        compile: bool = False,
-    ):
-        self.env = env
-        self.name = name
-        self.funcs = funcs
-        self.enabled = enabled
-        self.compile = compile
-
-        self.enabled_rewards = sum([func.enabled for func in funcs.values()])
-        self.rew_buf = torch.zeros(
-            env.num_envs, self.enabled_rewards, device=env.device
-        )
-        # Local EMA buffers for per-reward statistics. Each entry stores a pair
-        # ``(ema_sum, ema_cnt)`` which are updated on every call to ``compute``.
-        self._ema: Dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-        for key in funcs.keys():
-            self._ema[key] = (
-                torch.zeros(1, device=env.device),
-                torch.zeros(1, device=env.device),
-            )
-        if compile:
-            self.compute = torch.compile(self.compute, fullgraph=True)
-
-    def compute(self) -> torch.Tensor:
-        """Compute the total reward for this group and update statistics.
-
-        Returns a tensor of shape ``[num_envs, 1]`` containing the sum of all
-        enabled reward terms in this group.
-        """
-        rewards = []
-        for key, func in self.funcs.items():
-            reward, count = func()
-            self.env.stats[self.name, key].add_(reward)
-            ema_sum, ema_cnt = self._ema[key]
-            ema_sum.mul_(EMA_DECAY).add_(reward.sum())
-            ema_cnt.mul_(EMA_DECAY).add_(count)
-            self._ema[key] = (ema_sum, ema_cnt)
-            if func.enabled:
-                rewards.append(reward)
-        if len(rewards):
-            self.rew_buf[:] = torch.cat(rewards, 1)
-        return self.rew_buf.sum(dim=1, keepdim=True)
-
-    @property
-    def ema(self) -> Dict[str, tuple[torch.Tensor, torch.Tensor]]:
-        """Raw EMA buffers for this group, keyed by reward name."""
-        return self._ema
