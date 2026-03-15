@@ -1,3 +1,4 @@
+from active_adaptation import ROBOT_MODEL_DIR
 from active_adaptation.assets import AssetCfg
 from active_adaptation.envs.backends.isaac.adapter import (
     IsaacSceneAdapter,
@@ -50,9 +51,8 @@ class IsaacBackendEnv(_EnvBase):
             prim_path="/World/skyLight",
             spawn=sim_utils.DomeLightCfg(
                 intensity=750.0,
-                texture_file=(
-                    f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/"
-                    "kloofendal_43d_clear_puresky_4k.hdr"
+                texture_file=str(
+                    ROBOT_MODEL_DIR / "scene" / "kloofendal_43d_clear_puresky_4k.hdr"
                 ),
             ),
         )

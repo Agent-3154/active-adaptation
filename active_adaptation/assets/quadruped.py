@@ -1,6 +1,5 @@
-import os
 from pathlib import Path
-import active_adaptation
+from active_adaptation import ROBOT_MODEL_DIR
 from active_adaptation.assets.asset_cfg import (
     AssetCfg,
     InitialStateCfg,
@@ -13,7 +12,6 @@ from active_adaptation.utils.symmetry import mirrored
 registry = Registry.instance()
 
 FILE_DIR = Path(__file__).parent
-ROBOT_MODEL_DIR = Path(active_adaptation.__path__[0]).parent / ".cache" / "aa-robot-models"
 
 UNITREE_GO2_CFG = AssetCfg(
     mjcf_path=FILE_DIR / "Go2" / "mjcf" / "go2.xml",
@@ -46,41 +44,27 @@ UNITREE_GO2_CFG = AssetCfg(
             armature=0.01,
         ),
     },
-    joint_symmetry_mapping = { 
+    joint_symmetry_mapping = mirrored({ 
         "FL_hip_joint": (-1, "FR_hip_joint"),
-        "FR_hip_joint": (-1, "FL_hip_joint"),
         "RL_hip_joint": (-1, "RR_hip_joint"),
-        "RR_hip_joint": (-1, "RL_hip_joint"),
         "FL_thigh_joint": (1, "FR_thigh_joint"),
-        "FR_thigh_joint": (1, "FL_thigh_joint"),
         "RL_thigh_joint": (1, "RR_thigh_joint"),
-        "RR_thigh_joint": (1, "RL_thigh_joint"),
         "FL_calf_joint": (1, "FR_calf_joint"),
-        "FR_calf_joint": (1, "FL_calf_joint"),
         "RL_calf_joint": (1, "RR_calf_joint"),
-        "RR_calf_joint": (1, "RL_calf_joint")
-    },
-    spatial_symmetry_mapping = {
+    }),
+    spatial_symmetry_mapping = mirrored({
         "FL_hip": "FR_hip",
-        "FR_hip": "FL_hip",
         "RL_hip": "RR_hip",
-        "RR_hip": "RL_hip",
         "FL_thigh": "FR_thigh",
-        "FR_thigh": "FL_thigh",
         "RL_thigh": "RR_thigh",
-        "RR_thigh": "RL_thigh",
         "FL_calf": "FR_calf",
-        "FR_calf": "FL_calf",
         "RL_calf": "RR_calf",
-        "RR_calf": "RL_calf",
         "FL_foot": "FR_foot",
-        "FR_foot": "FL_foot",
         "RL_foot": "RR_foot",
-        "RR_foot": "RL_foot",
         "base": "base",
         "Head_upper": "Head_upper",
         "Head_lower": "Head_lower",
-    },
+    }),
     sensors_isaaclab=[
         ContactSensorCfg(
             name="contact_forces",

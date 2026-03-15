@@ -62,6 +62,7 @@ if is_distributed():
 CONFIG_PATH = Path(__file__).parent.parent / "cfg"
 ASSET_PATH = Path(__file__).parent / "assets"
 SCRIPT_PATH = Path(__file__).parent.parent / "scripts"
+ROBOT_MODEL_DIR = CACHE_DIR / "aa-robot-models"
 
 
 def set_backend(backend: str):
