@@ -165,7 +165,17 @@ class IsaacSceneAdapter(SceneAdapter):
     
     def __init__(self, scene: "InteractiveScene"):
         self._scene = scene
-    
+
+    @override
+    def zero_external_wrenches(self) -> None:
+        for asset in self._scene.articulations.values():
+            # if asset.has_external_wrench:
+            #     asset._external_force_b.zero_()
+            #     asset._external_torque_b.zero_()
+            #     asset.has_external_wrench = False
+            asset.instantaneous_wrench_composer.reset()
+            asset.permanent_wrench_composer.reset()
+
     @property
     def articulations(self):
         return self._scene.articulations

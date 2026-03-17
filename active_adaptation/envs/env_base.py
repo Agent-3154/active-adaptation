@@ -373,7 +373,10 @@ class _EnvBase(EnvBase):
             rewards *= self.step_dt
 
         self.stats["episode_len"][:] = self.episode_length_buf.unsqueeze(1)
-        self.stats["success"][:] = (self.episode_length_buf >= self.max_episode_length * 0.9).unsqueeze(1).float()
+        self.stats["success"][:] = (
+            (self.episode_length_buf.unsqueeze(1) >= self.max_episode_length * 0.9)
+            .float()
+        )
         tensordict.set("reward", rewards)
         return tensordict
     
