@@ -1,0 +1,69 @@
+# @package task
+# Flat-ground deployment: load InstinctLab ONNX checkpoint and verify
+# that observation/action pipeline is correct by watching the robot walk.
+project: sirius
+name: G1FlatDeploy
+
+viewer:
+  resolution: [1280, 720]
+  lookat: [0., 0., 0.]
+  eye: [4.0, 4.0, 4.0]
+
+robot:
+  name: g1_instinctlab
+
+terrain: plane
+
+num_envs: 1
+max_episode_length: 100000
+
+sim:
+  step_dt: 0.02
+  isaac_physics_dt: 0.005
+
+input:
+  action:
+    class: JointPosition
+    action_scaling:
+      .*_hip_yaw_joint: 0.5475464652142303
+      .*_hip_roll_joint: 0.3506614663788243
+      .*_hip_pitch_joint: 0.5475464652142303
+      .*_knee_joint: 0.3506614663788243
+      .*_ankle_pitch_joint: 0.43857731392336724
+      .*_ankle_roll_joint: 0.43857731392336724
+      waist_roll_joint: 0.43857731392336724
+      waist_pitch_joint: 0.43857731392336724
+      waist_yaw_joint: 0.5475464652142303
+      .*_shoulder_pitch_joint: 0.43857731392336724
+      .*_shoulder_roll_joint: 0.43857731392336724
+      .*_shoulder_yaw_joint: 0.43857731392336724
+      .*_elbow_joint: 0.43857731392336724
+      .*_wrist_roll_joint: 0.43857731392336724
+      .*_wrist_pitch_joint: 0.07450087032950714
+      .*_wrist_yaw_joint: 0.07450087032950714
+    max_delay: 0
+    alpha_range: [1.0, 1.0]
+
+command:
+  class: Twist
+  linvel_x_range: [0.5, 0.5]
+  linvel_y_range: [0.0, 0.0]
+  angvel_range: [0.0, 0.0]
+  yaw_stiffness_range: [1.0, 1.0]
+  use_stiffness_ratio: 0.0
+  base_height_range: [0.73, 0.74]
+  stand_prob: 0.0
+
+observation:
+  policy:
+    command:
+
+reward:
+  loco:
+    survival: {weight: 1.0}
+
+termination:
+  crash:
+    body_names_expr:
+    - "pelvis"
+    - "torso_link"

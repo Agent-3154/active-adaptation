@@ -106,7 +106,7 @@ def main(cfg: DictConfig):
     # ---- Load full DA3 for depth (we'll feed it 504x504) ----
     print("Loading full DA3 model for depth estimation...")
     from depth_anything_3.api import DepthAnything3
-    da3_full = DepthAnything3(model_name="da3-small")
+    da3_full = DepthAnything3.from_pretrained("depth-anything/DA3-SMALL")
     da3_full = da3_full.to(device)
     da3_full.eval()
 

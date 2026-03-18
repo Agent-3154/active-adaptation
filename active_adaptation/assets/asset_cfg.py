@@ -233,6 +233,7 @@ class AssetCfg:
     
     mjcf_path: str | Path = MISSING
     usd_path: str | Path = MISSING
+    urdf_path: Optional[str | Path] = None
     init_state: InitialStateCfg = MISSING
     key_frames: Optional[Dict[str, InitialStateCfg]] = None
     actuators: Dict[str, ActuatorCfg] = MISSING
@@ -316,29 +317,49 @@ class AssetCfg:
                 name: actuator.isaaclab() for name, actuator in self.actuators.items()
             }
         
-        return ArticulationCfg(
-            spawn=sim_utils.UsdFileCfg(
+        rigid_props = sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            retain_accelerations=False,
+            linear_damping=0.002,
+            angular_damping=0.002,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=1.0,
+        )
+        articulation_props = sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=self.self_collisions,
+            solver_position_iteration_count=4,
+            solver_velocity_iteration_count=1,
+        )
+        collision_props = sim_utils.CollisionPropertiesCfg(
+            contact_offset=0.02,
+            rest_offset=0.0,
+        )
+
+        if self.urdf_path is not None:
+            spawn_cfg = sim_utils.UrdfFileCfg(
+                asset_path=str(self.urdf_path),
+                activate_contact_sensors=True,
+                rigid_props=rigid_props,
+                articulation_props=articulation_props,
+                collision_props=collision_props,
+                replace_cylinders_with_capsules=False,
+                merge_fixed_joints=False,
+                fix_base=False,
+                self_collision=self.self_collisions,
+            )
+            spawn_cfg.joint_drive.gains.stiffness = None
+        else:
+            spawn_cfg = sim_utils.UsdFileCfg(
                 usd_path=str(self.usd_path),
                 activate_contact_sensors=True,
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    disable_gravity=False,
-                    retain_accelerations=False,
-                    linear_damping=0.002,
-                    angular_damping=0.002,
-                    max_linear_velocity=1000.0,
-                    max_angular_velocity=1000.0,
-                    max_depenetration_velocity=1.0,
-                ),
-                articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                    enabled_self_collisions=self.self_collisions,
-                    solver_position_iteration_count=4,
-                    solver_velocity_iteration_count=1,
-                ),
-                collision_props=sim_utils.CollisionPropertiesCfg(
-                    contact_offset=0.02,
-                    rest_offset=0.0,
-                ),
-            ),
+                rigid_props=rigid_props,
+                articulation_props=articulation_props,
+                collision_props=collision_props,
+            )
+
+        return ArticulationCfg(
+            spawn=spawn_cfg,
             init_state=self.init_state.isaaclab(),
             actuators=actuators,
             soft_joint_pos_limit_factor=0.9,

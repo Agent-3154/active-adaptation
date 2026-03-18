@@ -230,3 +230,124 @@ G1_WAIST_UNLOCKED_CFG = AssetCfg( # no wrist pitch and yaw
 )
 registry.register("asset", "g1_waist_unlocked", G1_WAIST_UNLOCKED_CFG)
 
+
+INSTINCTLAB_URDF = (
+    Path(__file__).resolve().parents[3]
+    / "InstinctLab" / "source" / "instinctlab" / "instinctlab"
+    / "assets" / "resources" / "unitree_g1" / "urdf"
+    / "g1_29dof_torsobase_simplified.urdf"
+)
+
+G1_INSTINCTLAB_CFG = AssetCfg(
+    mjcf_path=FILE_DIR / "G1" / "mjcf" / "g1.xml",
+    usd_path=FILE_DIR / "G1" / "waist_unlocked.usd",
+    urdf_path=INSTINCTLAB_URDF,
+    init_state=InitialStateCfg(
+        pos=(0.0, 0.0, 0.9),
+        joint_pos={
+            ".*_hip_pitch_joint": -0.312,
+            ".*_knee_joint": 0.669,
+            ".*_ankle_pitch_joint": -0.363,
+            ".*_elbow_joint": 0.6,
+            "left_shoulder_roll_joint": 0.2,
+            "left_shoulder_pitch_joint": 0.2,
+            "right_shoulder_roll_joint": -0.2,
+            "right_shoulder_pitch_joint": 0.2,
+        },
+        joint_vel={".*": 0.0},
+    ),
+    self_collisions=False,
+    actuators={
+        "base_legs": ActuatorCfg(
+            joint_names_expr=".*",
+            effort_limit={
+                ".*_hip_yaw_joint.*": 88.0,
+                ".*_hip_roll_joint.*": 139.0,
+                ".*_hip_pitch_joint.*": 88.0,
+                ".*_knee.*": 139.0,
+                ".*_ankle.*": 50,
+                ".*_shoulder.*": 25,
+                ".*_elbow.*": 25,
+                ".*_wrist_roll_joint": 25.0,
+                ".*_wrist_pitch_joint": 5.0,
+                ".*_wrist_yaw_joint": 5.0,
+                "waist.*": 50,
+            },
+            velocity_limit={
+                ".*_hip_yaw_joint": 32.0,
+                ".*_hip_roll_joint": 20.0,
+                ".*_hip_pitch_joint": 32.0,
+                ".*_knee_joint": 20.0,
+                ".*_ankle.*": 37.0,
+                "waist.*": 37.0,
+                ".*_shoulder_pitch_joint": 37.0,
+                ".*_shoulder_roll_joint": 37.0,
+                ".*_shoulder_yaw_joint": 37.0,
+                ".*_elbow_joint": 37.0,
+                ".*_wrist_roll_joint": 37.0,
+                ".*_wrist_pitch_joint": 22.0,
+                ".*_wrist_yaw_joint": 22.0,
+            },
+            stiffness={
+                ".*_hip_yaw_joint": STIFFNESS_7520_14,
+                ".*_hip_roll_joint": STIFFNESS_7520_22,
+                ".*_hip_pitch_joint": STIFFNESS_7520_14,
+                ".*_knee_joint": STIFFNESS_7520_22,
+                ".*ankle.*": 2.0 * STIFFNESS_5020,
+                "waist_roll_joint": 2.0 * STIFFNESS_5020,
+                "waist_pitch_joint": 2.0 * STIFFNESS_5020,
+                "waist_yaw_joint": STIFFNESS_7520_14,
+                ".*_shoulder_pitch_joint": STIFFNESS_5020,
+                ".*_shoulder_roll_joint": STIFFNESS_5020,
+                ".*_shoulder_yaw_joint": STIFFNESS_5020,
+                ".*_elbow_joint": STIFFNESS_5020,
+                ".*_wrist_roll_joint": STIFFNESS_5020,
+                ".*_wrist_pitch_joint": STIFFNESS_4010,
+                ".*_wrist_yaw_joint": STIFFNESS_4010,
+            },
+            damping={
+                ".*_hip_pitch_joint": DAMPING_7520_14,
+                ".*_hip_roll_joint": DAMPING_7520_22,
+                ".*_hip_yaw_joint": DAMPING_7520_14,
+                ".*_knee_joint": DAMPING_7520_22,
+                ".*ankle.*": 2.0 * DAMPING_5020,
+                "waist_roll_joint": 2.0 * DAMPING_5020,
+                "waist_pitch_joint": 2.0 * DAMPING_5020,
+                "waist_yaw_joint": DAMPING_7520_14,
+                ".*_shoulder_pitch_joint": DAMPING_5020,
+                ".*_shoulder_roll_joint": DAMPING_5020,
+                ".*_shoulder_yaw_joint": DAMPING_5020,
+                ".*_elbow_joint": DAMPING_5020,
+                ".*_wrist_roll_joint": DAMPING_5020,
+                ".*_wrist_pitch_joint": DAMPING_4010,
+                ".*_wrist_yaw_joint": DAMPING_4010,
+            },
+            armature={
+                ".*_hip_pitch_joint": ARMATURE_7520_14,
+                ".*_hip_roll_joint": ARMATURE_7520_22,
+                ".*_hip_yaw_joint": ARMATURE_7520_14,
+                ".*_knee_joint": ARMATURE_7520_22,
+                ".*ankle.*": 2.0 * ARMATURE_5020,
+                "waist_roll_joint": 2.0 * ARMATURE_5020,
+                "waist_pitch_joint": 2.0 * ARMATURE_5020,
+                "waist_yaw_joint": ARMATURE_7520_14,
+                ".*_shoulder_pitch_joint": ARMATURE_5020,
+                ".*_shoulder_roll_joint": ARMATURE_5020,
+                ".*_shoulder_yaw_joint": ARMATURE_5020,
+                ".*_elbow_joint": ARMATURE_5020,
+                ".*_wrist_roll_joint": ARMATURE_5020,
+                ".*_wrist_pitch_joint": ARMATURE_4010,
+                ".*_wrist_yaw_joint": ARMATURE_4010,
+            },
+            friction=0.01,
+        ),
+    },
+    joint_symmetry_mapping=G1_WAIST_UNLOCKED_CFG.joint_symmetry_mapping,
+    spatial_symmetry_mapping=G1_WAIST_UNLOCKED_CFG.spatial_symmetry_mapping,
+    sensors_isaaclab=G1_WAIST_UNLOCKED_CFG.sensors_isaaclab,
+    sensors_mjlab=G1_WAIST_UNLOCKED_CFG.sensors_mjlab,
+    joint_names_isaac=G1_WAIST_UNLOCKED_CFG.joint_names_isaac,
+    body_names_isaac=G1_WAIST_UNLOCKED_CFG.body_names_isaac,
+)
+registry.register("asset", "g1_instinctlab", G1_INSTINCTLAB_CFG)
+
