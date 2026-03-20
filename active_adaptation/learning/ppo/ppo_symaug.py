@@ -61,6 +61,7 @@ from active_adaptation.learning.ppo.common import (
     Actor,
 )
 from active_adaptation.learning.utils.opt import OptimizerGroup
+from active_adaptation.learning.utils.distributed import check_parameters
 
 import active_adaptation
 import torch.distributed as distr
@@ -267,6 +268,11 @@ class PPOPolicy(TensorDictModuleBase):
         infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
         if active_adaptation.is_distributed():
             self.vecnorm.module.synchronize(mode="broadcast")
+            if self.cfg.debug:
+                actor_diff = check_parameters(self.actor)
+                critic_diff = check_parameters(self.critic)
+                infos["actor/diff"] = actor_diff
+                infos["critic/diff"] = critic_diff
         return dict(sorted(infos.items()))
 
     @torch.no_grad()
@@ -349,7 +355,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.opt.zero_grad()
         loss.backward()
 
-        if active_adaptation.is_distributed() and not USE_DDP:
+        if active_adaptation.is_distributed() and not self.cfg.use_ddp:
             for param in self.actor.parameters():
                 distr.all_reduce(param.grad, op=distr.ReduceOp.SUM)
                 param.grad /= self.world_size
