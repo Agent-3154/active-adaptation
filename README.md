@@ -83,6 +83,39 @@ Projects using this codebase:
    pip install -e . 
    ```
 
+## Asset download and placement
+
+Some robots and scene files are **not** shipped inside this repository (to keep the clone small). They are loaded from a fixed cache directory next to the package.
+
+### Where files must live
+
+After `pip install -e .`, the code resolves assets from:
+
+**`<active-adaptation repo root>/.cache/aa-robot-models/`**
+
+That path is `ROBOT_MODEL_DIR` in code (`CACHE_DIR` is the repo’s `.cache/` folder). Do not rename `aa-robot-models` unless you also change the code.
+
+### What to download
+
+- **Source:** [Hugging Face dataset `btx0424/aa-robot-models`](https://huggingface.co/datasets/btx0424/aa-robot-models)
+- **Layout under `aa-robot-models/`** (paths used today):
+  - `a2/` — Unitree A2 MJCF/USD (`a2.xml`, `a2.usd`)
+  - `b2/` — Unitree B2 MJCF/USD (`b2.xml`, `b2_flattened.usda`)
+  - `scene/` — e.g. `kloofendal_43d_clear_puresky_4k.hdr` (dome light / sky for the Isaac backend)
+
+If the archive or clone has an extra top-level folder, unpack or move contents so those directories sit **directly** under `.cache/aa-robot-models/`.
+
+### How to get them
+
+From the **root of the cloned `active-adaptation` repo** (where `.cache/` is created automatically):
+
+```bash
+# Option A: Hugging Face CLI (recommended)
+pip install -U "huggingface_hub[cli]"
+huggingface-cli download btx0424/aa-robot-models --repo-type dataset --local-dir .cache/aa-robot-models
+```
+
+You can instead **clone or copy** the dataset contents into `.cache/aa-robot-models/`, or put the data elsewhere and replace `.cache/aa-robot-models` with a **symlink** to that folder.
 
 ## CLI commands
 
