@@ -62,8 +62,6 @@ from active_adaptation.learning.ppo.common import (
 )
 from active_adaptation.learning.utils.opt import OptimizerGroup
 
-USE_DDP = True
-
 import active_adaptation
 import torch.distributed as distr
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -79,14 +77,15 @@ class PPOConfig:
     desired_kl: Union[float, None] = None
     clip_param: float = 0.2
     entropy_coef: float = 0.002
+
     spo: bool = False # use Simple Policy Optimization Loss
     muon: bool = False # use Muon optimizer
-    
     aux_coef: float = 0.0 # loss coefficient for auxiliary prediction loss
-    value_norm: bool = False
+    
     compile: bool = False
+    use_ddp: bool = True
+    debug: bool = False # enable correctness checkers
 
-    checkpoint_path: Union[str, None] = None
     in_keys: Tuple[str, ...] = (OBS_KEY,)
 
 cs = ConfigStore.instance()
@@ -156,9 +155,31 @@ class PPOPolicy(TensorDictModuleBase):
         self.actor(fake_input)
         self.critic(fake_input)
 
+        def init_(module):
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, 0.1)
+                nn.init.constant_(module.bias, 0.)
+            elif isinstance(module, Actor):
+                nn.init.orthogonal_(module.actor_mean.weight, 0.01)
+                nn.init.constant_(module.actor_mean.bias, 0.)
+        
+        self.actor.apply(init_)
+        self.critic.apply(init_)
+
+        if active_adaptation.is_distributed():
+            if self.cfg.use_ddp:
+                self.actor = DDP(self.actor)
+                self.critic = DDP(self.critic)
+            else:
+                for param in self.actor.parameters():
+                    distr.broadcast(param, src=0)
+                for param in self.critic.parameters():
+                    distr.broadcast(param, src=0)
+        self.world_size = active_adaptation.get_world_size()
+            
         def is_matrix_shaped(param: torch.Tensor) -> bool:
             return param.dim() >= 2
-
+        
         if self.cfg.muon:
             muon = torch.optim.Muon([
                 {"params": [p for p in self.actor.parameters() if is_matrix_shaped(p)]},
@@ -179,29 +200,7 @@ class PPOPolicy(TensorDictModuleBase):
                 lr=cfg.lr,
                 weight_decay=0.01
             )
-        
-        def init_(module):
-            if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, 0.1)
-                nn.init.constant_(module.bias, 0.)
-            elif isinstance(module, Actor):
-                nn.init.orthogonal_(module.actor_mean.weight, 0.01)
-                nn.init.constant_(module.actor_mean.bias, 0.)
-        
-        self.actor.apply(init_)
-        self.critic.apply(init_)
 
-        if active_adaptation.is_distributed():
-            if USE_DDP:
-                self.actor = DDP(self.actor)
-                self.critic = DDP(self.critic)
-            else:
-                for param in self.actor.parameters():
-                    distr.broadcast(param, src=0)
-                for param in self.critic.parameters():
-                    distr.broadcast(param, src=0)
-            self.world_size = active_adaptation.get_world_size()
-            
         self.update = self._update
         if self.cfg.compile and not active_adaptation.is_distributed():
             # TODO: compile for multi-gpu training?

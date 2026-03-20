@@ -23,17 +23,12 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.distributions as D
 import torch.utils._pytree as pytree
-import warnings
 
 from torchrl.data import Composite, TensorSpec
 from torchrl.modules import ProbabilisticActor
-from torchrl.envs.transforms import CatTensors
 from tensordict import TensorDict
 from tensordict.nn import (
-    TensorDictModuleBase,
     TensorDictModule as Mod,
     TensorDictSequential as Seq,
 )
@@ -41,7 +36,6 @@ from tensordict.nn import (
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
 from typing import Union, Tuple
-from collections import OrderedDict
 
 from active_adaptation.learning.modules import (
     VecNorm, 
@@ -49,7 +43,8 @@ from active_adaptation.learning.modules import (
     SymmetryWrapper,
 )
 from .common import *
-from .ppo_base import PPOBase
+from active_adaptation.learning.ppo.ppo_base import PPOBase
+from active_adaptation.learning.utils.distributed import check_parameters
 
 import active_adaptation
 import torch.distributed as distr
@@ -66,7 +61,6 @@ class PPOConfig:
     desired_kl: Union[float, None] = None
     clip_param: float = 0.2
     entropy_coef: float = 0.002
-    layer_norm: Union[str, None] = "before"
 
     # symmetry options
     symnet: bool = False # use symmetry wrapper to wrap the policy and critic
@@ -74,8 +68,8 @@ class PPOConfig:
 
     compile: bool = False
     use_ddp: bool = True
+    debug: bool = False # enable correctness checkers
 
-    checkpoint_path: Union[str, None] = None
     in_keys: Tuple[str, ...] = (OBS_KEY,)
 
 
@@ -160,7 +154,6 @@ class PPOPolicy(PPOBase):
         self.critic.apply(init_)
 
         if active_adaptation.is_distributed():
-            self.world_size = active_adaptation.get_world_size()
             if self.cfg.use_ddp:
                 self.actor = DDP(self.actor)
                 self.critic = DDP(self.critic)
@@ -169,6 +162,7 @@ class PPOPolicy(PPOBase):
                     distr.broadcast(param, src=0)
                 for param in self.critic.parameters():
                     distr.broadcast(param, src=0)
+        self.world_size = active_adaptation.get_world_size()
         
         self.opt = torch.optim.Adam(
             [
@@ -208,7 +202,7 @@ class PPOPolicy(PPOBase):
         
         action = tensordict[ACTION_KEY]
         adv_unnormalized = tensordict["adv"]
-        log_probs_before = tensordict["sample_log_prob"]
+        log_probs_before = tensordict["action_log_prob"]
         tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
 
         for epoch in range(self.cfg.ppo_epochs):
@@ -224,6 +218,7 @@ class PPOPolicy(PPOBase):
                     elif kl < self.cfg.desired_kl / 2.0 and kl > 0.0:
                         actor_lr = min(1e-3, actor_lr * 1.5)
                     self.opt.param_groups[0]["lr"] = actor_lr
+            
         
         with torch.no_grad():
             tensordict_ = self.actor(tensordict.copy())
@@ -241,19 +236,23 @@ class PPOPolicy(PPOBase):
         infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
         infos["critic/valid_ratio"] = valid_ratio.item()
 
-        if active_adaptation.is_distributed():
+        if active_adaptation.is_distributed() and active_adaptation.is_main_process():
             loc_diffs, scale_diffs = check_vecnorm_divergence(self.vecnorm[0].module)
-            if active_adaptation.is_main_process():
-                infos["vecnorm/loc_diff_max"] = max(loc_diffs)
-                infos["vecnorm/scale_diff_max"] = max(scale_diffs)
-                infos["vecnorm/loc_diff_mean"] = sum(loc_diffs) / len(loc_diffs)
-                infos["vecnorm/scale_diff_mean"] = sum(scale_diffs) / len(scale_diffs)
+            infos["vecnorm/loc_diff_max"] = max(loc_diffs)
+            infos["vecnorm/scale_diff_max"] = max(scale_diffs)
+            infos["vecnorm/loc_diff_mean"] = sum(loc_diffs) / len(loc_diffs)
+            infos["vecnorm/scale_diff_mean"] = sum(scale_diffs) / len(scale_diffs)
             self.vecnorm[0].module.synchronize(mode="broadcast")
+            if self.cfg.debug:
+                actor_diff = check_parameters(self.actor)
+                critic_diff = check_parameters(self.critic)
+                infos["actor/diff"] = actor_diff
+                infos["critic/diff"] = critic_diff
         return dict(sorted(infos.items()))
 
     def _update(self, tensordict: TensorDict):
         action_data = tensordict[ACTION_KEY]
-        log_probs_data = tensordict["sample_log_prob"]
+        log_probs_data = tensordict["action_log_prob"]
         
         valid = (~tensordict["is_init"])
         valid_cnt = valid.sum()

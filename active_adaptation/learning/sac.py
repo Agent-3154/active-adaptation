@@ -219,12 +219,12 @@ class SAC(TensorDictModuleBase):
         losses["encoder_grad_norm"] = nn.utils.clip_grad_norm_(self.encoder_priv.parameters(), 2.)
         self.opt_actor.step()
 
-        losses["alpha_loss"] = -(self.log_alpha.exp() * (tensordict["sample_log_prob"].detach() + self.target_entropy)).mean()
+        losses["alpha_loss"] = -(self.log_alpha.exp() * (tensordict["action_log_prob"].detach() + self.target_entropy)).mean()
         self.opt_alpha.zero_grad()
         losses["alpha_loss"].backward()
         self.opt_alpha.step()
 
-        losses["entropy"] = -tensordict["sample_log_prob"].mean()
+        losses["entropy"] = -tensordict["action_log_prob"].mean()
         losses["q_taken"] = tensordict["q_taken"].mean()
 
         return TensorDict(losses, [])
@@ -235,7 +235,7 @@ class SAC(TensorDictModuleBase):
         action = dist.rsample()
         log_prob = dist.log_prob(action).unsqueeze(-1)
         tensordict[ACTION_KEY] = action
-        tensordict["sample_log_prob"] = log_prob
+        tensordict["action_log_prob"] = log_prob
         with hold_out_net(self.qs):
             self.qs(tensordict)
         q = 0.5 * (tensordict["Q1"] + tensordict["Q2"])
@@ -249,7 +249,7 @@ class SAC(TensorDictModuleBase):
             self.encoder_priv(tensordict["next"])
             self.actor(tensordict["next"])
             self.qs_ema(tensordict["next"])
-            entropy_bonus = - self.log_alpha.exp() * tensordict["next", "sample_log_prob"].unsqueeze(-1)
+            entropy_bonus = - self.log_alpha.exp() * tensordict["next", "action_log_prob"].unsqueeze(-1)
             next_q = 0.5 * (tensordict["next", "Q1"] + tensordict["next", "Q2"])
             next_v = self.v(tensordict["next"])["V"]
             next_q = torch.where(next_v > next_q, next_q.lerp(next_v, 0.2), next_q)

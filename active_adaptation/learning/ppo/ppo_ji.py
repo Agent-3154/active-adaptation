@@ -263,7 +263,7 @@ class PPOPolicy(ModBase):
         entropy = dist.entropy().mean()
 
         adv = tensordict["adv"]
-        ratio = torch.exp(log_probs - tensordict["sample_log_prob"]).unsqueeze(-1)
+        ratio = torch.exp(log_probs - tensordict["action_log_prob"]).unsqueeze(-1)
         surr1 = adv * ratio
         surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
         losses["actor/policy_loss"] = - torch.mean(torch.min(surr1, surr2))
