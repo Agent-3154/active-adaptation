@@ -190,7 +190,8 @@ class PPOPolicy(ModBase):
         num_envs = self.observation_spec.shape[0]
         return TensorDictPrimer(
             {"estimator_hx": UnboundedContinuous((num_envs, 128), device=self.device)},
-            reset_key="done"
+            reset_key="done",
+            expand_specs=False,
         )
     
     def get_rollout_policy(self, mode: str="train"):

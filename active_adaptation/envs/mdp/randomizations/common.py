@@ -4,7 +4,7 @@ import logging
 from typing import Union, Dict, Tuple, Optional
 
 import active_adaptation
-from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
+from active_adaptation.utils.math import quat_rotate_inverse
 
 try:
     import isaaclab.utils.string as string_utils
@@ -149,6 +149,245 @@ class motor_params(Randomization):
             low, range = self.ranges[key]
             values = torch.rand(len(env_ids), len(indices), device=self.device) * range + low
             self.write_func[key](values, indices, env_ids)
+
+
+class motor_params_implicit(Randomization):
+    supported_backends = ("isaac", "mjlab")
+
+    def __init__(
+        self,
+        env,
+        stiffness_range: Optional[NestedRangeType] = None,
+        damping_range: Optional[NestedRangeType] = None,
+        armature_range: Optional[NestedRangeType] = None,
+        friction_range: Optional[NestedRangeType] = None,
+    ):
+        super().__init__(env)
+        self.asset = self.env.scene.articulations["robot"]
+        self.stiffness_range = dict(stiffness_range) if stiffness_range is not None else None
+        self.damping_range = dict(damping_range) if damping_range is not None else None
+        self.armature_range = dict(armature_range) if armature_range is not None else None
+        self.friction_range = dict(friction_range) if friction_range is not None else None
+
+        if self.env.backend == "mjlab":
+            self._init_mjlab()
+        elif self.env.backend == "isaac":
+            self._init_isaac()
+
+    def _init_isaac(self):
+        if self.stiffness_range is not None:
+            ids, _, value = string_utils.resolve_matching_names_values(
+                self.stiffness_range, self.asset.joint_names
+            )
+            self.stiffness_id = torch.tensor(ids, device=self.device)
+            self.stiffness_default = self.asset.data.joint_stiffness[0, self.stiffness_id]
+            low, high = (
+                torch.tensor(value, device=self.device) * self.stiffness_default.unsqueeze(1)
+            ).unbind(1)
+            self.stiffness_low = low
+            self.stiffness_scale = high - low
+
+        if self.damping_range is not None:
+            ids, _, value = string_utils.resolve_matching_names_values(
+                self.damping_range, self.asset.joint_names
+            )
+            self.damping_id = torch.tensor(ids, device=self.device)
+            self.damping_default = self.asset.data.joint_damping[0, self.damping_id]
+            low, high = (
+                torch.tensor(value, device=self.device) * self.damping_default.unsqueeze(1)
+            ).unbind(1)
+            self.damping_low = low
+            self.damping_scale = high - low
+
+        if self.armature_range is not None:
+            ids, _, value = string_utils.resolve_matching_names_values(
+                self.armature_range, self.asset.joint_names
+            )
+            self.armature_id = torch.tensor(ids, device=self.device)
+            low, high = torch.tensor(value, device=self.device).unbind(1)
+            self.armature_low = low
+            self.armature_scale = high - low
+
+        if self.friction_range is not None:
+            ids, _, value = string_utils.resolve_matching_names_values(
+                self.friction_range, self.asset.joint_names
+            )
+            self.friction_id = torch.tensor(ids, device=self.device)
+            low, high = torch.tensor(value, device=self.device).unbind(1)
+            self.friction_low = low
+            self.friction_scale = high - low
+
+    def _init_mjlab(self):
+        _mjlab_expand_model_fields(
+            self.env,
+            "actuator_gainprm",
+            "actuator_biasprm",
+            "dof_armature",
+            "dof_frictionloss",
+        )
+        _mjlab_ensure_recompute_fields_expanded(self.env, RecomputeLevel.set_const_0)
+        self.model = self.env.sim.model
+
+        if self.stiffness_range is not None:
+            kp_ids, _, kp_ranges = string_utils.resolve_matching_names_values(
+                self.stiffness_range, self.asset.actuator_names
+            )
+            self.kp_ctrl_ids = self.asset.indexing.ctrl_ids[
+                torch.tensor(kp_ids, device=self.device, dtype=torch.long)
+            ]
+            default_gainprm = self.env.sim.get_default_field("actuator_gainprm")
+            default_biasprm = self.env.sim.get_default_field("actuator_biasprm")
+            self.kp_gain_def = default_gainprm[self.kp_ctrl_ids, 0]
+            self.kp_bias_def = default_biasprm[self.kp_ctrl_ids, 1]
+            kp_low, kp_high = torch.tensor(kp_ranges, device=self.device).unbind(1)
+            self._validate_log_uniform_range("stiffness_range", kp_low, kp_high)
+            self.kp_low = kp_low
+            self.kp_high = kp_high
+        else:
+            self.kp_ctrl_ids = torch.empty(0, device=self.device, dtype=torch.long)
+
+        if self.damping_range is not None:
+            kd_ids, _, kd_ranges = string_utils.resolve_matching_names_values(
+                self.damping_range, self.asset.actuator_names
+            )
+            self.kd_ctrl_ids = self.asset.indexing.ctrl_ids[
+                torch.tensor(kd_ids, device=self.device, dtype=torch.long)
+            ]
+            default_biasprm = self.env.sim.get_default_field("actuator_biasprm")
+            self.kd_bias_def = default_biasprm[self.kd_ctrl_ids, 2]
+            kd_low, kd_high = torch.tensor(kd_ranges, device=self.device).unbind(1)
+            self._validate_log_uniform_range("damping_range", kd_low, kd_high)
+            self.kd_low = kd_low
+            self.kd_high = kd_high
+        else:
+            self.kd_ctrl_ids = torch.empty(0, device=self.device, dtype=torch.long)
+
+        if self.armature_range is not None:
+            arm_ids, _, arm_ranges = string_utils.resolve_matching_names_values(
+                self.armature_range, self.asset.joint_names
+            )
+            self.arm_dof_ids = self.asset.indexing.joint_v_adr[
+                torch.tensor(arm_ids, device=self.device, dtype=torch.long)
+            ]
+            default_armature = self.env.sim.get_default_field("dof_armature")
+            self.arm_def = default_armature[self.arm_dof_ids]
+            arm_low, arm_high = torch.tensor(arm_ranges, device=self.device).unbind(1)
+            self._validate_log_uniform_range("armature_range", arm_low, arm_high)
+            self.arm_low = arm_low
+            self.arm_high = arm_high
+        else:
+            self.arm_dof_ids = torch.empty(0, device=self.device, dtype=torch.long)
+
+        if self.friction_range is not None:
+            friction_ids, _, friction_ranges = string_utils.resolve_matching_names_values(
+                self.friction_range, self.asset.joint_names
+            )
+            self.friction_dof_ids = self.asset.indexing.joint_v_adr[
+                torch.tensor(friction_ids, device=self.device, dtype=torch.long)
+            ]
+            friction_low, friction_high = torch.tensor(
+                friction_ranges, device=self.device
+            ).unbind(1)
+            self._validate_nonnegative_range(
+                "friction_range", friction_low, friction_high
+            )
+            self.friction_low = friction_low
+            self.friction_high = friction_high
+        else:
+            self.friction_dof_ids = torch.empty(0, device=self.device, dtype=torch.long)
+
+    def _validate_log_uniform_range(self, range_name: str, low: torch.Tensor, high: torch.Tensor):
+        if torch.any(low <= 0.0) or torch.any(high <= 0.0):
+            raise ValueError(
+                f"{range_name} must be strictly positive for log-uniform sampling, "
+                f"got low={low.tolist()}, high={high.tolist()}"
+            )
+        if torch.any(high < low):
+            raise ValueError(
+                f"{range_name} must satisfy low <= high, got low={low.tolist()}, high={high.tolist()}"
+            )
+
+    def _validate_nonnegative_range(self, range_name: str, low: torch.Tensor, high: torch.Tensor):
+        if torch.any(low < 0.0):
+            raise ValueError(
+                f"{range_name} must be non-negative, got low={low.tolist()}, high={high.tolist()}"
+            )
+        if torch.any(high < low):
+            raise ValueError(
+                f"{range_name} must satisfy low <= high, got low={low.tolist()}, high={high.tolist()}"
+            )
+
+    def _rand_log_uniform(self, n_env: int, low: torch.Tensor, high: torch.Tensor):
+        low_expand = low.unsqueeze(0).expand(n_env, -1)
+        high_expand = high.unsqueeze(0).expand(n_env, -1)
+        return log_uniform(low_expand, high_expand)
+
+    def startup(self):
+        if self.env.backend == "mjlab":
+            if self.arm_dof_ids.numel() > 0:
+                armature = self._rand_log_uniform(self.num_envs, self.arm_low, self.arm_high)
+                self.model.dof_armature[:, self.arm_dof_ids] = self.arm_def.unsqueeze(0) * armature
+                _mjlab_recompute_constants(self.env, RecomputeLevel.set_const_0)
+        elif self.env.backend == "isaac":
+            if self.armature_range is None:
+                return
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+            armature = (
+                torch.rand(self.num_envs, len(self.armature_id), device=self.device)
+                * self.armature_scale
+                + self.armature_low
+            )
+            self.asset.write_joint_armature_to_sim(armature, self.armature_id, env_ids)
+
+    def reset(self, env_ids):
+        if env_ids.numel() == 0:
+            return
+
+        if self.env.backend == "mjlab":
+            n_env = env_ids.numel()
+            if self.kp_ctrl_ids.numel() > 0:
+                kp_samples = self._rand_log_uniform(n_env, self.kp_low, self.kp_high)
+                kp_gain = self.kp_gain_def.unsqueeze(0) * kp_samples
+                kp_bias = self.kp_bias_def.unsqueeze(0) * kp_samples
+                self.model.actuator_gainprm[env_ids.unsqueeze(1), self.kp_ctrl_ids, 0] = kp_gain
+                self.model.actuator_biasprm[env_ids.unsqueeze(1), self.kp_ctrl_ids, 1] = kp_bias
+
+            if self.kd_ctrl_ids.numel() > 0:
+                kd_samples = self._rand_log_uniform(n_env, self.kd_low, self.kd_high)
+                kd_bias = self.kd_bias_def.unsqueeze(0) * kd_samples
+                self.model.actuator_biasprm[env_ids.unsqueeze(1), self.kd_ctrl_ids, 2] = kd_bias
+
+            if self.friction_dof_ids.numel() > 0:
+                low = self.friction_low.unsqueeze(0).expand(n_env, -1)
+                high = self.friction_high.unsqueeze(0).expand(n_env, -1)
+                friction = uniform(low, high)
+                self.model.dof_frictionloss[env_ids.unsqueeze(1), self.friction_dof_ids] = friction
+        elif self.env.backend == "isaac":
+            if self.stiffness_range is not None:
+                stiffness = (
+                    torch.rand(len(env_ids), len(self.stiffness_id), device=self.device)
+                    * self.stiffness_scale
+                    + self.stiffness_low
+                )
+                self.asset.write_joint_stiffness_to_sim(stiffness, self.stiffness_id, env_ids)
+
+            if self.damping_range is not None:
+                damping = (
+                    torch.rand(len(env_ids), len(self.damping_id), device=self.device)
+                    * self.damping_scale
+                    + self.damping_low
+                )
+                self.asset.write_joint_damping_to_sim(damping, self.damping_id, env_ids)
+
+            if self.friction_range is not None:
+                friction = (
+                    torch.rand(len(env_ids), len(self.friction_id), device=self.device)
+                    * self.friction_scale
+                    + self.friction_low
+                )
+                self.asset.write_joint_friction_coefficient_to_sim(
+                    friction, joint_ids=self.friction_id, env_ids=env_ids
+                )
 
 
 class random_motor_failure(Randomization):
@@ -541,10 +780,12 @@ class perturb_root_vel(Randomization):
         self.low = torch.tensor(lows, dtype=torch.float32, device=self.device)
         self.high = torch.tensor(highs, dtype=torch.float32, device=self.device)
 
-        self.time_left_s = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        # Keep the timer state on CPU so trigger detection doesn't force a CUDA sync.
+        self.time_left_s = torch.zeros(self.num_envs, dtype=torch.float32)
 
-    def _sample_interval(self, n: int):
-        return torch.rand(n, dtype=torch.float32, device=self.device) * (self.max_s - self.min_s) + self.min_s
+    def _sample_interval(self, n: int, device: torch.device | str | None = None):
+        device = device or self.device
+        return torch.rand(n, dtype=torch.float32, device=device) * (self.max_s - self.min_s) + self.min_s
 
     def _sample_delta_vel(self, n: int):
         rand = torch.rand((n, 6), dtype=torch.float32, device=self.device)
@@ -553,21 +794,23 @@ class perturb_root_vel(Randomization):
     def reset(self, env_ids: torch.Tensor):
         if env_ids.numel() == 0:
             return
-        self.time_left_s[env_ids] = self._sample_interval(len(env_ids))
+        env_ids_cpu = env_ids.to(device="cpu")
+        self.time_left_s[env_ids_cpu] = self._sample_interval(len(env_ids_cpu), device="cpu")
 
     def update(self):
         self.time_left_s.sub_(self.env.step_dt)
-        trigger_ids = torch.nonzero(self.time_left_s <= 1e-6, as_tuple=False).squeeze(-1)
-        if trigger_ids.numel() == 0:
+        trigger_ids_cpu = torch.nonzero(self.time_left_s <= 1e-6, as_tuple=False).squeeze(-1)
+        if trigger_ids_cpu.numel() == 0:
             return
+        trigger_ids = trigger_ids_cpu.to(device=self.device)
 
         delta_vel = self._sample_delta_vel(trigger_ids.numel())
         root_vel = torch.cat((self.asset.data.root_link_lin_vel_w[trigger_ids], self.asset.data.root_link_ang_vel_w[trigger_ids]), dim=-1)
+        self.time_left_s[trigger_ids_cpu] = self._sample_interval(trigger_ids.numel(), device="cpu")
 
         self.asset.write_root_link_velocity_to_sim(root_vel + delta_vel, env_ids=trigger_ids)
         # print(f"Applied random root velocity perturbation of {delta_vel} to envs {trigger_ids}.")
 
-        self.time_left_s[trigger_ids] = self._sample_interval(trigger_ids.numel())
 
 
 class reset_joint_states_uniform(Randomization):
@@ -840,7 +1083,14 @@ class random_joint_offset(Randomization):
         self.action_manager = self.env.action_manager
 
     def reset(self, env_ids: torch.Tensor):
-        offset = uniform(self.offset_range[:, 0], self.offset_range[:, 1])
+        if env_ids.numel() == 0:
+            return
+        low = self.offset_range[:, 0].unsqueeze(0)
+        high = self.offset_range[:, 1].unsqueeze(0)
+        offset = uniform(
+            low.expand(env_ids.numel(), -1),
+            high.expand(env_ids.numel(), -1),
+        )
         self.action_manager.offset[env_ids.unsqueeze(1), self.joint_ids] = offset
 
 

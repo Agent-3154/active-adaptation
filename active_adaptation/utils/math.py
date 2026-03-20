@@ -267,6 +267,20 @@ def axis_angle_from_quat(quat: torch.Tensor, eps: float = 1.0e-6) -> torch.Tenso
     return quat[..., 1:4] / sin_half_angles_over_angles.unsqueeze(-1)
 
 
+def quat_angle_magnitude(quat: torch.Tensor, eps: float = 1.0e-9) -> torch.Tensor:
+    """Compute the rotation angle represented by a quaternion.
+
+    Args:
+        quat: The quaternion orientation in (w, x, y, z). Shape is (..., 4).
+        eps: Clamp for the scalar part to avoid undefined gradients near zero.
+
+    Returns:
+        Rotation angle in radians. Shape is (...,).
+    """
+    xyz_norm = torch.linalg.norm(quat[..., 1:], dim=-1)
+    return 2.0 * torch.atan2(xyz_norm, quat[..., 0].abs().clamp_min(eps))
+
+
 def sample_quat_yaw(size, yaw_range=(0, torch.pi * 2), device: torch.device = "cpu"):
     yaw = torch.rand(size, device=device).uniform_(*yaw_range)
     quat = torch.cat(
@@ -424,4 +438,3 @@ class EMA:
         self.cnt.mul_(self.gammas.unsqueeze(-1)).add_(1.0)
         self.ema = self.sum / self.cnt
         return self.ema
-

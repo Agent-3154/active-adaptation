@@ -162,10 +162,11 @@ class PPOPolicy(TensorDictModuleBase):
                 self.actor = DDP(self.actor)
                 self.critic = DDP(self.critic)
             else:
-                for param in self.actor.parameters():
-                    distr.broadcast(param, src=0)
-                for param in self.critic.parameters():
-                    distr.broadcast(param, src=0)
+                with torch.no_grad():
+                    for param in self.actor.parameters():
+                        distr.broadcast(param, src=0)
+                    for param in self.critic.parameters():
+                        distr.broadcast(param, src=0)
             self.world_size = active_adaptation.get_world_size()
             
         self.update = self._update

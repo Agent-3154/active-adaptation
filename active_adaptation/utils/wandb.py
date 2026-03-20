@@ -40,8 +40,6 @@ from typing import Union
 
 import active_adaptation as aa
 
-from torch import distributed as torch_dist
-
 def dict_flatten(a: dict, delim="."):
     """Flatten a dict recursively.
     Examples:
@@ -301,6 +299,8 @@ class FileCheckpoint(CheckpointBase):
 class WandbCheckpoint(CheckpointBase):
     """Checkpoint from wandb run: run:<entity>/<project>/<run_id>[:<iteration>]. Fetched once in update()."""
     remote: bool = True
+    _DIST_WAIT_TIMEOUT_SEC = 300.0
+    _DIST_POLL_INTERVAL_SEC = 0.5
 
     def __init__(self, spec: str, api: "wandb.Api | None" = None) -> None:
         init_start = time.perf_counter()
@@ -318,13 +318,8 @@ class WandbCheckpoint(CheckpointBase):
             f"iteration={self._iteration}"
         )
         if api is None:
-            print("[WandbCheckpoint] creating wandb.Api()")
-            api_start = time.perf_counter()
-            self._api = wandb.Api()
-            print(
-                f"[WandbCheckpoint] wandb.Api() ready "
-                f"({time.perf_counter() - api_start:.2f}s)"
-            )
+            self._api = None
+            print("[WandbCheckpoint] deferring wandb.Api() creation")
         else:
             self._api = api
             print("[WandbCheckpoint] using injected wandb.Api")
@@ -339,6 +334,14 @@ class WandbCheckpoint(CheckpointBase):
     @property
     def run(self) -> "wandb.wandb_sdk.wandb_run.Run":
         if self._run is None:
+            if self._api is None:
+                print("[WandbCheckpoint] creating wandb.Api()")
+                api_start = time.perf_counter()
+                self._api = wandb.Api()
+                print(
+                    f"[WandbCheckpoint] wandb.Api() ready "
+                    f"({time.perf_counter() - api_start:.2f}s)"
+                )
             print(f"[WandbCheckpoint] fetching run metadata: {self._run_path}")
             run_start = time.perf_counter()
             self._run = self._api.run(self._run_path)
@@ -419,26 +422,54 @@ class WandbCheckpoint(CheckpointBase):
             marker_name = (
                 ".dist_checkpoint_path_"
                 + self._run_path.replace("/", "__").replace(":", "_")
-                + ".txt"
+                + ".json"
             )
             marker_path = _get_store_dir() / marker_name
             if rank == 0:
-                print(f"[WandbCheckpoint] distributed update: rank 0 downloading for world_size={world_size}")
-                path = self._download()
-                marker_path.write_text(path)
+                print(
+                    f"[WandbCheckpoint] distributed update: rank 0 downloading for world_size={world_size}"
+                )
+                try:
+                    path = self._download()
+                    marker_tmp = marker_path.with_suffix(".json.tmp")
+                    marker_tmp.write_text(json.dumps({"ok": True, "path": path, "error": None}))
+                    marker_tmp.replace(marker_path)
+                except Exception as exc:
+                    marker_tmp = marker_path.with_suffix(".json.tmp")
+                    marker_tmp.write_text(
+                        json.dumps({"ok": False, "path": None, "error": repr(exc)})
+                    )
+                    marker_tmp.replace(marker_path)
+                    raise
             else:
                 env_rank = os.getenv("LOCAL_RANK", "?")
                 print(
                     "[WandbCheckpoint] distributed update: "
-                    f"rank {rank} (LOCAL_RANK={env_rank}) waiting at barrier"
+                    f"rank {rank} (LOCAL_RANK={env_rank}) waiting for rank 0"
                 )
-
-            torch_dist.barrier()
-            if rank != 0:
-                if not marker_path.exists():
-                    raise RuntimeError(f"Checkpoint marker missing after barrier: {marker_path}")
-                path = marker_path.read_text().strip()
-                print(f"[WandbCheckpoint] rank {rank} using checkpoint path from marker: {path}")
+                start = time.perf_counter()
+                while True:
+                    if marker_path.exists():
+                        payload = json.loads(marker_path.read_text())
+                        if not payload.get("ok"):
+                            raise RuntimeError(
+                                f"Rank 0 failed to prepare W&B checkpoint {self._run_path}: "
+                                f"{payload.get('error')}"
+                            )
+                        path = payload.get("path")
+                        if not path:
+                            raise RuntimeError(
+                                f"Checkpoint marker missing path for {self._run_path}: {marker_path}"
+                            )
+                        print(
+                            f"[WandbCheckpoint] rank {rank} using checkpoint path from rank 0: {path}"
+                        )
+                        break
+                    if time.perf_counter() - start > self._DIST_WAIT_TIMEOUT_SEC:
+                        raise TimeoutError(
+                            f"Timed out waiting for rank 0 checkpoint marker: {marker_path}"
+                        )
+                    time.sleep(self._DIST_POLL_INTERVAL_SEC)
         else:
             path = self._download()
         return path

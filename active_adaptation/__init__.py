@@ -113,18 +113,21 @@ def init(cfg: DictConfig, auto_rank: bool):
 
     set_backend(cfg["backend"])
 
+    if auto_rank and (str(cfg.device) == "cuda"):
+        cfg.device = f"cuda:{get_local_rank()}"
+
     if is_distributed():
+        import torch
         import torch.distributed as dist
 
         if dist.is_available() and not dist.is_initialized():
             dist.init_process_group(
                 backend="nccl",
-                world_size=get_world_size(),
-                rank=get_local_rank(),
+                # world_size=get_world_size(),
+                # rank=get_local_rank(),
+                # device_id=torch.device(cfg.device)
+                init_method="env://",
             )
-
-        if auto_rank and (str(cfg.device) == "cuda"):
-            cfg.device = f"cuda:{get_local_rank()}"
 
     if get_backend() == "isaac":
         from isaaclab.app import AppLauncher

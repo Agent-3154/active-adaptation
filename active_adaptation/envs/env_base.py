@@ -128,12 +128,11 @@ class _EnvBase(EnvBase, RegistryMixin):
         self._setup_mdp_managers()
         self._build_tensor_specs()
 
-        [callback() for callback in self._startup_callbacks]
-
         self.timestamp: int = 0
         self.stats: TensorDict = self.reward_spec["stats"].zero()
         self.input_tensordict = None
         self.extra = {}
+        self._startup_done = False
 
     # ---------------------------------------------------------------------
     # Initialization helpers
@@ -373,6 +372,10 @@ class _EnvBase(EnvBase, RegistryMixin):
     def _reset(
         self, tensordict: TensorDictBase | None = None, **kwargs
     ) -> TensorDictBase:
+        if not self._startup_done:
+            [callback() for callback in self._startup_callbacks]
+            self._startup_done = True
+            
         if tensordict is not None:
             env_mask = tensordict.get("_reset").reshape(self.num_envs)
             env_ids = env_mask.nonzero().squeeze(-1)
@@ -426,9 +429,6 @@ class _EnvBase(EnvBase, RegistryMixin):
                     self.scene.update(self.physics_dt)
                     [callback(substep) for callback in self._post_step_callbacks]
 
-            with ScopedTimer("update_callbacks", sync=False):
-                [callback() for callback in self._update_callbacks]
-
         if self.sim.has_gui():
             self.sim.render()
 
@@ -437,12 +437,19 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
 
+        with ScopedTimer("command_update", sync=False):
+            self.command_manager.update()
+        with ScopedTimer("update_callbacks", sync=False):
+            [callback() for callback in self._update_callbacks]
+            # for callback in self._update_callbacks:
+            #     with ScopedTimer(f"{callback.__self__.__class__.__name__}", sync=False):
+            #         callback()
         with ScopedTimer("reward", sync=False):
             tensordict = self._compute_reward(tensordict)
         with ScopedTimer("termination", sync=False):
             tensordict = self._compute_termination(tensordict)
-        with ScopedTimer("command", sync=False):
-            self.command_manager.update()
+        with ScopedTimer("command_step", sync=False):
+            self.command_manager.step()
         with ScopedTimer("observation", sync=False):
             tensordict = self._compute_observation(tensordict)
 
@@ -545,10 +552,14 @@ class _EnvBase(EnvBase, RegistryMixin):
             except ModuleNotFoundError:
                 pass
             return torch_utils.set_seed(seed)
-        if self.backend == "mujoco":
+        elif self.backend == "mujoco":
             torch.manual_seed(seed)
             np.random.seed(seed)
-            return seed
+        elif self.backend == "mjlab":
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+        else:
+            raise ValueError(f"Unknown backend: {self.backend}")
 
     def render(self, mode: str = "human"):
         self.sim.render()
