@@ -276,6 +276,7 @@ class AssetCfg:
     sensors_isaaclab: List[ContactSensorCfg] = field(default_factory=list)
     sensors_mjlab: List[ContactSensorCfg] = field(default_factory=list)
     
+    # Isaac Sim uses breadth-first traversal to find the joints and bodies
     joint_names_simulation: Optional[List[str]] = None
     body_names_simulation: Optional[List[str]] = None
 
@@ -285,10 +286,10 @@ class AssetCfg:
     spatial_symmetry_mapping: Optional[Dict[str, str]] = None
 
     # def __post_init__(self):
-    #     if self.mjcf_path is not MISSING:
+    #     if self.mjcf_path and self.mjcf_path is not MISSING:
     #         mjcf_path = Path(self.mjcf_path)
     #         assert mjcf_path.exists(), f"MJCF file not found: {mjcf_path}"
-    #     if self.usd_path is not MISSING:
+    #     if self.usd_path and self.usd_path is not MISSING:
     #         usd_path = Path(self.usd_path)
     #         assert usd_path.exists(), f"USD file not found: {usd_path}"
 
