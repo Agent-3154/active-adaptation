@@ -425,3 +425,6 @@ class EMA:
         self.ema = self.sum / self.cnt
         return self.ema
 
+
+def random_noise(x: torch.Tensor, std: float):
+    return x + torch.randn_like(x).clamp(-3., 3.) * std
