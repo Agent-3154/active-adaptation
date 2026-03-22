@@ -10,13 +10,16 @@ from .base import Action
 
 
 class Marker(Action):
-    def __init__(self, env, num_markers: int = 1, body_frame: bool = False):
+    """
+    This is a marker action that visualizes a set of markers in the world frame.
+    It does not have a fixed action dimension, and the action is the position of the markers in the world frame.
+    """
+    def __init__(self, env, body_frame: bool = False):
         super().__init__(env)
         self.asset = self.env.scene.articulations["robot"]
-        self.num_markers = num_markers
         self.body_frame = body_frame
         self.has_gui = self.env.sim.has_gui()
-        self.action_dim = 3 * self.num_markers
+        self.action_dim = 3 # not actually limited to 3
 
         if self.has_gui and self.env.backend == "isaac":
             from isaaclab.markers import (
@@ -44,17 +47,18 @@ class Marker(Action):
     def process_action(self, action: torch.Tensor):
         if not self.has_gui or action is None:
             return
+        
+        assert action.shape[-1] == 3
 
         if self.body_frame:
-            pos = self.asset.data.root_link_pos_w.reshape(self.num_envs, 1, 3)
-            quat = self.asset.data.root_link_quat_w.reshape(self.num_envs, 1, 4)
-            translations = pos + quat_rotate(
-                quat, action.reshape(self.num_envs, self.num_markers, 3)
-            )
+            root_pos_w = self.asset.data.root_link_pos_w.reshape(self.num_envs, 1, 3)
+            root_quat_w = self.asset.data.root_link_quat_w.reshape(self.num_envs, 1, 4)
+            marker_pos = action.reshape(self.num_envs, -1, 3)
+            translations = root_pos_w + quat_rotate(root_quat_w, marker_pos)
         else:
-            translations = action.reshape(self.num_envs, self.num_markers, 3)
+            translations = action.reshape(self.num_envs, -1, 3)
             translations += self.env.scene.env_origins.unsqueeze(1)
-        translations = translations.reshape(self.num_envs * self.num_markers, 3)
+        translations = translations.reshape(-1, 3)
         self.marker.visualize(
             translations=translations,
             scales=torch.ones(3, device=self.device).expand_as(translations),
