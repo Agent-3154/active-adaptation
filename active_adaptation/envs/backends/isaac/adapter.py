@@ -64,17 +64,14 @@ class IsaacSceneAdapter(SceneAdapter):
         # Local imports to avoid making IsaacLab a hard dependency when other
         # backends are used.
         import numpy as np
+        import warp as wp
         from isaaclab.utils.warp import convert_to_warp_mesh
         from isaaclab.terrains.trimesh.utils import make_plane
         from pxr import UsdGeom
         import isaaclab.sim as sim_utils
 
         mesh_prim_path = "/World/ground"
-        device = (
-            self._scene.device.type
-            if hasattr(self._scene, "device") and hasattr(self._scene.device, "type")
-            else "cuda"
-        )
+        device = wp.get_device(str(self._scene.device))
 
         # Check if there is a PhysX plane; otherwise fall back to a mesh prim.
         mesh_prim = sim_utils.get_first_matching_child_prim(
