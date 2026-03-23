@@ -48,22 +48,19 @@ from active_adaptation.learning.ppo.common import (
     spo_loss,
     normalize,
     OBS_KEY,
-    OBS_PRIV_KEY,
-    OBS_HIST_KEY,
     ACTION_KEY,
     REWARD_KEY,
     TERM_KEY,
     DONE_KEY,
-    CMD_KEY,
     GAE,
     make_batch,
     make_mlp,
     Actor,
 )
-from active_adaptation.learning.utils.opt import OptimizerGroup
+from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import check_parameters
 
-import active_adaptation
+import active_adaptation as aa
 import torch.distributed as distr
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -73,7 +70,7 @@ class PPOConfig:
     name: str = "ppo_symaug"
     train_every: int = 32
     ppo_epochs: int = 4
-    num_minibatches: int = 8
+    num_minibatches: int = 4
     lr: float = 5e-4
     desired_kl: Union[float, None] = None
     clip_param: float = 0.2
@@ -167,31 +164,23 @@ class PPOPolicy(TensorDictModuleBase):
         self.actor.apply(init_)
         self.critic.apply(init_)
 
-        if active_adaptation.is_distributed():
+        if aa.is_distributed():
             if self.cfg.use_ddp:
-                self.actor = DDP(self.actor)
-                self.critic = DDP(self.critic)
+                self.actor = DDP(self.actor, device_ids=[aa.get_local_rank()])
+                self.critic = DDP(self.critic, device_ids=[aa.get_local_rank()])
             else:
                 for param in self.actor.parameters():
                     distr.broadcast(param, src=0)
                 for param in self.critic.parameters():
                     distr.broadcast(param, src=0)
-        self.world_size = active_adaptation.get_world_size()
-            
-        def is_matrix_shaped(param: torch.Tensor) -> bool:
-            return param.dim() >= 2
-        
-        if self.cfg.muon:
-            muon = torch.optim.Muon([
-                {"params": [p for p in self.actor.parameters() if is_matrix_shaped(p)]},
-                {"params": [p for p in self.critic.parameters() if is_matrix_shaped(p)]},
-            ], lr=cfg.lr, adjust_lr_fn="match_rms_adamw", weight_decay=0.01)
+        self.world_size = aa.get_world_size()
 
-            adamw = torch.optim.AdamW([
-                {"params": [p for p in self.actor.parameters() if not is_matrix_shaped(p)]},
-                {"params": [p for p in self.critic.parameters() if not is_matrix_shaped(p)]},
-            ], lr=cfg.lr, weight_decay=0.01)
-            self.opt = OptimizerGroup([muon, adamw])
+        if self.cfg.muon:
+            self.opt = MuonAdamWWrapper(
+                [self.actor, self.critic],
+                lr=cfg.lr,
+                weight_decay=0.01
+            )
         else:
             self.opt = torch.optim.AdamW(
                 [
@@ -203,7 +192,7 @@ class PPOPolicy(TensorDictModuleBase):
             )
 
         self.update = self._update
-        if self.cfg.compile and not active_adaptation.is_distributed():
+        if self.cfg.compile and not aa.is_distributed():
             # TODO: compile for multi-gpu training?
             self.update = torch.compile(self.update, fullgraph=True)
             # self.update = CudaGraphModule(self.update)
@@ -266,7 +255,7 @@ class PPOPolicy(TensorDictModuleBase):
         infos["critic/value_mean"] = tensordict["ret"].mean().item()
         infos["critic/value_std"] = tensordict["ret"].std().item()
         infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
-        if active_adaptation.is_distributed():
+        if aa.is_distributed():
             self.vecnorm.module.synchronize(mode="broadcast")
             if self.cfg.debug:
                 actor_diff = check_parameters(self.actor)
@@ -355,7 +344,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.opt.zero_grad()
         loss.backward()
 
-        if active_adaptation.is_distributed() and not self.cfg.use_ddp:
+        if aa.is_distributed() and not self.cfg.use_ddp:
             for param in self.actor.parameters():
                 distr.all_reduce(param.grad, op=distr.ReduceOp.SUM)
                 param.grad /= self.world_size
@@ -437,9 +426,3 @@ def effective_rank(X: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
     entropy = -(p * (p + eps).log()).sum()
     return entropy.exp()
 
-
-def normalize(x: torch.Tensor, subtract_mean: bool=False):
-    if subtract_mean:
-        return (x - x.mean()) / x.std().clamp(1e-7)
-    else:
-        return x  / x.std().clamp(1e-7)

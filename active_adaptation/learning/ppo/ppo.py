@@ -42,11 +42,21 @@ from active_adaptation.learning.modules import (
     IndependentNormal, 
     SymmetryWrapper,
 )
-from .common import *
+from active_adaptation.learning.ppo.common import (
+    normalize,
+    OBS_KEY,
+    ACTION_KEY,
+    REWARD_KEY,
+    GAE,
+    make_batch,
+    make_mlp,
+    Actor,
+)
 from active_adaptation.learning.ppo.ppo_base import PPOBase
+from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import check_parameters
 
-import active_adaptation
+import active_adaptation as aa
 import torch.distributed as distr
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -62,6 +72,8 @@ class PPOConfig:
     clip_param: float = 0.2
     entropy_coef: float = 0.002
 
+    muon: bool = False # use Muon optimizer
+    
     # symmetry options
     symnet: bool = False # use symmetry wrapper to wrap the policy and critic
     symaug: bool = False # use symmetry augmentation
@@ -153,27 +165,35 @@ class PPOPolicy(PPOBase):
         self.actor.apply(init_)
         self.critic.apply(init_)
 
-        if active_adaptation.is_distributed():
+        if aa.is_distributed():
             if self.cfg.use_ddp:
-                self.actor = DDP(self.actor)
-                self.critic = DDP(self.critic)
+                self.actor = DDP(self.actor, device_ids=[aa.get_local_rank()])
+                self.critic = DDP(self.critic, device_ids=[aa.get_local_rank()])
             else:
                 for param in self.actor.parameters():
                     distr.broadcast(param, src=0)
                 for param in self.critic.parameters():
                     distr.broadcast(param, src=0)
-        self.world_size = active_adaptation.get_world_size()
+        self.world_size = aa.get_world_size()
         
-        self.opt = torch.optim.Adam(
-            [
-                {"params": self.actor.parameters()},
-                {"params": self.critic.parameters()},
-            ],
-            lr=cfg.lr
-        )
+        if self.cfg.muon:
+            self.opt = MuonAdamWWrapper(
+                [self.actor, self.critic],
+                lr=cfg.lr,
+                weight_decay=0.01
+            )
+        else:
+            self.opt = torch.optim.AdamW(
+                [
+                    {"params": self.actor.parameters()},
+                    {"params": self.critic.parameters()},
+                ],
+                lr=cfg.lr,
+                weight_decay=0.01
+            )
 
         self.update = self._update
-        if self.cfg.compile and not active_adaptation.is_distributed():
+        if self.cfg.compile and not aa.is_distributed():
             self.update = torch.compile(self.update, fullgraph=True)
 
     def get_rollout_policy(self, mode: str="train", critic: bool = False):
@@ -236,7 +256,7 @@ class PPOPolicy(PPOBase):
         infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
         infos["critic/valid_ratio"] = valid_ratio.item()
 
-        if active_adaptation.is_distributed() and active_adaptation.is_main_process():
+        if aa.is_distributed() and aa.is_main_process():
             loc_diffs, scale_diffs = check_vecnorm_divergence(self.vecnorm[0].module)
             infos["vecnorm/loc_diff_max"] = max(loc_diffs)
             infos["vecnorm/scale_diff_max"] = max(scale_diffs)
@@ -279,7 +299,7 @@ class PPOPolicy(PPOBase):
         self.opt.zero_grad()
         loss.backward()
 
-        if active_adaptation.is_distributed() and not self.cfg.use_ddp:
+        if aa.is_distributed() and not self.cfg.use_ddp:
             for param in self.actor.parameters():
                 distr.all_reduce(param.grad.data, op=distr.ReduceOp.SUM)
                 param.grad.data /= self.world_size
@@ -306,15 +326,8 @@ class PPOPolicy(PPOBase):
         return info
 
 
-def normalize(x: torch.Tensor, subtract_mean: bool=False):
-    if subtract_mean:
-        return (x - x.mean()) / x.std().clamp(1e-7)
-    else:
-        return x  / x.std().clamp(1e-7)
-
-
 def check_vecnorm_divergence(vecnorm: VecNorm):
-    WORLD_SIZE = active_adaptation.get_world_size()
+    WORLD_SIZE = aa.get_world_size()
     
     loc, scale = vecnorm._compute()
     gather_loc = [torch.empty_like(loc) for _ in range(WORLD_SIZE)]
