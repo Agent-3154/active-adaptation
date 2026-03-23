@@ -221,63 +221,25 @@ class tracking_yaw(Reward):
         return torch.exp(- yaw_diff.square())
 
 
-class feet_air_time(Reward):
+class body_upright(Reward):
+    """
+    Reward for keeping the specified body upright.
+    """
+    def __init__(self, env, body_name: str, weight: float):
+        super().__init__(env, weight)
+        self.asset: Articulation = self.env.scene.articulations["robot"]
+        self.body_ids, body_names = self.asset.find_bodies(body_name)
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
     
-    def __init__(self, env, body_names: str, thres: float, weight: float):
-        super().__init__(env, weight)
-        self.thres = thres
-        self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
-
-        self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
-        self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
-        self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
-
-    @override
-    def _compute(self):
-        first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[:, self.body_ids]
-        last_air_time = self.contact_sensor.data.last_air_time[:, self.body_ids]
-        reward = ((last_air_time - self.thres).clamp_max(0.0) * first_contact).sum(1)
-        active = ~self.command_manager.is_standing_env
-        return reward.reshape(self.num_envs, 1), active
-
-
-class feet_contact_count(Reward):
-    supported_backends = ("isaac", "mjlab")
-    def __init__(self, env, body_names: str, weight: float):
-        super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
-
-        self.articulation_body_ids = self.asset.find_bodies(body_names)[0]
-        self.body_ids, self.body_names = self.contact_sensor.find_bodies(body_names)
-        self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
-        self.first_contact = torch.zeros(
-            self.num_envs, len(self.body_ids), device=self.env.device
-        )
-
-    @override
-    def _compute(self):
-        self.first_contact = self.contact_sensor.compute_first_contact(
-            self.env.step_dt
-        )[:, self.body_ids]
-        return self.first_contact.sum(1, keepdim=True)
-
-
-class root_upright(Reward):
-    def __init__(self, env, weight: float):
-        super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.projected_gravity_b = torch.zeros(self.num_envs, 3, device=self.device)
-    
-    @override
-    def update(self):
-        self.projected_gravity_b = self.asset.data.projected_gravity_b
-
     @override
     def _compute(self) -> torch.Tensor:
-        rew = 1. - self.projected_gravity_b[:, :2].square().sum(1)
-        return rew.reshape(self.num_envs, 1)
+        down = torch.tensor([[0., 0., -1.]], device=self.device)
+        g = quat_rotate_inverse(
+            self.asset.data.body_link_quat_w[:, self.body_ids],
+            down.expand(self.num_envs, len(self.body_ids), 3)
+        )
+        rew = 1. - g[:, :, :2].square().sum(-1)
+        return rew.mean(1, True)
 
 
 class base_height_l1(Reward[Twist]):
@@ -480,21 +442,6 @@ class oscillator(Reward):
         phi_dot[:, 2] = (phi[:, 1] - phi[:, 2]) + (phi[:, 0] - torch.pi - phi[:, 2])
         phi_dot[:, 3] = (phi[:, 0] - phi[:, 3]) + (phi[:, 1] + torch.pi - phi[:, 3])
         return phi_dot
-
-
-class oscillator_biped(Reward):
-    def __init__(self, env, weight):
-        super().__init__(env, weight)
-        self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.gravity = self.asset.data.default_mass[0].sum().item() * 9.81
-        self.contact_forces: ContactSensor = self.env.scene.sensors["contact_forces"]
-        self.feet_ids = self.contact_forces.find_bodies(".*_ankle_roll_link")[0]
-
-    def _compute(self):
-        self.sin_phase = self.asset.phi.sin()
-        grf = self.contact_forces.data.net_forces_w[:, self.feet_ids].norm(dim=-1)
-        r = (-grf/self.gravity * self.sin_phase).clamp_max(0.8).sum(1, True)
-        return r
 
 
 class quadruped_stand(Reward):
