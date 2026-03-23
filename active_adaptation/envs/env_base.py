@@ -546,7 +546,7 @@ class _EnvBase(EnvBase, RegistryMixin):
     def ground(self):
         if not hasattr(self, "_ground"):
             self._ground = GroundQuery(
-                self.scene, self.backend, self.terrain_type, self.device
+                self.terrain_type, self.device, self.ground_mesh
             )
         return self._ground
 
