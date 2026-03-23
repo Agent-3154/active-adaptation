@@ -17,6 +17,16 @@ EXTRA_ARGS="$@"
 IFS=',' read -ra GPUS <<< "$GPU_IDS"
 NUM_GPUS=${#GPUS[@]}
 
+# Set a reasonable per-process OpenMP thread count unless provided.
+if [ -z "${OMP_NUM_THREADS:-}" ]; then
+    TOTAL_CPUS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)
+    OMP_NUM_THREADS=$(( TOTAL_CPUS / NUM_GPUS ))
+    if [ "$OMP_NUM_THREADS" -lt 1 ]; then
+        OMP_NUM_THREADS=1
+    fi
+    export OMP_NUM_THREADS
+fi
+
 # Find a free port
 FREE_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
 

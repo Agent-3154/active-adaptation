@@ -89,6 +89,7 @@ def mesh_get_group_root(mesh: wp.Mesh, groups: torch.Tensor):
             wp.from_torch(groups, dtype=wp.int32, return_ctype=True),
             wp.from_torch(roots, dtype=wp.int32, return_ctype=True),
         ],
+        device=mesh.device,
     )
     return roots.reshape(shape)
 
@@ -129,6 +130,7 @@ def raycast_mesh(
                 max_dist,
             ],
             outputs=outputs,
+            device=mesh.device,
         )
     else:
         roots_wp = wp.from_torch(roots.reshape(num_rays), dtype=wp.int32, return_ctype=True)
@@ -144,6 +146,7 @@ def raycast_mesh(
                 max_dist,
             ],
             outputs=outputs,
+            device=mesh.device,
         )
     if sync:
         wp.synchronize()

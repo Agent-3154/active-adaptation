@@ -5,6 +5,8 @@ import datetime
 import builtins
 import inspect
 import importlib
+import warp as wp
+
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 from fractions import Fraction
@@ -102,6 +104,8 @@ def init(cfg: DictConfig, auto_rank: bool):
         auto_rank: Whether to automatically modify `cfg.device` according to the local rank.
     """
 
+    wp.init()
+
     # Store sys.argv to a local file
     if is_main_process():
         argv_file = CACHE_DIR / "command_history.json"
@@ -131,9 +135,6 @@ def init(cfg: DictConfig, auto_rank: bool):
                 world_size=get_world_size(),
                 rank=get_local_rank(),
             )
-
-        if auto_rank and (str(cfg.device) == "cuda"):
-            cfg.device = f"cuda:{get_local_rank()}"
 
     if get_backend() == "isaac":
         from isaaclab.app import AppLauncher
