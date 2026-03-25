@@ -10,6 +10,17 @@ if TYPE_CHECKING:
 from .base import Termination
 
 
+class max_episode_length(Termination):
+    """
+    Termination when episode length exceeds the specified maximum episode length.
+    """
+
+    def __init__(self, env):
+        super().__init__(env, is_timeout=True)
+
+    def compute(self, termination: torch.Tensor):
+        return self.env.episode_length_buf[:, None] >= self.env.max_episode_length
+
 class crash(Termination):
     """
     Hard termination given by undesired contact forces on the specified body names.

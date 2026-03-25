@@ -26,8 +26,11 @@ dependencies = [
     "torchrl==0.8.*",
     "torch==2.7.0",
     "mujoco",
+    "huggingface_hub>=0.30",
     "linuxfd",
     "pdbpp",
+    "importlib-metadata==8.7.1",
+    "pdbpp==0.12.0.post1",
 ]
 
 [project.scripts]

@@ -1053,9 +1053,6 @@ class pull(Randomization):
         self.drag_magnitude[env_ids] = drag_magnitude * self.default_mass_total
         self.apply_drag[env_ids] = (torch.rand(len(env_ids), 1, device=self.device) < self.drag_prob)
     
-    def update(self):
-        pass
-
     def step(self, substep):
         force =  self.axis * self.drag_magnitude
         self.forces[:] = torch.where(self.apply_drag, force, torch.zeros_like(self.forces))

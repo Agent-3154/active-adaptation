@@ -1,3 +1,4 @@
+import math
 from typing import cast
 
 from active_adaptation.assets import AssetCfg
@@ -25,6 +26,7 @@ class MjlabBackendEnv(_EnvBase):
         import mjlab.terrains as terrain_gen
         from mjlab.terrains import TerrainEntityCfg
         from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
+        from mjlab.viewer import ViewerConfig
 
         from active_adaptation.envs.backends.mjlab.viewer import MjLabViewer
 
@@ -91,8 +93,36 @@ class MjlabBackendEnv(_EnvBase):
         self.sim.create_graph()
 
         self.scene = MjlabSceneAdapter(scene)
+        viewer_cfg = self._make_viewer_cfg(ViewerConfig)
         viewer = MjLabViewer(self) if not self.headless else None
-        self.sim = MjlabSimAdapter(self.sim, viewer)
+        self.sim = MjlabSimAdapter(self.sim, viewer, viewer_cfg=viewer_cfg, scene=scene)
+
+    def _make_viewer_cfg(self, viewer_config_cls):
+        lookat = tuple(float(v) for v in self.cfg.viewer.lookat)
+        eye = tuple(float(v) for v in self.cfg.viewer.eye)
+        resolution = tuple(int(v) for v in self.cfg.viewer.resolution)
+
+        delta = [eye_i - lookat_i for eye_i, lookat_i in zip(eye, lookat)]
+        distance = math.sqrt(sum(v * v for v in delta))
+        if distance <= 1e-8:
+            distance = 5.0
+            azimuth = 90.0
+            elevation = -45.0
+        else:
+            planar = math.hypot(delta[0], delta[1])
+            azimuth = math.degrees(math.atan2(delta[1], delta[0]))
+            elevation = -math.degrees(math.atan2(delta[2], planar))
+
+        return viewer_config_cls(
+            lookat=lookat,
+            distance=distance,
+            azimuth=azimuth,
+            elevation=elevation,
+            width=resolution[0],
+            height=resolution[1],
+            env_idx=0,
+            max_extra_envs=max(0, self.cfg.num_envs - 1),
+        )
 
 
 __all__ = ["MjlabBackendEnv"]

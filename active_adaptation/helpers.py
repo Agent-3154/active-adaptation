@@ -53,13 +53,14 @@ def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
     else:
         raise ValueError(f"Unknown backend: {backend}")
     
-    base_env = env_cls(cfg.task, str(cfg.device), headless=cfg.headless)
+    base_env: _EnvBase = env_cls(cfg.task, str(cfg.device), headless=cfg.headless)
 
     if checkpoint is None:
         checkpoint = parse_checkpoint(cfg.checkpoint_path)
     if checkpoint is not None:
         checkpoint.update()
     checkpoint_path = checkpoint.get_path() if checkpoint else None
+    print(f"[Info]: Using checkpoint path: {checkpoint_path}")
     if checkpoint_path is not None:
         state_dict = torch.load(checkpoint_path, weights_only=False)
     else:

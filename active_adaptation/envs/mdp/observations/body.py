@@ -4,7 +4,6 @@ from typing_extensions import override
 from .base import Observation
 from active_adaptation.utils.symmetry import cartesian_space_symmetry
 from active_adaptation.assets import get_output_body_indexing
-from active_adaptation.utils.math import quat_rotate_inverse, yaw_quat
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation

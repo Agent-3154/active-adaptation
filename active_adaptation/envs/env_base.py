@@ -100,8 +100,15 @@ class RewardGroup:
 
     def compute(self) -> torch.Tensor:
         rewards = []
+        if self.name in {"tracking", "tracking_metrics"}:
+            print_enabled = True
+            # print(f"Reward group '{self.name}':")
+        else:
+            print_enabled = False
         for key, func in self.funcs.items():
             reward, count = func.compute()
+            # if print_enabled:
+            #     print(f"\t{key}: {reward.mean().item():.4f}")
             self.env.stats[self.name, key].add_(reward)
             ema_sum, ema_cnt = self.env._stats_ema[self.name][key]
             ema_sum.mul_(EMA_DECAY).add_(reward.sum())
@@ -429,7 +436,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                     self.scene.update(self.physics_dt)
                     [callback(substep) for callback in self._post_step_callbacks]
 
-        if self.sim.has_gui():
+        if self.sim.has_gui() and self.backend != "mjlab":
             self.sim.render()
 
         self.episode_length_buf.add_(1)
@@ -498,7 +505,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         return tensordict
 
     def _compute_termination(self, tensordict: TensorDictBase) -> TensorDictBase:
-        truncated = self.episode_length_buf[:, None] >= self.max_episode_length
+        truncated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
         terminated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
         discount = torch.ones((self.num_envs, 1), device=self.device)
         for key, func in self.termination_funcs.items():
@@ -572,9 +579,11 @@ class _EnvBase(EnvBase, RegistryMixin):
                     *rgb_data.shape
                 )
                 return rgb_data[:, :, :3]
+            if self.backend == "mjlab":
+                return self.sim.render_rgb_array()
             raise NotImplementedError(
                 f"rgb_array mode not supported for backend '{self.backend}'. "
-                "Only Isaac backend supports rgb_array rendering."
+                "Only Isaac and mjlab backends support rgb_array rendering."
             )
         raise NotImplementedError(f"Render mode '{mode}' not supported.")
 
@@ -594,6 +603,8 @@ class _EnvBase(EnvBase, RegistryMixin):
                 del self.scene
                 self.sim.clear_all_callbacks()
                 self.sim.clear_instance()
-            elif self.backend == "mjlab" and self.sim.has_gui():
-                self.sim.viewer.close()
+            elif self.backend == "mjlab":
+                if self.sim.has_gui():
+                    self.sim.viewer.close()
+                self.sim.close()
             super().close(raise_if_closed=raise_if_closed)
