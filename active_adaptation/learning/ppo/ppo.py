@@ -175,6 +175,7 @@ class PPOPolicy(PPOBase):
                 for param in self.critic.parameters():
                     distr.broadcast(param, src=0)
         self.world_size = aa.get_world_size()
+        self.should_reduce_grads = aa.is_distributed() and not self.cfg.use_ddp
         
         if self.cfg.muon:
             self.opt = MuonAdamWWrapper(
@@ -194,7 +195,7 @@ class PPOPolicy(PPOBase):
 
         self.update = self._update
         if self.cfg.compile and not aa.is_distributed():
-            self.update = torch.compile(self.update, fullgraph=True)
+            self.update = torch.compile(self.update)
 
     def get_rollout_policy(self, mode: str="train", critic: bool = False):
         if critic:
@@ -202,7 +203,7 @@ class PPOPolicy(PPOBase):
         else:
             policy = Seq(self.vecnorm, self.actor)
         if self.cfg.compile:
-            policy = torch.compile(policy, fullgraph=True)
+            policy = torch.compile(policy)
         return policy
 
     def compute_value(self, tensordict):
@@ -299,7 +300,7 @@ class PPOPolicy(PPOBase):
         self.opt.zero_grad()
         loss.backward()
 
-        if aa.is_distributed() and not self.cfg.use_ddp:
+        if self.should_reduce_grads:
             for param in self.actor.parameters():
                 distr.all_reduce(param.grad.data, op=distr.ReduceOp.SUM)
                 param.grad.data /= self.world_size

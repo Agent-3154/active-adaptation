@@ -8,8 +8,9 @@ import torch
 from typing_extensions import override
 
 from active_adaptation.utils.math import quat_rotate, yaw_quat
-
+from active_adaptation.utils.symmetry import SymmetryTransform
 from .base import Command
+from ..rewards.base import Reward
 
 
 class SingleEEFLocoManip(Command):
@@ -79,6 +80,8 @@ class SingleEEFLocoManip(Command):
             # (x,y): horizontal offsets in yaw-aligned frame; z: height above ground at target xy.
             self.cmd_eef_pos_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pos_w = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_vel_b = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_vel_w = torch.zeros(self.num_envs, 3)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.command_speed = torch.zeros(self.num_envs, 1)
 
@@ -100,12 +103,20 @@ class SingleEEFLocoManip(Command):
     def command(self) -> torch.Tensor:
         return torch.cat(
             [
-                self.cmd_linvel_b[:, :2],
-                self.cmd_yawvel_b,
-                self.cmd_eef_pos_b,
+                self.cmd_linvel_b[:, :2], # [N, 2]
+                self.cmd_yawvel_b, # [N, 1]
+                self.cmd_eef_pos_b, # [N, 3]
             ],
             dim=-1,
         )
+    
+    @override
+    def symmetry_transform(self):
+        # flip y and yaw
+        cmd_linvel_b = SymmetryTransform(perm=[0, 1], signs=[1, -1])
+        cmd_yawvel_b = SymmetryTransform(perm=[0], signs=[-1])
+        cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        return SymmetryTransform.cat([cmd_linvel_b, cmd_yawvel_b, cmd_eef_pos_b])
 
     @staticmethod
     def _env_mask_prob(num_envs: int, prob: float, device: torch.device) -> torch.Tensor:
@@ -177,6 +188,41 @@ class SingleEEFLocoManip(Command):
             color=(1.0, 1.0, 1.0, 1.0),
         )
         self.marker.visualize(self.cmd_eef_pos_w)
+
+
+class eef_pos_tracking(Reward[SingleEEFLocoManip]):
+    
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.asset = self.command_manager.asset
+        self.eef_body_idx = self.command_manager.eef_body_idx
+        self.sigma = 0.1
+    
+    @override
+    def _compute(self) -> torch.Tensor:
+        diff_w = self.command_manager.cmd_eef_pos_w - self.asset.data.body_link_pos_w[:, self.eef_body_idx]
+        error_l2 = diff_w.square().sum(dim=-1, keepdim=True)
+        rew = torch.exp(-error_l2 / self.sigma)
+        return rew.reshape(self.num_envs, 1)
+
+
+class eef_vel_tracking(Reward[SingleEEFLocoManip]):
+    """
+    Optionally track the velocity of the end-effector.
+    """
+    def __init__(self, env, weight: float, enabled: bool = True):
+        super().__init__(env, weight, enabled)
+        self.asset = self.command_manager.asset
+        self.eef_body_idx = self.command_manager.eef_body_idx
+        self.sigma = 0.2
+    
+    @override
+    def _compute(self) -> torch.Tensor:
+        diff_w = self.command_manager.cmd_eef_vel_w - self.asset.data.body_link_vel_w[:, self.eef_body_idx]
+        error_l2 = diff_w.square().sum(dim=-1, keepdim=True)
+        rew = torch.exp(-error_l2 / self.sigma)
+        return rew.reshape(self.num_envs, 1)
+
 
 
 __all__ = ["SingleEEFLocoManip"]

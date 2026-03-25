@@ -23,14 +23,21 @@ sim:
 
 input:
   action:
-    _target_: JointPosition
-    action_scaling:
-      .*_hip_joint: 0.5
-      .*_thigh_joint: 0.5
-      .*_calf_joint: 0.5
-      arm_joint.*: 0.35
-    max_delay: 1
-    alpha_range: [0.5, 1.0]
+    _target_: ConcatenatedAction
+    actions:
+      - _target_: JointPosition
+        action_scaling:
+          .*_hip_joint: 0.5
+          .*_thigh_joint: 0.5
+          .*_calf_joint: 0.5
+          arm_joint[4-8]: 0.35
+        max_delay: 1
+        alpha_range: [0.8, 0.9]
+      - _target_: JointPositionDelta
+        action_scaling:
+          arm_joint[1-3]: 0.5
+        max_delay: 1
+        alpha_range: [0.8, 0.9]
 
 command:
   _target_: SingleEEFLocoManip
@@ -67,6 +74,8 @@ reward:
     angvel_xy_l2:       {weight: 0.02}
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 2.0, target_height: 0.4}
+  manip:
+    eef_pos_tracking:   {weight: 1.0}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7}
@@ -84,7 +93,7 @@ reward:
     # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
-  crash: {body_names_expr: [base_link, .*thigh], t_thres: 0.06}
+  crash: {body_names_expr: [base_link, .*hip, .*thigh], t_thres: 0.06}
   fall_over: {xy_thres: 0.9}
   undesired_contact: {body_names: [.*_calf]}
 

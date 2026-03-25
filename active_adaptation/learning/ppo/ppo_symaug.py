@@ -173,6 +173,7 @@ class PPOPolicy(TensorDictModuleBase):
                     distr.broadcast(param, src=0)
                 for param in self.critic.parameters():
                     distr.broadcast(param, src=0)
+        self.should_reduce_grads = aa.is_distributed() and not self.cfg.use_ddp
         self.world_size = aa.get_world_size()
 
         if self.cfg.muon:
@@ -193,9 +194,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         self.update = self._update
         if self.cfg.compile and not aa.is_distributed():
-            # TODO: compile for multi-gpu training?
-            self.update = torch.compile(self.update, fullgraph=True)
-            # self.update = CudaGraphModule(self.update)
+            self.update = torch.compile(self.update)
     
     def on_stage_start(self, stage: str):
         pass
@@ -206,7 +205,7 @@ class PPOPolicy(TensorDictModuleBase):
         else:
             policy = Seq(self.vecnorm, self.actor)
         if self.cfg.compile:
-            policy = torch.compile(policy, fullgraph=True)
+            policy = torch.compile(policy)
         return policy
 
     @VecNorm.freeze()
@@ -224,6 +223,7 @@ class PPOPolicy(TensorDictModuleBase):
         for epoch in range(self.cfg.ppo_epochs):
             batch = make_batch(tensordict, self.cfg.num_minibatches)
             for minibatch in batch:
+                minibatch = self._augment_symmetry(minibatch)
                 infos.append(self.update(minibatch))
                 
                 if self.desired_kl is not None: # adaptive learning rate
@@ -296,10 +296,7 @@ class PPOPolicy(TensorDictModuleBase):
         tensordict.set(ret_key, ret)
         return tensordict
 
-    def _update(self, tensordict: TensorDict):
-        bsize = tensordict.shape[0]
-        loc_old, scale_old = tensordict["loc"], tensordict["scale"]
-
+    def _augment_symmetry(self, tensordict: TensorDict) -> TensorDict:
         symmetry = tensordict.empty()
         symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
         symmetry[OBS_KEY] = self.obs_transform(tensordict[OBS_KEY])
@@ -307,7 +304,13 @@ class PPOPolicy(TensorDictModuleBase):
         symmetry["adv"] = tensordict["adv"]
         symmetry["ret"] = tensordict["ret"]
         symmetry["is_init"] = tensordict["is_init"]
-        tensordict = torch.cat([tensordict.select(*symmetry.keys(True, True)), symmetry], dim=0)
+        return torch.cat(
+            [tensordict.select(*symmetry.keys(True, True)), symmetry],
+            dim=0,
+        )
+
+    def _update(self, tensordict: TensorDict):
+        bsize = tensordict.shape[0] // 2
 
         self.vecnorm(tensordict)
         
@@ -336,15 +339,16 @@ class PPOPolicy(TensorDictModuleBase):
 
         loss = policy_loss + entropy_loss + value_loss
         if self.cfg.aux_coef > 0.0:
-            aux_loss = (tensordict["aux_pred"].reshape_as(ret) - ret).square() * clamped
-            aux_loss = aux_loss.sum() / clamped.sum().clamp_min(1.0)
+            aux_weight = clamped.float() * valid
+            aux_loss = (tensordict["aux_pred"].reshape_as(ret) - ret).square() * aux_weight
+            aux_loss = aux_loss.sum() / aux_weight.sum().clamp_min(1.0)
             loss += self.cfg.aux_coef * aux_loss
         else:
-            aux_loss = torch.tensor(0.0)
+            aux_loss = ret.new_zeros(())
         self.opt.zero_grad()
         loss.backward()
 
-        if aa.is_distributed() and not self.cfg.use_ddp:
+        if self.should_reduce_grads:
             for param in self.actor.parameters():
                 distr.all_reduce(param.grad, op=distr.ReduceOp.SUM)
                 param.grad /= self.world_size
@@ -359,13 +363,7 @@ class PPOPolicy(TensorDictModuleBase):
         with torch.no_grad():
             explained_var = 1 - F.mse_loss(values, ret) / ret.var()
             clipfrac = clamped.float().mean()
-            loc, scale = dist.loc[:bsize], dist.scale[:bsize]
-            kl = torch.sum(
-                torch.log(scale) - torch.log(scale_old)
-                + (torch.square(scale_old) + torch.square(loc_old - loc)) / (2.0 * torch.square(scale))
-                - 0.5,
-                axis=-1,
-            ).mean()
+            approx_kl = ((ratio - 1.0) - log_ratio).mean()
             symmetry_loss = F.mse_loss(dist.mean[bsize:], self.act_transform(dist.mean[:bsize]))
             actor_feature_norm = torch.norm(tensordict["_actor_feature"], dim=-1).mean()
             critic_feature_norm = torch.norm(tensordict["_critic_feature"], dim=-1).mean()
@@ -374,7 +372,7 @@ class PPOPolicy(TensorDictModuleBase):
             "actor/entropy": entropy.detach(),
             "actor/grad_norm": actor_grad_norm,
             "actor/clamp_ratio": clipfrac,
-            "actor/kl": kl,
+            "actor/approx_kl": approx_kl,
             "actor/aux_loss": aux_loss,
             "actor/symmetry_loss": symmetry_loss.detach(),
             "actor/feature_norm": actor_feature_norm.detach(),
@@ -425,4 +423,3 @@ def effective_rank(X: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
     p = S2 / S2.sum().clamp_min(eps)
     entropy = -(p * (p + eps).log()).sum()
     return entropy.exp()
-

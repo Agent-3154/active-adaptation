@@ -18,7 +18,7 @@ class ConcatenatedAction(Action):
         self.action_managers: List[Action] = []
 
         for spec in actions:
-            cls = Action.registry[spec.pop("class")]
+            cls = Action.registry[spec.pop("_target_")]
             self.action_managers.append(cls(self.env, **spec))
         self.action_dims = [
             action_manager.action_dim for action_manager in self.action_managers

@@ -100,6 +100,15 @@ class _DelayedJointAction(Action):
 
 
 class JointPosition(_DelayedJointAction):
+    """Absolute joint-position offset controller.
+
+    This action maps policy outputs to a target posture each substep:
+    `target = default_joint_pos + action * action_scaling` (on controlled joints),
+    with optional random delay and first-order smoothing (LPF via `alpha`).
+
+    Use this when you want the policy to command pose offsets directly around the
+    nominal/default posture, without integrating action over time.
+    """
     def __init__(
         self,
         env,
@@ -134,6 +143,46 @@ class JointPosition(_DelayedJointAction):
         self.asset.set_joint_position_target(jpos_target)
 
 
+class JointPositionDelta(_DelayedJointAction):
+    """Incremental (integrated) joint-position controller.
+
+    Compared to `JointPosition`, this action integrates per-substep deltas:
+    `target[t+1] = target[t] + clamp(action * action_scaling * physics_dt)`.
+    The command still goes through delay and LPF (`alpha`) to better match
+    hardware-like command filtering.
+
+    Use this when you want rate-like behavior and smoother, trajectory-style
+    evolution of joint targets instead of direct pose-offset commands.
+    """
+    def __init__(
+        self,
+        env,
+        action_scaling: Dict[str, float] = 0.5,
+        clamp_range: Tuple[float, float] = (-0.5 * torch.pi, 0.5 * torch.pi),
+        max_delay: int = 2,
+        alpha_range: Tuple[float, float] = (0.5, 1.0),
+        input_order: Literal["isaac", "mujoco", "mjlab"] = "isaac",
+    ):
+        super().__init__(env, action_scaling, max_delay, alpha_range, input_order)
+        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
+        self.clamp_range = tuple(clamp_range)
+        self.jpos_target = self.default_joint_pos.clone()
+    
+    @override
+    def reset(self, env_ids: torch.Tensor):
+        super().reset(env_ids)
+        self.jpos_target[env_ids] = self.default_joint_pos[env_ids]
+    
+    @override
+    def apply_action(self, substep: int):
+        self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
+        self.action_queue = self.action_queue.roll(-1, dims=1)
+
+        delta = self.applied_action * self.action_scaling * self.env.physics_dt
+        self.jpos_target += torch.clamp(delta, self.clamp_range[0], self.clamp_range[1])
+        self.asset.set_joint_position_target(self.jpos_target, joint_ids=self.joint_ids)
+
+
 class JointVelocity(_DelayedJointAction):
     @override
     def apply_action(self, substep: int):
@@ -144,4 +193,4 @@ class JointVelocity(_DelayedJointAction):
         self.asset.set_joint_velocity_target(jvel_target, joint_ids=self.joint_ids)
 
 
-__all__ = ["JointPosition", "JointVelocity"]
+__all__ = ["JointPosition", "JointPositionDelta", "JointVelocity"]

@@ -51,8 +51,14 @@ def _a2_piper_cfg():
 
     # Symmetry: legs keep A2 left–right pairs; single arm joints map to themselves (+1).
     joint_symmetry = dict(base.joint_symmetry_mapping)
-    for jn in _ARM_JOINTS:
-        joint_symmetry[jn] = (1, jn)
+    joint_symmetry["arm_joint1"] = (-1, "arm_joint1") # yaw
+    joint_symmetry["arm_joint2"] = (1, "arm_joint2")
+    joint_symmetry["arm_joint3"] = (1, "arm_joint3")
+    joint_symmetry["arm_joint4"] = (-1, "arm_joint4") # roll
+    joint_symmetry["arm_joint5"] = (1, "arm_joint5")
+    joint_symmetry["arm_joint6"] = (-1, "arm_joint6") # roll
+    joint_symmetry["arm_joint7"] = (1, "arm_joint7")
+    joint_symmetry["arm_joint8"] = (1, "arm_joint8")
 
     spatial_symmetry = dict(base.spatial_symmetry_mapping)
     for bn in _ARM_BODIES:
