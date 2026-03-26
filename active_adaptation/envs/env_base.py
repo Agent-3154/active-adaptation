@@ -1,6 +1,6 @@
 import warnings
 from collections import OrderedDict
-from typing import Dict, Mapping, Tuple, cast
+from typing import Dict, Mapping, cast
 
 import numpy as np
 import torch
@@ -24,9 +24,6 @@ from active_adaptation.utils.profiling import ScopedTimer
 
 if active_adaptation.get_backend() == "isaac":
     import isaacsim.core.utils.torch as torch_utils
-
-
-EMA_DECAY = 0.99
 
 
 def parse_component_spec(name: str, cfg):
@@ -83,7 +80,7 @@ class ObsGroup:
 
 
 class RewardGroup:
-    """Group of reward terms with internal EMA tracking for logging."""
+    """Group of reward terms; per-term EMA logging lives on each :class:`~mdp.Reward`."""
 
     def __init__(
         self,
@@ -103,38 +100,28 @@ class RewardGroup:
         self.rew_buf = torch.zeros(
             env.num_envs, self.enabled_rewards, device=env.device
         )
-        # EMA state per reward term (sum, count) for logging
-        self._ema: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {
-            key: (
-                torch.zeros(1, device=env.device),
-                torch.zeros(1, device=env.device),
-            )
-            for key in funcs.keys()
-        }
         if compile:
             self.compute = torch.compile(self.compute, fullgraph=True)
 
     def compute(self) -> torch.Tensor:
         rewards = []
         for key, func in self.funcs.items():
-            reward, count = func.compute()
+            reward = func.compute()
             self.env.stats[self.name, key].add_(reward)
-            ema_sum, ema_cnt = self._ema[key]
-            ema_sum.mul_(EMA_DECAY).add_(reward.sum())
-            cnt = count.item() if torch.is_tensor(count) else count
-            ema_cnt.mul_(EMA_DECAY).add_(cnt)
             if func.enabled:
                 rewards.append(reward)
         if len(rewards):
-            self.rew_buf[:] = torch.cat(rewards, 1)
+            self.rew_buf = torch.cat(rewards, 1)
         return self.rew_buf.sum(dim=1, keepdim=True)
 
     def get_ema_stats(self) -> Dict[str, float]:
-        """Return EMA mean per reward term (for logging)."""
-        result = {}
-        for key, (ema_sum, ema_cnt) in self._ema.items():
-            cnt = ema_cnt.clamp(min=1e-8)
-            result[key] = (ema_sum / cnt).item()
+        """Flatten per-term EMA metrics (e.g. mean, optional var) for logging."""
+        result: Dict[str, float] = {}
+        for key, func in self.funcs.items():
+            mean, var = func.get_ema_stats()
+            result[key] = mean.item()
+            if var is not None:
+                result[f"{key}_var"] = var.item()
         return result
 
 

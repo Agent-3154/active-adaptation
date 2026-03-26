@@ -75,7 +75,7 @@ reward:
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 2.0, target_height: 0.4}
   manip:
-    eef_pos_tracking:   {weight: 1.0}
+    eef_pos_tracking:   {weight: 1.0, track_var: true}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7}
