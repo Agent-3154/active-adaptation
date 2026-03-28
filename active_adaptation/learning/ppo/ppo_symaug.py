@@ -47,6 +47,7 @@ from active_adaptation.learning.ppo.common import (
     ppo_clipped_loss,
     spo_loss,
     normalize,
+    CMD_KEY,
     OBS_KEY,
     ACTION_KEY,
     REWARD_KEY,
@@ -56,6 +57,7 @@ from active_adaptation.learning.ppo.common import (
     make_batch,
     make_mlp,
     Actor,
+    CatTensors,
 )
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import check_parameters
@@ -84,10 +86,15 @@ class PPOConfig:
     use_ddp: bool = True
     debug: bool = False # enable correctness checkers
 
-    in_keys: Tuple[str, ...] = (OBS_KEY,)
+    in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY,) # CMD_KEY is optional. One can embed the command into the observation.
 
 cs = ConfigStore.instance()
 cs.store("ppo_symaug", node=PPOConfig, group="algo")
+
+
+def vecnorm_sync_(module: nn.Module):
+    if isinstance(module, VecNorm):
+        module.synchronize(mode="broadcast")
 
 
 class PPOPolicy(TensorDictModuleBase):
@@ -115,20 +122,27 @@ class PPOPolicy(TensorDictModuleBase):
 
         fake_input = observation_spec.zero()
         
+        if CMD_KEY in observation_spec.keys(True, True):
+            self.cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transform().to(self.device)
+            obs_dim = observation_spec[OBS_KEY].shape[-1]
+            cmd_dim = observation_spec[CMD_KEY].shape[-1]
+            self.vecnorm = Seq(
+                CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False),
+                Mod(VecNorm((obs_dim + cmd_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
+            ).to(self.device)
+            self.training_keys = [CMD_KEY, OBS_KEY, ACTION_KEY]
+        else:
+            self.cmd_transform = None
+            obs_dim = observation_spec[OBS_KEY].shape[-1]
+            self.vecnorm = Mod(VecNorm((obs_dim,), decay=1.0), [OBS_KEY], ["_obs_normed"]).to(self.device)
+            self.training_keys = [OBS_KEY, ACTION_KEY]
+        
+        # the keys needed for `_update`
+        self.training_keys += ["action_log_prob", "adv", "ret", "is_init"]
         self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform().to(self.device)
         self.act_transform = env.action_manager.symmetry_transform().to(self.device)
         self.action_dim = env.action_manager.action_dim
 
-        self.vecnorm = Mod(
-            VecNorm(
-                input_shape=observation_spec[OBS_KEY].shape[-1:],
-                stats_shape=observation_spec[OBS_KEY].shape[-1:],
-                decay=1.0
-            ),
-            in_keys=[OBS_KEY],
-            out_keys=["_obs_normed"]
-        ).to(self.device)
-        
         actor_modules = [
             Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_actor_feature"]),
             Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
@@ -220,8 +234,9 @@ class PPOPolicy(TensorDictModuleBase):
         log_probs_before = tensordict["action_log_prob"]
         tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
 
+        td = tensordict.select(*self.training_keys)
         for epoch in range(self.cfg.ppo_epochs):
-            batch = make_batch(tensordict, self.cfg.num_minibatches)
+            batch = make_batch(td, self.cfg.num_minibatches)
             for minibatch in batch:
                 minibatch = self._augment_symmetry(minibatch)
                 infos.append(self.update(minibatch))
@@ -256,7 +271,7 @@ class PPOPolicy(TensorDictModuleBase):
         infos["critic/value_std"] = tensordict["ret"].std().item()
         infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
         if aa.is_distributed():
-            self.vecnorm.module.synchronize(mode="broadcast")
+            self.vecnorm.apply(vecnorm_sync_)
             if self.cfg.debug:
                 actor_diff = check_parameters(self.actor)
                 critic_diff = check_parameters(self.critic)
@@ -299,15 +314,14 @@ class PPOPolicy(TensorDictModuleBase):
     def _augment_symmetry(self, tensordict: TensorDict) -> TensorDict:
         symmetry = tensordict.empty()
         symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
+        if self.cmd_transform is not None:
+            symmetry[CMD_KEY] = self.cmd_transform(tensordict[CMD_KEY])
         symmetry[OBS_KEY] = self.obs_transform(tensordict[OBS_KEY])
         symmetry["action_log_prob"] = tensordict["action_log_prob"]
         symmetry["adv"] = tensordict["adv"]
         symmetry["ret"] = tensordict["ret"]
         symmetry["is_init"] = tensordict["is_init"]
-        return torch.cat(
-            [tensordict.select(*symmetry.keys(True, True)), symmetry],
-            dim=0,
-        )
+        return torch.cat([tensordict, symmetry])
 
     def _update(self, tensordict: TensorDict):
         bsize = tensordict.shape[0] // 2
