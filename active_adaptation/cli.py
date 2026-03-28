@@ -8,7 +8,7 @@ import importlib.metadata
 import json
 from pathlib import Path
 
-from .project_loading.manifest import CACHE_DIR, load_projects
+from .project_loading.manifest import CACHE_DIR, load_projects, save_projects
 
 
 def aa_pull():
@@ -114,6 +114,58 @@ def aa_discover_projects(enabled: bool = False):
         print(f"Discovered learning module: {entry_point.name} at {project_info['path']}")
     projects_file.write_text(json.dumps(projects, indent=2))
     print(f"Modify {projects_file} to enable/disable projects.")
+
+
+def aa_project():
+    """
+    Enable or disable a logical project in projects.json.
+
+    The same entry-point name may appear under \"environment\" and/or \"learning\";
+    both parts are updated together when present.
+    """
+    parser = argparse.ArgumentParser(
+        description="Enable or disable a project (environment and/or learning manifest entries)",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+    for cmd, help_text in (
+        ("enable", "Turn the project on for imports and aa-pull (default scope)"),
+        ("disable", "Turn the project off"),
+    ):
+        p = sub.add_parser(cmd, help=help_text)
+        p.add_argument(
+            "name",
+            metavar="NAME",
+            help="Entry-point name as in projects.json (e.g. same as pyproject entry point name)",
+        )
+    args = parser.parse_args()
+    name = args.name.strip()
+    if not name:
+        raise SystemExit("Project name must be non-empty.")
+
+    projects = load_projects()
+    env = projects.setdefault("environment", {})
+    learning = projects.setdefault("learning", {})
+    in_env = name in env
+    in_learning = name in learning
+
+    if not in_env and not in_learning:
+        raise SystemExit(
+            f"Unknown project {name!r}: not in environment or learning manifest. "
+            f"Run aa-discover-projects first."
+        )
+
+    enabled = args.command == "enable"
+    updated: list[str] = []
+    if in_env:
+        env[name]["enabled"] = enabled
+        updated.append("environment")
+    if in_learning:
+        learning[name]["enabled"] = enabled
+        updated.append("learning")
+
+    save_projects(projects)
+    state = "enabled" if enabled else "disabled"
+    print(f"Project {name!r} {state} ({', '.join(updated)}).")
 
 
 def _task_dir_for_path(project_path: Path) -> Path | None:

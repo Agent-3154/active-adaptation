@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "active_adaptation"
-version = "0.4.2"
+version = "0.5.0"
 authors = [
     {name = "btx0424@SUSTech"}
 ]
@@ -34,6 +34,7 @@ dependencies = [
 [project.scripts]
 aa-create-project = "active_adaptation.cli:aa_create_project"
 aa-discover-projects = "active_adaptation.cli:aa_discover_projects"
+aa-project = "active_adaptation.cli:aa_project"
 aa-list-tasks = "active_adaptation.cli:aa_list_tasks"
 aa-pull = "active_adaptation.cli:aa_pull"
 aa-recent-commands = "active_adaptation.cli:aa_recent_commands"
