@@ -22,6 +22,9 @@ class Command(MDPComponent, RegistryMixin):
         self.init_joint_pos = self.asset.data.default_joint_pos.clone()
         self.init_joint_vel = self.asset.data.default_joint_vel.clone()
         self.teleop = teleop
+    
+    def step(self):
+        pass
 
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor | None:
         init_root_state = self.init_root_state[env_ids]

@@ -254,7 +254,7 @@ class GAE(nn.Module):
         done: torch.Tensor,
         value: torch.Tensor,
         next_value: torch.Tensor,
-        discount: torch.Tensor = None,
+        discount: torch.Tensor | None = None,
     ):
         num_steps = terminated.shape[1]
         advantages = torch.zeros_like(reward)

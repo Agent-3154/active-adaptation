@@ -601,10 +601,14 @@ version = "0.1.0"
 source = { editable = "../../projects/hdmi" }
 dependencies = [
     { name = "active-adaptation" },
+    { name = "mjhub" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "active-adaptation" }]
+requires-dist = [
+    { name = "active-adaptation" },
+    { name = "mjhub", git = "https://github.com/EGalahad/mjhub.git?rev=main" },
+]
 
 [[package]]
 name = "hf-xet"
@@ -1036,6 +1040,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b3/eb/8a0499fb1a2f373f97e2b4df91797507c3971c42c59f1610bed090c57ddc/mediapy-1.2.6.tar.gz", hash = "sha256:2c866cfa0a170213f771b1dd5584a2e82d8d0dc0fa94982f83e29aae27e49c83", size = 28143, upload-time = "2026-02-03T10:29:31.104Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/37/8c/52f0299f1675cdfa1ab39a6028a2e5adf9032ae1118c9895c84b08af162b/mediapy-1.2.6-py3-none-any.whl", hash = "sha256:0a0ea00eb0da83c3c54d588b49c49a41ba456174aa33e530ffe13e17269c9072", size = 27494, upload-time = "2026-02-03T10:29:30.245Z" },
+]
+
+[[package]]
+name = "mjhub"
+version = "0.1.0"
+source = { git = "https://github.com/EGalahad/mjhub.git?rev=main#40aff4e13c6c0c04ce457ec0be706c63ca134429" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "mujoco" },
 ]
 
 [[package]]

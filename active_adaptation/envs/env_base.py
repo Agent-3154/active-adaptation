@@ -265,12 +265,14 @@ class _EnvBase(EnvBase, RegistryMixin):
             )
 
         # MDP: terminations
+        print("Termination functions:")
         for term_name, term_cfg in self.cfg.get("termination", {}).items():
             term_name, cls_name, term_kwargs = parse_component_spec(term_name, term_cfg)
             term = mdp.Termination.make(cls_name, self, **term_kwargs)
             if not term:
                 continue
             term = cast(mdp.Termination, term)
+            print(f"\t{term_name}: \t{'timeout' if term.is_timeout else 'termination'}")
             self.termination_funcs[term_name] = term
             self._add_mdp_component(term)
 
@@ -435,6 +437,9 @@ class _EnvBase(EnvBase, RegistryMixin):
                 with ScopedTimer("simulation_post_step", sync=False):
                     self.scene.update(self.physics_dt)
                     [callback(substep) for callback in self._post_step_callbacks]
+            # TODO: test if this is needed
+            if self.backend == "mjlab":
+                self.sim._sim.forward()
 
         if self.sim.has_gui() and self.backend != "mjlab":
             self.sim.render()

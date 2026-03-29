@@ -1,6 +1,6 @@
 hydra:
   run:
-    dir: ./outputs_play/${now:%Y-%m-%d}/${now:%H-%M-%S}-${task.name}-${algo.name}
+    dir: ./outputs/play/${now:%Y-%m-%d}/${now:%H-%M-%S}-${task.name}-${algo.name}
 
 headless: false
 
