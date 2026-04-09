@@ -4,8 +4,6 @@ import numpy as np
 import einops
 import time
 import sys
-import av
-
 from fractions import Fraction
 from omegaconf import OmegaConf
 
@@ -71,4 +69,3 @@ def main(cfg):
 
 if __name__ == "__main__":
     main()
-

@@ -24,64 +24,103 @@ Projects using this codebase:
 
 ## Installation
 
-1. For the following steps, the recommended way to structure the (VSCode or Cursor) workspace is:
-   ```bash
-    ${workspaceFolder}/ # File->Open Folder here
-      .vscode/
-        launch.json # use vscode Python debugging for better experience!
-        settings.json
-      active-adaptation/
-      IsaacLab/
-        _isaac_sim/
-   ```
-2. Install [Isaac Sim 5.1.0](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/download.html) by downloading the latest release and unzip it to a desired location `$ISAACSIM_PATH`. Installing via `pip` is also fine.
-3. Install [Isaac Lab](https://github.com/isaac-sim/IsaacLab) and setup a conda environment:
-   ```bash
-   conda create -n lab python=3.11
-   conda activate lab
-   # install IsaacLab to the exisiting conda environment
-   # git clone https://github.com/isaac-sim/IsaacLab.git
-   git clone git@github.com:isaac-sim/IsaacLab.git # SSH recommended
-   cd IsaacLab
-   ln -s $ISAACSIM_PATH _isaac_sim
-   ./isaaclab.sh -c lab
-   ./isaaclab.sh -i none # install without additional RL libraries
-   # reactivate the environment
-   conda activate lab
-   echo $PYTHONPATH 
-   ```
-   You should see the isaac-sim related dependencies are added to `$PYTHONPATH`.
-4. [**Recommended**] Isaac Sim comes with its cumstom Python environment which may lead to conflicts with our conda environment.
-   To avoid Python environment conflicts, try the following steps:
-   ```bash
-   cd $ISAACSIM_PATH/exts/omni.isaac.ml_archive
-   mv pip_prebundle pip_prebundle.back # backup the packages shipped with Isaac Sim
-   ln -s $CONDA_PREFIX/lib/python3.11/site-packages pip_prebundle
-   ```
-5. [**Optional**] VSCode setup. This enables the Python extension for code analysis to provide auto-completiong and linting. Edit `.vscode/settings.json` on demand:
-   ```json
-   "python.analysis.extraPaths": [
-        // Recommended
-        "./IsaacLab/source/isaaclab",
-        "./IsaacLab/source/isaaclab_assets",
-        // Optional, modified from IsaacLab/.vscode/settings.json
-        "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.behavior",
-        "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.behavior.ui",
-        "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.domain_randomization",
-        "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.examples",
-        "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.scene_blox",
-        "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.synthetic_recorder",
-        "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.writers",
-        //... note that adding extraPaths may increase VSCode CPU usage
-    ],
-   ```
-6. `pip install -U torch torchvision tensordict torchrl`. `torch>=2.8.0` is recommended for full feature.
-7. Install this repo:
-   ```bash
-   git clone git@github.com:btx0424/active-adaptation.git # SSH recommended
-   cd active-adaptation
-   pip install -e . 
-   ```
+### Workspace layout
+
+For IsaacLab development, the recommended workspace layout is:
+
+```bash
+${workspaceFolder}/
+  .vscode/
+    launch.json
+    settings.json
+  active-adaptation/
+  IsaacLab/
+    _isaac_sim/
+```
+
+### Single Python environment
+
+Use one Python 3.11 environment for this repo.
+
+- Isaac Sim / IsaacLab requires Python 3.11.
+- MJLab also works on Python 3.11.
+- The repo root is the only `uv` project you need.
+
+Setup:
+
+```bash
+git clone git@github.com:btx0424/active-adaptation.git
+cd active-adaptation
+uv sync
+```
+
+For common development commands:
+
+```bash
+uv run aa-discover-projects
+uv run aa-list-tasks
+uv run pyright active_adaptation
+```
+
+### IsaacLab / Isaac Sim setup
+
+Install [Isaac Sim 5.1.0](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/download.html) and [IsaacLab](https://github.com/isaac-sim/IsaacLab) into the same Python 3.11 environment you use for this repo.
+
+After that, run training / eval / play from the repo root:
+
+```bash
+uv run python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
+uv run python scripts/eval.py task=Go2/Go2Flat algo=ppo eval_render=true
+uv run python scripts/play.py task=Go2/Go2Flat algo=ppo checkpoint_path=/path/to/checkpoint.pt
+```
+
+Notes:
+
+- `uv sync` manages this repo's dependencies in `.venv`.
+- IsaacLab itself may still require its own setup for `PYTHONPATH`, Isaac Sim linking, and extension discovery.
+- The important constraint is that IsaacLab and this repo must use the same Python 3.11 environment.
+
+### MJLab setup
+
+If you want to use the `mjlab` backend, install the optional extra in the same root environment:
+
+```bash
+uv sync --extra mjlab
+```
+
+Then run MJLab commands from the repo root:
+
+```bash
+uv run python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
+uv run python scripts/play.py task=Go2/Go2Flat algo=ppo backend=mjlab checkpoint_path=/path/to/checkpoint.pt
+```
+
+### Optional: direct `pip` install
+
+If you are not using `uv`, the root package can still be installed directly:
+
+```bash
+pip install -e .
+pip install mjlab==1.2.0  # only if you need the mjlab backend
+```
+
+### Optional VSCode setup
+
+Edit `.vscode/settings.json` on demand:
+
+```json
+"python.analysis.extraPaths": [
+  "./IsaacLab/source/isaaclab",
+  "./IsaacLab/source/isaaclab_assets",
+  "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.behavior",
+  "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.behavior.ui",
+  "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.domain_randomization",
+  "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.examples",
+  "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.scene_blox",
+  "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.synthetic_recorder",
+  "${workspaceFolder}/IsaacLab/_isaac_sim/exts/isaacsim.replicator.writers"
+],
+```
 
 ## Asset download and placement
 

@@ -159,7 +159,13 @@ class height_scan(Observation):
             self.ground_mesh_quat_w = torch.tensor([1., 0., 0., 0.]).expand(self.num_envs, 1, 4)
             self.ray_dirs_w = torch.tensor([0., 0., -1.]).expand(self.num_envs, self.n_rays, 3)
 
-        from simple_raycaster import MultiMeshRaycaster
+        try:
+            from simple_raycaster import MultiMeshRaycaster
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "height_scan requires the optional `simple-raycaster` package. "
+                "Install it separately before using height_scan."
+            ) from exc
         self.raycaster = MultiMeshRaycaster([self.env.ground_mesh], device=self.device)
         self.target_assets = []
         

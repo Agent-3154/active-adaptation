@@ -9,7 +9,7 @@ authors = [
     {name = "btx0424@SUSTech"}
 ]
 keywords = ["robotics", "rl"]
-requires-python = ">=3.11,<3.13"
+requires-python = "==3.11.*"
 dependencies = [
     "setproctitle",
     "hydra-core",
@@ -28,7 +28,14 @@ dependencies = [
     "mujoco",
     "linuxfd",
     "pdbpp",
-    "simple-raycaster @ git+https://github.com/btx0424/simple-raycaster.git"
+    "scipy",
+    "trimesh",
+    "warp-lang",
+]
+
+[project.optional-dependencies]
+mjlab = [
+    "mjlab==1.2.0",
 ]
 
 [project.scripts]
