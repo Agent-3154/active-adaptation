@@ -129,7 +129,8 @@ def main(cfg: DictConfig):
         """
         data = []
         for _ in range(cfg.algo.train_every):
-            carry = rollout_policy(carry)
+            with ScopedTimer("policy_inference"):
+                carry = rollout_policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
             private_keys = [
                 key

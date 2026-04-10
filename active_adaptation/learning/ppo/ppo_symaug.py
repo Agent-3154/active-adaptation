@@ -254,17 +254,20 @@ class PPOPolicy(TensorDictModuleBase):
             tensordict_ = self.actor(tensordict.copy())
             dist = IndependentNormal(tensordict_["loc"], tensordict_["scale"])
             log_probs_after = dist.log_prob(action)
-            pg_loss_after = log_probs_after.reshape_as(adv_unnormalized) * adv_unnormalized
-            pg_loss_before = log_probs_before.reshape_as(adv_unnormalized) * adv_unnormalized
-            actor_feature = tensordict_["_actor_feature"].reshape(-1, tensordict_["_actor_feature"].shape[-1]) # [N*T, D]
-            critic_feature = tensordict_["_critic_feature"].reshape(-1, tensordict_["_critic_feature"].shape[-1]) # [N*T, D]
-            actor_effective_rank = effective_rank(actor_feature)
-            critic_effective_rank = effective_rank(critic_feature)
+            log_ratio = (log_probs_after - log_probs_before).reshape_as(adv_unnormalized)
+            # log π_new/π_old · A: first-order signal of whether the post-update policy
+            # shifts log-prob in the direction favored by the (unnormalized) advantage.
+            policy_gain = log_ratio * adv_unnormalized
+            # r(θ) · A with r = exp(log_ratio) = π_new/π_old; same weighted term as in
+            # the unclipped PPO surrogate, useful to monitor IS-weighted advantage mass.
+            weighted_ratio = log_ratio.exp() * adv_unnormalized
+            actor_effective_rank = effective_rank(tensordict_["_actor_feature"])
+            critic_effective_rank = effective_rank(tensordict_["_critic_feature"])
                 
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
         infos["actor/lr"] = self.opt.param_groups[0]["lr"]
-        infos["actor/pg_loss_raw_after"] = pg_loss_after.mean().item()
-        infos["actor/pg_loss_raw_before"] = pg_loss_before.mean().item()
+        infos["actor/policy_gain"] = policy_gain.mean().item()
+        infos["actor/weighted_ratio"] = weighted_ratio.mean().item()
         infos["actor/effective_rank"] = actor_effective_rank.item()
         infos["critic/effective_rank"] = critic_effective_rank.item()
         infos["critic/value_mean"] = tensordict["ret"].mean().item()
@@ -427,6 +430,7 @@ def effective_rank(X: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
     Uses p_i = σ_i² / Σσ_j² so p is the proportion of variance in each principal direction.
     Lower values indicate loss of expressivity (variance concentrated in few dimensions).
     """
+    X = X.reshape(-1, X.shape[-1])
     if X.numel() == 0 or X.shape[0] < 2 or X.shape[1] < 2:
         return torch.tensor(0.0, device=X.device, dtype=X.dtype)
     S = torch.linalg.svdvals(X)
