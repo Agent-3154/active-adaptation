@@ -202,6 +202,23 @@ class Split(nn.Module):
 
 
 class Actor(nn.Module):
+    """Maps backbone features to a diagonal Gaussian policy (mean and scale).
+
+    The final linear uses ``nn.LazyLinear``; its weight is marked ``_non_muon`` so
+    optimizers such as ``MuonAdamWWrapper`` keep the output head on AdamW.
+
+    If ``predict_std`` is false, per-action standard deviation is a single learned
+    vector ``actor_std`` broadcast to the batch; ``scale_mapping`` is identity. If
+    true, the linear output is split; the second half is mapped with ``torch.exp`` to
+    a positive diagonal scale.
+
+    Args:
+        action_dim: Size of the action vector (output dim of the mean, or half of
+            the linear output when ``predict_std`` is true).
+        predict_std: If true, one linear layer outputs ``2 * action_dim`` and is
+            chunked into ``loc`` and ``scale``; if false, only ``loc`` is predicted.
+    """
+
     def __init__(self, action_dim: int, predict_std: bool = False) -> None:
         super().__init__()
         self.predict_std = predict_std
@@ -212,8 +229,10 @@ class Actor(nn.Module):
             self.actor_mean = nn.LazyLinear(action_dim)
             self.actor_std = nn.Parameter(torch.ones(action_dim))
             self.scale_mapping = nn.Identity()
+        self.actor_mean.weight._non_muon = True
 
     def forward(self, features: torch.Tensor):
+        """Return ``(loc, scale)`` tensors for ``IndependentNormal`` (or equivalent)."""
         if self.predict_std:
             loc, scale = self.actor_mean(features).chunk(2, dim=-1)
         else:
@@ -223,39 +242,24 @@ class Actor(nn.Module):
         return loc, scale
 
 
-class ActorSoftplus(nn.Module):
-    def __init__(self, action_dim: int) -> None:
+class Critic(nn.Module):
+    """Value head: a single ``nn.LazyLinear`` from features to ``output_dim`` scalars.
+
+    The linear weight is marked ``_non_muon`` so composite optimizers can exclude
+    this layer from Muon and train it with AdamW.
+
+    Args:
+        output_dim: Trailing dimension of the value output (often ``1`` for V(s)).
+    """
+
+    def __init__(self, output_dim: int):
         super().__init__()
-        self.actor_loc_scale = nn.LazyLinear(action_dim * 2)
+        self.critic = nn.LazyLinear(output_dim)
+        self.critic.weight._non_muon = True
 
     def forward(self, features: torch.Tensor):
-        loc, scale = self.actor_loc_scale(features).chunk(2, dim=-1)
-        scale = F.softplus(scale)
-        return loc, scale
-
-
-class ActorCov(nn.Module):
-    """
-    Predicts state-dependent covariance between a_t and a_{t-1}.
-    """
-
-    def __init__(self, action_dim: int) -> None:
-        super().__init__()
-        self.actor_mean_cov = nn.LazyLinear(action_dim * 2)
-        self.actor_std = nn.Parameter(torch.zeros(action_dim))
-        self.scale_mapping = torch.exp
-
-    def forward(
-        self, features: torch.Tensor, prev_action: torch.Tensor, prev_loc: torch.Tensor
-    ):
-        loc, cov = self.actor_mean_cov(features).chunk(2, dim=-1)
-        scale = torch.ones_like(loc) * self.scale_mapping(self.actor_std)
-        var = scale.square()
-        cov = torch.tanh(cov) * var.detach()
-        loc = loc + (cov / var.detach()) * (prev_action - prev_loc)
-        var = var - cov.square() / var.detach()
-        scale = var.sqrt()
-        return loc, scale
+        """Return predicted value(s) with shape ``(*features.shape[:-1], output_dim)``."""
+        return self.critic(features)
 
 
 class GAE(nn.Module):

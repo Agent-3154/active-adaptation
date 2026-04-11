@@ -90,11 +90,11 @@ class MuonAdamWWrapper(OptimizerGroup):
         muon_params: list[torch.nn.Parameter] = []
         adamw_params: list[torch.nn.Parameter] = []
         for module in modules:
-            for p in module.parameters():
+            for name, p in module.named_parameters():
                 if id(p) in seen:
                     continue
                 seen.add(id(p))
-                if p.dim() == 2:
+                if p.dim() == 2 and not getattr(p, "_non_muon", False):
                     muon_params.append(p)
                 else:
                     adamw_params.append(p)
