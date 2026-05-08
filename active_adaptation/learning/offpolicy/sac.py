@@ -103,7 +103,9 @@ class SACConfig:
     entropy_bonus: float = 1.0
     # If set: H_target = (d/2)*log(2*pi*e*sigma^2) for N(0,sigma^2)^d (FlashSAC).
     # If None: use -dim(A) (common heuristic for tanh-squashed SAC).
+    alpha_init: float = 4e-3
     target_entropy_sigma: float | None = 0.15
+    soft_bound: float = math.pi
 
     tau_actor: float = 0.1 # a relatively large value for faster convergence
     tau_Q: float = 0.02  # a relatively large value for faster convergence
@@ -465,7 +467,7 @@ class SAC(TensorDictModuleBase):
         else:
             self.target_entropy = -float(act_dim)
         self.target_entropy = 0.0
-        self.log_alpha = nn.Parameter(torch.tensor(math.log(0.004), device=device))
+        self.log_alpha = nn.Parameter(torch.tensor(math.log(self.cfg.alpha_init), device=device))
         self.opt_alpha = torch.optim.Adam([self.log_alpha], lr=self.cfg.lr_alpha)
         if self.cfg.muon:
             self.opt_actor = MuonAdamWWrapper(
@@ -840,7 +842,7 @@ class SAC(TensorDictModuleBase):
         actor_loss = (
             policy_term
             + alpha.detach() * (-entropy_est.reshape_as(policy_term))
-            + 0.01 * ((loc/2.5)**6).sum(-1).reshape_as(policy_term)
+            + 0.01 * ((loc/self.cfg.soft_bound)**6).sum(-1).reshape_as(policy_term)
         ).mean()
 
         q_action_grad_norm: torch.Tensor | None = None
