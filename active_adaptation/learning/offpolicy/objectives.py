@@ -5,7 +5,7 @@ import torch.nn as nn
 import einops
 from tensordict import TensorDictBase
 from torchrl.objectives import hold_out_net
-from jaxtyping import Float
+from jaxtyping import Float, Bool
 from active_adaptation.learning.ppo.common import ACTION_KEY, OBS_KEY
 from active_adaptation.learning.offpolicy.distribution import ScaledTanhNormal
 
@@ -26,7 +26,6 @@ class MultiStepReturn(nn.Module):
     def forward(
         self,
         next_observations: Float[torch.Tensor, "T N obs_dim"],
-        actions: Float[torch.Tensor, "T N act_dim"],
         rewards: Float[torch.Tensor, "T N 1"],
         terminated: Float[torch.Tensor, "T N 1"],
         done: Float[torch.Tensor, "T N 1"],
@@ -34,6 +33,7 @@ class MultiStepReturn(nn.Module):
         Float[torch.Tensor, "N obs_dim"],
         Float[torch.Tensor, "N 1"],
         Float[torch.Tensor, "N 1"],
+        Bool[torch.Tensor, "N 1"]
     ]:
         T, N = next_observations.shape[:2]
         assert T == self.n_steps
@@ -58,7 +58,7 @@ class MultiStepReturn(nn.Module):
             * (1.0 - terminated.float())
         )
 
-        return next_observations, rewards, discount
+        return next_observations, rewards, discount, terminated
 
 
 def _actor_q_per_sample(critic: nn.Module, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:

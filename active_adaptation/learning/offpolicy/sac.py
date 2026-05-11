@@ -129,6 +129,7 @@ class SACConfig:
 
 
 cs.store(name="sac", node=SACConfig, group="algo")
+# cs.store(name="dsac", node=SACConfig, group="algo") # distributional SAC
 
 
 class TwinQNetwork(nn.Module):
@@ -205,7 +206,6 @@ class TwinDistributionalQNetwork(nn.Module):
         v_min: float,
         v_max: float,
         activation: str| type[nn.Module] = nn.SiLU,
-        simba_mlp: bool = False,
     ):
         super().__init__()
         if num_atoms < 3:
@@ -219,27 +219,15 @@ class TwinDistributionalQNetwork(nn.Module):
         critic_input_dim = obs_dim + act_dim
     
         def make_critic():
-            if simba_mlp:
-                in_layer = nn.Linear(critic_input_dim, 512)
-                in_layer.weight._non_muon = True
-                out_layer = nn.Linear(512, num_atoms)
-                out_layer.weight._non_muon = True
-                return nn.Sequential(
-                    in_layer,
-                    SimbaMLP(512, 2, activation),
-                    nn.LayerNorm(512),
-                    out_layer,
-                )
-            else:
-                out_layer = nn.Linear(512, num_atoms)
-                out_layer.weight._non_muon = True
-                return nn.Sequential(
-                    nn.Linear(critic_input_dim, 512),
-                    ConditionalBlock(hidden_dim=512),
-                    ConditionalBlock(hidden_dim=512),
-                    nn.RMSNorm(512),
-                    out_layer,
-                )
+            out_layer = nn.Linear(512, num_atoms)
+            out_layer.weight._non_muon = True
+            return nn.Sequential(
+                nn.Linear(critic_input_dim, 512),
+                ConditionalBlock(hidden_dim=512, activation=activation),
+                ConditionalBlock(hidden_dim=512, activation=activation),
+                nn.RMSNorm(512),
+                out_layer,
+            )
 
         self.critic_1 = make_critic()
         self.critic_2 = make_critic()
@@ -338,17 +326,13 @@ class TanhNormalActor(nn.Module):
         self.obs_dim = obs_dim
         self.act_dim = act_dim
 
-        # self.trunk = MLP(
-        #     [obs_dim, 256, 256, 256],
-        #     nn.SiLU,
-        #     layer_norm=layer_norm,
-        #     first_non_muon=True,
-        # )
+        in_layer = nn.Linear(obs_dim, 384)
+        in_layer.weight._non_muon = True
         self.trunk = nn.Sequential(
-            nn.Linear(obs_dim, 384),
+            in_layer,
             ConditionalBlock(hidden_dim=384, condition_dim=0),
             ConditionalBlock(hidden_dim=384, condition_dim=0),
-            nn.LayerNorm(384),
+            nn.RMSNorm(384),
         )
         self.action = nn.Linear(384, act_dim * 2)
         self.action.weight._non_muon = True
@@ -429,7 +413,6 @@ class SAC(TensorDictModuleBase):
                 num_atoms=num_atoms,
                 v_min=v_min, # we actually do not have negative values, but it is a good idea to have a small margin
                 v_max=v_max,
-                simba_mlp=False
             ).to(device)
             self.V = None  # unused; keeps optim / checkpoint layout stable
             self.V_quantile = 0.7
@@ -494,6 +477,7 @@ class SAC(TensorDictModuleBase):
         fake_rb = (
             env.fake_tensordict()
             .exclude(("next", "stats"), "collector")
+            # .exclude(("next", OBS_KEY))
             .detach()
             # .cpu()
         )
@@ -596,6 +580,8 @@ class SAC(TensorDictModuleBase):
         self.global_step += self.cfg.train_every
 
         td = tensordict.exclude(("next", "stats"), "collector")
+        # td = td.exclude(("next", OBS_KEY))
+
         reward = td[REWARD_KEY]
         # KEEP THIS FOR DEBUGGING
         if self.cfg.debug:
@@ -612,24 +598,15 @@ class SAC(TensorDictModuleBase):
 
         bs = td.batch_size
         # StackingCollector stacks steps on batch dim 1: [num_envs, horizon, …].
-        if len(bs) >= 2:
-            for ti in range(int(bs[1])):
-                sub = td[:, ti]
-                if self.reward_normalizer is not None:
-                    self.reward_normalizer.update_reward_stats(
-                        reward=sub[REWARD_KEY],
-                        terminated=sub[TERM_KEY],
-                        truncated=sub["next", "truncated"],
-                    )
-                self.rb.push(sub)
-        else:
+        for ti in range(int(bs[1])):
+            sub = td[:, ti]
             if self.reward_normalizer is not None:
                 self.reward_normalizer.update_reward_stats(
-                    reward=td[REWARD_KEY],
-                    terminated=td[TERM_KEY],
-                    truncated=td["next", "truncated"],
+                    reward=sub[REWARD_KEY],
+                    terminated=sub[TERM_KEY],
+                    truncated=sub["next", "truncated"],
                 )
-            self.rb.push(td)
+            self.rb.push(sub)
 
         infos: dict = {"rb_size": len(self.rb), "critic/neg_rew_ratio": neg_rew_ratio}
         if self.global_step < self.cfg.warm_up_steps:
@@ -683,14 +660,22 @@ class SAC(TensorDictModuleBase):
             discount = self.cfg.gamma * (1.0 - batch[TERM_KEY].float())
         else:
             assert self.msr is not None
+            batch_done = batch[DONE_KEY][:self.msr.n_steps]
+            batch_term = batch[TERM_KEY][:self.msr.n_steps]
+            if (next_obs := batch.get(("next", OBS_KEY))) is None:
+                assert batch.shape[0] == self.msr.n_steps + 1
+                next_obs = torch.where(
+                    batch_done,
+                    batch[OBS_KEY][:self.msr.n_steps], # repeat the last obs as the terminal obs
+                    batch[OBS_KEY][1:self.msr.n_steps+1],
+                )
             obs = batch[OBS_KEY][0]
             act = batch[ACTION_KEY][0]
-            next_obs, reward, discount = self.msr(
-                batch["next", OBS_KEY],
-                batch[ACTION_KEY],
-                reward,
-                batch[TERM_KEY],
-                batch[DONE_KEY],
+            next_obs, reward, discount, terminated = self.msr(
+                next_obs,
+                reward[:self.msr.n_steps],
+                batch_term,
+                batch_done,
             )
 
         obs = self.vecnorm_obs(obs)
@@ -743,6 +728,7 @@ class SAC(TensorDictModuleBase):
                 obs = torch.cat([obs, obs_mirror], dim=0)
                 act = torch.cat([act, act_mirror], dim=0)
                 q_target = torch.cat([q_target, q_target], dim=0)
+                terminated = torch.cat([terminated, terminated], dim=0)
 
             qs: torch.Tensor = self.Q(obs, act)
             q_loss = self.Q.compute_loss(qs, q_target)
@@ -772,14 +758,14 @@ class SAC(TensorDictModuleBase):
             q_val_mean = q_h.mean().item()
             q_val_max = q_h.max().item()
             q_val_std = q_h.std(dim=-1).mean().item()
-            infos.update(
-                {
-                    "critic/q_value": q_val_mean,
-                    "critic/q_max": q_val_max,
-                    "critic/q_std": q_val_std,
-                    "critic/grad_norm": critic_grad_norm.item(),
-                }
-            )
+            
+            infos["critic/q_value"] = q_val_mean
+            infos["critic/q_max"] = q_val_max
+            infos["critic/q_std"] = q_val_std
+            infos["critic/grad_norm"] = critic_grad_norm.item()
+            if terminated.any():
+                q_val_terminated = q_h[terminated.reshape(q_h.shape[0])]
+                infos["critic/q_value_terminated"] = q_val_terminated.mean().item()
 
         # Optional: use expectile regression to estimate the value
         if self.V is not None:
