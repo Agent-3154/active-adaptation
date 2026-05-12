@@ -17,11 +17,115 @@ import torch.nn.functional as F
 from typing import NamedTuple
 
 
-def expected_q_from_logits(logits: torch.Tensor, support: torch.Tensor) -> torch.Tensor:
+def expected_from_logits(logits: torch.Tensor, support: torch.Tensor) -> torch.Tensor:
     """Expected scalar Q under a softmax over atoms: logits [B, N] -> [B, 1]."""
     p = F.softmax(logits, dim=-1)
     z = support.to(device=logits.device, dtype=logits.dtype).view(1, -1)
     return (p * z).sum(dim=-1, keepdim=True)
+
+
+def _cvar_tail_from_probs(
+    p: torch.Tensor,
+    z: torch.Tensor,
+    mass: torch.Tensor,
+) -> torch.Tensor:
+    """One-sided conditional mean for a discrete law; see :func:`cvar_from_logits`.
+
+    Args:
+        p: Probabilities ``[..., N]`` (row-stochastic last dim).
+        z: Atom values ``[..., N]``, same shape as ``p``.
+        mass: Tail probability per batch slice, broadcastable to ``p.shape[:-1]``, entries in ``(0, 1]``.
+    """
+    # p, z: [..., N]; mass: [...] broadcastable to p.shape[:-1], in (0, 1]
+    n = p.shape[-1]
+    cp = p.cumsum(dim=-1)
+    czp = (p * z).cumsum(dim=-1)
+
+    idx = torch.searchsorted(
+        cp.reshape(-1, n),
+        mass.reshape(-1, 1),
+        right=False,
+    ).reshape(mass.shape)
+    idx = idx.clamp(max=n - 1)
+
+    idx_prev = (idx - 1).clamp(min=0)
+    # At idx==0, cp_prev and czp_prev must be 0 (ignore gather at -1).
+    mask_prev = idx > 0
+    cp_prev = cp.gather(-1, idx_prev.unsqueeze(-1)).squeeze(-1)
+    cp_prev = torch.where(mask_prev, cp_prev, cp.new_zeros(()))
+    czp_prev = czp.gather(-1, idx_prev.unsqueeze(-1)).squeeze(-1)
+    czp_prev = torch.where(mask_prev, czp_prev, czp.new_zeros(()))
+    z_k = z.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
+
+    numer = czp_prev + (mass - cp_prev).clamp(min=0.0) * z_k
+    return (numer / mass).unsqueeze(-1)
+
+
+def cvar_from_logits(
+    logits: torch.Tensor,
+    support: torch.Tensor,
+    alpha: torch.Tensor | float,
+) -> torch.Tensor:
+    """Conditional tail mean of the return implied by ``softmax(logits)`` on ``support``.
+
+    The support must be **non-decreasing** (e.g. C51 grid ``v_min … v_max``). Let :math:`Z`
+    be the random return with :math:`P(Z=z_i)=p_i`.
+
+    * **Risk-averse (left tail):** entries with ``0 < alpha <= 1``. CVaR is the expectation of
+      :math:`Z` over the worst :math:`\\alpha` mass (smallest outcomes first). For ``alpha == 1``
+      this matches :func:`expected_q_from_logits` (per element).
+
+    * **Risk-seeking (right tail):** entries with ``-1 < alpha < 0``. Uses tail mass
+      :math:`\\beta=-\\alpha` from the **largest** outcomes (right tail conditional mean).
+
+    ``alpha`` is a tensor broadcastable to ``logits.shape[:-1]`` (or a Python float). Per-element
+    signs may differ across the batch.
+
+    Args:
+        logits: Raw scores, shape ``[..., N]`` (last dim matches atoms).
+        support: Atom locations ``z_0 \\le … \\le z_{N-1}``, shape ``[N]``.
+        alpha: Tail level(s), broadcastable to ``[...,]`` (same as ``logits`` without the atom
+            axis). Each entry must lie in ``(0, 1]`` (left CVaR) or ``(-1, 0)`` (right CVaR).
+
+    Returns:
+        Tensor shaped ``logits.shape[:-1] + (1,)`` with the tail conditional mean per batch slice.
+    """
+    p = F.softmax(logits, dim=-1)
+    z = support.to(device=logits.device, dtype=logits.dtype)
+    if z.ndim != 1:
+        raise ValueError(f"support must be 1-D, got shape {tuple(z.shape)}")
+    n = z.shape[0]
+    if logits.shape[-1] != n:
+        raise ValueError(
+            f"logits last dim {logits.shape[-1]} != len(support) {n}"
+        )
+
+    batch_shape = logits.shape[:-1]
+    alpha_t = torch.as_tensor(alpha, device=logits.device, dtype=logits.dtype)
+    try:
+        alpha_t = alpha_t.broadcast_to(batch_shape)
+    except RuntimeError as e:
+        raise ValueError(
+            f"alpha with shape {tuple(torch.as_tensor(alpha).shape)} is not broadcastable "
+            f"to logits batch shape {tuple(batch_shape)}."
+        ) from e
+
+    valid = ((alpha_t > 0) & (alpha_t <= 1)) | ((alpha_t < 0) & (alpha_t > -1))
+    if not valid.all():
+        raise ValueError(
+            "alpha entries must be in (0, 1] for left-tail CVaR or in (-1, 0) for right-tail CVaR."
+        )
+
+    # Broadcast z to p's leading dims: [..., N]
+    z_b = z
+    # while z_b.ndim < p.ndim:
+    #     z_b = z_b.unsqueeze(0)
+    z_b = z_b.expand_as(p)
+
+    mass = alpha_t.abs()
+    out_left = _cvar_tail_from_probs(p, z_b, mass)
+    out_right = _cvar_tail_from_probs(p.flip(-1), z_b.flip(-1), mass)
+    return torch.where(alpha_t.unsqueeze(-1) > 0, out_left, out_right)
 
 
 def project_categorical_bellman(
@@ -111,7 +215,7 @@ class ValueDistribution(NamedTuple):
         return F.softmax(self.logits, dim=-1)
 
     def expected_value(self) -> torch.Tensor:
-        return expected_q_from_logits(self.logits, self.support)
+        return expected_from_logits(self.logits, self.support)
 
     def project(
         self,
