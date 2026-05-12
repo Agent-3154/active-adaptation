@@ -1,44 +1,52 @@
 """
-This script is used to rollout a policy and collect data.
+Roll out a policy and collect transitions for offline replay / inspection.
+
+Writes a small ``torch.save`` payload (stacked steps, format version) under
+``rollout/<task>/<algo>/<timestamp>/rollout.pt``.
 """
 
+import datetime
 import torch
 import hydra
-import numpy as np
-import einops
-import itertools
-import os
-import datetime
 from pathlib import Path
 from omegaconf import OmegaConf
 from tqdm import tqdm
 
-from torchrl.data.replay_buffers import ReplayBuffer, LazyMemmapStorage
 from torchrl.envs.utils import set_exploration_type, ExplorationType
 from tensordict import TensorDict
 
 import active_adaptation as aa
 
-
-aa.import_algorithms()
 FILE_PATH = Path(__file__).parent
 
 
 class RolloutWriter:
+    """Append CPU transition rows and flush to ``rollout.pt`` in ``path``."""
+
     def __init__(self, path: Path, max_size: int = 2000):
         self.path = path
         path.mkdir(parents=True, exist_ok=True)
-        storage = LazyMemmapStorage(max_size=max_size, scratch_dir=path / "storage")
-        self.rb = ReplayBuffer(storage=storage)
+        self._max_size = max_size
+        self._rows: list[TensorDict] = []
 
     def add(self, tensordict: TensorDict):
         assert tensordict.ndim == 1
-        tensordict = tensordict.cpu(non_blocking=True)
-        self.rb.add(tensordict)
-        return len(self.rb)
-    
-    def close(self):
-        self.rb.dumps(self.path)
+        td = tensordict.detach().cpu()
+        self._rows.append(td.clone())
+        if len(self._rows) > self._max_size:
+            self._rows = self._rows[-self._max_size :]
+        return len(self._rows)
+
+    def close(self) -> None:
+        if not self._rows:
+            return
+        stacked: TensorDict = torch.stack(self._rows, dim=0)
+        payload = {
+            "format_version": 1,
+            "writer_max_size": self._max_size,
+            "stacked": stacked,
+        }
+        torch.save(payload, self.path / "rollout.pt")
 
 
 @hydra.main(config_path="../cfg", config_name="rollout", version_base=None)
@@ -49,22 +57,23 @@ def main(cfg):
     aa.init(cfg)
 
     from active_adaptation.helpers import make_env_policy
+
     env, policy = make_env_policy(cfg)
     rollout_policy = policy.get_rollout_policy("eval")
 
     env.eval()
     carry = env.reset()
 
-    writer_path = FILE_PATH / "rollout" / cfg.task.name / f"{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    writer_path = FILE_PATH / "rollout" / f"{cfg.task.name}-{cfg.algo.name}" / timestamp
     writer = RolloutWriter(writer_path, max_size=cfg.num_steps)
 
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
-
         for _ in tqdm(range(cfg.num_steps)):
             carry = rollout_policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
             writer.add(td)
-    
+
     writer.close()
     env.close()
 

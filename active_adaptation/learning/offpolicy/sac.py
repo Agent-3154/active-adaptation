@@ -477,7 +477,7 @@ class SAC(TensorDictModuleBase):
                 per_alpha=self.cfg.per_alpha,
                 per_beta=self.cfg.per_beta,
             )
-        self.rb = ReplayBuffer(self.cfg.buffer_size, fake_rb, **per_kw)
+        self.rb = ReplayBuffer.from_fake(self.cfg.buffer_size, fake_rb, **per_kw)
         self.msr = (
             MultiStepReturn(self.cfg.gamma, self.cfg.n_steps).to(device)
             if self.cfg.n_steps > 1

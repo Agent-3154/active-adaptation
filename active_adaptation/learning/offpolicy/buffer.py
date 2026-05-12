@@ -1,46 +1,166 @@
 import numpy as np
 import torch
 from tensordict import TensorDict
-from typing import Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
+from pathlib import Path
 
 from torchrl.data.replay_buffers.samplers import PrioritizedSampler
 
+# Written by :mod:`active_adaptation.scripts.rollout` and read by :meth:`ReplayBuffer.from_rollout`.
+ROLLOUT_ARCHIVE_NAME = "rollout.pt"
+ROLLOUT_FORMAT_VERSION = 1
+
 
 class ReplayBuffer:
+    """Ring replay storage (no TorchRL :class:`~torchrl.data.ReplayBuffer`).
+
+    Pass the ring storage :class:`~tensordict.TensorDict` (batch ``[max_size, num_envs]``)
+    to ``__init__``, normally built by :meth:`from_fake` or :meth:`from_rollout`.
+    """
+
     def __init__(
         self,
+        buffer_tensordict: TensorDict,
+        *,
+        current_size: int = 0,
+        write_ptr: int = 0,
+        per_alpha: Optional[float] = None,
+        per_beta: float = 1.0,
+        per_eps: float = 1e-8,
+        per_generator: Optional[torch.Generator] = None,
+    ):
+        if len(buffer_tensordict.batch_size) != 2:
+            raise ValueError(
+                f"buffer_tensordict must have batch rank 2 [max_size, num_envs], got {buffer_tensordict.batch_size}."
+            )
+        self._td = buffer_tensordict
+        self.max_size = int(self._td.shape[0])
+        self.num_envs = int(self._td.shape[1])
+        self.device = self._td.device
+        self._current_size = current_size
+        self._ptr = write_ptr
+
+        self._per: Optional[PrioritizedSampler] = None
+        self._init_prioritized_sampler(
+            per_alpha=per_alpha,
+            per_beta=per_beta,
+            per_eps=per_eps,
+            per_generator=per_generator,
+        )
+
+    def _init_prioritized_sampler(
+        self,
+        *,
+        per_alpha: Optional[float],
+        per_beta: float,
+        per_eps: float,
+        per_generator: Optional[torch.Generator],
+    ) -> None:
+        if per_alpha is None:
+            return
+        cap = self.max_size * self.num_envs
+        self._per = PrioritizedSampler(
+            max_capacity=cap,
+            alpha=per_alpha,
+            beta=per_beta,
+            eps=per_eps,
+            dtype=torch.float,
+        )
+        self._per._rng = per_generator
+
+    @classmethod
+    def from_fake(
+        cls,
         max_size: int,
         fake_tensordict: TensorDict,
         *,
         per_alpha: Optional[float] = None,
         per_beta: float = 1.0,
         per_eps: float = 1e-8,
-        per_dtype: torch.dtype = torch.float32,
         per_generator: Optional[torch.Generator] = None,
-    ):
-        self.max_size = max_size
-        self.num_envs = fake_tensordict.shape[0]
-        self.device = fake_tensordict.device
-        self._current_size = 0
-        self._td = fake_tensordict.expand(max_size, *fake_tensordict.shape).clone()
-        self._ptr = 0
+    ) -> "ReplayBuffer":
+        """Build ring storage ``[max_size, num_envs]`` from a one-step template and construct the buffer."""
+        td = fake_tensordict.expand(max_size, *fake_tensordict.shape).clone()
+        return cls(
+            td,
+            current_size=0,
+            write_ptr=0,
+            per_alpha=per_alpha,
+            per_beta=per_beta,
+            per_eps=per_eps,
+            per_generator=per_generator,
+        )
 
-        self._per: Optional[PrioritizedSampler] = None
-        if per_alpha is not None:
-            cap = max_size * self.num_envs
-            dtype = per_dtype
-            if dtype == torch.float32:
-                dtype = torch.float
-            elif dtype == torch.float64:
-                dtype = torch.double
-            self._per = PrioritizedSampler(
-                max_capacity=cap,
-                alpha=per_alpha,
-                beta=per_beta,
-                eps=per_eps,
-                dtype=dtype,
+    @classmethod
+    def from_rollout(
+        cls,
+        path: Union[str, Path],
+        *,
+        max_size: Optional[int] = None,
+        per_alpha: Optional[float] = None,
+        per_beta: float = 1.0,
+        per_eps: float = 1e-8,
+        per_generator: Optional[torch.Generator] = None,
+        map_location: Union[str, torch.device] = "cpu",
+    ) -> "ReplayBuffer":
+        """Load from a rollout archive produced by :mod:`active_adaptation.scripts.rollout`.
+
+        The archive is a ``torch.save`` dict with keys ``format_version``, ``stacked``
+        (TensorDict with batch ``[T, num_envs]``), and optionally ``writer_max_size``.
+
+        Args:
+            path: File ``rollout.pt`` or directory containing it.
+            max_size: Ring capacity. Defaults to ``max(writer_max_size, T)`` from the archive.
+        """
+        root = Path(path)
+        file = root if root.suffix == ".pt" else root / ROLLOUT_ARCHIVE_NAME
+        if not file.is_file():
+            raise FileNotFoundError(f"No rollout archive at {file}")
+
+        payload: Dict[str, Any] = torch.load(file, map_location=map_location, weights_only=False)
+        version = payload.get("format_version")
+        if version != ROLLOUT_FORMAT_VERSION:
+            raise ValueError(
+                f"Unsupported rollout format_version={version!r}; expected {ROLLOUT_FORMAT_VERSION}."
             )
-            self._per._rng = per_generator
+        stacked: TensorDict = payload["stacked"]
+        if len(stacked.batch_size) < 2:
+            raise ValueError(
+                f"Expected stacked transitions with batch [T, num_envs], got batch_size={stacked.batch_size}."
+            )
+        T = int(stacked.batch_size[0])
+        if T < 1:
+            raise ValueError("Rollout archive contains zero transitions.")
+
+        writer_max = int(payload.get("writer_max_size", T))
+        ring_cap = max_size if max_size is not None else max(writer_max, T)
+
+        take = min(T, ring_cap)
+        if T >= ring_cap:
+            td = stacked[-ring_cap:].clone()
+        else:
+            row0 = stacked[0]
+            td = row0.expand(ring_cap, *row0.shape).clone()
+            td[:take] = stacked[:take]
+        ptr = take % ring_cap
+
+        out = cls(
+            td,
+            current_size=take,
+            write_ptr=ptr,
+            per_alpha=per_alpha,
+            per_beta=per_beta,
+            per_eps=per_eps,
+            per_generator=per_generator,
+        )
+        if out._per is not None:
+            for wrow in range(take):
+                flat = (
+                    torch.arange(out.num_envs, dtype=torch.long, device=torch.device("cpu"))
+                    + int(wrow) * out.num_envs
+                )
+                out._per.mark_update(flat)
+        return out
 
     @property
     def prioritized(self):
@@ -83,7 +203,7 @@ class ReplayBuffer:
             if steps == 1
             else priority_weight.view(1, -1).expand(steps, -1).contiguous()
         )
-        idx_long = idx_flat.long()
+        idx_long = idx_flat.to(dtype=torch.long)
         rfi = (
             idx_long
             if steps == 1
@@ -150,14 +270,9 @@ class ReplayBuffer:
 
         importance = torch.pow(weight / p_min, -ps.beta)
 
-        wdtype = (
-            self._td.dtype
-            if self._td.dtype.is_floating_point
-            else torch.float32
-        )
         return (
-            index.to(self._td.device),
-            importance.to(device=self._td.device, dtype=wdtype),
+            index.to(device=self._td.device, dtype=torch.long),
+            importance.to(device=self._td.device, dtype=torch.float32),
         )
 
     def sample(self, batch_size: int, steps: int = 1) -> TensorDict:
@@ -179,7 +294,9 @@ class ReplayBuffer:
             idx_flat = torch.randint(
                 0, self.num_samples, (batch_size,), device=self._td.device
             )
-            weight = torch.ones(batch_size, device=self._td.device)
+            weight = torch.ones(
+                batch_size, device=self._td.device, dtype=torch.float32
+            )
 
         t, e = torch.unravel_index(idx_flat, (len(self), self._td.shape[1]))
         if steps == 1:
