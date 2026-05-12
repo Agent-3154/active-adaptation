@@ -18,11 +18,10 @@ from tensordict.nn import (
 from torchrl.data import Composite, TensorSpec
 from torchrl.objectives import hold_out_net
 
-from active_adaptation.learning.modules import ResidualMLP, MLP, VecNorm, SimbaMLP, IndependentNormal
+from active_adaptation.learning.modules import VecNorm, IndependentNormal
 from active_adaptation.learning.ppo.common import (
     ACTION_KEY,
     DONE_KEY,
-    GAE,
     OBS_KEY,
     REWARD_KEY,
     TERM_KEY,
@@ -35,13 +34,9 @@ from active_adaptation.learning.offpolicy.distributional import (
     expected_from_logits,
     cvar_from_logits,
 )
-from active_adaptation.learning.offpolicy.objectives import MultiStepReturn, SACLoss
+from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
-from active_adaptation.learning.offpolicy.distribution import (
-    ScaledTanhNormal,
-    ScaledSymlogNormal,
-    FasterTransformedDistribution
-)
+from active_adaptation.learning.offpolicy.distribution import ScaledTanhNormal, FasterTransformedDistribution
 from active_adaptation.learning.offpolicy.network import ConditionalBlock
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.dormancy import DormancyTracker
@@ -56,7 +51,8 @@ clip_grad_norm_ = nn.utils.clip_grad_norm_
 def gaussian_target_entropy(act_dim: int, sigma: float) -> float:
     """Differential entropy of independent \\mathcal N(0, \\sigma^2) in \\mathbb R^d (FlashSAC-style).
 
-    H = (d/2) * log(2 * pi * e * sigma^2). Used as SAC log-alpha target when ``target_entropy_sigma`` is set.
+    H = (d/2) * log(2 * pi * e * sigma^2). Used as SAC log-alpha target when
+    :attr:`~SACConfig.target_entropy_sigma` is set.
     """
     if sigma <= 0:
         raise ValueError("target_entropy_sigma must be positive for principled entropy.")
@@ -101,9 +97,9 @@ class SACConfig:
     use_correlated: bool = True
     # sac specific
     entropy_bonus: float = 1.0
+    alpha_init: float = 4e-3
     # If set: H_target = (d/2)*log(2*pi*e*sigma^2) for N(0,sigma^2)^d (FlashSAC).
     # If None: use -dim(A) (common heuristic for tanh-squashed SAC).
-    alpha_init: float = 4e-3
     target_entropy_sigma: float | None = 0.15
     soft_bound: float = math.pi
 
@@ -116,6 +112,9 @@ class SACConfig:
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = True
+    # Prioritized replay (same API as off-policy ReplayBuffer): None disables PER.
+    per_alpha: float | None = None
+    per_beta: float = 0.6
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
     normalized_G_max: float = 5.0
@@ -472,7 +471,13 @@ class SAC(TensorDictModuleBase):
         )
         fake_rb[REWARD_KEY] = fake_rb[REWARD_KEY].sum(-1, keepdim=True)
         fake_rb["loc"] = torch.zeros(fake_rb.shape[0], self.actor.act_dim)
-        self.rb = ReplayBuffer(self.cfg.buffer_size, fake_rb)
+        per_kw: dict[str, Any] = {}
+        if self.cfg.per_alpha is not None:
+            per_kw.update(
+                per_alpha=self.cfg.per_alpha,
+                per_beta=self.cfg.per_beta,
+            )
+        self.rb = ReplayBuffer(self.cfg.buffer_size, fake_rb, **per_kw)
         self.msr = (
             MultiStepReturn(self.cfg.gamma, self.cfg.n_steps).to(device)
             if self.cfg.n_steps > 1
@@ -649,6 +654,10 @@ class SAC(TensorDictModuleBase):
             next_obs = batch["next", OBS_KEY]
             discount = self.cfg.gamma * (1.0 - batch[TERM_KEY].float())
             is_init = batch["is_init"]
+            term_flat = batch[TERM_KEY]
+            if term_flat.dim() > 1 and term_flat.shape[-1] == 1:
+                term_flat = term_flat.squeeze(-1)
+            terminated = term_flat.bool()
         else:
             assert self.msr is not None
             batch_done = batch[DONE_KEY][:self.msr.n_steps]
@@ -673,6 +682,19 @@ class SAC(TensorDictModuleBase):
         obs = self.vecnorm_obs(obs)
         next_obs = self.vecnorm_obs(next_obs)
 
+        B_eff = obs.shape[0]
+
+        weight = batch["priority_weight"]
+        replay_flat_idx = batch["replay_flat_index"].long()
+        if weight.ndim == 2:
+            weight = weight[0].contiguous()
+            replay_flat_idx = replay_flat_idx[0].contiguous()
+        weight = weight.to(device=self.device, dtype=torch.float32)
+        ri_base_cpu = replay_flat_idx.detach().cpu() if self.rb.prioritized else None
+
+        importance_weights_base = weight
+        importance_weights = weight.clone()
+
         with self._autocast():
             with torch.no_grad():
                 # actions are sampled with uncorrelated noise
@@ -683,11 +705,7 @@ class SAC(TensorDictModuleBase):
                 next_log_prob = dist.log_prob(next_action)
                 target_action = next_action + torch.randn_like(next_action) * self.cfg.target_action_noise
                 alpha = self.log_alpha.exp()
-                lp = next_log_prob
-                if lp.dim() == 1:
-                    lp = lp.unsqueeze(-1)
-                if lp.shape != reward.shape:
-                    lp = lp.reshape_as(reward)
+                lp = next_log_prob.reshape_as(reward)
 
                 if self.cfg.distributional:
                     # Fold soft Bellman entropy into rewards, then categorical projection (FastSAC-style).
@@ -703,9 +721,7 @@ class SAC(TensorDictModuleBase):
                     ev2 = (p2 * z).sum(-1, keepdim=True)
                     q_target = torch.where(ev1 < ev2, p1, p2)
                 else:
-                    entropy_bonus = -alpha * lp
-                    if entropy_bonus.shape != reward.shape:
-                        entropy_bonus = entropy_bonus.reshape_as(reward)
+                    entropy_bonus = (-alpha * lp).reshape_as(reward)
                     target_qs = self.Q_target(next_obs, target_action)
                     target_q = target_qs.mean(dim=-1, keepdim=True)
                     q_target = reward + discount * (
@@ -721,11 +737,18 @@ class SAC(TensorDictModuleBase):
                 q_target = torch.cat([q_target, q_target], dim=0)
                 terminated = torch.cat([terminated, terminated], dim=0)
                 is_init = torch.cat([is_init, is_init], dim=0)
+                importance_weights = torch.cat(
+                    [importance_weights_base, importance_weights_base], dim=0
+                )
 
             qs: torch.Tensor = self.Q(obs, act)
-            q_loss = self.Q.compute_loss(qs, q_target)
-            valid = (1.0 - is_init.float()).reshape_as(q_loss)
-            q_loss = (q_loss * valid).sum() / valid.sum()
+            if self.cfg.distributional:
+                per_sample_q_loss = self.Q.compute_loss(qs, q_target)
+            else:
+                per_sample_q_loss = (qs - q_target).square().sum(dim=-1)
+            valid = (1.0 - is_init.float()).reshape_as(per_sample_q_loss)
+            denom = (importance_weights * valid).sum().clamp_min(1e-8)
+            q_loss = (per_sample_q_loss * importance_weights * valid).sum() / denom
 
         self.opt_Q.zero_grad(set_to_none=True)
         if self._amp_enabled:
@@ -744,6 +767,22 @@ class SAC(TensorDictModuleBase):
             self.opt_Q.step()
 
         soft_copy_(self.Q, self.Q_target, tau=self.cfg.tau_Q)
+
+        if self.rb.prioritized:
+            with torch.no_grad():
+                if self.cfg.distributional:
+                    prio_src = per_sample_q_loss.detach()[:B_eff].float().cpu()
+                else:
+                    prio_src = (
+                        (
+                            qs.detach()[:B_eff] - q_target.detach()[:B_eff]
+                        )
+                        .abs()
+                        .mean(dim=-1)
+                        .float()
+                        .cpu()
+                    )
+                self.rb.update_priority(ri_base_cpu, prio_src)
 
         infos: dict = {"critic/q_loss": q_loss.item()}
         if diagnostics:
@@ -774,6 +813,13 @@ class SAC(TensorDictModuleBase):
             self.device
         ) # [N,]
 
+        weight = batch["priority_weight"]
+        if weight.ndim == 2:
+            weight = weight[0].contiguous()
+        weight = weight.to(device=self.device, dtype=torch.float32)
+        importance_weights_base = weight
+        importance_weights = weight.clone()
+
         obs = batch[OBS_KEY]
         obs = self.vecnorm_obs(obs)
         act = batch[ACTION_KEY]
@@ -785,6 +831,9 @@ class SAC(TensorDictModuleBase):
             obs = torch.cat([obs, obs_mirror], dim=0)
             act = torch.cat([act, act_mirror], dim=0)
             is_init = torch.cat([is_init, is_init], dim=0)
+            importance_weights = torch.cat(
+                [importance_weights_base, importance_weights_base], dim=0
+            )
 
         with hold_out_net(self.Q), self._autocast():
             loc, scale = self.actor(obs)
@@ -804,7 +853,8 @@ class SAC(TensorDictModuleBase):
             + 0.01 * ((loc/self.cfg.soft_bound)**6).sum(-1).reshape_as(policy_term)
         )
         valid = (1.0 - is_init.float()).reshape_as(actor_loss)
-        actor_loss = (actor_loss * valid).sum() / valid.sum()
+        denom = (importance_weights * valid).sum().clamp_min(1e-8)
+        actor_loss = (actor_loss * importance_weights * valid).sum() / denom
 
         q_action_grad_norm: torch.Tensor | None = None
         if diagnostics:
