@@ -805,6 +805,7 @@ class SAC(TensorDictModuleBase):
             if terminated.any():
                 q_val_terminated = q[terminated.reshape(q.shape[0])]
                 infos["critic/q_value_terminated"] = q_val_terminated.mean().item()
+                infos["critic/q_loss_terminated"] = per_sample_q_loss[terminated.reshape(q.shape[0])].mean().item()
 
         return infos
 
