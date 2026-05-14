@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -29,36 +29,51 @@ class MultiStepReturn(nn.Module):
         rewards: Float[torch.Tensor, "T N 1"],
         terminated: Float[torch.Tensor, "T N 1"],
         done: Float[torch.Tensor, "T N 1"],
+        env_discount: Optional[Float[torch.Tensor, "T N 1"]] = None,
     ) -> tuple[
         Float[torch.Tensor, "N obs_dim"],
         Float[torch.Tensor, "N 1"],
         Float[torch.Tensor, "N 1"],
-        Bool[torch.Tensor, "N 1"]
+        Bool[torch.Tensor, "N 1"],
     ]:
         T, N = next_observations.shape[:2]
         assert T == self.n_steps
 
         device = rewards.device
-        gammas = self.gamma ** torch.arange(self.n_steps, device=device)
+        dtype = rewards.dtype
+        gamma = self.gamma.to(device=device, dtype=dtype)
 
         cum_not_done = (~done).cumprod(dim=0)
-        cum_reward = (rewards * gammas.reshape(self.n_steps, 1, 1)).cumsum(dim=0)
+
+        step_discount = torch.full((T, N), gamma, device=device, dtype=dtype)
+        if env_discount is not None:
+            step_discount = step_discount * env_discount.squeeze(-1).to(
+                device=device, dtype=dtype
+            )
+
+        gammas_cumprod = step_discount.cumprod(dim=0)
+        gammas_pow = torch.cat(
+            [torch.ones(1, N, device=device, dtype=dtype), gammas_cumprod[:-1]],
+            dim=0,
+        ).unsqueeze(-1)
+
+        cum_reward = (rewards * gammas_pow).cumsum(dim=0)
         alive_steps = cum_not_done.sum(dim=0)
 
         last_indices = alive_steps.clamp_max(self.n_steps - 1).reshape(N)
         batch_indices = torch.arange(N, device=device)
 
         next_observations = next_observations[last_indices, batch_indices]
-        rewards = cum_reward[last_indices, batch_indices]
+        rewards_out = cum_reward[last_indices, batch_indices]
         terminated = terminated[last_indices, batch_indices]
 
         discount = (
-            self.gamma
-            * gammas[last_indices].reshape_as(terminated)
+            gammas_cumprod[last_indices, batch_indices]
+            .reshape_as(terminated.float())
             * (1.0 - terminated.float())
         )
 
-        return next_observations, rewards, discount, terminated
+        return next_observations, rewards_out, discount, terminated
 
 
 def _actor_q_per_sample(critic: nn.Module, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:

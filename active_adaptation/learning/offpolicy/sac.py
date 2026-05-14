@@ -120,6 +120,10 @@ class SACConfig:
     normalized_G_max: float = 5.0
     reward_norm_epsilon: float = 1e-8
 
+    # path to prior data for RLPD
+    prior_data: str | None = None
+    prior_data_ratio: float = 0.4
+
     in_keys: Tuple[str, ...] = (OBS_KEY, ACTION_KEY)
 
 
@@ -460,24 +464,6 @@ class SAC(TensorDictModuleBase):
 
         self.global_step = 0
 
-        if env is None:
-            raise ValueError("SAC requires env for ReplayBuffer layout (fake_tensordict).")
-        fake_rb = (
-            env.fake_tensordict()
-            .exclude(("next", "stats"), "collector")
-            # .exclude(("next", OBS_KEY))
-            .detach()
-            # .cpu()
-        )
-        fake_rb[REWARD_KEY] = fake_rb[REWARD_KEY].sum(-1, keepdim=True)
-        fake_rb["loc"] = torch.zeros(fake_rb.shape[0], self.actor.act_dim)
-        per_kw: dict[str, Any] = {}
-        if self.cfg.per_alpha is not None:
-            per_kw.update(
-                per_alpha=self.cfg.per_alpha,
-                per_beta=self.cfg.per_beta,
-            )
-        self.rb = ReplayBuffer.from_fake(self.cfg.buffer_size, fake_rb, **per_kw)
         self.msr = (
             MultiStepReturn(self.cfg.gamma, self.cfg.n_steps).to(device)
             if self.cfg.n_steps > 1
@@ -494,10 +480,7 @@ class SAC(TensorDictModuleBase):
                 epsilon=float(self.cfg.reward_norm_epsilon),
             )
 
-        scope = _SACDormancyScope(
-            self.actor,
-            self.Q,
-        )
+        scope = _SACDormancyScope(self.actor, self.Q)
         self._dormancy_tracker = DormancyTracker(scope)
 
         _dev = torch.device(device) if not isinstance(device, torch.device) else device
@@ -558,6 +541,10 @@ class SAC(TensorDictModuleBase):
                         sample = transform(sample)
             else:
                 sample = dist.sample()
+            
+            if critic:
+                qs = self.Q.get_values(obs, sample).mean(dim=-1)
+                tensordict["Q_value"] = qs
 
             tensordict[ACTION_KEY] = sample # + 0.04 * torch.randn_like(sample)
             tensordict["loc"] = loc
@@ -566,6 +553,29 @@ class SAC(TensorDictModuleBase):
         return self._dormancy_tracker.wrap(policy)
 
     def on_stage_start(self, stage: str):
+        # we will not create buffer when not training
+        fake_rb = (
+            self.env.fake_tensordict()
+            .exclude(("next", "stats"), "collector")
+            # .exclude(("next", OBS_KEY))
+        )
+        fake_rb["loc"] = torch.zeros(fake_rb.shape[0], self.actor.act_dim)
+        per_kw: dict[str, Any] = {}
+        if self.cfg.per_alpha is not None:
+            per_kw.update(
+                per_alpha=self.cfg.per_alpha,
+                per_beta=self.cfg.per_beta,
+            )
+        self.rb = ReplayBuffer.from_fake(self.cfg.buffer_size, fake_rb, **per_kw)
+        print("Primary buffer:")
+        print(self.rb)
+        if self.cfg.prior_data is not None:
+            self.rb_prior = ReplayBuffer.from_rollout(self.cfg.prior_data)
+            print("Prior data buffer:")
+            print(self.rb_prior)
+        else:
+            self.rb_prior = None
+
         self.enable_actor = True
         self.Q_target.load_state_dict(self.Q.state_dict())
         self.actor_target.load_state_dict(self.actor.state_dict())
@@ -588,8 +598,6 @@ class SAC(TensorDictModuleBase):
         else:
             reward = reward.sum(-1, keepdim=True)
             neg_rew_ratio = (reward <= 0.).float().mean().item()
-            reward = reward.clamp_min(0.)
-        td[REWARD_KEY] = reward
 
         bs = td.batch_size
         # StackingCollector stacks steps on batch dim 1: [num_envs, horizon, …].
@@ -597,7 +605,7 @@ class SAC(TensorDictModuleBase):
             sub = td[:, ti]
             if self.reward_normalizer is not None:
                 self.reward_normalizer.update_reward_stats(
-                    reward=sub[REWARD_KEY],
+                    reward=sub[REWARD_KEY].sum(-1, keepdim=True).clamp_min(0.),
                     terminated=sub[TERM_KEY],
                     truncated=sub["next", "truncated"],
                 )
@@ -623,9 +631,14 @@ class SAC(TensorDictModuleBase):
                     batch_size=self.cfg.critic_batch_size,
                     steps=self.cfg.n_steps,
                 ).to(self.device)
-                with ScopedTimer("train_critic"):
-                    d = i == iters - 1
-                    info = self.train_critic(batch, diagnostics=d)
+                if self.rb_prior is not None:
+                    batch_prior = self.rb_prior.sample(
+                        batch_size=int(self.cfg.critic_batch_size * self.cfg.prior_data_ratio),
+                        steps=self.cfg.n_steps,
+                    ).to(self.device).select(*batch.keys(True, True))
+                    batch = torch.cat([batch, batch_prior], dim=1)
+                d = i == iters - 1
+                info = self.train_critic(batch, diagnostics=d)
             infos.update(info)
 
             if self.enable_actor:
@@ -635,16 +648,15 @@ class SAC(TensorDictModuleBase):
                         info = self.train_actor(diagnostics=d)
                 infos.update(info)
 
-        # if self.global_step % self.cfg.v_update_every == 0:
-        #     for _ in range(self.cfg.v_inner):
-        #         infos.update(self.train_v())
-
         self._flush_dormancy(infos)
         return dict(sorted(infos.items()))
 
+    @ScopedTimer("train_critic")
     def train_critic(self, batch: TensorDict, diagnostics: bool = False):
         self.Q.train()
         reward = batch[REWARD_KEY]
+        reward = reward.sum(-1, keepdim=True).clamp_min(0.)
+
         if self.reward_normalizer is not None:
             reward = self.reward_normalizer.normalize_rewards(reward)
 
@@ -652,7 +664,11 @@ class SAC(TensorDictModuleBase):
             obs = batch[OBS_KEY]
             act = batch[ACTION_KEY]
             next_obs = batch["next", OBS_KEY]
-            discount = self.cfg.gamma * (1.0 - batch[TERM_KEY].float())
+            term = batch[TERM_KEY].float()
+            env_disc = batch.get(("next", "discount"))
+            if env_disc is None:
+                env_disc = torch.ones_like(term)
+            discount = self.cfg.gamma * env_disc * (1.0 - term)
             is_init = batch["is_init"]
             term_flat = batch[TERM_KEY]
             if term_flat.dim() > 1 and term_flat.shape[-1] == 1:
@@ -671,11 +687,15 @@ class SAC(TensorDictModuleBase):
                 )
             obs = batch[OBS_KEY][0]
             act = batch[ACTION_KEY][0]
+            env_disc_ms = batch.get(("next", "discount"))
+            if env_disc_ms is not None:
+                env_disc_ms = env_disc_ms[: self.msr.n_steps]
             next_obs, reward, discount, terminated = self.msr(
                 next_obs,
                 reward[:self.msr.n_steps],
                 batch_term,
                 batch_done,
+                env_discount=env_disc_ms,
             )
             is_init = batch["is_init"][0]
 
@@ -808,10 +828,17 @@ class SAC(TensorDictModuleBase):
 
         return infos
 
+    @ScopedTimer("train_actor")
     def train_actor(self, diagnostics: bool = False):
         batch = self.rb.sample(batch_size=self.cfg.actor_batch_size, steps=1).to(
             self.device
         ) # [N,]
+        if self.rb_prior is not None:
+            batch_prior = self.rb_prior.sample(
+                batch_size=int(self.cfg.actor_batch_size * self.cfg.prior_data_ratio),
+                steps=1,
+            ).to(self.device).select(*batch.keys(True, True))
+            batch = torch.cat([batch, batch_prior], dim=0)
 
         weight = batch["priority_weight"]
         if weight.ndim == 2:

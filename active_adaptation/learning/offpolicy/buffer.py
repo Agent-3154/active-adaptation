@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import torch
 from tensordict import TensorDict
@@ -48,6 +50,32 @@ class ReplayBuffer:
             per_generator=per_generator,
         )
 
+    def __repr__(self) -> str:
+        keys = list(self.keys())
+        if len(keys) <= 12:
+            key_desc = "[" + ", ".join(repr(k) for k in keys) + "]"
+        else:
+            key_desc = (
+                "["
+                + ", ".join(repr(k) for k in keys[:12])
+                + f", … (+{len(keys) - 12} keys)]"
+            )
+        if self._per is None:
+            sampling = "uniform"
+        else:
+            alpha = getattr(self._per, "alpha", None)
+            beta = getattr(self._per, "beta", None)
+            sampling = f"PER(α={alpha}, β={beta})"
+        return (
+            f"{self.__class__.__name__}("
+            f"ring={len(self)}/{self.max_size}×{self.num_envs}, "
+            f"write_ptr={self._ptr}, {sampling}, device={self.device}, "
+            f"keys={key_desc})"
+        )
+    
+    def keys(self):
+        return self._td.keys(True, True)
+
     def _init_prioritized_sampler(
         self,
         *,
@@ -67,6 +95,14 @@ class ReplayBuffer:
             dtype=torch.float,
         )
         self._per._rng = per_generator
+    
+    def select_(self, *keys: str) -> ReplayBuffer:
+        self._td = self._td.select(*keys, inplace=True, strict=True)
+        return self
+    
+    def exclude_(self, *keys: str) -> ReplayBuffer:
+        self._td = self._td.exclude(*keys, inplace=True, strict=True)
+        return self
 
     @classmethod
     def from_fake(
@@ -78,7 +114,7 @@ class ReplayBuffer:
         per_beta: float = 1.0,
         per_eps: float = 1e-8,
         per_generator: Optional[torch.Generator] = None,
-    ) -> "ReplayBuffer":
+    ) -> ReplayBuffer:
         """Build ring storage ``[max_size, num_envs]`` from a one-step template and construct the buffer."""
         td = fake_tensordict.expand(max_size, *fake_tensordict.shape).clone()
         return cls(
@@ -102,7 +138,7 @@ class ReplayBuffer:
         per_eps: float = 1e-8,
         per_generator: Optional[torch.Generator] = None,
         map_location: Union[str, torch.device] = "cpu",
-    ) -> "ReplayBuffer":
+    ) -> ReplayBuffer:
         """Load from a rollout archive produced by :mod:`active_adaptation.scripts.rollout`.
 
         The archive is a ``torch.save`` dict with keys ``format_version``, ``stacked``
@@ -300,13 +336,13 @@ class ReplayBuffer:
 
         t, e = torch.unravel_index(idx_flat, (len(self), self._td.shape[1]))
         if steps == 1:
-            samples = self._td[t, e]
+            samples = self._td[t, e]#.rename("env")
         else:
             ts = (t.unsqueeze(0) + torch.arange(steps, device=self._td.device).unsqueeze(1)) % len(self)
-            samples = self._td[ts, e]
+            samples = self._td[ts, e]#.rename("time", "env")
             assert samples.shape[:2] == (steps, batch_size)
-
-        return self._annotate_sampling_meta(samples, idx_flat, steps, weight)
+        samples = self._annotate_sampling_meta(samples, idx_flat, steps, weight)
+        return samples
 
     def sample_sequential(
         self,
