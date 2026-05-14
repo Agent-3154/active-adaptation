@@ -9,6 +9,8 @@ backend: isaac
 device: cuda
 seed: 42
 
+store_transitions: true
+run_critic: true
 checkpoint_path: null
 
 app:

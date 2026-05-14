@@ -41,12 +41,25 @@ class RolloutWriter:
         if not self._rows:
             return
         stacked: TensorDict = torch.stack(self._rows, dim=0)
+        print(stacked)
         payload = {
             "format_version": 1,
             "writer_max_size": self._max_size,
             "stacked": stacked,
         }
-        torch.save(payload, self.path / "rollout.pt")
+        out_path = self.path / "rollout.pt"
+        torch.save(payload, out_path)
+        size = out_path.stat().st_size
+        if size >= 1024**3:
+            human = f"{size / (1024**3):.2f} GiB"
+        elif size >= 1024**2:
+            human = f"{size / (1024**2):.2f} MiB"
+        elif size >= 1024:
+            human = f"{size / 1024:.2f} KiB"
+        else:
+            human = f"{size} B"
+        print(f"Collected rollout disk usage: {size:,} bytes ({human}) at {out_path}")
+
 
 
 @hydra.main(config_path="../cfg", config_name="rollout", version_base=None)
@@ -54,12 +67,20 @@ def main(cfg):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    aa.init(cfg)
+    aa.init(cfg, auto_rank=True)
 
     from active_adaptation.helpers import make_env_policy
 
     env, policy = make_env_policy(cfg)
-    rollout_policy = policy.get_rollout_policy("eval")
+    obs_keys = list(env.observation_spec.keys())
+    # whether to store ("next", ...) or not
+    store_transitions = bool(cfg.store_transitions)
+    exclude_keys = [("next", "stats"),]
+    if not store_transitions:
+        exclude_keys.extend(("next", key) for key in obs_keys)
+    # wheter to run critic (if applicable)
+    critic = bool(cfg.run_critic)
+    rollout_policy = policy.get_rollout_policy("eval", critic=critic)
 
     env.eval()
     carry = env.reset()
@@ -72,6 +93,7 @@ def main(cfg):
         for _ in tqdm(range(cfg.num_steps)):
             carry = rollout_policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
+            td = td.exclude(*exclude_keys, inplace=True)
             writer.add(td)
 
     writer.close()
