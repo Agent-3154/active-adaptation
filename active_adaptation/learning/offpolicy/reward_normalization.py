@@ -7,7 +7,8 @@ training time: ``reward / max(sqrt(var(G_r) + eps), |G_r|_max / G_max)``.
 from __future__ import annotations
 
 import os
-from typing import TypeVar
+from collections import OrderedDict
+from typing import Any, TypeVar
 
 import torch
 
@@ -30,6 +31,19 @@ def _update_reward_stats(
 
 
 @torch.compile
+def _invert_scale_reward_denominator(
+    G_var: torch.Tensor,
+    G_r_max: torch.Tensor,
+    G_max: float,
+    eps: float,
+) -> torch.Tensor:
+    """Inverse of the denominator in :func:`_scale_reward` (scalar tensor)."""
+    var_denominator = torch.sqrt(G_var + eps)
+    min_required_denominator = G_r_max / G_max
+    return torch.maximum(var_denominator, min_required_denominator)
+
+
+@torch.compile
 def _scale_reward(
     rewards: torch.Tensor,
     G_var: torch.Tensor,
@@ -37,9 +51,7 @@ def _scale_reward(
     G_max: float,
     eps: float,
 ) -> torch.Tensor:
-    var_denominator = torch.sqrt(G_var + eps)
-    min_required_denominator = G_r_max / G_max
-    denominator = torch.maximum(var_denominator, min_required_denominator)
+    denominator = _invert_scale_reward_denominator(G_var, G_r_max, G_max, eps)
     return rewards / denominator
 
 
@@ -139,21 +151,44 @@ class RewardNormalizer:
             eps=self.epsilon,
         )
 
+    def reward_denominator(self) -> torch.Tensor:
+        """Scalar S with ``r_normalized = r_raw / S`` (same S as :meth:`normalize_rewards`)."""
+        return _invert_scale_reward_denominator(
+            self.G_rms.var,
+            self.G_r_max,
+            float(self.G_max),
+            self.epsilon,
+        )
+
+    def denormalize_return_values(self, values: torch.Tensor) -> torch.Tensor:
+        """Undo reward scaling for logging Q-style quantities: ``values * S`` (broadcasts)."""
+        s = self.reward_denominator().to(device=values.device, dtype=values.dtype)
+        return values * s
+
+    def state_dict(self) -> dict[str, Any]:
+        """Serializable running statistics (checkpoint / :meth:`torch.save`)."""
+        return OrderedDict(
+            [
+                ("G_r", self.G_r.detach().cpu()),
+                ("G_r_max", self.G_r_max.detach().cpu()),
+                ("G_rms_mean", self.G_rms.mean.detach().cpu()),
+                ("G_rms_var", self.G_rms.var.detach().cpu()),
+                ("G_rms_count", self.G_rms.count.detach().cpu()),
+            ]
+        )
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore running stats on :attr:`device` from :meth:`state_dict`."""
+        self.G_r = state["G_r"].to(device=self.device, dtype=torch.float32)
+        self.G_r_max = state["G_r_max"].to(device=self.device, dtype=torch.float32)
+        self.G_rms.mean = state["G_rms_mean"].to(device=self.device, dtype=torch.float32)
+        self.G_rms.var = state["G_rms_var"].to(device=self.device, dtype=torch.float32)
+        self.G_rms.count = state["G_rms_count"].to(device=self.device, dtype=torch.float32)
+        self.G_rms.device = self.device
+
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        state = {
-            "G_r": self.G_r,
-            "G_r_max": self.G_r_max,
-            "G_rms_mean": self.G_rms.mean,
-            "G_rms_var": self.G_rms.var,
-            "G_rms_count": self.G_rms.count,
-        }
-        torch.save(state, path)
+        torch.save(self.state_dict(), path)
 
     def load(self, path: str) -> None:
-        state = torch.load(path, map_location=self.device)
-        self.G_r = state["G_r"]
-        self.G_r_max = state["G_r_max"]
-        self.G_rms.mean = state["G_rms_mean"]
-        self.G_rms.var = state["G_rms_var"]
-        self.G_rms.count = state["G_rms_count"]
+        self.load_state_dict(torch.load(path, map_location="cpu"))
