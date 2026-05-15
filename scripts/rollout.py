@@ -47,7 +47,7 @@ class RolloutWriter:
             "writer_max_size": self._max_size,
             "stacked": stacked,
         }
-        out_path = self.path / "rollout.pt"
+        out_path = self.path / f"rollout_{stacked.shape[0]}_{stacked.shape[1]}.pt"
         torch.save(payload, out_path)
         size = out_path.stat().st_size
         if size >= 1024**3:
