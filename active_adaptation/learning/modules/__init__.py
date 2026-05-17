@@ -1,6 +1,6 @@
 from .vecnorm import VecNorm
 from .distributions import *
-from .common import SymmetryWrapper
+from .common import SymmetryWrapper, ConditionalBlock
 from .rnn import GRUCore
 from .fusion import FiLM, CrossAttention
 from .common import MLP, ResidualMLP, DtypeConversion, FlattenBatch, SimbaMLP
@@ -17,4 +17,5 @@ __all__ = [
     "DtypeConversion",
     "FlattenBatch",
     "SimbaMLP",
+    "ConditionalBlock",
 ]

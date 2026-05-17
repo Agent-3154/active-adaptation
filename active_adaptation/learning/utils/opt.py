@@ -118,7 +118,7 @@ class MuonAdamWWrapper(OptimizerGroup):
             muon = torch.optim.Muon(muon_params, lr=lr, adjust_lr_fn="match_rms_adamw")
             optimizers.append(muon)
         if len(adamw_params) > 0:
-            adamw = torch.optim.AdamW(adamw_params, lr=lr, weight_decay=weight_decay)
+            adamw = torch.optim.AdamW(adamw_params, lr=lr, weight_decay=weight_decay, fused=True)
             optimizers.append(adamw)
         if len(optimizers) == 0:
             raise ValueError(

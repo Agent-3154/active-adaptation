@@ -15,7 +15,6 @@ import torch
 Config = TypeVar("Config")
 
 
-@torch.compile
 def _update_reward_stats(
     reward: torch.Tensor,
     terminated: torch.Tensor,
@@ -30,7 +29,6 @@ def _update_reward_stats(
     return new_G_r, new_G_r_max
 
 
-@torch.compile
 def _invert_scale_reward_denominator(
     G_var: torch.Tensor,
     G_r_max: torch.Tensor,
@@ -43,7 +41,6 @@ def _invert_scale_reward_denominator(
     return torch.maximum(var_denominator, min_required_denominator)
 
 
-@torch.compile
 def _scale_reward(
     rewards: torch.Tensor,
     G_var: torch.Tensor,
@@ -55,7 +52,6 @@ def _scale_reward(
     return rewards / denominator
 
 
-@torch.compile
 def _update_mean_var_count_from_moments(
     samples: torch.Tensor,
     running_mean: torch.Tensor,

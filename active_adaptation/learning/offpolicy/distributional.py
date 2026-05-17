@@ -381,7 +381,7 @@ class IQNCritic(nn.Module, CriticBase):
 
     The injected ``module`` maps ``(s, a)`` and quantile levels ``\\tau`` to twin value samples
     (e.g. a FiLM-conditioned trunk: embed ``\\tau`` and pass it as ``cond`` to
-    :class:`~active_adaptation.learning.offpolicy.network.ConditionalBlock`). It must satisfy::
+    :class:`~active_adaptation.learning.modules.common.ConditionalBlock`). It must satisfy::
 
         forward(obs, act, tau) -> [B, N, 2]
 
@@ -511,7 +511,7 @@ class QRCritic(nn.Module, CriticBase):
 
     Same forward contract as :class:`IQNCritic`: ``module(obs, act, tau) -> [B, N, 2]`` with
     ``\\tau`` / FiLM handled **inside** ``module`` (e.g. τ embedding as ``cond`` for
-    :class:`~active_adaptation.learning.offpolicy.network.ConditionalBlock`).
+    :class:`~active_adaptation.learning.modules.common.ConditionalBlock`).
 
     **Differences from IQN**
 
