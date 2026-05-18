@@ -18,7 +18,7 @@ from tensordict.nn import (
 from torchrl.data import Composite, TensorSpec
 from torchrl.objectives import hold_out_net
 
-from active_adaptation.learning.modules import VecNorm, IndependentNormal
+from active_adaptation.learning.modules import VecNorm, IndependentNormal, ConditionalBlock
 from active_adaptation.learning.ppo.common import (
     ACTION_KEY,
     DONE_KEY,
@@ -35,8 +35,7 @@ from active_adaptation.learning.offpolicy.distributional import (
 )
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
-from active_adaptation.learning.offpolicy.distribution import ScaledTanhNormal, FasterTransformedDistribution
-from active_adaptation.learning.offpolicy.network import ConditionalBlock
+from active_adaptation.learning.offpolicy.distribution import FasterTransformedDistribution
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.dormancy import DormancyTracker
 from active_adaptation.utils.profiling import ScopedTimer
@@ -81,7 +80,6 @@ class SACConfig:
     utd_ratio: int = 4
     # architecture
     actor_init: str = "zeros"
-    init_upscale: float = 2.0
     distributional: bool = True
     # batch sizes
     critic_batch_size: int = 2048
@@ -260,7 +258,6 @@ class NormalActor(nn.Module):
         std_max: float = 1.0,
         std_min: float = 0.001,
         action_init: Literal["zeros", "orthogonal"] = "zeros",
-        init_upscale: float = 1.0,
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -285,10 +282,7 @@ class NormalActor(nn.Module):
             nn.init.constant_(self.action.bias, 0.0) # zero-init the bias
         else:
             raise ValueError(f"Invalid action_init: {action_init}")
-        
-        self.upscale: torch.Tensor
-        self.register_buffer("upscale", torch.ones(act_dim) * init_upscale)
-        
+
         if not std_max > 0.0:
             raise ValueError("std_max must be positive")
         self.log_std_max = math.log(std_max)
@@ -356,15 +350,13 @@ class SAC(TensorDictModuleBase):
         else:
             self.Q = TwinScalarCritic(obs_dim, act_dim).to(device)
 
-        # self.DistClass = ScaledTanhNormal
-        self.DistClass = lambda loc, scale, upscale: IndependentNormal(loc, scale)
+        self.DistClass = IndependentNormal
         self.actor = NormalActor(
             obs_dim,
             act_dim,
             std_max=1.0,
             std_min=0.001,
             action_init=self.cfg.actor_init,
-            init_upscale=self.cfg.init_upscale,
         ).to(device)
 
         self.Q_target = copy.deepcopy(self.Q).to(device)
@@ -421,7 +413,10 @@ class SAC(TensorDictModuleBase):
         self._amp_device_type = _dev.type
         self._amp_enabled = bool(self.cfg.use_amp and _dev.type == "cuda")
         self.grad_scaler = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
-        self.compute_target = torch.compile(self._compute_target)
+        self.compute_target = torch.compile(
+            self._compute_target,
+            mode="reduce-overhead"
+        )
 
     def _autocast(self):
         return autocast(
@@ -460,7 +455,7 @@ class SAC(TensorDictModuleBase):
         def policy(tensordict: TensorDict):
             obs = self.vecnorm_obs(tensordict[OBS_KEY])
             loc, scale = self.actor(obs)
-            dist = self.DistClass(loc, scale, upscale=self.actor.upscale)
+            dist = self.DistClass(loc, scale)
 
             if self.cfg.use_correlated:
                 prev_noise = tensordict["prev_noise"]
@@ -478,7 +473,12 @@ class SAC(TensorDictModuleBase):
                 sample = dist.sample()
             
             if critic:
+                # Store in raw return units so the value is independent of the
+                # reward normalizer state at consumption time (debug/visualization
+                # or ground-truth Q when used as prior data).
                 qs = self.Q.get_values(obs, sample).mean(dim=-1)
+                if self.reward_normalizer is not None:
+                    qs = self.reward_normalizer.denormalize_return_values(qs)
                 tensordict["Q_value"] = qs
 
             tensordict[ACTION_KEY] = sample # + 0.04 * torch.randn_like(sample)
@@ -551,43 +551,61 @@ class SAC(TensorDictModuleBase):
             self._flush_dormancy(infos)
             return infos
 
-        with self._dormancy_tracker.track():
-            last_indices = None
-            iters = self.cfg.train_every * self.cfg.utd_ratio
-            for i in range(iters):
-                # batch, last_indices = self.rb.sample_sequential(
-                #     batch_size=self.cfg.critic_batch_size,
-                #     steps=self.cfg.n_steps,
-                #     last_indices=last_indices,
-                #     sequential_prob=0.6,
-                #     sequential_offset=-1,
-                # )
-                batch = self.rb.sample(
-                    batch_size=self.cfg.critic_batch_size,
+        # with self._dormancy_tracker.track():
+        last_indices = None
+        iters = self.cfg.train_every * self.cfg.utd_ratio
+        for i in range(iters):
+            # batch, last_indices = self.rb.sample_sequential(
+            #     batch_size=self.cfg.critic_batch_size,
+            #     steps=self.cfg.n_steps,
+            #     last_indices=last_indices,
+            #     sequential_prob=0.6,
+            #     sequential_offset=-1,
+            # )
+            batch = self.rb.sample(
+                batch_size=self.cfg.critic_batch_size,
+                steps=self.cfg.n_steps,
+            ).to(self.device)
+            if self.rb_prior is not None:
+                batch_prior = self.rb_prior.sample(
+                    batch_size=int(self.cfg.critic_batch_size * self.cfg.prior_data_ratio),
                     steps=self.cfg.n_steps,
                 ).to(self.device)
-                if self.rb_prior is not None:
-                    batch_prior = self.rb_prior.sample(
-                        batch_size=int(self.cfg.critic_batch_size * self.cfg.prior_data_ratio),
-                        steps=self.cfg.n_steps,
-                    ).to(self.device).select(*batch.keys(True, True))
-                    batch = torch.cat([batch, batch_prior], dim=1)
-                d = i == iters - 1
-                info = self.train_critic(batch, diagnostics=d)
-            infos.update(info)
+            else:
+                batch_prior = None
+            d = i == iters - 1
+            info = self.train_critic(batch, batch_prior=batch_prior, diagnostics=d)
+        infos.update(info)
 
-            if self.enable_actor:
-                for j in range(self.cfg.train_every):
-                    d = j == self.cfg.train_every - 1
-                    info = self.train_actor(diagnostics=d)
-                infos.update(info)
+        if self.enable_actor:
+            for j in range(self.cfg.train_every):
+                d = j == self.cfg.train_every - 1
+                info = self.train_actor(diagnostics=d)
+            infos.update(info)
 
         self._flush_dormancy(infos)
         return dict(sorted(infos.items()))
 
     @ScopedTimer("train_critic")
-    def train_critic(self, batch: TensorDict, diagnostics: bool = False):
+    def train_critic(
+        self,
+        batch: TensorDict,
+        batch_prior: TensorDict | None = None,
+        diagnostics: bool = False,
+    ):
         self.Q.train()
+
+        # Capture prior ground-truth Q (in raw return units, recorded at rollout
+        # time) before .select() drops keys not present in the primary buffer
+        # schema, then concatenate the prior data into the training batch.
+        prior_q_gt: torch.Tensor | None = None
+        if batch_prior is not None:
+            if "Q_value" in batch_prior.keys(True, True):
+                gt = batch_prior["Q_value"]
+                prior_q_gt = gt[0] if gt.ndim > 1 else gt
+            batch_prior_aligned = batch_prior.select(*batch.keys(True, True))
+            batch = torch.cat([batch, batch_prior_aligned], dim=1)
+
         reward = batch[REWARD_KEY]
         reward = reward.sum(-1, keepdim=True).clamp_min(0.)
         
@@ -656,6 +674,9 @@ class SAC(TensorDictModuleBase):
             with ScopedTimer("compute_target"):
                 q_target = self.compute_target(next_obs, reward, discount)
 
+            # as of torch 2.11, compiling loss computation leads to numerically
+            # inconsistent results and degrades performance
+            
             if self.cfg.sym_aug:
                 # Q(s, a) = Q(s_mirror, a_mirror)
                 obs_mirror = self.obs_transform(obs)
@@ -746,13 +767,28 @@ class SAC(TensorDictModuleBase):
             infos["critic/q_value_terminated"] = q_val_terminated.mean().item()
             infos["critic/q_loss_terminated"] = per_sample_q_loss[terminated.reshape(q.shape[0])].mean().item()
 
+        # Gap between current critic and the prior-data ground-truth Q
+        # (recorded at rollout time, stored in raw return units).
+        if prior_q_gt is not None:
+            B_prior = int(prior_q_gt.shape[0])
+            # q is already denormalized above when reward_normalizer is active.
+            # Under sym_aug, q has shape (2*B_eff,); take the unaugmented head.
+            q_unaug = q[:B_eff]
+            q_prior_pred = q_unaug[B_eff - B_prior :].reshape(B_prior)
+            gt = prior_q_gt.to(device=q_prior_pred.device, dtype=q_prior_pred.dtype).reshape(B_prior)
+            gap = q_prior_pred - gt
+            infos["critic/prior_q_gt"] = gt.mean().item()
+            infos["critic/prior_q_pred"] = q_prior_pred.mean().item()
+            infos["critic/prior_q_gap_mean"] = gap.mean().item()
+            infos["critic/prior_q_gap_abs"] = gap.abs().mean().item()
+
         return infos
 
     @torch.no_grad()
     def _compute_target(self, next_obs: torch.Tensor, reward: torch.Tensor, discount: torch.Tensor) -> torch.Tensor:
         # actions are sampled with uncorrelated noise
         loc, scale = self.actor_target(next_obs)
-        dist = self.DistClass(loc, scale, upscale=self.actor.upscale)
+        dist = self.DistClass(loc, scale)
         next_action = dist.sample()
 
         next_log_prob = dist.log_prob(next_action)
@@ -805,7 +841,7 @@ class SAC(TensorDictModuleBase):
 
         with hold_out_net(self.Q), self._autocast():
             loc, scale = self.actor(obs)
-            dist = self.DistClass(loc, scale, upscale=self.actor.upscale)
+            dist = self.DistClass(loc, scale)
             action_update = dist.rsample((4,))  # [4, N, D]
             entropy_est = -dist.log_prob(action_update).mean(dim=0)
             q = self.Q.get_values(
@@ -877,25 +913,6 @@ class SAC(TensorDictModuleBase):
                 "actor/mean_scale": scale.mean().item(),
             }
 
-        actor_diagnostics = {}
-        if isinstance(dist, ScaledTanhNormal):
-            eps = 0.05
-            with torch.no_grad():
-                tanh_grad = 1.0 - (action_update / dist.upscale).square()
-                action_saturation = (1.0 - action_update.abs() / dist.upscale < eps)
-                mean_squashed = torch.tanh(dist.loc / dist.upscale) * dist.upscale
-                mean_saturation = (1.0 - mean_squashed.abs() / dist.upscale < eps)
-                # mean saturation per action dimension
-                dim_saturation = mean_saturation.float().mean(dim=0)
-            actor_diagnostics = {
-                "actor/action_saturation": action_saturation.float().mean().item(),
-                "actor/mean_saturation": mean_saturation.float().mean().item(),
-                "actor/max_saturation": dim_saturation.max().item(),
-                "actor/tanh_grad": tanh_grad.mean().item(),
-                "actor/upscale": dist.upscale.mean().item(),
-            }
-            # self.actor.upscale.add_((dim_saturation > 0.15).float() * 5e-4)
-        
         if self.has_symmetry:
             with torch.no_grad():
                 _obs = obs[:batch.shape[0]]
@@ -903,7 +920,6 @@ class SAC(TensorDictModuleBase):
                 mean_mirrot_act = self.act_transform(self.actor(_obs)[0])
             infos["actor/symmetry_loss"] = (mean_mirror_obs - mean_mirrot_act).square().mean().item()
 
-        infos.update(actor_diagnostics)
         return infos
 
     def state_dict(self):
