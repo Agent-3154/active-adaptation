@@ -193,7 +193,7 @@ class SingleEEFLocoManip(Command):
 class eef_pos_tracking(Reward[SingleEEFLocoManip]):
     
     def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(env, weight, enabled, track_var)
+        super().__init__(env, weight, enabled=True, track_var=False)
         self.asset = self.command_manager.asset
         self.eef_body_idx = self.command_manager.eef_body_idx
         self.sigma = 0.1
@@ -211,7 +211,7 @@ class eef_vel_tracking(Reward[SingleEEFLocoManip]):
     Optionally track the velocity of the end-effector.
     """
     def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(env, weight, enabled, track_var)
+        super().__init__(env, weight, enabled=True, track_var=False)
         self.asset = self.command_manager.asset
         self.eef_body_idx = self.command_manager.eef_body_idx
         self.sigma = 0.2
