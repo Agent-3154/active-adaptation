@@ -27,9 +27,9 @@ input:
     actions:
       - _target_: JointPosition
         action_scaling:
-          .*_hip_joint: 0.5
-          .*_thigh_joint: 0.5
-          .*_calf_joint: 0.5
+          .*_hip_joint: 0.4
+          .*_thigh_joint: 0.4
+          .*_calf_joint: 0.4
           arm_joint[4-8]: 0.35
         max_delay: 1
         alpha_range: [0.8, 0.9]
@@ -46,11 +46,11 @@ command:
   workspace_range:
     - [0.15, 0.6]
     - [-0.4, 0.4]
-    - [0.05, 0.8]
+    - [0.05, 0.9]
   # Half of resampled envs keep independent local loco/manip commands.
   # The other half sample a world-frame EEF target and base standoff pose,
   # then convert them back into the same 6D local command interface.
-  world_goal_prob: 0.5
+  world_goal_prob: 0.4
   standoff_distance_range: [1.0, 3.0]
   standoff_linvel_gain: 1.0
   standoff_yaw_gain: 1.0
@@ -78,16 +78,16 @@ reward:
     linvel_exp:         {weight: 1.5, dim: 2}
     linvel_projection:  {weight: 0.5}
     angvel_z_exp:       {weight: 0.8}
-    angvel_xy_l2:       {weight: 0.02}
+    angvel_xy_l2:       {weight: 0.01}
     linvel_z_l2:        {weight: 2.0}
-    base_height_exp:    {weight: 2.0, target_height: 0.4}
+    base_height_exp:    {weight: 1.0, target_height: 0.4}
   manip:
-    eef_pos_tracking:   {weight: 1.0, track_var: true}
-    eef_angvel_penalty: {weight: 0.02}
+    eef_pos_tracking:   {weight: 1.2}
+    eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0005}
-    joint_acc_l2:       {weight: 2.5e-7}
-    joint_torques_l2:   {weight: 2.0e-4}
+    joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
+    joint_torques_l2:   {weight: 2.0e-4, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
@@ -101,6 +101,7 @@ reward:
     # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
+  max_episode_length: {}
   crash: {body_names_expr: [base_link, .*hip, .*thigh], t_thres: 0.06}
   fall_over: {xy_thres: 0.9}
   undesired_contact: {body_names: [.*_calf]}

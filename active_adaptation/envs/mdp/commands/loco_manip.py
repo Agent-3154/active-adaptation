@@ -313,8 +313,9 @@ class eef_pos_tracking(Reward[SingleEEFLocoManip]):
     @override
     def _compute(self) -> torch.Tensor:
         diff_w = self.command_manager.cmd_eef_pos_w - self.asset.data.body_link_pos_w[:, self.eef_body_idx]
-        error_l2 = diff_w.square().sum(dim=-1, keepdim=True)
-        rew = torch.exp(-error_l2 / self.sigma)
+        error_norm_sq = diff_w.square().sum(dim=-1, keepdim=True)
+        error_norm = error_norm_sq.sqrt()
+        rew = torch.exp(-error_norm_sq / self.sigma) - 0.2 * error_norm
         return rew.reshape(self.num_envs, 1)
 
 
