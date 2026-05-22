@@ -371,11 +371,19 @@ class eef_forward_tracking(Reward[SingleEEFLocoManip]):
     Track a global EEF pitch target through the end-effector forward direction.
     """
 
-    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(env, weight, enabled=True, track_var=False)
+    def __init__(
+        self,
+        env,
+        weight: float,
+        enabled: bool = True,
+        track_var: bool = False,
+        pos_error_threshold: float = 0.15,
+    ):
+        super().__init__(env, weight, enabled=enabled, track_var=track_var)
         self.asset = self.command_manager.asset
         self.eef_body_idx = self.command_manager.eef_body_idx
         self.forward_axis_b = torch.tensor([1.0, 0.0, 0.0], device=self.device)
+        self.pos_error_threshold = pos_error_threshold
 
     @override
     def _compute(self) -> torch.Tensor:
@@ -385,7 +393,12 @@ class eef_forward_tracking(Reward[SingleEEFLocoManip]):
         rew = (eef_forward_w * self.command_manager.cmd_eef_forward_w).sum(
             dim=-1, keepdim=True
         )
-        return rew.reshape(self.num_envs, 1)
+        pos_error = (
+            self.command_manager.cmd_eef_pos_w
+            - self.asset.data.body_link_pos_w[:, self.eef_body_idx]
+        ).norm(dim=-1, keepdim=True)
+        active = pos_error < self.pos_error_threshold
+        return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
 class eef_angvel_penalty(Reward[SingleEEFLocoManip]):
