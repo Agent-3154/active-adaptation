@@ -7,7 +7,12 @@ from typing import Tuple
 import torch
 from typing_extensions import override
 
-from active_adaptation.utils.math import quat_rotate, yaw_quat
+from active_adaptation.utils.math import (
+    quat_rotate,
+    quat_rotate_inverse,
+    wrap_to_pi,
+    yaw_quat,
+)
 from active_adaptation.utils.symmetry import SymmetryTransform
 from .base import Command
 from ..rewards.base import Reward
@@ -35,6 +40,13 @@ class SingleEEFLocoManip(Command):
         linvel_x_range: Tuple[float, float] = (-1.0, 1.0),
         linvel_y_range: Tuple[float, float] = (-1.0, 1.0),
         yaw_rate_range: Tuple[float, float] = (-1.0, 1.0),
+        world_goal_prob: float = 0.5,
+        standoff_xy_range: Tuple[Tuple[float, float], Tuple[float, float]] = (
+            (-0.6, 0.6),
+            (-0.4, 0.4),
+        ),
+        standoff_linvel_gain: float = 1.0,
+        standoff_yaw_gain: float = 1.0,
         resample_interval: int = 300,
         resample_prob: float = 0.75,
         teleop: bool = False,
@@ -55,11 +67,17 @@ class SingleEEFLocoManip(Command):
             raise ValueError(
                 "Only one of workspace_range or workspace_profile can be provided"
             )
+        if not 0.0 <= world_goal_prob <= 1.0:
+            raise ValueError("world_goal_prob must be in [0, 1]")
 
         self.workspace_profile = workspace_profile
         self.linvel_x_range = linvel_x_range
         self.linvel_y_range = linvel_y_range
         self.yaw_rate_range = yaw_rate_range
+        self.world_goal_prob = world_goal_prob
+        self.standoff_xy_range = standoff_xy_range
+        self.standoff_linvel_gain = standoff_linvel_gain
+        self.standoff_yaw_gain = standoff_yaw_gain
         self.resample_interval = resample_interval
         self.resample_prob = resample_prob
 
@@ -82,10 +100,16 @@ class SingleEEFLocoManip(Command):
             self.cmd_eef_pos_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_vel_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_vel_w = torch.zeros(self.num_envs, 3)
+            self.is_world_goal_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
+            self.world_env_ids = torch.empty(0, dtype=torch.long)
+            self.world_eef_pos_w = torch.zeros(self.num_envs, 3)
+            self.standoff_pos_w = torch.zeros(self.num_envs, 3)
+            self.standoff_yaw_w = torch.zeros(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.command_speed = torch.zeros(self.num_envs, 1)
 
         self.marker = None
+        self.standoff_marker = None
         if (
             self.env.backend == "isaac"
             and self.env.sim.has_gui()
@@ -97,6 +121,11 @@ class SingleEEFLocoManip(Command):
                 "/Visuals/Command/target_eef_pos",
                 (1.0, 0.4, 0.0),
                 radius=0.03,
+            )
+            self.standoff_marker = self.scene.create_sphere_marker(
+                "/Visuals/Command/standoff_pos",
+                (0.0, 0.7, 1.0),
+                radius=0.04,
             )
 
     @property
@@ -122,6 +151,15 @@ class SingleEEFLocoManip(Command):
     def _env_mask_prob(num_envs: int, prob: float, device: torch.device) -> torch.Tensor:
         return torch.rand(num_envs, device=device) < prob
 
+    def _sample_local_eef_offsets(self, env_ids: torch.Tensor) -> torch.Tensor:
+        if self.workspace_profile is not None:
+            raise NotImplementedError(
+                "workspace_profile sampling is not implemented; use workspace_range"
+            )
+        low = self._eef_pos_low[env_ids]
+        high = self._eef_pos_high[env_ids]
+        return torch.rand_like(low) * (high - low) + low
+
     def sample_loco_commands(self, env_ids: torch.Tensor) -> None: # env_ids is always non-empty
         # tensor[env_ids] is advanced indexing
         # so in-place operations like tensor[env_ids, 0].uniform_() have no effects
@@ -135,17 +173,89 @@ class SingleEEFLocoManip(Command):
         self.cmd_yawvel_b[env_ids] = new_cmd_yawvel_b
 
     def sample_manip_commands(self, env_ids: torch.Tensor) -> None: # env_ids is always non-empty
-        if self.workspace_profile is not None:
-            raise NotImplementedError(
-                "workspace_profile sampling is not implemented; use workspace_range"
-            )
-        low = self._eef_pos_low[env_ids]
-        high = self._eef_pos_high[env_ids]
-        self.cmd_eef_pos_b[env_ids] = torch.rand_like(low) * (high - low) + low
+        self.cmd_eef_pos_b[env_ids] = self._sample_local_eef_offsets(env_ids)
+
+    def sample_world_goal_commands(self, env_ids: torch.Tensor) -> None:
+        root_pos = self.asset.data.root_link_pos_w[env_ids]
+        root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w[env_ids])
+
+        standoff_offset_b = torch.zeros(len(env_ids), 3, device=self.device)
+        standoff_offset_b[:, 0].uniform_(*self.standoff_xy_range[0])
+        standoff_offset_b[:, 1].uniform_(*self.standoff_xy_range[1])
+        standoff_offset_w = quat_rotate(root_yaw_q, standoff_offset_b)
+        standoff_pos_w = root_pos + standoff_offset_w
+        standoff_pos_w[:, 2] = self.env.get_ground_height_at(standoff_pos_w)
+
+        eef_offset_b = self._sample_local_eef_offsets(env_ids)
+        eef_offset_w = quat_rotate(root_yaw_q, eef_offset_b)
+        world_eef_pos_w = standoff_pos_w + eef_offset_w
+        world_eef_pos_w[:, 2] = (
+            self.env.get_ground_height_at(world_eef_pos_w) + eef_offset_b[:, 2]
+        )
+
+        self.standoff_pos_w[env_ids] = standoff_pos_w
+        self.world_eef_pos_w[env_ids] = world_eef_pos_w
+        self.standoff_yaw_w[env_ids, 0] = self.asset.data.heading_w[env_ids]
+
+    def _split_command_strategy(
+        self, env_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_world = int(len(env_ids) * self.world_goal_prob + 0.5)
+        shuffled = env_ids[torch.randperm(len(env_ids), device=self.device)]
+        world_env_ids = shuffled[:num_world]
+        local_env_ids = shuffled[num_world:]
+        return local_env_ids, world_env_ids
+
+    def sample_commands(self, env_ids: torch.Tensor) -> None:
+        local_env_ids, world_env_ids = self._split_command_strategy(env_ids)
+        self.is_world_goal_env[env_ids] = False
+        if local_env_ids.numel() > 0:
+            self.sample_loco_commands(local_env_ids)
+            self.sample_manip_commands(local_env_ids)
+        if world_env_ids.numel() > 0:
+            self.is_world_goal_env[world_env_ids] = True
+            self.sample_world_goal_commands(world_env_ids)
+        keep_cached = (self.world_env_ids[:, None] != env_ids[None, :]).all(dim=1)
+        self.world_env_ids = torch.cat([self.world_env_ids[keep_cached], world_env_ids])
+
+    def _sync_world_goal_envs(self, env_ids: torch.Tensor) -> None:
+        root_pos = self.asset.data.root_link_pos_w[env_ids]
+        yaw_q = yaw_quat(self.asset.data.root_link_quat_w[env_ids])
+
+        eef_delta_w = self.world_eef_pos_w[env_ids] - root_pos
+        eef_delta_w[:, 2] = 0.0
+        eef_delta_b = quat_rotate_inverse(yaw_q, eef_delta_w)
+        self.cmd_eef_pos_b[env_ids, :2] = eef_delta_b[:, :2]
+        self.cmd_eef_pos_b[env_ids, 2] = (
+            self.world_eef_pos_w[env_ids, 2]
+            - self.env.get_ground_height_at(self.world_eef_pos_w[env_ids])
+        )
+
+        standoff_delta_w = self.standoff_pos_w[env_ids] - root_pos
+        standoff_delta_w[:, 2] = 0.0
+        standoff_delta_b = quat_rotate_inverse(yaw_q, standoff_delta_w)
+        self.cmd_linvel_b[env_ids, 0] = (
+            self.standoff_linvel_gain * standoff_delta_b[:, 0]
+        ).clamp(*self.linvel_x_range)
+        self.cmd_linvel_b[env_ids, 1] = (
+            self.standoff_linvel_gain * standoff_delta_b[:, 1]
+        ).clamp(*self.linvel_y_range)
+        self.cmd_linvel_b[env_ids, 2] = 0.0
+
+        yaw_error = wrap_to_pi(
+            self.standoff_yaw_w[env_ids] - self.asset.data.heading_w[env_ids, None]
+        )
+        self.cmd_yawvel_b[env_ids] = (
+            self.standoff_yaw_gain * yaw_error
+        ).clamp(*self.yaw_rate_range)
 
     def _sync_world_frames(self) -> None:
+        """Add informative comments here."""
         quat_w = self.asset.data.root_link_quat_w
         yaw_q = yaw_quat(quat_w)
+        world_env_ids = self.world_env_ids
+        if world_env_ids.numel() > 0:
+            self._sync_world_goal_envs(world_env_ids)
         self.cmd_linvel_w = quat_rotate(yaw_q, self.cmd_linvel_b)
 
         root_pos = self.asset.data.root_link_pos_w
@@ -156,14 +266,15 @@ class SingleEEFLocoManip(Command):
         ground_h = self.env.get_ground_height_at(horiz_w)
         self.cmd_eef_pos_w[:, :2] = horiz_w[:, :2]
         self.cmd_eef_pos_w[:, 2] = ground_h + self.cmd_eef_pos_b[:, 2]
+        if world_env_ids.numel() > 0:
+            self.cmd_eef_pos_w[world_env_ids] = self.world_eef_pos_w[world_env_ids]
 
         self.command_speed = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
         self.is_standing_env = (self.command_speed < 0.1)
 
     @override
     def reset(self, env_ids: torch.Tensor) -> None:
-        self.sample_loco_commands(env_ids)
-        self.sample_manip_commands(env_ids)
+        self.sample_commands(env_ids)
         self._sync_world_frames()
 
     @override
@@ -176,8 +287,7 @@ class SingleEEFLocoManip(Command):
         )
         env_ids = resample.nonzero(as_tuple=False).squeeze(-1)
         if env_ids.numel() > 0:
-            self.sample_loco_commands(env_ids)
-            self.sample_manip_commands(env_ids)
+            self.sample_commands(env_ids)
         self._sync_world_frames()
 
     @override
@@ -188,6 +298,9 @@ class SingleEEFLocoManip(Command):
             color=(1.0, 1.0, 1.0, 1.0),
         )
         self.marker.visualize(self.cmd_eef_pos_w)
+        world_env_ids = self.world_env_ids
+        if self.standoff_marker is not None and world_env_ids.numel() > 0:
+            self.standoff_marker.visualize(self.standoff_pos_w[world_env_ids])
 
 
 class eef_pos_tracking(Reward[SingleEEFLocoManip]):
