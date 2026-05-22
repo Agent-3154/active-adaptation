@@ -41,10 +41,7 @@ class SingleEEFLocoManip(Command):
         linvel_y_range: Tuple[float, float] = (-1.0, 1.0),
         yaw_rate_range: Tuple[float, float] = (-1.0, 1.0),
         world_goal_prob: float = 0.5,
-        standoff_xy_range: Tuple[Tuple[float, float], Tuple[float, float]] = (
-            (-0.6, 0.6),
-            (-0.4, 0.4),
-        ),
+        standoff_distance_range: Tuple[float, float] = (1.0, 2.0),
         standoff_linvel_gain: float = 1.0,
         standoff_yaw_gain: float = 1.0,
         resample_interval: int = 300,
@@ -75,7 +72,7 @@ class SingleEEFLocoManip(Command):
         self.linvel_y_range = linvel_y_range
         self.yaw_rate_range = yaw_rate_range
         self.world_goal_prob = world_goal_prob
-        self.standoff_xy_range = standoff_xy_range
+        self.standoff_distance_range = standoff_distance_range
         self.standoff_linvel_gain = standoff_linvel_gain
         self.standoff_yaw_gain = standoff_yaw_gain
         self.resample_interval = resample_interval
@@ -180,8 +177,10 @@ class SingleEEFLocoManip(Command):
         root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w[env_ids])
 
         standoff_offset_b = torch.zeros(len(env_ids), 3, device=self.device)
-        standoff_offset_b[:, 0].uniform_(*self.standoff_xy_range[0])
-        standoff_offset_b[:, 1].uniform_(*self.standoff_xy_range[1])
+        a = torch.rand(len(env_ids), device=self.device) * torch.pi * 2
+        d = torch.rand(len(env_ids), device=self.device) * (self.standoff_distance_range[1] - self.standoff_distance_range[0]) + self.standoff_distance_range[0]
+        standoff_offset_b[:, 0] = d * torch.cos(a)
+        standoff_offset_b[:, 1] = d * torch.sin(a)
         standoff_offset_w = quat_rotate(root_yaw_q, standoff_offset_b)
         standoff_pos_w = root_pos + standoff_offset_w
         standoff_pos_w[:, 2] = self.env.get_ground_height_at(standoff_pos_w)
@@ -336,6 +335,21 @@ class eef_vel_tracking(Reward[SingleEEFLocoManip]):
         rew = torch.exp(-error_l2 / self.sigma)
         return rew.reshape(self.num_envs, 1)
 
+
+class eef_angvel_penalty(Reward[SingleEEFLocoManip]):
+    """
+    Penalize oscillation of the end-effector.
+    """
+    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
+        super().__init__(env, weight, enabled=True, track_var=False)
+        self.asset = self.command_manager.asset
+        self.eef_body_idx = self.command_manager.eef_body_idx
+    
+    @override
+    def _compute(self) -> torch.Tensor:
+        angvel = self.asset.data.body_link_ang_vel_w[:, self.eef_body_idx]
+        rew = - angvel.square().sum(dim=-1, keepdim=True)
+        return rew.reshape(self.num_envs, 1)
 
 
 __all__ = ["SingleEEFLocoManip"]

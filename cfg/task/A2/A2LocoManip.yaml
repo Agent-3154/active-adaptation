@@ -44,16 +44,14 @@ command:
   eef_body_name: gripper_base
   # Heading-frame (x,y) offsets from root + z above terrain; tune for Piper workspace.
   workspace_range:
-    - [0.15, 0.55]
-    - [-0.35, 0.35]
-    - [0.2, 0.75]
+    - [0.15, 0.6]
+    - [-0.4, 0.4]
+    - [0.05, 0.8]
   # Half of resampled envs keep independent local loco/manip commands.
   # The other half sample a world-frame EEF target and base standoff pose,
   # then convert them back into the same 6D local command interface.
   world_goal_prob: 0.5
-  standoff_xy_range:
-    - [-0.6, 0.6]
-    - [-0.4, 0.4]
+  standoff_distance_range: [1.0, 3.0]
   standoff_linvel_gain: 1.0
   standoff_yaw_gain: 1.0
 
@@ -85,6 +83,7 @@ reward:
     base_height_exp:    {weight: 2.0, target_height: 0.4}
   manip:
     eef_pos_tracking:   {weight: 1.0, track_var: true}
+    eef_angvel_penalty: {weight: 0.02}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7}
