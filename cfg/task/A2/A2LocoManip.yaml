@@ -83,6 +83,7 @@ reward:
     base_height_exp:    {weight: 1.0, target_height: 0.4}
   manip:
     eef_pos_tracking:   {weight: 1.2}
+    eef_forward_tracking: {weight: 0.6}
     eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0005}

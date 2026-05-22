@@ -19,15 +19,17 @@ from ..rewards.base import Reward
 
 
 class SingleEEFLocoManip(Command):
-    """Command vector: planar base velocity, yaw rate, and EEF target in a **heading frame**.
+    """Command vector: base velocity, yaw rate, EEF target, and EEF pitch target.
 
-    Layout: ``[v_x, v_y, yaw_rate, eef_x, eef_y, eef_z]`` (6D). The first two loco components
-    are in the usual body horizontal frame (same as ``Twist``); ``eef_x``/``eef_y`` are **not**
-    full body frame: they use the same **yaw-only** rotation as world ``(x,y)`` offsets from the
-    root (pitch/roll of the base are ignored for the horizontal part). ``eef_z`` is **height
-    above terrain**, not root-link ``z``: world target height is
+    Layout: ``[v_x, v_y, yaw_rate, eef_x, eef_y, eef_z, eef_pitch]`` (7D). The first
+    two loco components are in the usual body horizontal frame (same as ``Twist``);
+    ``eef_x``/``eef_y`` are **not** full body frame: they use the same **yaw-only**
+    rotation as world ``(x,y)`` offsets from the root (pitch/roll of the base are
+    ignored for the horizontal part). ``eef_z`` is **height above terrain**, not
+    root-link ``z``: world target height is
     ``get_ground_height_at(query_xy) + eef_z``, with ``query_xy`` the horizontal target under
-    the root. Extend ``command`` if you add base height, wrist orientation, etc.
+    the root. ``eef_pitch`` is a global pitch target used to construct a world-frame
+    EEF forward vector.
     """
 
     def __init__(
@@ -95,6 +97,8 @@ class SingleEEFLocoManip(Command):
             # (x,y): horizontal offsets in yaw-aligned frame; z: height above ground at target xy.
             self.cmd_eef_pos_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pos_w = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_pitch_w = torch.zeros(self.num_envs, 1)
+            self.cmd_eef_forward_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_vel_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_vel_w = torch.zeros(self.num_envs, 3)
             self.is_world_goal_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
@@ -132,6 +136,9 @@ class SingleEEFLocoManip(Command):
                 self.cmd_linvel_b[:, :2], # [N, 2]
                 self.cmd_yawvel_b, # [N, 1]
                 self.cmd_eef_pos_b, # [N, 3]
+                self.cmd_eef_pitch_w, # [N, 1]
+                self.cmd_eef_pitch_w.cos(), # [N, 1]
+                self.cmd_eef_pitch_w.sin(), # [N, 1]
             ],
             dim=-1,
         )
@@ -142,7 +149,10 @@ class SingleEEFLocoManip(Command):
         cmd_linvel_b = SymmetryTransform(perm=[0, 1], signs=[1, -1])
         cmd_yawvel_b = SymmetryTransform(perm=[0], signs=[-1])
         cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
-        return SymmetryTransform.cat([cmd_linvel_b, cmd_yawvel_b, cmd_eef_pos_b])
+        cmd_eef_pitch_w = SymmetryTransform(perm=[0, 1, 2], signs=[1, 1, 1])
+        return SymmetryTransform.cat(
+            [cmd_linvel_b, cmd_yawvel_b, cmd_eef_pos_b, cmd_eef_pitch_w]
+        )
 
     @staticmethod
     def _env_mask_prob(num_envs: int, prob: float, device: torch.device) -> torch.Tensor:
@@ -171,6 +181,20 @@ class SingleEEFLocoManip(Command):
 
     def sample_manip_commands(self, env_ids: torch.Tensor) -> None: # env_ids is always non-empty
         self.cmd_eef_pos_b[env_ids] = self._sample_local_eef_offsets(env_ids)
+        self.sample_eef_pitch_commands(env_ids, self.cmd_eef_pos_b[env_ids, 2])
+
+    def sample_eef_pitch_commands(
+        self, env_ids: torch.Tensor, target_height: torch.Tensor
+    ) -> None:
+        pitch_down = torch.rand(len(env_ids), device=self.device) * (torch.pi / 2)
+        pitch_up = torch.rand(len(env_ids), device=self.device) * (torch.pi / 2) - (
+            torch.pi / 2
+        )
+        self.cmd_eef_pitch_w[env_ids, 0] = torch.where(
+            target_height < 0.4,
+            pitch_down,
+            pitch_up,
+        )
 
     def sample_world_goal_commands(self, env_ids: torch.Tensor) -> None:
         root_pos = self.asset.data.root_link_pos_w[env_ids]
@@ -195,6 +219,7 @@ class SingleEEFLocoManip(Command):
         self.standoff_pos_w[env_ids] = standoff_pos_w
         self.world_eef_pos_w[env_ids] = world_eef_pos_w
         self.standoff_yaw_w[env_ids, 0] = self.asset.data.heading_w[env_ids]
+        self.sample_eef_pitch_commands(env_ids, eef_offset_b[:, 2])
 
     def _split_command_strategy(
         self, env_ids: torch.Tensor
@@ -249,7 +274,7 @@ class SingleEEFLocoManip(Command):
         ).clamp(*self.yaw_rate_range)
 
     def _sync_world_frames(self) -> None:
-        """Add informative comments here."""
+        """Sync command tensors that are derived from the current root pose."""
         quat_w = self.asset.data.root_link_quat_w
         yaw_q = yaw_quat(quat_w)
         world_env_ids = self.world_env_ids
@@ -267,6 +292,10 @@ class SingleEEFLocoManip(Command):
         self.cmd_eef_pos_w[:, 2] = ground_h + self.cmd_eef_pos_b[:, 2]
         if world_env_ids.numel() > 0:
             self.cmd_eef_pos_w[world_env_ids] = self.world_eef_pos_w[world_env_ids]
+        pitch = self.cmd_eef_pitch_w.squeeze(-1)
+        self.cmd_eef_forward_w[:, 0] = torch.cos(pitch)
+        self.cmd_eef_forward_w[:, 1] = 0.0
+        self.cmd_eef_forward_w[:, 2] = -torch.sin(pitch)
 
         self.command_speed = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
         self.is_standing_env = (self.command_speed < 0.1)
@@ -334,6 +363,28 @@ class eef_vel_tracking(Reward[SingleEEFLocoManip]):
         diff_w = self.command_manager.cmd_eef_vel_w - self.asset.data.body_link_vel_w[:, self.eef_body_idx]
         error_l2 = diff_w.square().sum(dim=-1, keepdim=True)
         rew = torch.exp(-error_l2 / self.sigma)
+        return rew.reshape(self.num_envs, 1)
+
+
+class eef_forward_tracking(Reward[SingleEEFLocoManip]):
+    """
+    Track a global EEF pitch target through the end-effector forward direction.
+    """
+
+    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
+        super().__init__(env, weight, enabled=True, track_var=False)
+        self.asset = self.command_manager.asset
+        self.eef_body_idx = self.command_manager.eef_body_idx
+        self.forward_axis_b = torch.tensor([1.0, 0.0, 0.0], device=self.device)
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        eef_quat_w = self.asset.data.body_link_quat_w[:, self.eef_body_idx]
+        forward_axis_b = self.forward_axis_b.unsqueeze(0).expand(self.num_envs, -1)
+        eef_forward_w = quat_rotate(eef_quat_w, forward_axis_b)
+        rew = (eef_forward_w * self.command_manager.cmd_eef_forward_w).sum(
+            dim=-1, keepdim=True
+        )
         return rew.reshape(self.num_envs, 1)
 
 
