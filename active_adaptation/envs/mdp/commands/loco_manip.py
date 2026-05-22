@@ -8,6 +8,8 @@ import torch
 from typing_extensions import override
 
 from active_adaptation.utils.math import (
+    euler_from_quat,
+    euler_rotate,
     quat_rotate,
     quat_rotate_inverse,
     wrap_to_pi,
@@ -292,10 +294,16 @@ class SingleEEFLocoManip(Command):
         self.cmd_eef_pos_w[:, 2] = ground_h + self.cmd_eef_pos_b[:, 2]
         if world_env_ids.numel() > 0:
             self.cmd_eef_pos_w[world_env_ids] = self.world_eef_pos_w[world_env_ids]
-        pitch = self.cmd_eef_pitch_w.squeeze(-1)
-        self.cmd_eef_forward_w[:, 0] = torch.cos(pitch)
-        self.cmd_eef_forward_w[:, 1] = 0.0
-        self.cmd_eef_forward_w[:, 2] = -torch.sin(pitch)
+        
+        eef_quat_w = self.asset.data.body_link_quat_w[:, self.eef_body_idx]
+        eef_rpy_w = euler_from_quat(eef_quat_w)
+        eef_rpy_w[:, 1] = self.cmd_eef_pitch_w.squeeze(-1)
+    
+        self.eef_forward_w = quat_rotate(eef_quat_w, torch.tensor([[1.0, 0.0, 0.0]], device=self.device))
+        self.cmd_eef_forward_w = euler_rotate(
+            eef_rpy_w,
+            torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
+        )
 
         self.command_speed = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
         self.is_standing_env = (self.command_speed < 0.1)
@@ -324,6 +332,16 @@ class SingleEEFLocoManip(Command):
             self.asset.data.root_link_pos_w,
             self.cmd_linvel_w,
             color=(1.0, 1.0, 1.0, 1.0),
+        )
+        self.env.debug_draw.vector(
+            self.asset.data.body_link_pos_w[:, self.eef_body_idx],
+            self.eef_forward_w,
+            color=(1.0, 0.0, 0.0, 1.0),
+        )
+        self.env.debug_draw.vector(
+            self.asset.data.body_link_pos_w[:, self.eef_body_idx],
+            self.cmd_eef_forward_w,
+            color=(0.0, 1.0, 0.0, 1.0),
         )
         self.marker.visualize(self.cmd_eef_pos_w)
         world_env_ids = self.world_env_ids
@@ -387,10 +405,7 @@ class eef_forward_tracking(Reward[SingleEEFLocoManip]):
 
     @override
     def _compute(self) -> torch.Tensor:
-        eef_quat_w = self.asset.data.body_link_quat_w[:, self.eef_body_idx]
-        forward_axis_b = self.forward_axis_b.unsqueeze(0).expand(self.num_envs, -1)
-        eef_forward_w = quat_rotate(eef_quat_w, forward_axis_b)
-        rew = (eef_forward_w * self.command_manager.cmd_eef_forward_w).sum(
+        rew = (self.command_manager.eef_forward_w * self.command_manager.cmd_eef_forward_w).sum(
             dim=-1, keepdim=True
         )
         pos_error = (

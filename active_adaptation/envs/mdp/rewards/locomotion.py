@@ -264,10 +264,18 @@ class base_height_l1(Reward[Twist]):
 
 
 class base_height_exp(Reward[Twist]):
-    def __init__(self, env, weight: float, target_height: Optional[float] = None, track_var: bool = False):
+    def __init__(
+        self,
+        env,
+        weight: float,
+        target_height: Optional[float] = None,
+        track_var: bool = False,
+        sigma: float = 0.2,
+    ):
         super().__init__(env, weight, track_var=track_var)
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.target_height = target_height
+        self.sigma = sigma
     
     @override
     def _compute(self) -> torch.Tensor:
@@ -278,7 +286,7 @@ class base_height_exp(Reward[Twist]):
         root_link_pos_w = self.asset.data.root_link_pos_w
         height = root_link_pos_w[:, 2] - self.env.get_ground_height_at(root_link_pos_w)
         error_l2 = (height.unsqueeze(1) - target_height).square()
-        rew = torch.exp(-error_l2 / 0.2)
+        rew = torch.exp(-error_l2 / self.sigma)
         return rew.reshape(self.num_envs, 1)
 
 
