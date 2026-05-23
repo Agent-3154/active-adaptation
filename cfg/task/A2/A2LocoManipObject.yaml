@@ -32,9 +32,14 @@ input:
           .*_hip_joint: 0.4
           .*_thigh_joint: 0.4
           .*_calf_joint: 0.4
-          arm_joint[4-8]: 0.35
+          arm_joint[4-6]: 0.35
         max_delay: 1
         alpha_range: [0.8, 0.9]
+      - _target_: CorrelatedJointPosition
+        joint_names: "arm_joint[7,8]"
+        # arm_joint7: [0, 0.035], arm_joint8: [-0.035, 0] -> open/close together
+        matrix: [1.0, -1.0]
+        action_scaling: 0.035
       - _target_: JointPositionDelta
         action_scaling:
           arm_joint[1-3]: 0.5
@@ -47,7 +52,7 @@ command:
   object_name: object
   object_distance_range: [2.0, 3.0]
   grasp_height_range: [0.05, 0.6]
-  standoff_distance_range: [1.0, 2.0]
+  standoff_distance_range: [0.6, 0.8]
   standoff_angle_range: [-1.0471975512, 1.0471975512]
   standoff_linvel_gain: 1.0
   standoff_yaw_gain: 1.0
@@ -101,7 +106,16 @@ reward:
 termination:
   max_episode_length: {}
   crash: {body_names_expr: [base_link, .*hip, .*thigh], t_thres: 0.06}
-  fall_over: {xy_thres: 0.9}
+  robot_fall_over: {
+    _target_: fall_over,
+    entity_name: robot,
+    xy_thres: 0.9,
+  }
+  object_fall_over: {
+    _target_: fall_over,
+    entity_name: object,
+    xy_thres: 0.9,
+  }
   undesired_contact: {body_names: [.*_calf]}
 
 randomization:

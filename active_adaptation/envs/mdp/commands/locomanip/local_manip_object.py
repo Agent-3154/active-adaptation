@@ -34,7 +34,7 @@ class LocalManipObject(Command):
         object_name: str = "object",
         object_distance_range: Tuple[float, float] = (2.0, 3.0),
         grasp_height_range: Tuple[float, float] = (0.05, 0.6),
-        standoff_distance_range: Tuple[float, float] = (1.0, 2.0),
+        standoff_distance_range: Tuple[float, float] = (0.6, 0.8),
         standoff_angle_range: Tuple[float, float] = (-torch.pi / 3, torch.pi / 3),
         linvel_x_range: Tuple[float, float] = (-1.0, 1.0),
         linvel_y_range: Tuple[float, float] = (-1.0, 1.0),
@@ -101,11 +101,17 @@ class LocalManipObject(Command):
     
     @property
     def command(self) -> torch.Tensor:
+        pos_diff_w = self.cmd_eef_pos_w - self.eef_pos_w
+        pos_diff_b = quat_rotate_inverse(
+            yaw_quat(self.asset.data.root_link_quat_w),
+            pos_diff_w
+        )
         return torch.cat(
             [
                 self.cmd_linvel_b[:, :2],
                 self.cmd_yawvel_b,
                 self.cmd_eef_pos_b,
+                pos_diff_b,
                 self.cmd_eef_pitch_w,
             ],
             dim=-1,
@@ -218,6 +224,7 @@ class LocalManipObject(Command):
             self.grasp_point_w[:, 2] - self.env.get_ground_height_at(self.grasp_point_w)
         )
         self.cmd_eef_pos_w = self.grasp_point_w.clone()
+        self.eef_pos_w = self.asset.data.body_link_pos_w[:, self.eef_body_idx]
 
         standoff_delta_w = self.standoff_pos_w - root_pos
         standoff_delta_w[:, 2] = 0.0
@@ -264,6 +271,11 @@ class LocalManipObject(Command):
             self.asset.data.body_link_pos_w[:, self.eef_body_idx],
             self.cmd_eef_forward_w,
             color=(0.0, 1.0, 0.0, 1.0),
+        )
+        self.env.debug_draw.vector(
+            self.eef_pos_w,
+            self.cmd_eef_pos_w - self.eef_pos_w,
+            color=(0.0, 0.0, 1.0, 1.0),
         )
         if self.grasp_marker is not None:
             self.grasp_marker.visualize(self.grasp_point_w)

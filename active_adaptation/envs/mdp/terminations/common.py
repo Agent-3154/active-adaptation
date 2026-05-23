@@ -1,11 +1,12 @@
 import torch
 import abc
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation
+    from isaaclab.assets import Articulation, RigidObject
     from isaaclab.sensors import ContactSensor
+    IsaacEntity = Union[Articulation, RigidObject]
 
 from .base import Termination
 from active_adaptation.envs.utils import find_sensor_bodies, find_bodies
@@ -126,9 +127,10 @@ class fall_over(Termination):
         self,
         env,
         xy_thres: float = 0.8,
+        entity_name: str = "robot",
     ):
         super().__init__(env)
-        self.asset: Articulation = self.env.scene.articulations["robot"]
+        self.asset: IsaacEntity = self.env.scene[entity_name]
         self.xy_thres = xy_thres
 
     def compute(self, termination: torch.Tensor):

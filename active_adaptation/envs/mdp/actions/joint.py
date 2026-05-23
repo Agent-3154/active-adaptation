@@ -11,7 +11,7 @@ try:
 except ModuleNotFoundError:
     from mjlab.utils.lab_api import string as string_utils
 
-from active_adaptation.utils.symmetry import joint_space_symmetry
+from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
 
 from .base import Action
 
@@ -300,4 +300,84 @@ class JointVelocity(_DelayedJointAction):
             self.vel_target_bound_tracker.update(jvel_target)
 
 
-__all__ = ["JointPosition", "JointPositionDelta", "JointVelocity", "SoftBoundTracker"]
+class CorrelatedJointPosition(Action):
+    """Map a low-dimensional action to correlated joint position targets.
+
+    Each controlled joint receives ``default_joint_pos + action_scaling * (action @ matrix.T)``,
+    where ``matrix`` has shape ``(num_joints, action_dim)``. This is useful for parallel
+    grippers where one scalar command should open/close multiple joints with opposite sign.
+    """
+
+    def __init__(
+        self,
+        env,
+        joint_names: str | list[str],
+        matrix: list[float] | list[list[float]],
+        action_scaling: float = 1.0,
+    ) -> None:
+        super().__init__(env)
+        joint_ids, self.joint_names = self.asset.find_joints(joint_names)
+        self.joint_ids = torch.tensor(joint_ids, device=self.device)
+
+        coeffs = torch.tensor(matrix, dtype=torch.float32, device=self.device)
+        if coeffs.ndim == 1:
+            coeffs = coeffs.unsqueeze(-1)
+        if coeffs.shape[0] != len(self.joint_names):
+            raise ValueError(
+                f"matrix rows ({coeffs.shape[0]}) must match number of joints "
+                f"({len(self.joint_names)})"
+            )
+        self.matrix = coeffs
+        self.action_dim = int(self.matrix.shape[1])
+        self.action_scaling = action_scaling
+
+        with torch.device(self.device):
+            self.default_joint_pos = self.asset.data.default_joint_pos[
+                :, self.joint_ids
+            ].clone()
+            self.action_buf = torch.zeros(self.num_envs, 4, self.action_dim)
+            self.applied_action = torch.zeros(self.num_envs, self.action_dim)
+
+    def __repr__(self) -> str:
+        return (
+            f"CorrelatedJointPosition(joint_names={self.joint_names}, "
+            f"joint_ids={self.joint_ids.tolist()}, action_dim={self.action_dim})"
+        )
+
+    @override
+    def reset(self, env_ids: torch.Tensor) -> None:
+        self.action_buf[env_ids] = 0.0
+        self.applied_action[env_ids] = 0.0
+        self.default_joint_pos[env_ids] = self.asset.data.default_joint_pos[
+            env_ids.unsqueeze(1), self.joint_ids
+        ]
+
+    @override
+    def process_action(self, action: torch.Tensor) -> None:
+        self.action_buf = self.action_buf.roll(1, dims=1)
+        self.action_buf[:, 0] = action
+        self.applied_action = action
+
+    @override
+    def apply_action(self, substep: int) -> None:
+        joint_delta = (self.applied_action @ self.matrix.T) * self.action_scaling
+        jpos_target = self.default_joint_pos + joint_delta
+        self.asset.set_joint_position_target(jpos_target, joint_ids=self.joint_ids)
+
+    @override
+    def symmetry_transform(self):
+        if not self.action_dim == 1:
+            raise NotImplementedError("Symmetry transform is not supported for correlated joint positions with action dimension > 1")
+        return SymmetryTransform(
+            perm=torch.arange(self.action_dim),
+            signs=[1] * self.action_dim,
+        )
+
+
+__all__ = [
+    "JointPosition",
+    "JointPositionDelta",
+    "JointVelocity",
+    "CorrelatedJointPosition",
+    "SoftBoundTracker",
+]
