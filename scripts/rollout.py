@@ -1,11 +1,12 @@
 """
 Roll out a policy and collect transitions for offline replay / inspection.
 
-Writes a small ``torch.save`` payload (stacked steps, format version) under
-``rollout/<task>/<algo>/<timestamp>/rollout.pt``.
+Writes a stacked transition archive and companion metadata JSON under
+``rollout/<task>-<algo>/<timestamp>/``.
 """
 
 import datetime
+import json
 import torch
 import hydra
 from pathlib import Path
@@ -20,13 +21,47 @@ import active_adaptation as aa
 FILE_PATH = Path(__file__).parent
 
 
-class RolloutWriter:
-    """Append CPU transition rows and flush to ``rollout.pt`` in ``path``."""
+def _describe_tensordict(tensordict: TensorDict) -> dict:
+    shapes: dict = {}
+    for key in tensordict.keys(include_nested=True):
+        value = tensordict.get(key)
+        if not isinstance(value, torch.Tensor):
+            continue
+        key_str = key if isinstance(key, str) else "/".join(key)
+        shapes[key_str] = list(value.shape)
+    return shapes
 
-    def __init__(self, path: Path, max_size: int = 2000):
+
+def _write_metadata_json(metadata: dict, path: Path) -> None:
+    """Write metadata to a JSON file."""
+    def render(obj, indent: int = 0) -> str:
+        if isinstance(obj, list):
+            return json.dumps(obj)
+        if isinstance(obj, dict):
+            pad = "  " * indent
+            inner = "  " * (indent + 1)
+            lines = ["{"]
+            items = sorted(obj.items())
+            for i, (key, value) in enumerate(items):
+                comma = "," if i < len(items) - 1 else ""
+                lines.append(
+                    f"{inner}{json.dumps(key)}: {render(value, indent + 1)}{comma}"
+                )
+            lines.append(f"{pad}}}")
+            return "\n".join(lines)
+        return json.dumps(obj)
+
+    path.write_text(render(metadata) + "\n", encoding="utf-8")
+
+
+class RolloutWriter:
+    """Append CPU transition rows and flush to disk in ``path``."""
+
+    def __init__(self, path: Path, max_size: int = 2000, policy_name: str = ""):
         self.path = path
         path.mkdir(parents=True, exist_ok=True)
         self._max_size = max_size
+        self._policy_name = policy_name
         self._rows: list[TensorDict] = []
 
     def add(self, tensordict: TensorDict):
@@ -60,6 +95,13 @@ class RolloutWriter:
             human = f"{size} B"
         print(f"Collected rollout disk usage: {size:,} bytes ({human}) at {out_path}")
 
+        metadata = {
+            "policy_name": self._policy_name,
+            "tensor_shapes": _describe_tensordict(stacked),
+        }
+        meta_path = out_path.with_suffix(".json")
+        _write_metadata_json(metadata, meta_path)
+        print(f"Wrote rollout metadata to {meta_path}")
 
 
 @hydra.main(config_path="../cfg", config_name="rollout", version_base=None)
@@ -87,7 +129,11 @@ def main(cfg):
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     writer_path = FILE_PATH / "rollout" / f"{cfg.task.name}-{cfg.algo.name}" / timestamp
-    writer = RolloutWriter(writer_path, max_size=cfg.num_steps)
+    writer = RolloutWriter(
+        writer_path,
+        max_size=cfg.num_steps,
+        policy_name=str(cfg.algo.name),
+    )
 
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
         for _ in tqdm(range(cfg.num_steps)):
