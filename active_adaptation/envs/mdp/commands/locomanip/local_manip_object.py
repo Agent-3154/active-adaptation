@@ -14,6 +14,7 @@ from active_adaptation.utils.math import (
     sample_quat_yaw,
     wrap_to_pi,
     yaw_quat,
+    clamp_norm
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
 from ..base import Command
@@ -46,11 +47,10 @@ class LocalManipObject(Command):
         grasp_height_range: Tuple[float, float] = (0.05, 0.6),
         standoff_distance_range: Tuple[float, float] = (0.6, 0.8),
         standoff_angle_range: Tuple[float, float] = (-torch.pi / 3, torch.pi / 3),
-        linvel_x_range: Tuple[float, float] = (-1.0, 1.0),
-        linvel_y_range: Tuple[float, float] = (-1.0, 1.0),
         yaw_rate_range: Tuple[float, float] = (-1.0, 1.0),
-        standoff_linvel_gain: float = 1.0,
+        standoff_linvel_gain: float = 2.0,
         standoff_yaw_gain: float = 1.0,
+        speed_limit_range: Tuple[float, float] = (0.4, 1.2),
         teleop: bool = False,
     ) -> None:
         super().__init__(env, teleop)
@@ -73,11 +73,10 @@ class LocalManipObject(Command):
         self.grasp_height_range = grasp_height_range
         self.standoff_distance_range = standoff_distance_range
         self.standoff_angle_range = standoff_angle_range
-        self.linvel_x_range = linvel_x_range
-        self.linvel_y_range = linvel_y_range
         self.yaw_rate_range = yaw_rate_range
         self.standoff_linvel_gain = standoff_linvel_gain
         self.standoff_yaw_gain = standoff_yaw_gain
+        self.speed_limit_range = speed_limit_range
 
         with torch.device(self.device):
             self.cmd_linvel_b = torch.zeros(self.num_envs, 3)
@@ -98,6 +97,7 @@ class LocalManipObject(Command):
             self.standoff_pos_w = torch.zeros(self.num_envs, 3)
             self.standoff_yaw_w = torch.zeros(self.num_envs, 1)
             self.command_speed = torch.zeros(self.num_envs, 1)
+            self.cmd_speed_limit = torch.zeros(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
 
         self.grasp_marker = None
@@ -228,6 +228,7 @@ class LocalManipObject(Command):
     @override
     def reset(self, env_ids: torch.Tensor) -> None:
         self.sample_commands(env_ids)
+        self.cmd_speed_limit[env_ids, 0] = self._sample_uniform(len(env_ids), self.speed_limit_range)
         self.update()
     
     @override
@@ -253,15 +254,9 @@ class LocalManipObject(Command):
 
         standoff_delta_w = self.standoff_pos_w - root_pos
         standoff_delta_w[:, 2] = 0.0
-        standoff_delta_b = quat_rotate_inverse(root_yaw_q, standoff_delta_w)
-        self.cmd_linvel_b[:, 0] = (
-            self.standoff_linvel_gain * standoff_delta_b[:, 0]
-        ).clamp(*self.linvel_x_range)
-        self.cmd_linvel_b[:, 1] = (
-            self.standoff_linvel_gain * standoff_delta_b[:, 1]
-        ).clamp(*self.linvel_y_range)
-        self.cmd_linvel_b[:, 2] = 0.0
-        self.cmd_linvel_w = quat_rotate(root_yaw_q, self.cmd_linvel_b)
+        cmd_linvel_w = self.standoff_linvel_gain * standoff_delta_w
+        self.cmd_linvel_w = clamp_norm(cmd_linvel_w, min=0., max=self.cmd_speed_limit)
+        self.cmd_linvel_b = quat_rotate_inverse(root_yaw_q, cmd_linvel_w)
 
         yaw_error = wrap_to_pi(
             self.standoff_yaw_w - self.asset.data.heading_w.unsqueeze(1)

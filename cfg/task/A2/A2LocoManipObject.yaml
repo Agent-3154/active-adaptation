@@ -54,8 +54,9 @@ command:
   grasp_height_range: [0.1, 0.6]
   standoff_distance_range: [0.6, 0.7]
   standoff_angle_range: [-1.0471975512, 1.0471975512]
-  standoff_linvel_gain: 1.0
+  standoff_linvel_gain: 2.0
   standoff_yaw_gain: 1.0
+  speed_limit_range: [0.4, 1.2]
 
 observation:
   policy:
