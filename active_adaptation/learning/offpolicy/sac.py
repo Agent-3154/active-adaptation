@@ -313,6 +313,14 @@ class NormalActor(nn.Module):
 
 
 class SAC(TensorDictModuleBase):
+
+    # keys to select from the batch for training
+    train_keys = (
+        OBS_KEY, ("next", OBS_KEY), ACTION_KEY, REWARD_KEY,
+        TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
+        "priority_weight", "replay_flat_index"
+    )
+
     def __init__(
         self,
         cfg: SACConfig,
@@ -741,7 +749,8 @@ class SAC(TensorDictModuleBase):
         diagnostics: bool = False,
     ):
         self.Q.train()
-
+        batch = batch.select(*self.train_keys, inplace=True)
+        batch_prior = batch_prior.select(*self.train_keys, inplace=True)
         # Capture prior ground-truth Q (in raw return units, recorded at rollout
         # time) before .select() drops keys not present in the primary buffer
         # schema, then concatenate the prior data into the training batch.
@@ -750,8 +759,7 @@ class SAC(TensorDictModuleBase):
             if "Q_value" in batch_prior.keys(True, True):
                 gt = batch_prior["Q_value"]
                 prior_q_gt = gt[0] if gt.ndim > 1 else gt
-            batch_prior_aligned = batch_prior.select(*batch.keys(True, True))
-            batch = torch.cat([batch, batch_prior_aligned], dim=1)
+            batch = torch.cat([batch, batch_prior], dim=1)
 
         reward = batch[REWARD_KEY]
         reward = reward.sum(-1, keepdim=True).clamp_min(0.)
@@ -961,12 +969,12 @@ class SAC(TensorDictModuleBase):
     def train_actor(self, diagnostics: bool = False):
         batch = self.rb.sample(batch_size=self.cfg.actor_batch_size, steps=1).to(
             self.device
-        ) # [N,]
+        ).select(*self.train_keys) # [N,]
         if self.rb_prior is not None:
             batch_prior = self.rb_prior.sample(
                 batch_size=int(self.cfg.actor_batch_size * self.cfg.prior_data_ratio),
                 steps=1,
-            ).to(self.device).select(*batch.keys(True, True))
+            ).select(*self.train_keys).to(self.device)
             batch = torch.cat([batch, batch_prior], dim=0)
 
         weight = batch["priority_weight"]
@@ -1058,13 +1066,14 @@ class SAC(TensorDictModuleBase):
             q_for_log = q
             if self.reward_normalizer is not None:
                 q_for_log = self.reward_normalizer.denormalize_return_values(q_for_log)
-            mean_change = (dist.loc[: batch.shape[0]] - batch["loc"]).abs().mean()
+            # prior data may not contain "loc" key
+            # mean_change = (dist.loc[: batch.shape[0]] - batch["loc"]).abs().mean()
             infos = {
                 "actor/loss": actor_loss.item(),
                 "actor/grad_norm": actor_grad_norm.item(),
                 "actor/alpha": alpha.item(),
                 "actor/entropy": entropy_est.mean().item(),
-                "actor/mean_change": mean_change.item(),
+                # "actor/mean_change": mean_change.item(),
                 "actor/q_std": q_for_log.std(dim=1).mean().item(),
                 "actor/q_action_grad_norm": q_action_grad_norm.item(),
                 "actor/mean_loc": loc.abs().mean().item(),

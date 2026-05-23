@@ -134,11 +134,16 @@ def main(cfg):
         max_size=cfg.num_steps,
         policy_name=str(cfg.algo.name),
     )
+    
+    def is_private_key(key: str) -> bool:
+        return isinstance(key, str) and key.startswith('_')
 
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
         for _ in tqdm(range(cfg.num_steps)):
             carry = rollout_policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
+            private_keys = [key for key in td.keys(True, True) if is_private_key(key)]
+            td = td.exclude(*private_keys, inplace=True)
             td = td.exclude(*exclude_keys, inplace=True)
             writer.add(td)
 
