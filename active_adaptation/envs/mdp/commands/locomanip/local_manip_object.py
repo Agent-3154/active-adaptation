@@ -123,9 +123,16 @@ class LocalManipObject(Command):
         cmd_linvel_b = SymmetryTransform(perm=[0, 1], signs=[1, -1])
         cmd_yawvel_b = SymmetryTransform(perm=[0], signs=[-1])
         cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
         cmd_eef_pitch_w = SymmetryTransform(perm=[0], signs=[1])
         return SymmetryTransform.cat(
-            [cmd_linvel_b, cmd_yawvel_b, cmd_eef_pos_b, cmd_eef_pitch_w]
+            [
+                cmd_linvel_b,
+                cmd_yawvel_b,
+                cmd_eef_pos_b,
+                pos_diff_b,
+                cmd_eef_pitch_w,
+            ]
         )
 
     @override
