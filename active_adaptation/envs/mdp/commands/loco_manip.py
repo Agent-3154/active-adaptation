@@ -512,11 +512,12 @@ class eef_grasp(Reward[SingleEEFLocoManip]):
         closedness = 1.0 - openness
 
         close_active = pos_error < self.pos_error_threshold
-        approach_active = (pos_error >= self.pos_error_threshold) & (
-            pos_error < self.approach_error_threshold
-        )
-        rew = torch.where(close_active, closedness, openness)
-        active = close_active | approach_active
+        # approach_active = (pos_error >= self.pos_error_threshold) & (
+        #     pos_error < self.approach_error_threshold
+        # )
+        # rew = torch.where(close_active, closedness, openness)
+        active = close_active
+        rew = closedness
         return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 

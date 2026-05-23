@@ -64,9 +64,9 @@ class LocalManipObject(Command):
         self.object_name = object_name
         self.object: RigidObject = self.env.scene[object_name]
         
-        v = self.object.root_physx_view
-        disable = torch.rand(self.num_envs) < 0.5
-        v.set_disable_simulations(disable, torch.arange(self.num_envs))
+        # v = self.object.root_physx_view
+        # disable = torch.rand(self.num_envs) < 0.5
+        # v.set_disable_simulations(disable, torch.arange(self.num_envs))
         
         self.object_init_root_state = self.object.data.default_root_state.clone()
         self.object_distance_range = object_distance_range
