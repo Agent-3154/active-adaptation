@@ -99,6 +99,7 @@ class SingleEEFLocoManip(Command):
             # (x,y): horizontal offsets in yaw-aligned frame; z: height above ground at target xy.
             self.cmd_eef_pos_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pos_w = torch.zeros(self.num_envs, 3)
+            self.eef_pos_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pitch_w = torch.zeros(self.num_envs, 1)
             self.eef_forward_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_forward_w = torch.zeros(self.num_envs, 3)
@@ -136,11 +137,17 @@ class SingleEEFLocoManip(Command):
 
     @property
     def command(self) -> torch.Tensor:
+        pos_diff_w = self.cmd_eef_pos_w - self.eef_pos_w
+        pos_diff_b = quat_rotate_inverse(
+            yaw_quat(self.asset.data.root_link_quat_w),
+            pos_diff_w
+        )
         return torch.cat(
             [
                 self.cmd_linvel_b[:, :2], # [N, 2]
                 self.cmd_yawvel_b, # [N, 1]
                 self.cmd_eef_pos_b, # [N, 3]
+                pos_diff_b, # [N, 3]
                 self.cmd_eef_pitch_w, # [N, 1]
                 self.cmd_eef_pitch_w.cos(), # [N, 1]
                 self.cmd_eef_pitch_w.sin(), # [N, 1]
@@ -154,9 +161,10 @@ class SingleEEFLocoManip(Command):
         cmd_linvel_b = SymmetryTransform(perm=[0, 1], signs=[1, -1])
         cmd_yawvel_b = SymmetryTransform(perm=[0], signs=[-1])
         cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
         cmd_eef_pitch_w = SymmetryTransform(perm=[0, 1, 2], signs=[1, 1, 1])
         return SymmetryTransform.cat(
-            [cmd_linvel_b, cmd_yawvel_b, cmd_eef_pos_b, cmd_eef_pitch_w]
+            [cmd_linvel_b, cmd_yawvel_b, cmd_eef_pos_b, pos_diff_b, cmd_eef_pitch_w]
         )
 
     @staticmethod
@@ -293,6 +301,8 @@ class SingleEEFLocoManip(Command):
         delta_w = quat_rotate(yaw_q, exy)
         horiz_w = root_pos + delta_w
         ground_h = self.env.get_ground_height_at(horiz_w)
+
+        self.eef_pos_w = self.asset.data.body_link_pos_w[:, self.eef_body_idx]
         self.cmd_eef_pos_w[:, :2] = horiz_w[:, :2]
         self.cmd_eef_pos_w[:, 2] = ground_h + self.cmd_eef_pos_b[:, 2]
         if world_env_ids.numel() > 0:
@@ -339,12 +349,12 @@ class SingleEEFLocoManip(Command):
             color=(1.0, 1.0, 1.0, 1.0),
         )
         self.env.debug_draw.vector(
-            self.asset.data.body_link_pos_w[:, self.eef_body_idx],
+            self.eef_pos_w,
             self.eef_forward_w,
             color=(1.0, 0.0, 0.0, 1.0),
         )
         self.env.debug_draw.vector(
-            self.asset.data.body_link_pos_w[:, self.eef_body_idx],
+            self.eef_pos_w,
             self.cmd_eef_forward_w,
             color=(0.0, 1.0, 0.0, 1.0),
         )

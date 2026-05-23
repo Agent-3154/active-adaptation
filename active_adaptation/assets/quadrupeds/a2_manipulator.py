@@ -36,6 +36,7 @@ _ARM_BODIES = (
     "gripper_base",
     "gripper_right",
     "gripper_left",
+    "grasp_point",
 )
 
 _ARM_JOINT_SYMMETRY = {
@@ -45,8 +46,8 @@ _ARM_JOINT_SYMMETRY = {
     "arm_joint4": (-1, "arm_joint4"),
     "arm_joint5": (1, "arm_joint5"),
     "arm_joint6": (-1, "arm_joint6"),
-    "arm_joint7": (1, "arm_joint7"),
-    "arm_joint8": (1, "arm_joint8"),
+    "arm_joint7": (-1, "arm_joint8"),
+    "arm_joint8": (-1, "arm_joint7"),
 }
 
 INIT_JOINT_POS = {**A2_INIT_JOINT_POS, "arm_joint[1-8]": 0.0}

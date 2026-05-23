@@ -46,6 +46,7 @@ from active_adaptation.learning.utils.distributed import (
     wrap_ddp,
 )
 from active_adaptation.utils.profiling import ScopedTimer
+from tensordict.nn.probabilistic import interaction_type, InteractionType
 
 cs = ConfigStore.instance()
 
@@ -601,20 +602,24 @@ class SAC(TensorDictModuleBase):
             loc, scale = self.actor(obs)
             dist = self.DistClass(loc, scale)
 
-            if self.cfg.use_correlated:
-                prev_noise = tensordict["prev_noise"]
-                rho = tensordict["rho"]
-                noise = (
-                    rho * prev_noise 
-                    + torch.sqrt((1.0 - rho.square())) * torch.randn_like(loc)
-                )
-                sample = loc + noise * scale
-                tensordict["next", "prev_noise"] = noise
-                if isinstance(dist, FasterTransformedDistribution):
-                    for transform in dist.transforms:
-                        sample = transform(sample)
+            if interaction_type() == InteractionType.MODE:
+                sample = loc.clone()
             else:
-                sample = dist.sample()
+                if self.cfg.use_correlated:
+                    prev_noise = tensordict["prev_noise"]
+                    rho = tensordict["rho"]
+                    noise = (
+                        rho * prev_noise 
+                        + torch.sqrt((1.0 - rho.square())) * torch.randn_like(loc)
+                    )
+                    sample = loc + noise * scale
+                    tensordict["next", "prev_noise"] = noise
+                else:
+                    sample = dist.sample()
+            
+            if isinstance(dist, FasterTransformedDistribution):
+                for transform in dist.transforms:
+                    sample = transform(sample)
             
             if critic:
                 # Store in raw return units so the value is independent of the

@@ -68,6 +68,7 @@ observation:
     joint_vel_multistep: {steps: 4, noise_std: 0.2}
     prev_actions: {steps: 2}
   # priv:
+    body_vel_b: {body_names: grasp_point}
     root_linvel_b:    {yaw_only: true}
     root_angvel_b:    {}
   extero:
