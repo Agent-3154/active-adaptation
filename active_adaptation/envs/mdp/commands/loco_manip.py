@@ -468,4 +468,56 @@ class eef_angvel_penalty(Reward[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1)
 
 
+class eef_grasp(Reward[SingleEEFLocoManip]):
+    """
+    Two-phase grasp reward gated on EEF position error.
+
+    - ``error < pos_error_threshold``: reward a closed gripper (grasp).
+    - ``pos_error_threshold <= error < 3 * pos_error_threshold``: reward an open
+      gripper (pre-grasp approach).
+    """
+
+    def __init__(
+        self,
+        env,
+        gripper_joint_names: str,
+        weight: float,
+        enabled: bool = True,
+        track_var: bool = False,
+        pos_error_threshold: float = 0.04,
+    ):
+        super().__init__(env, weight, enabled=enabled, track_var=track_var)
+        self.asset = self.command_manager.asset
+        self.eef_body_idx = self.command_manager.eef_body_idx
+        self.pos_error_threshold = pos_error_threshold
+        self.approach_error_threshold = 3.0 * pos_error_threshold
+        self.gripper_joint_ids, _ = self.asset.find_joints(gripper_joint_names)
+        self.gripper_joint_ids = torch.tensor(
+            self.gripper_joint_ids, device=self.device
+        )
+        limits = self.asset.data.soft_joint_pos_limits[0, self.gripper_joint_ids]
+        self.max_open = limits.abs().amax(dim=-1).max().clamp_min(1e-6)
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        pos_error = (
+            self.command_manager.cmd_eef_pos_w
+            - self.asset.data.body_link_pos_w[:, self.eef_body_idx]
+        ).norm(dim=-1, keepdim=True)
+
+        gripper_pos = self.asset.data.joint_pos[:, self.gripper_joint_ids]
+        openness = (gripper_pos.abs().amax(dim=-1, keepdim=True) / self.max_open).clamp(
+            0.0, 1.0
+        )
+        closedness = 1.0 - openness
+
+        close_active = pos_error < self.pos_error_threshold
+        approach_active = (pos_error >= self.pos_error_threshold) & (
+            pos_error < self.approach_error_threshold
+        )
+        rew = torch.where(close_active, closedness, openness)
+        active = close_active | approach_active
+        return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
+
+
 __all__ = ["SingleEEFLocoManip"]

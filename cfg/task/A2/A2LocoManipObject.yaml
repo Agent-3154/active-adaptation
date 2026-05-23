@@ -51,8 +51,8 @@ command:
   eef_body_name: grasp_point
   object_name: object
   object_distance_range: [2.0, 3.0]
-  grasp_height_range: [0.05, 0.6]
-  standoff_distance_range: [0.6, 0.8]
+  grasp_height_range: [0.1, 0.6]
+  standoff_distance_range: [0.6, 0.7]
   standoff_angle_range: [-1.0471975512, 1.0471975512]
   standoff_linvel_gain: 1.0
   standoff_yaw_gain: 1.0
@@ -88,6 +88,7 @@ reward:
     eef_forward_tracking: {weight: 0.6}
     eef_up_tracking: {weight: 0.6}
     eef_angvel_penalty: {weight: 0.005}
+    eef_grasp: {weight: 1.0, gripper_joint_names: "arm_joint[7,8]"}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints

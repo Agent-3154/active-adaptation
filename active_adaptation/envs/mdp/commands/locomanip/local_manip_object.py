@@ -23,7 +23,17 @@ if TYPE_CHECKING:
 
 
 class LocalManipObject(Command):
-    """Object-aware loco-manip command with the `SingleEEFLocoManip` command layout."""
+    """
+    Object-aware loco-manip command with the `SingleEEFLocoManip` command layout.
+
+    Similar to `SingleEEFLocoManip`, we use two command sampling strategies:
+    1. sample a grasp point on the object as the world-frame EEF target.
+    2. sample a grasp point on the object as the world-frame EEF target, but turn off the simulation of the object.
+    
+    This is because the robot may receive large penalty for making the object fall
+    over when control is not good enough, and therefore refuses to reach for the
+    target position. 
+    """
 
     supported_backends = ("isaac",)
 
@@ -53,6 +63,11 @@ class LocalManipObject(Command):
 
         self.object_name = object_name
         self.object: RigidObject = self.env.scene[object_name]
+        
+        v = self.object.root_physx_view
+        disable = torch.rand(self.num_envs) < 0.5
+        v.set_disable_simulations(disable, torch.arange(self.num_envs))
+        
         self.object_init_root_state = self.object.data.default_root_state.clone()
         self.object_distance_range = object_distance_range
         self.grasp_height_range = grasp_height_range
