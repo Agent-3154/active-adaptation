@@ -70,6 +70,7 @@ class LocalManipObject(Command):
             self.cmd_yawvel_b = torch.zeros(self.num_envs, 1)
             self.cmd_eef_pos_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pos_w = torch.zeros(self.num_envs, 3)
+            self.eef_pos_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pitch_w = torch.zeros(self.num_envs, 1)
             self.eef_forward_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_forward_w = torch.zeros(self.num_envs, 3)
