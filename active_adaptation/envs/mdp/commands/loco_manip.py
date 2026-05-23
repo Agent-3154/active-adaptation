@@ -100,7 +100,10 @@ class SingleEEFLocoManip(Command):
             self.cmd_eef_pos_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pos_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pitch_w = torch.zeros(self.num_envs, 1)
+            self.eef_forward_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_forward_w = torch.zeros(self.num_envs, 3)
+            self.eef_up_w = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_up_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_vel_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_vel_w = torch.zeros(self.num_envs, 3)
             self.is_world_goal_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
@@ -297,13 +300,15 @@ class SingleEEFLocoManip(Command):
         
         eef_quat_w = self.asset.data.body_link_quat_w[:, self.eef_body_idx]
         eef_rpy_w = euler_from_quat(eef_quat_w)
+        eef_rpy_w[:, 0] = 0.0
         eef_rpy_w[:, 1] = self.cmd_eef_pitch_w.squeeze(-1)
-    
-        self.eef_forward_w = quat_rotate(eef_quat_w, torch.tensor([[1.0, 0.0, 0.0]], device=self.device))
-        self.cmd_eef_forward_w = euler_rotate(
-            eef_rpy_w,
-            torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
-        )
+
+        forward_axis_b = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
+        up_axis_b = torch.tensor([[0.0, 0.0, 1.0]], device=self.device)
+        self.eef_forward_w = quat_rotate(eef_quat_w, forward_axis_b)
+        self.eef_up_w = quat_rotate(eef_quat_w, up_axis_b)
+        self.cmd_eef_forward_w = euler_rotate(eef_rpy_w, forward_axis_b)
+        self.cmd_eef_up_w = euler_rotate(eef_rpy_w, up_axis_b)
 
         self.command_speed = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
         self.is_standing_env = (self.command_speed < 0.1)
@@ -406,6 +411,37 @@ class eef_forward_tracking(Reward[SingleEEFLocoManip]):
     @override
     def _compute(self) -> torch.Tensor:
         rew = (self.command_manager.eef_forward_w * self.command_manager.cmd_eef_forward_w).sum(
+            dim=-1, keepdim=True
+        )
+        pos_error = (
+            self.command_manager.cmd_eef_pos_w
+            - self.asset.data.body_link_pos_w[:, self.eef_body_idx]
+        ).norm(dim=-1, keepdim=True)
+        active = pos_error < self.pos_error_threshold
+        return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
+
+
+class eef_up_tracking(Reward[SingleEEFLocoManip]):
+    """
+    Track a global EEF pitch target through the end-effector up direction.
+    """
+
+    def __init__(
+        self,
+        env,
+        weight: float,
+        enabled: bool = True,
+        track_var: bool = False,
+        pos_error_threshold: float = 0.15,
+    ):
+        super().__init__(env, weight, enabled=enabled, track_var=track_var)
+        self.asset = self.command_manager.asset
+        self.eef_body_idx = self.command_manager.eef_body_idx
+        self.pos_error_threshold = pos_error_threshold
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        rew = (self.command_manager.eef_up_w * self.command_manager.cmd_eef_up_w).sum(
             dim=-1, keepdim=True
         )
         pos_error = (

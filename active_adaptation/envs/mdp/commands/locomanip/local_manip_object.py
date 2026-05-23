@@ -74,6 +74,8 @@ class LocalManipObject(Command):
             self.cmd_eef_pitch_w = torch.zeros(self.num_envs, 1)
             self.eef_forward_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_forward_w = torch.zeros(self.num_envs, 3)
+            self.eef_up_w = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_up_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_vel_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_vel_w = torch.zeros(self.num_envs, 3)
             self.grasp_height = torch.zeros(self.num_envs)
@@ -198,12 +200,12 @@ class LocalManipObject(Command):
     def sample_eef_pitch_commands(
         self, env_ids: torch.Tensor, target_height: torch.Tensor
     ) -> None:
-        pitch_down = torch.rand(len(env_ids), device=self.device) * (torch.pi / 2)
-        pitch_up = torch.rand(len(env_ids), device=self.device) * (torch.pi / 2) - (
-            torch.pi / 2
-        )
+        pitch_down = torch.empty(len(env_ids), device=self.device)
+        pitch_down.uniform_(-torch.pi / 6, 0.0)
+        pitch_up = torch.empty(len(env_ids), device=self.device)
+        pitch_up.uniform_(0.0, torch.pi / 6)
         self.cmd_eef_pitch_w[env_ids, 0] = torch.where(
-            target_height < 0.4,
+            target_height < 0.35,
             pitch_down,
             pitch_up,
         )
@@ -254,11 +256,15 @@ class LocalManipObject(Command):
         )
 
         forward_axis_b = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
+        up_axis_b = torch.tensor([[0.0, 0.0, 1.0]], device=self.device)
         eef_quat_w = self.asset.data.body_link_quat_w[:, self.eef_body_idx]
         eef_rpy_w = euler_from_quat(eef_quat_w)
+        eef_rpy_w[:, 0] = 0.0 # keep upright
         eef_rpy_w[:, 1] = self.cmd_eef_pitch_w.squeeze(-1)
         self.eef_forward_w = quat_rotate(eef_quat_w, forward_axis_b)
+        self.eef_up_w = quat_rotate(eef_quat_w, up_axis_b)
         self.cmd_eef_forward_w = euler_rotate(eef_rpy_w, forward_axis_b)
+        self.cmd_eef_up_w = euler_rotate(eef_rpy_w, up_axis_b)
 
         self.command_speed = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
         self.is_standing_env = self.command_speed < 0.1
