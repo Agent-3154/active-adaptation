@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from isaaclab.assets import RigidObject
 
 
-class LocalManipObject(Command):
+class LocoManipObject(Command):
     """
     Object-aware loco-manip command with the `SingleEEFLocoManip` command layout.
 
@@ -34,6 +34,8 @@ class LocalManipObject(Command):
     This is because the robot may receive large penalty for making the object fall
     over when control is not good enough, and therefore refuses to reach for the
     target position. 
+
+    2 is currently not implemented.
     """
 
     supported_backends = ("isaac",)
@@ -307,4 +309,4 @@ class LocalManipObject(Command):
             self.standoff_marker.visualize(self.standoff_pos_w)
 
 
-__all__ = ["LocalManipObject"]
+__all__ = ["LocoManipObject"]

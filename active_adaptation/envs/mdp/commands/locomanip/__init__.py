@@ -1,5 +1,6 @@
 """Loco-manipulation command variants."""
 
-from .local_manip_object import LocalManipObject
+from .loco_manip_object import LocoManipObject
+from .loco_manip_sparse import LocoManipSparse
 
-__all__ = ["LocalManipObject"]
+__all__ = ["LocoManipObject", "LocoManipSparse"]
