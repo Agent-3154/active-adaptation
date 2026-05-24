@@ -6,9 +6,9 @@ Writes a stacked transition archive and companion metadata JSON under
 """
 
 import datetime
-import json
-import torch
+
 import hydra
+import torch
 from pathlib import Path
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -17,41 +17,17 @@ from torchrl.envs.utils import set_exploration_type, ExplorationType
 from tensordict import TensorDict
 
 import active_adaptation as aa
+from active_adaptation.utils.helpers import EpisodeStats
+from active_adaptation.rollout_io import (
+    DEFAULT_ROLLOUT_ROOT,
+    ROLLOUT_FORMAT_VERSION,
+    episode_stats_to_metadata,
+    format_bytes,
+    save_rollout_with_metadata,
+    update_metadata_shapes,
+)
 
 FILE_PATH = Path(__file__).parent
-
-
-def _describe_tensordict(tensordict: TensorDict) -> dict:
-    shapes: dict = {}
-    for key in tensordict.keys(include_nested=True):
-        value = tensordict.get(key)
-        if not isinstance(value, torch.Tensor):
-            continue
-        key_str = key if isinstance(key, str) else "/".join(key)
-        shapes[key_str] = list(value.shape)
-    return shapes
-
-
-def _write_metadata_json(metadata: dict, path: Path) -> None:
-    """Write metadata to a JSON file."""
-    def render(obj, indent: int = 0) -> str:
-        if isinstance(obj, list):
-            return json.dumps(obj)
-        if isinstance(obj, dict):
-            pad = "  " * indent
-            inner = "  " * (indent + 1)
-            lines = ["{"]
-            items = sorted(obj.items())
-            for i, (key, value) in enumerate(items):
-                comma = "," if i < len(items) - 1 else ""
-                lines.append(
-                    f"{inner}{json.dumps(key)}: {render(value, indent + 1)}{comma}"
-                )
-            lines.append(f"{pad}}}")
-            return "\n".join(lines)
-        return json.dumps(obj)
-
-    path.write_text(render(metadata) + "\n", encoding="utf-8")
 
 
 class RolloutWriter:
@@ -72,36 +48,40 @@ class RolloutWriter:
             self._rows = self._rows[-self._max_size :]
         return len(self._rows)
 
-    def close(self) -> None:
+    def close(
+        self,
+        *,
+        episode_count: int = 0,
+        episode_stats: dict[str, float] | None = None,
+    ) -> None:
         if not self._rows:
             return
         stacked: TensorDict = torch.stack(self._rows, dim=0)
         print(stacked)
         payload = {
-            "format_version": 1,
+            "format_version": ROLLOUT_FORMAT_VERSION,
             "writer_max_size": self._max_size,
             "stacked": stacked,
         }
         out_path = self.path / f"rollout_{stacked.shape[0]}_{stacked.shape[1]}.pt"
-        torch.save(payload, out_path)
+        metadata = update_metadata_shapes(
+            {
+                "policy_name": self._policy_name,
+                "episode_count": episode_count,
+                "episode_stats": episode_stats or {},
+            },
+            stacked,
+        )
+        save_rollout_with_metadata(out_path, payload, metadata)
         size = out_path.stat().st_size
-        if size >= 1024**3:
-            human = f"{size / (1024**3):.2f} GiB"
-        elif size >= 1024**2:
-            human = f"{size / (1024**2):.2f} MiB"
-        elif size >= 1024:
-            human = f"{size / 1024:.2f} KiB"
-        else:
-            human = f"{size} B"
-        print(f"Collected rollout disk usage: {size:,} bytes ({human}) at {out_path}")
-
-        metadata = {
-            "policy_name": self._policy_name,
-            "tensor_shapes": _describe_tensordict(stacked),
-        }
-        meta_path = out_path.with_suffix(".json")
-        _write_metadata_json(metadata, meta_path)
-        print(f"Wrote rollout metadata to {meta_path}")
+        print(
+            f"Collected rollout disk usage: {size:,} bytes ({format_bytes(size)}) at {out_path}"
+        )
+        print(f"Episodes completed: {episode_count}")
+        if episode_stats:
+            for key, value in sorted(episode_stats.items()):
+                print(f"  {key}: {value:.4f}")
+        print(f"Wrote rollout metadata to {out_path.with_suffix('.json')}")
 
 
 @hydra.main(config_path="../cfg", config_name="rollout", version_base=None)
@@ -114,13 +94,18 @@ def main(cfg):
     from active_adaptation.helpers import make_env_policy
 
     env, policy = make_env_policy(cfg)
+
+    stats_keys = [
+        k for k in env.reward_spec.keys(True, True) 
+        if isinstance(k, tuple) and k[0]=="stats"
+    ]
+    episode_stats = EpisodeStats(stats_keys, device=env.device)
+
     obs_keys = list(env.observation_spec.keys())
-    # whether to store ("next", ...) or not
     store_transitions = bool(cfg.store_transitions)
     exclude_keys = [("next", "stats"),]
     if not store_transitions:
         exclude_keys.extend(("next", key) for key in obs_keys)
-    # wheter to run critic (if applicable)
     critic = bool(cfg.run_critic)
     rollout_policy = policy.get_rollout_policy("eval", critic=critic)
 
@@ -128,26 +113,34 @@ def main(cfg):
     carry = env.reset()
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    writer_path = FILE_PATH / "rollout" / f"{cfg.task.name}-{cfg.algo.name}" / timestamp
+    writer_path = DEFAULT_ROLLOUT_ROOT / f"{cfg.task.name}-{cfg.algo.name}" / timestamp
     writer = RolloutWriter(
         writer_path,
         max_size=cfg.num_steps,
         policy_name=str(cfg.algo.name),
     )
-    
+
     def is_private_key(key: str) -> bool:
-        return isinstance(key, str) and key.startswith('_')
+        return isinstance(key, str) and key.startswith("_")
 
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
         for _ in tqdm(range(cfg.num_steps)):
             carry = rollout_policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
+            episode_stats.add(td)
+
             private_keys = [key for key in td.keys(True, True) if is_private_key(key)]
             td = td.exclude(*private_keys, inplace=True)
             td = td.exclude(*exclude_keys, inplace=True)
+            
             writer.add(td)
 
-    writer.close()
+        episode_count = int(len(episode_stats))
+        episode_stats_meta: dict[str, float] = {}
+        if episode_count > 0:
+            episode_stats_meta = episode_stats_to_metadata(episode_stats.pop())
+
+    writer.close(episode_count=episode_count, episode_stats=episode_stats_meta)
     env.close()
 
 

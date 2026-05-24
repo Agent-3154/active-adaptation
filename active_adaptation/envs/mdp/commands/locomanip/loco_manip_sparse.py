@@ -59,6 +59,12 @@ class LocoManipSparse(Command):
             self.cmd_eef_pos_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pos_w = torch.zeros(self.num_envs, 3)
             self.eef_pos_w = torch.zeros(self.num_envs, 3)
+            
+            self.pos_diff_w = torch.zeros(self.num_envs, 3)
+            self.pos_diff_b = torch.zeros(self.num_envs, 3)
+            self.pos_error_norm2 = torch.zeros(self.num_envs, 1)
+            self.pos_error_norm = torch.zeros(self.num_envs, 1)
+
             self.world_eef_pos_w = torch.zeros(self.num_envs, 3)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
 
@@ -103,6 +109,15 @@ class LocoManipSparse(Command):
             * (value_range[1] - value_range[0])
             + value_range[0]
         )
+    
+    def _update_eef_pos_error(self) -> None:
+        self.pos_diff_w = self.cmd_eef_pos_w - self.eef_pos_w
+        self.pos_diff_b = quat_rotate_inverse(
+            yaw_quat(self.asset.data.root_link_quat_w),
+            self.pos_diff_w,
+        )
+        self.pos_error_norm2 = self.pos_diff_w.square().sum(dim=-1, keepdim=True)
+        self.pos_error_norm = self.pos_error_norm2.sqrt()
 
     @override
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
@@ -151,6 +166,7 @@ class LocoManipSparse(Command):
     def reset(self, env_ids: torch.Tensor) -> None:
         self.sample_commands(env_ids)
         self._sync_command()
+        self._update_eef_pos_error()
 
     @override
     def update(self) -> None:
@@ -162,6 +178,7 @@ class LocoManipSparse(Command):
         if env_ids.numel() > 0:
             self.sample_commands(env_ids)
         self._sync_command()
+        self._update_eef_pos_error()
 
     @override
     def debug_draw(self) -> None:
