@@ -16,9 +16,11 @@ from nicegui import ui
 
 from active_adaptation.rollout_io import (
     DEFAULT_ROLLOUT_ROOT,
+    apply_key_concat,
     apply_key_deletions,
     apply_key_renames,
     combine_rollouts,
+    default_concat_key_name,
     delete_rollout_archive,
     discover_rollouts,
     format_bytes,
@@ -30,7 +32,10 @@ from active_adaptation.rollout_io import (
     update_metadata_shapes,
     validate_combine,
     validate_delete_keys,
+    validate_key_concat,
     validate_rename_map,
+    key_from_str,
+    list_tensor_keys,
 )
 
 
@@ -46,6 +51,14 @@ class KeyRow:
     dtype: str
     size_human: str
     deleted: bool = False
+    concat: bool = False
+
+
+@dataclass
+class ConcatOp:
+    source_keys: list[str]
+    dest_key: str
+    dim: int = -1
 
 
 def _save_stacked(path: Path, stacked, *, save_as: bool, suffix: str = "edited") -> Path:
@@ -82,6 +95,9 @@ class RolloutManagerUI:
         self.key_rows: list[KeyRow] = []
         self.dirty = False
         self.suffix = "edited"
+        self.concat_order: list[str] = []
+        self.pending_concats: list[ConcatOp] = []
+        self.concat_dim = -1
         self.status_label: ui.label | None = None
         self.combine_btn: ui.button | None = None
         self.save_btn: ui.button | None = None
@@ -89,6 +105,8 @@ class RolloutManagerUI:
         self.revert_btn: ui.button | None = None
         self.dirty_label: ui.label | None = None
         self.keys_info_label: ui.label | None = None
+        self.concat_dest_input: ui.input | None = None
+        self.concat_btn: ui.button | None = None
 
     def set_status(self, msg: str, *, kind: str = "info") -> None:
         if self.status_label is not None:
@@ -116,6 +134,46 @@ class RolloutManagerUI:
             name = self._save_as_name(path, payload["stacked"])
             self.save_as_btn.set_text(f"Save As ({name})")
 
+        if self.concat_btn is not None:
+            self.concat_btn.enable() if single and len(self.concat_order) >= 2 else self.concat_btn.disable()
+
+    def _reset_concat_state(self) -> None:
+        self.concat_order = []
+        self.pending_concats = []
+        if self.concat_dest_input is not None:
+            self.concat_dest_input.set_value("")
+
+    def _display_name(self, row: KeyRow) -> str:
+        return row.name.strip() or row.original_key
+
+    def _default_concat_dest(self) -> str:
+        names: list[str] = []
+        for key in self.concat_order:
+            row = next((r for r in self.key_rows if r.original_key == key), None)
+            if row is not None and not row.deleted:
+                names.append(self._display_name(row))
+        return default_concat_key_name(names)
+
+    def _update_concat_dest_default(self) -> None:
+        if self.concat_dest_input is None:
+            return
+        if self.concat_order:
+            self.concat_dest_input.set_value(self._default_concat_dest())
+        else:
+            self.concat_dest_input.set_value("")
+
+    def _stacked_with_pending_concats(self, stacked):
+        out = stacked
+        for op in self.pending_concats:
+            out = apply_key_concat(out, op.source_keys, op.dest_key, dim=op.dim)
+        return out
+
+    def _entry_from_tensor(self, tensor) -> tuple[str, str, str]:
+        shape = str(list(tensor.shape))
+        dtype = str(tensor.dtype).removeprefix("torch.")
+        size_human = format_bytes(int(tensor.numel() * tensor.element_size()))
+        return shape, dtype, size_human
+
     def _load_keys(self, path: str) -> None:
         pt_path = Path(path)
         payload = load_rollout(pt_path)
@@ -133,6 +191,7 @@ class RolloutManagerUI:
             )
             for key, info in sorted(entries.items())
         ]
+        self._reset_concat_state()
         self.dirty = False
         self._update_keys_info()
         self._update_action_buttons()
@@ -162,23 +221,25 @@ class RolloutManagerUI:
     def _validate_rows(self, stacked) -> list[str]:
         deletes, renames = self._ops_from_rows()
         errors: list[str] = []
-        if not deletes and not renames:
+        if not deletes and not renames and not self.pending_concats:
             errors.append("No edits to save.")
             return errors
+
+        trial = self._stacked_with_pending_concats(stacked)
 
         overlap = set(deletes) & set(renames.keys())
         if overlap:
             errors.append(f"Keys marked deleted and renamed: {sorted(overlap)}")
 
         if deletes:
-            _, delete_errors = validate_delete_keys(stacked, deletes)
+            _, delete_errors = validate_delete_keys(trial, deletes)
             errors.extend(delete_errors)
 
         if renames:
-            remaining = stacked
+            remaining = trial
             if deletes:
                 try:
-                    remaining = apply_key_deletions(stacked, deletes)
+                    remaining = apply_key_deletions(trial, deletes)
                 except ValueError:
                     pass
             _, rename_errors = validate_rename_map(remaining, renames)
@@ -187,8 +248,8 @@ class RolloutManagerUI:
         return errors
 
     def _apply_rows(self, stacked):
+        out = self._stacked_with_pending_concats(stacked)
         deletes, renames = self._ops_from_rows()
-        out = stacked
         if deletes:
             out = apply_key_deletions(out, deletes)
         if renames:
@@ -254,14 +315,120 @@ class RolloutManagerUI:
         self.dirty = True
         self._update_action_buttons()
 
+    def _toggle_key_concat(self, index: int, selected: bool) -> None:
+        row = self.key_rows[index]
+        if row.deleted:
+            return
+        row.concat = selected
+        key = row.original_key
+        if selected:
+            if key not in self.concat_order:
+                self.concat_order.append(key)
+        else:
+            self.concat_order = [k for k in self.concat_order if k != key]
+        self._update_concat_dest_default()
+        self._update_action_buttons()
+        self.keys_panel.refresh()
+
+    async def stage_concat(self) -> None:
+        if self.editing_path is None or len(self.concat_order) < 2:
+            self.set_status("Select at least two keys to concat.", kind="warning")
+            return
+
+        path = Path(self.editing_path)
+        stacked = load_rollout(path)["stacked"]
+        trial = self._stacked_with_pending_concats(stacked)
+        dest_key = (
+            self.concat_dest_input.value.strip()
+            if self.concat_dest_input is not None
+            else ""
+        ) or self._default_concat_dest()
+        source_keys = list(self.concat_order)
+
+        existing = set(list_tensor_keys(trial))
+        will_overwrite = dest_key in existing and dest_key not in source_keys
+        if will_overwrite:
+            if not await self._confirm(
+                "Overwrite existing key?",
+                f"Key {dest_key!r} already exists.\n\n"
+                "Confirm to overwrite with the concat result, or cancel.",
+            ):
+                return
+
+        _, dest_key, errors = validate_key_concat(
+            trial,
+            source_keys,
+            dest_key,
+            dim=self.concat_dim,
+            allow_overwrite=will_overwrite,
+        )
+        if errors:
+            self.set_status("\n".join(errors), kind="negative")
+            return
+
+        merged = apply_key_concat(
+            trial, source_keys, dest_key, dim=self.concat_dim, allow_overwrite=will_overwrite
+        )
+        merged_tensor = merged.get(key_from_str(dest_key))
+        shape, dtype, size_human = self._entry_from_tensor(merged_tensor)
+
+        self.pending_concats = [
+            op for op in self.pending_concats if op.dest_key != dest_key
+        ]
+        self.pending_concats.append(
+            ConcatOp(source_keys=source_keys, dest_key=dest_key, dim=self.concat_dim)
+        )
+        for row in self.key_rows:
+            if row.original_key in source_keys:
+                row.concat = False
+
+        existing_row = next(
+            (row for row in self.key_rows if row.original_key == dest_key),
+            None,
+        )
+        if existing_row is not None:
+            existing_row.name = dest_key
+            existing_row.shape = shape
+            existing_row.dtype = dtype
+            existing_row.size_human = size_human
+            existing_row.deleted = False
+        else:
+            self.key_rows.append(
+                KeyRow(
+                    original_key=dest_key,
+                    name=dest_key,
+                    shape=shape,
+                    dtype=dtype,
+                    size_human=size_human,
+                )
+            )
+            self.key_rows.sort(key=lambda row: row.original_key)
+
+        self.concat_order = []
+        self._update_concat_dest_default()
+        self._mark_dirty()
+        self.keys_panel.refresh()
+        action = "Overwrote" if will_overwrite else "Staged concat ->"
+        self.set_status(
+            f"{action} {dest_key!r} from {source_keys}",
+            kind="positive",
+        )
+
     def _toggle_key_deleted(self, index: int) -> None:
-        self.key_rows[index].deleted = not self.key_rows[index].deleted
+        row = self.key_rows[index]
+        if row.original_key in self.concat_order:
+            self.concat_order = [k for k in self.concat_order if k != row.original_key]
+            row.concat = False
+            self._update_concat_dest_default()
+        row.deleted = not row.deleted
         self._mark_dirty()
         self.keys_panel.refresh()
 
     def _on_key_name_change(self, index: int, value: str) -> None:
         if self.key_rows[index].name != value:
             self.key_rows[index].name = value
+            if self.key_rows[index].original_key in self.concat_order:
+                self._update_concat_dest_default()
             self._mark_dirty()
 
     def revert_edits(self) -> None:
@@ -421,6 +588,7 @@ class RolloutManagerUI:
 
             header = ui.row().classes("w-full gap-2 text-sm font-semibold text-gray-600")
             with header:
+                ui.label("").style("width: 36px")
                 ui.label("Key").classes("flex-1")
                 ui.label("Shape").classes("flex-1")
                 ui.label("Dtype").style("width: 88px")
@@ -431,13 +599,30 @@ class RolloutManagerUI:
                 row_classes = "w-full gap-2 items-center py-1 px-1 rounded"
                 if row.deleted:
                     row_classes += " bg-red-50"
+                elif row.original_key in {op.dest_key for op in self.pending_concats}:
+                    row_classes += " bg-green-50"
                 elif row.name.strip() != row.original_key:
                     row_classes += " bg-amber-50"
 
                 with ui.row().classes(row_classes):
                     if row.deleted:
-                        ui.label(row.name).classes("flex-1 text-sm font-mono line-through text-red-700")
+                        ui.label("").style("width: 36px")
+                        ui.label(row.name).classes(
+                            "flex-1 text-sm font-mono line-through text-red-700"
+                        )
                     else:
+                        order = (
+                            str(self.concat_order.index(row.original_key) + 1)
+                            if row.original_key in self.concat_order
+                            else ""
+                        )
+                        with ui.row().classes("items-center").style("width: 36px"):
+                            ui.checkbox(
+                                value=row.concat,
+                                on_change=lambda e, i=index: self._toggle_key_concat(i, e.value),
+                            ).props("dense")
+                            if order:
+                                ui.label(order).classes("text-xs text-blue-600")
                         ui.input(
                             value=row.name,
                             on_change=lambda e, i=index: self._on_key_name_change(i, e.value),
@@ -503,6 +688,18 @@ class RolloutManagerUI:
                 self.revert_btn.disable()
                 self.save_btn.disable()
                 self.save_as_btn.disable()
+            with ui.row().classes("w-full items-end gap-2 mb-2"):
+                self.concat_dest_input = ui.input(
+                    label="Concat as",
+                    placeholder="Select keys in order, name auto-fills",
+                ).classes("flex-1")
+                ui.number(
+                    label="Dim",
+                    value=self.concat_dim,
+                    on_change=lambda e: setattr(self, "concat_dim", int(e.value)),
+                ).classes("w-24").props("dense")
+                self.concat_btn = ui.button("Concat selected", on_click=self.stage_concat).props("outline dense")
+                self.concat_btn.disable()
             self.keys_panel()
 
 

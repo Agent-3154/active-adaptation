@@ -253,6 +253,101 @@ def apply_key_deletions(stacked: TensorDict, keys_to_delete: list[str]) -> Tenso
     return stacked.exclude(*td_keys)
 
 
+def default_concat_key_name(source_keys: list[str]) -> str:
+    return "_".join(source_keys)
+
+
+def validate_key_concat(
+    stacked: TensorDict,
+    source_keys: list[str],
+    dest_key: str,
+    *,
+    dim: int = -1,
+    allow_overwrite: bool = False,
+) -> tuple[list[str], str, list[str]]:
+    errors: list[str] = []
+    if len(source_keys) < 2:
+        errors.append("Select at least two keys to concat.")
+        return source_keys, dest_key, errors
+
+    dest_key = dest_key.strip()
+    if not dest_key:
+        errors.append("Destination key name is empty.")
+        return source_keys, dest_key, errors
+
+    existing = set(list_tensor_keys(stacked))
+    cleaned: list[str] = []
+    for key in source_keys:
+        key = key.strip()
+        if not key:
+            continue
+        if key not in existing:
+            errors.append(f"Key not found: {key!r}")
+            continue
+        cleaned.append(key)
+
+    if len(cleaned) < 2:
+        errors.append("Need at least two valid source keys.")
+        return source_keys, dest_key, errors
+
+    if dest_key in existing and dest_key not in cleaned and not allow_overwrite:
+        errors.append(f"Destination key already exists: {dest_key!r}")
+
+    tensors = [stacked.get(key_from_str(key)) for key in cleaned]
+    if not all(isinstance(t, torch.Tensor) for t in tensors):
+        errors.append("All source keys must be tensors.")
+        return cleaned, dest_key, errors
+
+    ref = tensors[0]
+    ndim = ref.ndim
+    cat_dim = dim if dim >= 0 else ndim + dim
+    if cat_dim < 0 or cat_dim >= ndim:
+        errors.append(f"Invalid concat dim {dim} for rank-{ndim} tensors.")
+        return cleaned, dest_key, errors
+
+    ref_dtype = ref.dtype
+    for key, tensor in zip(cleaned[1:], tensors[1:], strict=True):
+        if tensor.dtype != ref_dtype:
+            errors.append(
+                f"dtype mismatch for {key!r}: {tensor.dtype} vs {ref_dtype}"
+            )
+        if len(tensor.shape) != ndim:
+            errors.append(f"Rank mismatch for {key!r}.")
+            continue
+        for axis, (a, b) in enumerate(zip(ref.shape, tensor.shape, strict=True)):
+            if axis == cat_dim:
+                continue
+            if a != b:
+                errors.append(
+                    f"Shape mismatch for {key!r} at dim {axis}: {a} vs {b}"
+                )
+
+    return cleaned, dest_key, errors
+
+
+def apply_key_concat(
+    stacked: TensorDict,
+    source_keys: list[str],
+    dest_key: str,
+    *,
+    dim: int = -1,
+    allow_overwrite: bool = False,
+) -> TensorDict:
+    cleaned, dest, errors = validate_key_concat(
+        stacked, source_keys, dest_key, dim=dim, allow_overwrite=allow_overwrite
+    )
+    if errors:
+        raise ValueError("\n".join(errors))
+
+    tensors = [stacked.get(key_from_str(key)) for key in cleaned]
+    ndim = tensors[0].ndim
+    cat_dim = dim if dim >= 0 else ndim + dim
+    merged = torch.cat(tensors, dim=cat_dim)
+    out = stacked.clone()
+    out.set(key_from_str(dest), merged)
+    return out
+
+
 def resolve_out_path(
     path: Path,
     stacked: TensorDict,
