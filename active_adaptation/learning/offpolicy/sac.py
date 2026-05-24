@@ -655,6 +655,11 @@ class SAC(TensorDictModuleBase):
         print(self.rb)
         if self.cfg.prior_data is not None:
             self.rb_prior = ReplayBuffer.from_rollout(self.cfg.prior_data)
+            self.rb_prior.compute_return(
+                REWARD_KEY,
+                gamma=self.cfg.gamma,
+                fn=lambda x: x.sum(-1, keepdim=True).clamp_min(0.)
+            )
             print("Prior data buffer:")
             print(self.rb_prior)
         else:
@@ -755,16 +760,23 @@ class SAC(TensorDictModuleBase):
     ):
         self.Q.train()
         batch = batch.select(*self.train_keys, inplace=True)
-        batch_prior = batch_prior.select(*self.train_keys, inplace=True)
+        B_online = batch.shape[1]
         # Capture prior ground-truth Q (in raw return units, recorded at rollout
         # time) before .select() drops keys not present in the primary buffer
         # schema, then concatenate the prior data into the training batch.
-        prior_q_gt: torch.Tensor | None = None
+        # prior_q_gt: torch.Tensor | None = None
         if batch_prior is not None:
-            if "Q_value" in batch_prior.keys(True, True):
-                gt = batch_prior["Q_value"]
-                prior_q_gt = gt[0] if gt.ndim > 1 else gt
+            prior_ret = batch_prior["ret"]
+            # ret_valid = batch_prior["ret_valid"] # unused for now
+            batch_prior = batch_prior.select(*self.train_keys, inplace=True)
+            # if "Q_value" in batch_prior.keys(True, True):
+            #     gt = batch_prior["Q_value"]
+            #     prior_q_gt = gt[0] if gt.ndim > 1 else gt
+            B_prior = batch_prior.shape[1]
             batch = torch.cat([batch, batch_prior], dim=1)
+        else:
+            B_prior = 0
+        B_eff = B_online + B_prior
 
         reward = batch[REWARD_KEY]
         reward = reward.sum(-1, keepdim=True).clamp_min(0.)
@@ -816,8 +828,6 @@ class SAC(TensorDictModuleBase):
 
         obs = self.vecnorm_obs(obs)
         next_obs = self.vecnorm_obs(next_obs)
-
-        B_eff = obs.shape[0]
 
         weight = batch["priority_weight"]
         replay_flat_idx = batch["replay_flat_index"].long()
@@ -898,7 +908,10 @@ class SAC(TensorDictModuleBase):
         if not diagnostics:
             return
 
-        infos: dict = {"critic/q_loss": q_loss.item()}
+        infos: dict = {
+            "critic/q_loss": q_loss.item(),
+            "critic/grad_norm": critic_grad_norm.item(),
+        }
         with torch.no_grad():
             if self.cfg.distributional:
                 logits = self.Q(obs, act)
@@ -919,33 +932,42 @@ class SAC(TensorDictModuleBase):
                 infos["critic/q_lower"] = q_lower.mean().item()
                 infos["critic/q_upper"] = q_upper.mean().item()
 
-            q_val_mean = q.mean().item()
-            q_val_max = q.max().item()
-            q_val_std = q.std(dim=-1).mean().item()
+            # online statistics
+            q_val_mean = q[:B_online].mean().item()
+            q_val_max = q[:B_online].max().item()
+            q_val_std = q[:B_online].std(dim=-1).mean().item()
 
         infos["critic/q_value"] = q_val_mean
         infos["critic/q_max"] = q_val_max
         infos["critic/q_std"] = q_val_std
-        infos["critic/grad_norm"] = critic_grad_norm.item()
+        
+        if B_prior > 0:
+            q_prior = q[B_online: B_eff]
+            infos["critic/prior_q_mean"] = q_prior.mean().item()
+            infos["critic/prior_q_max"] = q_prior.max().item()
+            infos["critic/prior_q_std"] = q_prior.std(dim=-1).mean().item()
+            underestimated = (q_prior < prior_ret).float().mean().item()
+            infos["critic/prior_q_underestimated"] = underestimated
+        
         if terminated.any():
             q_val_terminated = q[terminated.reshape(q.shape[0])]
             infos["critic/q_value_terminated"] = q_val_terminated.mean().item()
             infos["critic/q_loss_terminated"] = per_sample_q_loss[terminated.reshape(q.shape[0])].mean().item()
-
+        
         # Gap between current critic and the prior-data ground-truth Q
         # (recorded at rollout time, stored in raw return units).
-        if prior_q_gt is not None:
-            B_prior = int(prior_q_gt.shape[0])
-            # q is already denormalized above when reward_normalizer is active.
-            # Under sym_aug, q has shape (2*B_eff,); take the unaugmented head.
-            q_unaug = q[:B_eff]
-            q_prior_pred = q_unaug[B_eff - B_prior :].reshape(B_prior)
-            gt = prior_q_gt.to(device=q_prior_pred.device, dtype=q_prior_pred.dtype).reshape(B_prior)
-            gap = q_prior_pred - gt
-            infos["critic/prior_q_gt"] = gt.mean().item()
-            infos["critic/prior_q_pred"] = q_prior_pred.mean().item()
-            infos["critic/prior_q_gap_mean"] = gap.mean().item()
-            infos["critic/prior_q_gap_abs"] = gap.abs().mean().item()
+        # if prior_q_gt is not None:
+        #     B_prior = int(prior_q_gt.shape[0])
+        #     # q is already denormalized above when reward_normalizer is active.
+        #     # Under sym_aug, q has shape (2*B_eff,); take the unaugmented head.
+        #     q_unaug = q[:B_eff]
+        #     q_prior_pred = q_unaug[B_eff - B_prior :].reshape(B_prior)
+        #     gt = prior_q_gt.to(device=q_prior_pred.device, dtype=q_prior_pred.dtype).reshape(B_prior)
+        #     gap = q_prior_pred - gt
+        #     infos["critic/prior_q_gt"] = gt.mean().item()
+        #     infos["critic/prior_q_pred"] = q_prior_pred.mean().item()
+        #     infos["critic/prior_q_gap_mean"] = gap.mean().item()
+        #     infos["critic/prior_q_gap_abs"] = gap.abs().mean().item()
 
         return infos
 

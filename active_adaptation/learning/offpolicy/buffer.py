@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from tensordict import TensorDict
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union, Callable
 from pathlib import Path
 
 from torchrl.data.replay_buffers.samplers import PrioritizedSampler
@@ -405,3 +405,78 @@ class ReplayBuffer:
 
     def __len__(self):
         return self._current_size
+
+    def compute_return(
+        self,
+        reward_key: str | Tuple[str, ...],
+        gamma: float,
+        fn: Callable[[torch.Tensor], torch.Tensor],
+        *,
+        done_key: str | Tuple[str, ...] = ("next", "done"),
+        discount_key: str | Tuple[str, ...] = ("next", "discount"),
+        is_init_key: str = "is_init",
+    ) -> None:
+        """Compute Monte Carlo discounted returns and store them under ``ret``.
+
+        Also stores ``ret_valid`` (bool, shape ``[max_size, N, 1]``): a step's
+        return is valid only if its episode terminates (``done``) within the
+        filled buffer rows ``[:T]``. Truncated episodes that reach the buffer
+        end without ``done`` get ``ret_valid=False`` for all their steps.
+
+        Args:
+            reward_key: Buffer key for rewards, e.g. ``("next", "reward")``.
+            gamma: Discount factor.
+            fn: Maps raw reward tensor to scalar reward, e.g.
+                ``lambda x: x.sum(-1, keepdim=True).clamp_min(0.)``.
+            done_key: Key marking episode termination after the transition.
+            discount_key: Per-step discount multiplier with shape ``[T, N, 1]``
+                (defaults to ones if absent).
+            is_init_key: Key marking the first step of an episode (shape ``[T, N, 1]``).
+        
+        TODO: handle bootstraping. the current return is incomplete.
+        """
+        if "ret" in self._td.keys(True, True) or "ret_valid" in self._td.keys(True, True):
+            raise ValueError("Return keys already exist in buffer.")
+
+        T, N = len(self), self.num_envs
+        if T == 0:
+            raise RuntimeError("Cannot compute returns on an empty ReplayBuffer.")
+
+        rew = fn(self._td.get(reward_key)[:T]).float()
+        assert rew.ndim == 3, f"Expected reward tensor with shape [T, N, *], got {rew.shape}"
+
+        done = self._td.get(done_key)[:T]
+        assert done.shape == (T, N, 1), f"Expected done tensor with shape [T, N, 1], got {done.shape}"
+
+        discount = self._td.get(discount_key, default=None)
+        if discount is None:
+            discount = torch.ones(T, N, 1, device=rew.device, dtype=rew.dtype)
+        else:
+            discount = discount[:T].float()
+            assert discount.shape == (T, N, 1), (
+                f"Expected discount tensor with shape [T, N, 1], got {discount.shape}"
+            )
+
+        is_init = self._td.get(is_init_key)[:T].bool()
+        assert is_init.shape == (T, N, 1), (
+            f"Expected is_init tensor with shape [T, N, 1], got {is_init.shape}"
+        )
+
+        ret = torch.zeros_like(rew)
+        ret_valid = torch.zeros(T, N, 1, dtype=torch.bool, device=rew.device)
+        running = torch.zeros(N, rew.shape[-1], device=rew.device, dtype=rew.dtype)
+        running_valid = torch.zeros(N, 1, dtype=torch.bool, device=rew.device)
+        nonterminal = 1.0 - done.float()
+
+        for t in reversed(range(T)):
+            running = rew[t] + gamma * discount[t] * nonterminal[t] * running
+            ret[t] = running
+            running = running * (~is_init[t]).float()
+
+            # valid turns true when seeing an episode end
+            running_valid = running_valid | done[t]
+            ret_valid[t] = running_valid
+
+        self._td.set("ret", ret)
+        self._td.set("ret_valid", ret_valid)
+
