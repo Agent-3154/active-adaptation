@@ -61,8 +61,11 @@ command:
   standoff_yaw_gain: 1.0
 
 observation:
+  command:
+    command:  {key: dense}
+  command_sparse:
+    command:  {key: sparse}
   policy:
-    command:  {}
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {steps: 4, noise_std: 0.05}
     joint_vel_multistep: {steps: 4, noise_std: 0.2}
@@ -90,6 +93,7 @@ reward:
   manip:
     eef_pos_tracking:   {weight: 1.2}
     eef_forward_tracking: {weight: 0.6}
+    eef_pos_progress:   {weight: 0.5}
     eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0005}

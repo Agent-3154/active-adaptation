@@ -29,7 +29,8 @@ class LocoManipSparse(Command):
     horizontal components are yaw-aligned offsets from the root; ``eef_z`` is height
     above terrain at the target ``xy``.
 
-    We expect this task to be harder to learn from scratch due to exploration difficulties.
+    We expect this task to be harder to learn from scratch due to exploration difficulties:
+    there is no signal for the base movement.
     """
 
     def __init__(
@@ -74,11 +75,21 @@ class LocoManipSparse(Command):
 
     @property
     def command(self) -> torch.Tensor:
-        return self.cmd_eef_pos_b
+        pos_diff_w = self.cmd_eef_pos_w - self.eef_pos_w
+        pos_diff_b = quat_rotate_inverse(
+            yaw_quat(self.asset.data.root_link_quat_w),
+            pos_diff_w
+        )
+        return torch.cat([
+            self.cmd_eef_pos_b,
+            pos_diff_b,
+        ], dim=-1)
 
     @override
     def symmetry_transform(self):
-        return SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        return SymmetryTransform.cat([cmd_eef_pos_b, pos_diff_b])
 
     @staticmethod
     def _env_mask_prob(num_envs: int, prob: float, device: torch.device) -> torch.Tensor:

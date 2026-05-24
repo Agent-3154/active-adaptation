@@ -47,8 +47,9 @@ command:
   spawn_radius_range: [1.0, 3.0]
 
 observation:
-  policy:
+  command:
     command:  {}
+  policy:
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {steps: 4, noise_std: 0.05}
     joint_vel_multistep: {steps: 4, noise_std: 0.2}
@@ -71,6 +72,7 @@ reward:
     base_height_exp:    {weight: 1.0, target_height: 0.4, sigma: 0.4}
   manip:
     eef_pos_tracking:   {weight: 1.2}
+    eef_pos_progress:   {weight: 0.5}
     eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0005}

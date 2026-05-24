@@ -26,7 +26,10 @@ class Every:
         self.i += 1
 
 
-def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
+def make_env_policy(
+    cfg: DictConfig,
+    checkpoint: CheckpointBase | None = None
+):
     OmegaConf.set_struct(cfg, False)
     cfg.seed = cfg.seed + active_adaptation.get_local_rank()
     
@@ -50,14 +53,17 @@ def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
     if policy_in_keys is None:
         raise ValueError("Specify `in_keys` (e.g., `policy`, `priv`) in `cfg.algo`.")
 
-    for obs_group_key in list(cfg.task.observation.keys()):
-        if (
-            obs_group_key not in policy_in_keys
-            and not obs_group_key.endswith("_")
-        ):
-            cfg.task.observation.pop(obs_group_key)
-            print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
-    
+    if cfg.discard_unused_obs:
+        def should_discard(key: str) -> bool:
+            return (
+                key not in policy_in_keys
+                and not key.endswith("_")
+            )
+        for obs_group_key in list(cfg.task.observation.keys()):
+            if should_discard(obs_group_key):
+                cfg.task.observation.pop(obs_group_key)
+                print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
+
     base_env = env_cls(cfg.task, str(cfg.device), headless=cfg.headless)
 
     if checkpoint is None:

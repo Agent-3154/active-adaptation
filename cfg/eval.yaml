@@ -16,7 +16,7 @@ eval_render: false
 save_interval: -1
 seed: 0
 checkpoint_path: null
-vecnorm: eval # ${oc.select:algo.vecnorm,train}
+discard_unused_obs: true
 
 camera_follow: true
 

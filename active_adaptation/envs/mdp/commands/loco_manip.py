@@ -100,6 +100,12 @@ class SingleEEFLocoManip(Command):
             self.cmd_eef_pos_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pos_w = torch.zeros(self.num_envs, 3)
             self.eef_pos_w = torch.zeros(self.num_envs, 3)
+
+            self.pos_diff_w = torch.zeros(self.num_envs, 3)
+            self.pos_diff_b = torch.zeros(self.num_envs, 3)
+            self.pos_error_norm2 = torch.zeros(self.num_envs, 1)
+            self.pos_error_norm = torch.zeros(self.num_envs, 1)
+
             self.cmd_eef_pitch_w = torch.zeros(self.num_envs, 1)
             self.eef_forward_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_forward_w = torch.zeros(self.num_envs, 3)
@@ -135,37 +141,46 @@ class SingleEEFLocoManip(Command):
                 radius=0.04,
             )
 
-    @property
-    def command(self) -> torch.Tensor:
-        pos_diff_w = self.cmd_eef_pos_w - self.eef_pos_w
-        pos_diff_b = quat_rotate_inverse(
-            yaw_quat(self.asset.data.root_link_quat_w),
-            pos_diff_w
-        )
-        return torch.cat(
-            [
-                self.cmd_linvel_b[:, :2], # [N, 2]
-                self.cmd_yawvel_b, # [N, 1]
+    def command(self, key: str = "dense") -> torch.Tensor:
+        if key == "dense":
+            return torch.cat(
+                [
+                    self.cmd_linvel_b[:, :2], # [N, 2]
+                    self.cmd_yawvel_b, # [N, 1]
+                    self.cmd_eef_pos_b, # [N, 3]
+                    self.pos_diff_b, # [N, 3]
+                    self.cmd_eef_pitch_w, # [N, 1]
+                    self.cmd_eef_pitch_w.cos(), # [N, 1]
+                    self.cmd_eef_pitch_w.sin(), # [N, 1]
+                ],
+                dim=-1,
+            )
+        elif key == "sparse":
+            return torch.cat([
                 self.cmd_eef_pos_b, # [N, 3]
-                pos_diff_b, # [N, 3]
-                self.cmd_eef_pitch_w, # [N, 1]
-                self.cmd_eef_pitch_w.cos(), # [N, 1]
-                self.cmd_eef_pitch_w.sin(), # [N, 1]
-            ],
-            dim=-1,
-        )
-    
+                self.pos_diff_b, # [N, 3]
+            ], dim=-1)
+        else:
+            raise ValueError(f"Invalid key: {key}")
+
     @override
-    def symmetry_transform(self):
-        # flip y and yaw
-        cmd_linvel_b = SymmetryTransform(perm=[0, 1], signs=[1, -1])
-        cmd_yawvel_b = SymmetryTransform(perm=[0], signs=[-1])
-        cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
-        pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
-        cmd_eef_pitch_w = SymmetryTransform(perm=[0, 1, 2], signs=[1, 1, 1])
-        return SymmetryTransform.cat(
-            [cmd_linvel_b, cmd_yawvel_b, cmd_eef_pos_b, pos_diff_b, cmd_eef_pitch_w]
-        )
+    def symmetry_transform(self, key: str = "dense"):
+        if key == "dense":
+            # flip y and yaw
+            cmd_linvel_b = SymmetryTransform(perm=[0, 1], signs=[1, -1])
+            cmd_yawvel_b = SymmetryTransform(perm=[0], signs=[-1])
+            cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+            pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+            cmd_eef_pitch_w = SymmetryTransform(perm=[0, 1, 2], signs=[1, 1, 1])
+            return SymmetryTransform.cat(
+                [cmd_linvel_b, cmd_yawvel_b, cmd_eef_pos_b, pos_diff_b, cmd_eef_pitch_w]
+            )
+        elif key == "sparse":
+            cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+            pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+            return SymmetryTransform.cat([cmd_eef_pos_b, pos_diff_b])
+        else:
+            raise ValueError(f"Invalid key: {key}")
 
     @staticmethod
     def _env_mask_prob(num_envs: int, prob: float, device: torch.device) -> torch.Tensor:
@@ -323,10 +338,20 @@ class SingleEEFLocoManip(Command):
         self.command_speed = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
         self.is_standing_env = (self.command_speed < 0.1)
 
+    def _update_eef_pos_error(self) -> None:
+        self.pos_diff_w = self.cmd_eef_pos_w - self.eef_pos_w
+        self.pos_diff_b = quat_rotate_inverse(
+            yaw_quat(self.asset.data.root_link_quat_w),
+            self.pos_diff_w,
+        )
+        self.pos_error_norm2 = self.pos_diff_w.square().sum(dim=-1, keepdim=True)
+        self.pos_error_norm = self.pos_error_norm2.sqrt()
+
     @override
     def reset(self, env_ids: torch.Tensor) -> None:
         self.sample_commands(env_ids)
         self._sync_world_frames()
+        self._update_eef_pos_error()
 
     @override
     def update(self) -> None:
@@ -339,7 +364,9 @@ class SingleEEFLocoManip(Command):
         env_ids = resample.nonzero(as_tuple=False).squeeze(-1)
         if env_ids.numel() > 0:
             self.sample_commands(env_ids)
+
         self._sync_world_frames()
+        self._update_eef_pos_error()
 
     @override
     def debug_draw(self) -> None:
@@ -379,6 +406,36 @@ class eef_pos_tracking(Reward[SingleEEFLocoManip]):
         error_norm = error_norm_sq.sqrt()
         rew = torch.exp(-error_norm_sq / self.sigma) - 0.2 * error_norm
         return rew.reshape(self.num_envs, 1)
+
+
+class eef_pos_progress(Reward[SingleEEFLocoManip]):
+    """Reward the reduction in EEF position error: ``prev_error - curr_error``."""
+
+    def __init__(
+        self, env, weight: float, enabled: bool = True, track_var: bool = False
+    ):
+        super().__init__(env, weight, enabled=enabled, track_var=track_var)
+        self.prev_pos_error_norm = torch.zeros(self.num_envs, 1, device=self.device)
+        self.rew = torch.zeros(self.num_envs, 1, device=self.device)
+
+    @override
+    def reset(self, env_ids: torch.Tensor) -> None:
+        self.prev_pos_error_norm[env_ids] = self.command_manager.pos_error_norm[
+            env_ids
+        ]
+        self.rew[env_ids] = 0.0
+
+    @override
+    def update(self) -> None:
+        curr_error = self.command_manager.pos_error_norm
+        self.rew = (self.prev_pos_error_norm - curr_error) / self.env.step_dt
+        self.prev_pos_error_norm = curr_error.clone()
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        # the value may be incorrect at the first step
+        active = (self.env.episode_length_buf > 1)
+        return self.rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
 class eef_vel_tracking(Reward[SingleEEFLocoManip]):
