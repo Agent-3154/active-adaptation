@@ -7,6 +7,7 @@ from typing_extensions import override
 
 from active_adaptation.utils.math import (
     quat_mul,
+    quat_rotate,
     quat_rotate_inverse,
     sample_quat_yaw,
     yaw_quat,
@@ -66,6 +67,13 @@ class LocoManipSparse(Command):
             self.pos_error_norm = torch.zeros(self.num_envs, 1)
 
             self.world_eef_pos_w = torch.zeros(self.num_envs, 3)
+            self.eef_pos_reached = torch.zeros(self.num_envs, 1, dtype=torch.bool)
+            self.eef_pos_reached_time = torch.zeros(self.num_envs, 1, dtype=torch.float)
+            # we move the target in a continuous manner after it is reached
+            self._scale_xyz = torch.zeros(self.num_envs, 3)
+            self._scale_xyz[:, 0].uniform_(0.0, 0.6)
+            self._scale_xyz[:, 1].uniform_(0.0, 0.3)
+            self._scale_xyz[:, 2].uniform_(0.0, 0.1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
 
         self.marker = None
@@ -118,6 +126,7 @@ class LocoManipSparse(Command):
         )
         self.pos_error_norm2 = self.pos_diff_w.square().sum(dim=-1, keepdim=True)
         self.pos_error_norm = self.pos_error_norm2.sqrt()
+        self.eef_pos_reached = self.eef_pos_reached | (self.pos_error_norm < 0.05)
 
     @override
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
@@ -145,12 +154,18 @@ class LocoManipSparse(Command):
         target_w = origins.clone()
         target_w[:, 2] = self.env.get_ground_height_at(origins) + z_offset
         self.world_eef_pos_w[env_ids] = target_w
+        self.eef_pos_reached[env_ids] = False
+        self.eef_pos_reached_time[env_ids] = 0.0
 
     def _sync_command(self) -> None:
         root_pos = self.asset.data.root_link_pos_w
         yaw_q = yaw_quat(self.asset.data.root_link_quat_w)
 
         self.eef_pos_w = self.asset.data.body_link_pos_w[:, self.eef_body_idx]
+        self.eef_forward = quat_rotate(
+            self.asset.data.body_link_quat_w[:, self.eef_body_idx],
+            torch.tensor([[1.0, 0.0, 0.0]], device=self.device),
+        )
         self.cmd_eef_pos_w = self.world_eef_pos_w.clone()
 
         eef_delta_w = self.world_eef_pos_w - root_pos
@@ -165,14 +180,18 @@ class LocoManipSparse(Command):
     @override
     def reset(self, env_ids: torch.Tensor) -> None:
         self.sample_commands(env_ids)
-        self._sync_command()
-        self._update_eef_pos_error()
+        # Not need to update states here because we do not run FK after reset,
+        # so the body states are not updated yet.
+        # Running FK at each reset is expensive.
+        # self._sync_command()
 
     @override
     def update(self) -> None:
         interval = (self.env.episode_length_buf - 20) % self.resample_interval == 0
-        resample = interval & self._env_mask_prob(
-            self.num_envs, self.resample_prob, self.device
+        resample = (
+            interval
+            & self._env_mask_prob(self.num_envs, self.resample_prob, self.device)
+            & self.eef_pos_reached.squeeze(1) # do not resample if not reached yet
         )
         env_ids = resample.nonzero(as_tuple=False).squeeze(-1)
         if env_ids.numel() > 0:
@@ -180,12 +199,22 @@ class LocoManipSparse(Command):
         self._sync_command()
         self._update_eef_pos_error()
 
+        self.eef_pos_reached_time += self.eef_pos_reached.float() * self.env.step_dt
+        t = self.eef_pos_reached_time * 0.5
+        dpos = torch.cat([torch.ones_like(t), torch.sin(t), torch.sin(t)], dim=-1) * self._scale_xyz
+        self.world_eef_pos_w += dpos * self.eef_pos_reached.float() * self.env.step_dt
+
     @override
     def debug_draw(self) -> None:
         self.env.debug_draw.vector(
             self.eef_pos_w,
             self.cmd_eef_pos_w - self.eef_pos_w,
             color=(0.0, 0.0, 1.0, 1.0),
+        )
+        self.env.debug_draw.vector(
+            self.eef_pos_w,
+            self.eef_forward,
+            color=(0.0, 1.0, 0.0, 1.0),
         )
         if self.marker is not None:
             self.marker.visualize(self.cmd_eef_pos_w)
