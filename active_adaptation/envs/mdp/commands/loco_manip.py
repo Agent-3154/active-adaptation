@@ -105,6 +105,8 @@ class SingleEEFLocoManip(Command):
             self.pos_diff_b = torch.zeros(self.num_envs, 3)
             self.pos_error_norm2 = torch.zeros(self.num_envs, 1)
             self.pos_error_norm = torch.zeros(self.num_envs, 1)
+            self.eef_pos_reached = torch.zeros(self.num_envs, 1, dtype=torch.bool)
+            self.eef_pos_reaching = torch.zeros(self.num_envs, 1, dtype=torch.bool)
 
             self.cmd_eef_pitch_w = torch.zeros(self.num_envs, 1)
             self.eef_forward_w = torch.zeros(self.num_envs, 3)
@@ -115,7 +117,11 @@ class SingleEEFLocoManip(Command):
             self.cmd_eef_vel_w = torch.zeros(self.num_envs, 3)
             self.is_world_goal_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.world_env_ids = torch.empty(0, dtype=torch.long)
+            # world goal eef position and velocity
+            # the goal may move slowly
             self.world_eef_pos_w = torch.zeros(self.num_envs, 3)
+            self.world_eef_vel_w = torch.zeros(self.num_envs, 3)
+
             self.standoff_pos_w = torch.zeros(self.num_envs, 3)
             self.standoff_yaw_w = torch.zeros(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
@@ -243,9 +249,13 @@ class SingleEEFLocoManip(Command):
         world_eef_pos_w[:, 2] = (
             self.env.get_ground_height_at(world_eef_pos_w) + eef_offset_b[:, 2]
         )
+        world_eef_vel_w = torch.zeros(len(env_ids), 3, device=self.device)
+        world_eef_vel_w[:, 0].uniform_(-0.2, 0.2)
+        world_eef_vel_w[:, 1].uniform_(-0.2, 0.2)
 
         self.standoff_pos_w[env_ids] = standoff_pos_w
         self.world_eef_pos_w[env_ids] = world_eef_pos_w
+        self.world_eef_vel_w[env_ids] = world_eef_vel_w
         self.standoff_yaw_w[env_ids, 0] = self.asset.data.heading_w[env_ids]
         self.sample_eef_pitch_commands(env_ids, eef_offset_b[:, 2])
 
@@ -261,6 +271,8 @@ class SingleEEFLocoManip(Command):
     def sample_commands(self, env_ids: torch.Tensor) -> None:
         local_env_ids, world_env_ids = self._split_command_strategy(env_ids)
         self.is_world_goal_env[env_ids] = False
+        self.eef_pos_reached[env_ids] = False
+        self.eef_pos_reaching[env_ids] = False
         if local_env_ids.numel() > 0:
             self.sample_loco_commands(local_env_ids)
             self.sample_manip_commands(local_env_ids)
@@ -300,6 +312,10 @@ class SingleEEFLocoManip(Command):
         self.cmd_yawvel_b[env_ids] = (
             self.standoff_yaw_gain * yaw_error
         ).clamp(*self.yaw_rate_range)
+
+        dpos = self.world_eef_vel_w[env_ids] * self.env.step_dt
+        self.world_eef_pos_w[env_ids] += dpos
+        self.standoff_pos_w[env_ids] += dpos
 
     def _sync_world_frames(self) -> None:
         """Sync command tensors that are derived from the current root pose."""
@@ -346,6 +362,9 @@ class SingleEEFLocoManip(Command):
         )
         self.pos_error_norm2 = self.pos_diff_w.square().sum(dim=-1, keepdim=True)
         self.pos_error_norm = self.pos_error_norm2.sqrt()
+        reached_now = self.pos_error_norm < 0.05
+        self.eef_pos_reaching = reached_now & (~self.eef_pos_reached)
+        self.eef_pos_reached = self.eef_pos_reached | reached_now
 
     @override
     def reset(self, env_ids: torch.Tensor) -> None:
@@ -435,6 +454,30 @@ class eef_pos_progress(Reward[SingleEEFLocoManip]):
         # the value may be incorrect at the first step
         active = (self.env.episode_length_buf > 1)
         return self.rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
+
+
+class eef_pos_reaching(Reward[SingleEEFLocoManip]):
+    """One-step reward for reaching the EEF position target."""
+
+    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
+        super().__init__(env, weight, enabled=enabled, track_var=track_var)
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        rew = torch.ones(self.num_envs, 1, device=self.device)
+        return rew, self.command_manager.eef_pos_reaching
+
+
+class eef_pos_reached(Reward[SingleEEFLocoManip]):
+    """Reward for staying in an episode after the EEF position target is reached."""
+
+    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
+        super().__init__(env, weight, enabled=enabled, track_var=track_var)
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        rew = torch.ones(self.num_envs, 1, device=self.device)
+        return rew, self.command_manager.eef_pos_reached
 
 
 class eef_vel_tracking(Reward[SingleEEFLocoManip]):

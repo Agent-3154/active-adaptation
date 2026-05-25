@@ -67,6 +67,7 @@ class LocoManipSparse(Command):
             self.pos_error_norm = torch.zeros(self.num_envs, 1)
 
             self.world_eef_pos_w = torch.zeros(self.num_envs, 3)
+            self.eef_pos_reaching = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.eef_pos_reached = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.eef_pos_reached_time = torch.zeros(self.num_envs, 1, dtype=torch.float)
             # we move the target in a continuous manner after it is reached
@@ -126,7 +127,9 @@ class LocoManipSparse(Command):
         )
         self.pos_error_norm2 = self.pos_diff_w.square().sum(dim=-1, keepdim=True)
         self.pos_error_norm = self.pos_error_norm2.sqrt()
-        self.eef_pos_reached = self.eef_pos_reached | (self.pos_error_norm < 0.05)
+        reached_now = self.pos_error_norm < 0.05
+        self.eef_pos_reaching = reached_now & (~self.eef_pos_reached)
+        self.eef_pos_reached = self.eef_pos_reached | reached_now
 
     @override
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
@@ -154,6 +157,7 @@ class LocoManipSparse(Command):
         target_w = origins.clone()
         target_w[:, 2] = self.env.get_ground_height_at(origins) + z_offset
         self.world_eef_pos_w[env_ids] = target_w
+        self.eef_pos_reaching[env_ids] = False
         self.eef_pos_reached[env_ids] = False
         self.eef_pos_reached_time[env_ids] = 0.0
 
