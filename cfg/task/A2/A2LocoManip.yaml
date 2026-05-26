@@ -47,6 +47,7 @@ input:
 command:
   _target_: SingleEEFLocoManip
   eef_body_name: grasp_point
+  gripper_joint_names: "arm_joint[7,8]"
   # Heading-frame (x,y) offsets from root + z above terrain; tune for Piper workspace.
   workspace_range:
     - [0.15, 0.6]
@@ -55,7 +56,7 @@ command:
   # Half of resampled envs keep independent local loco/manip commands.
   # The other half sample a world-frame EEF target and base standoff pose,
   # then convert them back into the same 6D local command interface.
-  world_goal_prob: 0.4
+  world_goal_prob: 0.
   standoff_distance_range: [1.0, 3.0]
   standoff_linvel_gain: 1.0
   standoff_yaw_gain: 1.0
@@ -93,6 +94,7 @@ reward:
   manip:
     eef_pos_tracking:   {weight: 1.2}
     eef_forward_tracking: {weight: 1.0}
+    eef_grasp:          {weight: 1.0}
     eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0005}

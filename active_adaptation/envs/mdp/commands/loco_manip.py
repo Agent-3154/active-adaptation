@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Tuple
 
 import torch
+import torch.nn.functional as F
 from typing_extensions import override
 
 from active_adaptation.utils.math import (
@@ -22,12 +23,10 @@ from ..rewards.base import Reward
 class SingleEEFLocoManip(Command):
     """Command vector: base velocity, yaw rate, EEF position, and EEF forward target.
 
-    Dense layout (15D, body/yaw frame):
-    ``[v_x, v_y, yaw_rate, eef_x, eef_y, eef_z, pos_diff_x, pos_diff_y, pos_diff_z,
-      cmd_fwd_b_x, cmd_fwd_b_y, cmd_fwd_b_z, fwd_diff_b_x, fwd_diff_b_y, fwd_diff_b_z]``.
-    Sparse layout (12D, body/yaw frame):
-    ``[eef_x, eef_y, eef_z, pos_diff_x, pos_diff_y, pos_diff_z,
-      cmd_fwd_b_x, cmd_fwd_b_y, cmd_fwd_b_z, fwd_diff_b_x, fwd_diff_b_y, fwd_diff_b_z]``.
+    Dense layout (17D, body/yaw frame):
+    ``[..., cmd_fwd_b(3), fwd_diff_b(3), cmd_closed(1), cmd_open(1)]``.
+    Sparse layout (14D, body/yaw frame):
+    ``[..., cmd_fwd_b(3), fwd_diff_b(3), cmd_closed(1), cmd_open(1)]``.
 
     The first two loco components are in the usual body horizontal frame (same as ``Twist``);
     ``eef_x``/``eef_y`` are **not** full body frame: they use the same **yaw-only**
@@ -43,6 +42,7 @@ class SingleEEFLocoManip(Command):
         self,
         env,
         eef_body_name: str,
+        gripper_joint_names: str,
         workspace_range: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]
         | None = None,
         workspace_profile: str | None = None,
@@ -64,6 +64,10 @@ class SingleEEFLocoManip(Command):
                 f"Expected exactly one body matching {eef_body_name!r}, got {body_ids.numel()}"
             )
         self.eef_body_idx = body_ids[0]
+        self.gripper_joint_ids, _ = self.asset.find_joints(gripper_joint_names)
+        self.gripper_joint_ids = torch.tensor(self.gripper_joint_ids, device=self.device)
+        limits = self.asset.data.soft_joint_pos_limits[0, self.gripper_joint_ids]
+        self._gripper_max_open = limits.abs().amax(dim=-1).max().clamp_min(1e-6)
 
         if workspace_range is None and workspace_profile is None:
             raise ValueError(
@@ -131,6 +135,10 @@ class SingleEEFLocoManip(Command):
             self.world_eef_pos_w = torch.zeros(self.num_envs, 3)
             self.world_eef_vel_w = torch.zeros(self.num_envs, 3)
 
+            # gripper closedness in [0, 1]: 0 = open, 1 = closed
+            self.eef_status = torch.zeros(self.num_envs, 1)
+            self.cmd_eef_status = torch.zeros(self.num_envs, 1, dtype=torch.long)
+
             self.standoff_pos_w = torch.zeros(self.num_envs, 3)
             self.standoff_yaw_w = torch.zeros(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
@@ -166,6 +174,8 @@ class SingleEEFLocoManip(Command):
                     self.pos_diff_b, # [N, 3]
                     self.cmd_eef_forward_b, # [N, 3]
                     self.cmd_eef_forward_b - self.eef_forward_b, # [N, 3]
+                    self.cmd_eef_status.float(), # [N, 1]
+                    (1 - self.cmd_eef_status.float()) # [N, 1]
                 ],
                 dim=-1,
             )
@@ -176,6 +186,8 @@ class SingleEEFLocoManip(Command):
                 self.pos_diff_b, # [N, 3]
                 self.cmd_eef_forward_b, # [N, 3]
                 self.cmd_eef_forward_b - self.eef_forward_b, # [N, 3]
+                self.cmd_eef_status.float(), # [N, 1]
+                (1 - self.cmd_eef_status.float()) # [N, 1]
             ], dim=-1)
         else:
             raise ValueError(f"Invalid key: {key}")
@@ -190,6 +202,7 @@ class SingleEEFLocoManip(Command):
             pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             cmd_eef_forward_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             eef_forward_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+            eef_status = SymmetryTransform(perm=[0, 1], signs=[1, 1])
             return SymmetryTransform.cat(
                 [
                     cmd_linvel_b,
@@ -198,6 +211,7 @@ class SingleEEFLocoManip(Command):
                     pos_diff_b,
                     cmd_eef_forward_b,
                     eef_forward_b,
+                    eef_status,
                 ]
             )
         elif key == "sparse":
@@ -206,16 +220,31 @@ class SingleEEFLocoManip(Command):
             pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             cmd_eef_forward_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             forward_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+            eef_status = SymmetryTransform(perm=[0, 1], signs=[1, 1])
             return SymmetryTransform.cat(
                 [
                     cmd_eef_pos_b,
                     pos_diff_b,
                     cmd_eef_forward_b,
                     forward_diff_b,
+                    eef_status,
                 ]
             )
         else:
             raise ValueError(f"Invalid key: {key}")
+    
+    def get_gripper_status(self) -> torch.Tensor:
+        """Return gripper closedness in ``[0, 1]`` (0=open, 1=closed)."""
+        gripper_pos = self.asset.data.joint_pos[:, self.gripper_joint_ids]
+        openness = (
+            gripper_pos.abs().amax(dim=-1, keepdim=True) / self._gripper_max_open
+        ).clamp(0.0, 1.0)
+        return 1.0 - openness
+
+    def sample_eef_status_commands(self, env_ids: torch.Tensor) -> None:
+        self.cmd_eef_status[env_ids, 0] = torch.randint(
+            0, 2, (len(env_ids),), device=self.device
+        )
 
     @staticmethod
     def _env_mask_prob(num_envs: int, prob: float, device: torch.device) -> torch.Tensor:
@@ -306,6 +335,7 @@ class SingleEEFLocoManip(Command):
         if world_env_ids.numel() > 0:
             self.is_world_goal_env[world_env_ids] = True
             self.sample_world_goal_commands(world_env_ids)
+        self.sample_eef_status_commands(env_ids)
         keep_world = (self.world_env_ids[:, None] != env_ids[None, :]).all(dim=1)
         self.world_env_ids = torch.cat([self.world_env_ids[keep_world], world_env_ids])
         keep_local = (self.local_env_ids[:, None] != env_ids[None, :]).all(dim=1)
@@ -384,6 +414,7 @@ class SingleEEFLocoManip(Command):
         forward_axis_b = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
         self.eef_forward_w = quat_rotate(eef_quat_w, forward_axis_b)
         self.eef_forward_b = quat_rotate_inverse(yaw_q, self.eef_forward_w)
+        self.eef_status = self.get_gripper_status()
 
         self.command_speed = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
         self.is_standing_env = (self.command_speed < 0.1)
@@ -612,56 +643,14 @@ class eef_angvel_penalty(Reward[SingleEEFLocoManip]):
 
 
 class eef_grasp(Reward[SingleEEFLocoManip]):
-    """
-    Two-phase grasp reward gated on EEF position error.
-
-    - ``error < pos_error_threshold``: reward a closed gripper (grasp).
-    - ``pos_error_threshold <= error < 3 * pos_error_threshold``: reward an open
-      gripper (pre-grasp approach).
-    """
-
-    def __init__(
-        self,
-        env,
-        gripper_joint_names: str,
-        weight: float,
-        enabled: bool = True,
-        track_var: bool = False,
-        pos_error_threshold: float = 0.04,
-    ):
-        super().__init__(env, weight, enabled=enabled, track_var=track_var)
-        self.asset = self.command_manager.asset
-        self.eef_body_idx = self.command_manager.eef_body_idx
-        self.pos_error_threshold = pos_error_threshold
-        self.approach_error_threshold = 3.0 * pos_error_threshold
-        self.gripper_joint_ids, _ = self.asset.find_joints(gripper_joint_names)
-        self.gripper_joint_ids = torch.tensor(
-            self.gripper_joint_ids, device=self.device
-        )
-        limits = self.asset.data.soft_joint_pos_limits[0, self.gripper_joint_ids]
-        self.max_open = limits.abs().amax(dim=-1).max().clamp_min(1e-6)
+    """Binary cross-entropy gripper reward on ``cmd_eef_status`` vs ``eef_status``."""
 
     @override
     def _compute(self) -> torch.Tensor:
-        pos_error = (
-            self.command_manager.cmd_eef_pos_w
-            - self.asset.data.body_link_pos_w[:, self.eef_body_idx]
-        ).norm(dim=-1, keepdim=True)
-
-        gripper_pos = self.asset.data.joint_pos[:, self.gripper_joint_ids]
-        openness = (gripper_pos.abs().amax(dim=-1, keepdim=True) / self.max_open).clamp(
-            0.0, 1.0
-        )
-        closedness = 1.0 - openness
-
-        close_active = pos_error < self.pos_error_threshold
-        # approach_active = (pos_error >= self.pos_error_threshold) & (
-        #     pos_error < self.approach_error_threshold
-        # )
-        # rew = torch.where(close_active, closedness, openness)
-        active = close_active
-        rew = closedness
-        return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
-
+        cmd = self.command_manager
+        pred = cmd.eef_status.clamp(1e-6, 1.0 - 1e-6)
+        target = cmd.cmd_eef_status.float()
+        bce = F.binary_cross_entropy(pred, target, reduction="none")
+        return (1.0 - bce).reshape(self.num_envs, 1)
 
 __all__ = ["SingleEEFLocoManip"]
