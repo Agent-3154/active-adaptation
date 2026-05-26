@@ -74,13 +74,13 @@ observation:
     body_vel_b: {body_names: grasp_point}
     root_linvel_b:    {yaw_only: true}
     root_angvel_b:    {}
-  extero:
-    height_scan: {
-      x_range: [-1.2, 1.2],
-      y_range: [-1.0, 1.0],
-      resolution: [0.1, 0.1],
-      flatten: false,
-    }
+  # extero:
+  #   height_scan: {
+  #     x_range: [-1.2, 1.2],
+  #     y_range: [-1.0, 1.0],
+  #     resolution: [0.1, 0.1],
+  #     flatten: false,
+  #   }
 
 reward:
   loco:
@@ -92,8 +92,7 @@ reward:
     base_height_exp:    {weight: 1.0, target_height: 0.4, sigma: 0.4}
   manip:
     eef_pos_tracking:   {weight: 1.2}
-    eef_forward_tracking: {weight: 0.6}
-    eef_pos_progress:   {weight: 0.5}
+    eef_forward_tracking: {weight: 1.0}
     eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0005}
