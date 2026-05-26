@@ -491,6 +491,25 @@ class eef_pos_tracking(Reward[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1)
 
 
+class eef_pos_forward_tracking(Reward[SingleEEFLocoManip]):
+    """Multiplicative reward of position and forward tracking."""
+
+    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
+        super().__init__(env, weight, enabled=enabled, track_var=track_var)
+        self.asset = self.command_manager.asset
+        self.eef_body_idx = self.command_manager.eef_body_idx
+        self.sigma = 0.1
+    
+    @override
+    def _compute(self) -> torch.Tensor:
+        rew_pos = torch.exp(-self.command_manager.pos_error_norm2 / self.sigma)
+        forward_diff = self.command_manager.eef_forward_w - self.command_manager.cmd_eef_forward_w
+        forward_error_norm2 = forward_diff.square().sum(dim=-1, keepdim=True)
+        rew_forward = torch.exp(-forward_error_norm2 / 0.25)
+        rew = rew_pos * rew_forward - 0.2 * self.command_manager.pos_error_norm
+        return rew.reshape(self.num_envs, 1)
+
+
 class eef_pos_progress(Reward[SingleEEFLocoManip]):
     """Reward the reduction in EEF position error: ``prev_error - curr_error``."""
 
@@ -652,5 +671,6 @@ class eef_grasp(Reward[SingleEEFLocoManip]):
         target = cmd.cmd_eef_status.float()
         bce = F.binary_cross_entropy(pred, target, reduction="none")
         return (1.0 - bce).reshape(self.num_envs, 1)
+
 
 __all__ = ["SingleEEFLocoManip"]
