@@ -47,8 +47,9 @@ input:
         alpha_range: [0.8, 0.9]
 
 command:
-  _target_: LocalManipObject
+  _target_: LocoManipObject
   eef_body_name: grasp_point
+  gripper_joint_names: "arm_joint[7,8]"
   object_name: object
   object_distance_range: [2.0, 3.0]
   grasp_height_range: [0.1, 0.6]
@@ -56,11 +57,11 @@ command:
   standoff_angle_range: [-1.0471975512, 1.0471975512]
   standoff_linvel_gain: 2.0
   standoff_yaw_gain: 1.0
-  speed_limit_range: [0.4, 1.2]
 
 observation:
+  command:
+    command:  {key: "dense"}
   policy:
-    command:  {}
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {steps: 4, noise_std: 0.05}
     joint_vel_multistep: {steps: 4, noise_std: 0.2}
@@ -78,18 +79,18 @@ observation:
 
 reward:
   loco:
-    linvel_exp:         {weight: 1.5, dim: 2}
-    linvel_projection:  {weight: 0.5}
-    angvel_z_exp:       {weight: 0.8}
+    # linvel_exp:         {weight: 1.5, dim: 2}
+    # linvel_projection:  {weight: 0.5}
+    # angvel_z_exp:       {weight: 0.8}
     angvel_xy_l2:       {weight: 0.01}
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 1.0, target_height: 0.4, sigma: 0.4}
-  manip:
-    eef_pos_tracking:   {weight: 1.2}
-    eef_forward_tracking: {weight: 0.6}
-    eef_up_tracking: {weight: 0.6}
-    eef_angvel_penalty: {weight: 0.005}
-    eef_grasp: {weight: 1.0, gripper_joint_names: "arm_joint[7,8]"}
+  # manip:
+  #   eef_pos_tracking:   {weight: 1.2}
+  #   eef_forward_tracking: {weight: 0.6}
+  #   eef_up_tracking: {weight: 0.6}
+  #   eef_angvel_penalty: {weight: 0.005}
+  #   eef_grasp: {weight: 1.0, gripper_joint_names: "arm_joint[7,8]"}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints

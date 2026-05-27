@@ -66,6 +66,12 @@ class LocoManipSparse(Command):
             self.pos_error_norm2 = torch.zeros(self.num_envs, 1)
             self.pos_error_norm = torch.zeros(self.num_envs, 1)
 
+            # orientation tracking
+            self.eef_forward_w = torch.zeros(self.num_envs, 3)
+            self.eef_forward_b = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_forward_w = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_forward_b = torch.zeros(self.num_envs, 3)
+
             self.world_eef_pos_w = torch.zeros(self.num_envs, 3)
             self.eef_pos_reaching = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.eef_pos_reached = torch.zeros(self.num_envs, 1, dtype=torch.bool)
@@ -90,21 +96,26 @@ class LocoManipSparse(Command):
 
     @property
     def command(self) -> torch.Tensor:
+        # align with SingleEEFLocoManip's sparse command
         pos_diff_w = self.cmd_eef_pos_w - self.eef_pos_w
         pos_diff_b = quat_rotate_inverse(
             yaw_quat(self.asset.data.root_link_quat_w),
             pos_diff_w
         )
         return torch.cat([
-            self.cmd_eef_pos_b,
-            pos_diff_b,
+            self.cmd_eef_pos_b, # [N, 3]
+            pos_diff_b, # [N, 3]
+            self.cmd_eef_forward_b, # [N, 3]
+            self.cmd_eef_forward_b - self.eef_forward_b, # [N, 3]
         ], dim=-1)
 
     @override
     def symmetry_transform(self):
         cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
         pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
-        return SymmetryTransform.cat([cmd_eef_pos_b, pos_diff_b])
+        cmd_eef_forward_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        forward_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        return SymmetryTransform.cat([cmd_eef_pos_b, pos_diff_b, cmd_eef_forward_b, forward_diff_b])
 
     @staticmethod
     def _env_mask_prob(num_envs: int, prob: float, device: torch.device) -> torch.Tensor:
@@ -157,6 +168,9 @@ class LocoManipSparse(Command):
         target_w = origins.clone()
         target_w[:, 2] = self.env.get_ground_height_at(origins) + z_offset
         self.world_eef_pos_w[env_ids] = target_w
+        self.cmd_eef_forward_w[env_ids] = torch.tensor(
+            [[1.0, 0.0, 0.0]], device=self.device
+        )
         self.eef_pos_reaching[env_ids] = False
         self.eef_pos_reached[env_ids] = False
         self.eef_pos_reached_time[env_ids] = 0.0
@@ -166,10 +180,11 @@ class LocoManipSparse(Command):
         yaw_q = yaw_quat(self.asset.data.root_link_quat_w)
 
         self.eef_pos_w = self.asset.data.body_link_pos_w[:, self.eef_body_idx]
-        self.eef_forward = quat_rotate(
-            self.asset.data.body_link_quat_w[:, self.eef_body_idx],
-            torch.tensor([[1.0, 0.0, 0.0]], device=self.device),
-        )
+        eef_quat_w = self.asset.data.body_link_quat_w[:, self.eef_body_idx]
+        forward_axis_b = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
+        self.eef_forward_w = quat_rotate(eef_quat_w, forward_axis_b)
+        self.eef_forward_b = quat_rotate_inverse(yaw_q, self.eef_forward_w)
+        self.cmd_eef_forward_b = quat_rotate_inverse(yaw_q, self.cmd_eef_forward_w)
         self.cmd_eef_pos_w = self.world_eef_pos_w.clone()
 
         eef_delta_w = self.world_eef_pos_w - root_pos
@@ -217,8 +232,13 @@ class LocoManipSparse(Command):
         )
         self.env.debug_draw.vector(
             self.eef_pos_w,
-            self.eef_forward,
+            self.eef_forward_w,
             color=(0.0, 1.0, 0.0, 1.0),
+        )
+        self.env.debug_draw.vector(
+            self.eef_pos_w,
+            self.cmd_eef_forward_w,
+            color=(1.0, 0.5, 0.0, 1.0),
         )
         if self.marker is not None:
             self.marker.visualize(self.cmd_eef_pos_w)
