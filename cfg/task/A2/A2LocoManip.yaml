@@ -56,7 +56,7 @@ command:
   # Half of resampled envs keep independent local loco/manip commands.
   # The other half sample a world-frame EEF target and base standoff pose,
   # then convert them back into the same 6D local command interface.
-  world_goal_prob: 0.
+  world_goal_prob: 0.4
   standoff_distance_range: [1.0, 3.0]
   standoff_linvel_gain: 1.0
   standoff_yaw_gain: 1.0
@@ -111,6 +111,7 @@ reward:
     _enabled_: false
     linvel_projection:  {weight: 0.5}
     feet_contact_count: {weight: 1.0, body_names: .*_foot}
+    eef_pos_error_l1:   {weight: 1.0}
     # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:

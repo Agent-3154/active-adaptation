@@ -517,6 +517,18 @@ class eef_pos_tracking(Reward[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1)
 
 
+class eef_pos_error_l1(Reward[SingleEEFLocoManip]):
+    """This is a metric instead of reward"""
+    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
+        super().__init__(env, weight, enabled=enabled, track_var=track_var)
+        self.asset = self.command_manager.asset
+        self.eef_body_idx = self.command_manager.eef_body_idx
+    
+    @override
+    def _compute(self) -> torch.Tensor:
+        return self.command_manager.pos_error_norm.reshape(self.num_envs, 1)
+
+
 class eef_pos_forward_tracking(Reward[SingleEEFLocoManip]):
     """Multiplicative reward of position and forward tracking."""
 
