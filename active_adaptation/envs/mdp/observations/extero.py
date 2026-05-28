@@ -1,3 +1,4 @@
+import colorsys
 import torch
 from typing import Tuple, TYPE_CHECKING, Optional, List
 
@@ -59,6 +60,12 @@ def raymap(width: int, height: int, fov: float) -> Float[torch.Tensor, "height w
     directions = directions / directions.norm(dim=-1, keepdim=True)
     
     return directions
+
+
+def _distinct_debug_color(instance_id: int) -> Tuple[float, float, float]:
+    """Pick a saturated, high-contrast RGB color for debug markers."""
+    hue = (instance_id * 0.618033988749895) % 1.0
+    return colorsys.hsv_to_rgb(hue, 0.85, 0.95)
 
 
 class external_forces(Observation):
@@ -314,6 +321,7 @@ class forward_scan(Observation):
 
 class raycast_camera(Observation):
     supported_backends = ("isaac",)
+    _debug_instance_count = 0
 
     supported_dtypes = {
         "float32": torch.float32,
@@ -328,10 +336,12 @@ class raycast_camera(Observation):
         resolution: Tuple[int, int],
         fov_deg: float,
         rpy_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        pos_offset: Tuple[float, float, float] = (0.0, 0.0, 0.0),
         body_name: Optional[str] = None,
         near: float = 0.01,
         far: float = 100.0,
         dtype: torch.dtype | str = torch.float16,
+        targets: Optional[List[str]] = None,
     ):
         super().__init__(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
@@ -347,11 +357,19 @@ class raycast_camera(Observation):
         euler = torch.tensor(rpy_deg, device=self.device)  / 180.0 * torch.pi
         quat = quat_from_euler_xyz(euler)
         self.raymap = quat_rotate(quat.reshape(1, 1, 4), self.raymap)
+        self.pos_offset = torch.tensor(pos_offset, device=self.device)
         
         self.shape = self.raymap.shape[:2]
         assert self.shape == (height, width), "Resolution must match the raymap shape"
         self.num_rays = self.raymap.shape[0] * self.raymap.shape[1]
-        self.ground_mesh = self.env.ground_mesh
+
+        from simple_raycaster import MultiMeshRaycasterV2
+        self.raycaster = MultiMeshRaycasterV2(device=self.device)
+        self.raycaster.add_isaac_static("/World/ground")
+        if targets is not None:
+            for target in targets:
+                target_asset = self.env.scene[target]
+                self.raycaster.add_isaac_entity(target_asset)
 
         if body_name is not None:
             self.body_id = self.asset.find_bodies(body_name)[0]
@@ -363,44 +381,40 @@ class raycast_camera(Observation):
         if self.env.backend == "isaac" and self.env.sim.has_gui():
             from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
             scene: IsaacSceneAdapter = self.env.scene
+            self.instance_id = raycast_camera._debug_instance_count
+            raycast_camera._debug_instance_count += 1
+            marker_color = _distinct_debug_color(self.instance_id)
             self.marker = scene.create_sphere_marker(
-                "/Visuals/Command/raycast_camera", (0.8, 0.0, 0.8), radius=0.02
+                f"/Visuals/Command/raycast_camera_{self.instance_id}",
+                marker_color,
+                radius=0.02,
             )
     
     def compute(self) -> torch.Tensor:
         if self.body_id is not None:
-            ray_starts = self.asset.data.body_link_pos_w[:, self.body_id]
-            quat = self.asset.data.body_link_quat_w[:, self.body_id]
+            body_pos_w = self.asset.data.body_link_pos_w[:, self.body_id]
+            body_quat = self.asset.data.body_link_quat_w[:, self.body_id]
         else:
-            ray_starts = self.asset.data.root_pos_w
-            quat = self.asset.data.root_link_quat_w
-        ray_dirs = quat_rotate(quat.unsqueeze(1), self.raymap.reshape(1, self.num_rays, 3))
-        ray_starts = ray_starts.unsqueeze(1) + ray_dirs * self.near
+            body_pos_w = self.asset.data.root_link_pos_w
+            body_quat = self.asset.data.root_link_quat_w
+        self.ray_dirs_w = quat_rotate(body_quat.unsqueeze(1), self.raymap.reshape(1, self.num_rays, 3))
+        offset_w = quat_rotate(body_quat, self.pos_offset.unsqueeze(0))
+        self.ray_starts_w = (
+            body_pos_w.reshape(self.num_envs, 1, 3)
+            + offset_w.reshape(self.num_envs, 1, 3)
+            + self.ray_dirs_w * self.near
+        ) # [self.num_envs, self.num_rays, 3]
         
-        self.ray_starts_w = ray_starts
-        self.ray_dirs_w = ray_dirs
-
-        _, ray_distance, _, _ = raycast_mesh(
-            ray_starts=ray_starts,
-            ray_directions=ray_dirs,
+        hit_pos_w, hit_distance = self.raycaster.raycast_fused(
+            ray_starts_w=self.ray_starts_w,
+            ray_dirs_w=self.ray_dirs_w,
+            min_dist=0.0,
             max_dist=self.far,
-            mesh=self.ground_mesh,
-            return_distance=True,
         )
-        self.ray_hits_w = ray_starts + ray_distance.reshape(self.num_envs, self.num_rays, 1) * ray_dirs
+        self.ray_hits_w = hit_pos_w
         
-        ray_distance = ray_distance.nan_to_num(posinf=self.far)
-        # Convert to target dtype
-        if self.dtype.is_floating_point:
-            # For float32 and float16, direct conversion
-            ray_distance = ray_distance.to(self.dtype)
-        else:
-            # For uint16 and uint8, normalize to [0, 1] and scale to dtype max value
-            range_size = self.far - self.near
-            normalized = (ray_distance - self.near) / range_size
-            max_val = torch.iinfo(self.dtype).max
-            ray_distance = (normalized * max_val).clamp(0, max_val).to(self.dtype)
-        return ray_distance.reshape(self.num_envs, 1, self.shape[0], self.shape[1])
+        hit_distance = hit_distance.nan_to_num(posinf=self.far).to(self.dtype)
+        return hit_distance.reshape(self.num_envs, 1, self.shape[0], self.shape[1])
     
     def debug_draw(self) -> None:
         if self.env.backend == "isaac":
