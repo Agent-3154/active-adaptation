@@ -138,11 +138,16 @@ class SingleEEFLocoManip(Command):
             # gripper closedness in [0, 1]: 0 = open, 1 = closed
             self.eef_status = torch.zeros(self.num_envs, 1)
             self.cmd_eef_status = torch.zeros(self.num_envs, 1, dtype=torch.long)
+            # self.reaction_force
 
             self.standoff_pos_w = torch.zeros(self.num_envs, 3)
             self.standoff_yaw_w = torch.zeros(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.command_speed = torch.zeros(self.num_envs, 1)
+
+            # payload applied at grasp point (force, unit: N)
+            self.has_payload = torch.zeros(self.num_envs, 1, dtype=torch.bool)
+            self.payload_force_w = torch.zeros(self.num_envs, 3)
 
         self.marker = None
         self.standoff_marker = None
@@ -166,7 +171,7 @@ class SingleEEFLocoManip(Command):
 
     def command(self, key: str = "dense") -> torch.Tensor:
         if key == "dense":
-            return torch.cat(
+            cmd = torch.cat(
                 [
                     self.cmd_linvel_b[:, :2], # [N, 2]
                     self.cmd_yawvel_b, # [N, 1]
@@ -178,7 +183,9 @@ class SingleEEFLocoManip(Command):
                     (1 - self.cmd_eef_status.float()) # [N, 1]
                 ],
                 dim=-1,
-            )
+            ) # [N, 17]
+            assert cmd.shape == (self.num_envs, 17)
+            return cmd
         elif key == "sparse":
             # align with LocoManipSparse's command
             return torch.cat([
@@ -233,6 +240,14 @@ class SingleEEFLocoManip(Command):
         else:
             raise ValueError(f"Invalid key: {key}")
     
+    @override
+    def pre_step(self, substep: int) -> None:
+        self.asset._external_force_b[:, self.eef_body_idx] = quat_rotate_inverse(
+            self.asset.data.body_link_quat_w[:, self.eef_body_idx],
+            self.payload_force_w,
+        )
+        self.asset.has_external_wrench = True
+    
     def get_gripper_status(self) -> torch.Tensor:
         """Return gripper closedness in ``[0, 1]`` (0=open, 1=closed)."""
         gripper_pos = self.asset.data.joint_pos[:, self.gripper_joint_ids]
@@ -245,6 +260,12 @@ class SingleEEFLocoManip(Command):
         self.cmd_eef_status[env_ids, 0] = torch.randint(
             0, 2, (len(env_ids),), device=self.device
         )
+        has_payload = torch.rand(len(env_ids), 1, device=self.device) < 0.5
+        payload_force_w = torch.zeros(len(env_ids), 3, device=self.device)
+        payload_force_w[:, :2].uniform_(-10., 10.)
+        payload_force_w[:, 2].uniform_(-20., 20.)
+        self.payload_force_w[env_ids] = payload_force_w * has_payload
+        self.has_payload[env_ids] = has_payload
 
     @staticmethod
     def _env_mask_prob(num_envs: int, prob: float, device: torch.device) -> torch.Tensor:
@@ -468,6 +489,11 @@ class SingleEEFLocoManip(Command):
             self.eef_pos_w,
             self.cmd_eef_forward_w,
             color=(0.0, 1.0, 0.0, 1.0),
+        )
+        self.env.debug_draw.vector(
+            self.eef_pos_w,
+            self.payload_force_w / 9.81,
+            color=(0.0, 0.0, 1.0, 1.0),
         )
         self.marker.visualize(self.cmd_eef_pos_w)
         world_env_ids = self.world_env_ids
