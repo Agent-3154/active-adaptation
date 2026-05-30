@@ -12,6 +12,7 @@ seed: 42
 store_transitions: true
 run_critic: true
 checkpoint_path: null
+discard_unused_obs: false
 
 app:
   headless: ${..headless}

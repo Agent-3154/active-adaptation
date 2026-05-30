@@ -449,10 +449,8 @@ class _EnvBase(EnvBase, RegistryMixin):
         if not isinstance(init_state, dict):
             init_state = {"robot": init_state}
         for key, value in init_state.items():
-            if value is not None:
-                self.scene.articulations[key].write_root_state_to_sim(
-                    value, env_ids=env_ids
-                )
+            entity = self.scene[key]
+            entity.write_root_state_to_sim(value, env_ids=env_ids)
         self.stats[env_ids] = 0.0
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:

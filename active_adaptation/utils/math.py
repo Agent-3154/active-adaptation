@@ -94,6 +94,11 @@ def yaw_rotate(yaw: torch.Tensor, vec: torch.Tensor):
     )
 
 
+def euler_rotate(rpy: torch.Tensor, vec: torch.Tensor):
+    quat = quat_from_euler_xyz(rpy)
+    return quat_rotate(quat, vec)
+
+
 def quat_from_yaw(yaw: torch.Tensor):
     return torch.cat(
         [

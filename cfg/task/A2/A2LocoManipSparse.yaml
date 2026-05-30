@@ -1,5 +1,5 @@
 # @package task
-name: A2LocoManip
+name: A2LocoManipSparse
 
 viewer:
   resolution: [1280, 720]
@@ -8,11 +8,8 @@ viewer:
 
 robot:
   name: unitree_a2_piper
-# terrain: slopes_boxes
 terrain: plane
 
-
-# common
 num_envs: 4096
 max_episode_length: 1000
 
@@ -35,7 +32,6 @@ input:
         alpha_range: [0.8, 0.9]
       - _target_: CorrelatedJointPosition
         joint_names: "arm_joint[7,8]"
-        # arm_joint7: [0, 0.035], arm_joint8: [-0.035, 0] -> open/close together
         matrix: [1.0, -1.0]
         action_scaling: 0.035
       - _target_: JointPositionDelta
@@ -45,62 +41,43 @@ input:
         alpha_range: [0.8, 0.9]
 
 command:
-  _target_: SingleEEFLocoManip
+  _target_: LocoManipSparse
   eef_body_name: grasp_point
-  gripper_joint_names: "arm_joint[7,8]"
-  # Heading-frame (x,y) offsets from root + z above terrain; tune for Piper workspace.
-  workspace_range:
-    - [0.15, 0.6]
-    - [-0.4, 0.4]
-    - [0.05, 0.9]
-  # Half of resampled envs keep independent local loco/manip commands.
-  # The other half sample a world-frame EEF target and base standoff pose,
-  # then convert them back into the same 6D local command interface.
-  world_goal_prob: 0.4
-  standoff_distance_range: [1.0, 3.0]
-  standoff_linvel_gain: 1.0
-  standoff_yaw_gain: 1.0
+  eef_z_range: [0.2, 0.75]
+  spawn_radius_range: [1.0, 3.0]
 
 observation:
   command:
-    command:  {key: dense}
-  command_sparse:
-    command:  {key: sparse}
+    command:  {}
   policy:
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {steps: 4, noise_std: 0.05}
     joint_vel_multistep: {steps: 4, noise_std: 0.2}
     prev_actions: {steps: 2}
-  # priv:
     body_vel_b: {body_names: grasp_point}
     root_linvel_b:    {yaw_only: true}
     root_angvel_b:    {}
-  # extero:
-  #   height_scan: {
-  #     x_range: [-1.2, 1.2],
-  #     y_range: [-1.0, 1.0],
-  #     resolution: [0.1, 0.1],
-  #     flatten: false,
-  #   }
+  extero:
+    height_scan: {
+      x_range: [-1.2, 1.2],
+      y_range: [-1.0, 1.0],
+      resolution: [0.1, 0.1],
+      flatten: false,
+    }
 
 reward:
   loco:
-    linvel_exp:         {weight: 1.5, dim: 2}
-    linvel_projection:  {weight: 0.5}
-    angvel_z_exp:       {weight: 0.8}
     angvel_xy_l2:       {weight: 0.01}
     linvel_z_l2:        {weight: 2.0}
-    base_height_exp:    {weight: 1.0, target_height: 0.37, sigma: 0.5}
+    base_height_exp:    {weight: 1.0, target_height: 0.4, sigma: 0.4}
   manip:
-    eef_pos_forward_tracking: {weight: 1.2}
-    # eef_pos_tracking:   {weight: 1.2}
-    # eef_forward_tracking: {weight: 1.0}
-    eef_grasp:          {weight: 1.0}
+    eef_pos_tracking:   {weight: 1.2}
+    eef_pos_progress:   {weight: 0.5}
     eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0005}
-    joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
-    joint_torques_l2:   {weight: 2.0e-4, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
+    joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(arm_joint[7,8])).*" }
+    joint_torques_l2:   {weight: 2.0e-4, joint_names: "(?!(arm_joint[7,8])).*" }
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
@@ -109,10 +86,6 @@ reward:
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:
     _enabled_: false
-    linvel_projection:  {weight: 0.5}
-    feet_contact_count: {weight: 1.0, body_names: .*_foot}
-    eef_pos_error_l1:   {weight: 1.0}
-    # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
   max_episode_length: {}

@@ -46,6 +46,7 @@ from active_adaptation.learning.utils.distributed import (
     wrap_ddp,
 )
 from active_adaptation.utils.profiling import ScopedTimer
+from tensordict.nn.probabilistic import interaction_type, InteractionType
 
 cs = ConfigStore.instance()
 
@@ -313,6 +314,14 @@ class NormalActor(nn.Module):
 
 
 class SAC(TensorDictModuleBase):
+
+    # keys to select from the batch for training
+    train_keys = (
+        OBS_KEY, ("next", OBS_KEY), ACTION_KEY, REWARD_KEY,
+        TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
+        "priority_weight", "replay_flat_index"
+    )
+
     def __init__(
         self,
         cfg: SACConfig,
@@ -593,20 +602,24 @@ class SAC(TensorDictModuleBase):
             loc, scale = self.actor(obs)
             dist = self.DistClass(loc, scale)
 
-            if self.cfg.use_correlated:
-                prev_noise = tensordict["prev_noise"]
-                rho = tensordict["rho"]
-                noise = (
-                    rho * prev_noise 
-                    + torch.sqrt((1.0 - rho.square())) * torch.randn_like(loc)
-                )
-                sample = loc + noise * scale
-                tensordict["next", "prev_noise"] = noise
-                if isinstance(dist, FasterTransformedDistribution):
-                    for transform in dist.transforms:
-                        sample = transform(sample)
+            if interaction_type() == InteractionType.MODE:
+                sample = loc.clone()
             else:
-                sample = dist.sample()
+                if self.cfg.use_correlated:
+                    prev_noise = tensordict["prev_noise"]
+                    rho = tensordict["rho"]
+                    noise = (
+                        rho * prev_noise 
+                        + torch.sqrt((1.0 - rho.square())) * torch.randn_like(loc)
+                    )
+                    sample = loc + noise * scale
+                    tensordict["next", "prev_noise"] = noise
+                else:
+                    sample = dist.sample()
+            
+            if isinstance(dist, FasterTransformedDistribution):
+                for transform in dist.transforms:
+                    sample = transform(sample)
             
             if critic:
                 # Store in raw return units so the value is independent of the
@@ -642,6 +655,11 @@ class SAC(TensorDictModuleBase):
         print(self.rb)
         if self.cfg.prior_data is not None:
             self.rb_prior = ReplayBuffer.from_rollout(self.cfg.prior_data)
+            self.rb_prior.compute_return(
+                REWARD_KEY,
+                gamma=self.cfg.gamma,
+                fn=lambda x: x.sum(-1, keepdim=True).clamp_min(0.)
+            )
             print("Prior data buffer:")
             print(self.rb_prior)
         else:
@@ -741,17 +759,24 @@ class SAC(TensorDictModuleBase):
         diagnostics: bool = False,
     ):
         self.Q.train()
-
+        batch = batch.select(*self.train_keys, inplace=True)
+        B_online = batch.shape[1]
         # Capture prior ground-truth Q (in raw return units, recorded at rollout
         # time) before .select() drops keys not present in the primary buffer
         # schema, then concatenate the prior data into the training batch.
-        prior_q_gt: torch.Tensor | None = None
+        # prior_q_gt: torch.Tensor | None = None
         if batch_prior is not None:
-            if "Q_value" in batch_prior.keys(True, True):
-                gt = batch_prior["Q_value"]
-                prior_q_gt = gt[0] if gt.ndim > 1 else gt
-            batch_prior_aligned = batch_prior.select(*batch.keys(True, True))
-            batch = torch.cat([batch, batch_prior_aligned], dim=1)
+            prior_ret = batch_prior["ret"]
+            # ret_valid = batch_prior["ret_valid"] # unused for now
+            batch_prior = batch_prior.select(*self.train_keys, inplace=True)
+            # if "Q_value" in batch_prior.keys(True, True):
+            #     gt = batch_prior["Q_value"]
+            #     prior_q_gt = gt[0] if gt.ndim > 1 else gt
+            B_prior = batch_prior.shape[1]
+            batch = torch.cat([batch, batch_prior], dim=1)
+        else:
+            B_prior = 0
+        B_eff = B_online + B_prior
 
         reward = batch[REWARD_KEY]
         reward = reward.sum(-1, keepdim=True).clamp_min(0.)
@@ -803,8 +828,6 @@ class SAC(TensorDictModuleBase):
 
         obs = self.vecnorm_obs(obs)
         next_obs = self.vecnorm_obs(next_obs)
-
-        B_eff = obs.shape[0]
 
         weight = batch["priority_weight"]
         replay_flat_idx = batch["replay_flat_index"].long()
@@ -885,7 +908,10 @@ class SAC(TensorDictModuleBase):
         if not diagnostics:
             return
 
-        infos: dict = {"critic/q_loss": q_loss.item()}
+        infos: dict = {
+            "critic/q_loss": q_loss.item(),
+            "critic/grad_norm": critic_grad_norm.item(),
+        }
         with torch.no_grad():
             if self.cfg.distributional:
                 logits = self.Q(obs, act)
@@ -906,33 +932,42 @@ class SAC(TensorDictModuleBase):
                 infos["critic/q_lower"] = q_lower.mean().item()
                 infos["critic/q_upper"] = q_upper.mean().item()
 
-            q_val_mean = q.mean().item()
-            q_val_max = q.max().item()
-            q_val_std = q.std(dim=-1).mean().item()
+            # online statistics
+            q_val_mean = q[:B_online].mean().item()
+            q_val_max = q[:B_online].max().item()
+            q_val_std = q[:B_online].std(dim=-1).mean().item()
 
         infos["critic/q_value"] = q_val_mean
         infos["critic/q_max"] = q_val_max
         infos["critic/q_std"] = q_val_std
-        infos["critic/grad_norm"] = critic_grad_norm.item()
+        
+        if B_prior > 0:
+            q_prior = q[B_online: B_eff]
+            infos["critic/prior_q_mean"] = q_prior.mean().item()
+            infos["critic/prior_q_max"] = q_prior.max().item()
+            infos["critic/prior_q_std"] = q_prior.std(dim=-1).mean().item()
+            underestimated = (q_prior < prior_ret).float().mean().item()
+            infos["critic/prior_q_underestimated"] = underestimated
+        
         if terminated.any():
             q_val_terminated = q[terminated.reshape(q.shape[0])]
             infos["critic/q_value_terminated"] = q_val_terminated.mean().item()
             infos["critic/q_loss_terminated"] = per_sample_q_loss[terminated.reshape(q.shape[0])].mean().item()
-
+        
         # Gap between current critic and the prior-data ground-truth Q
         # (recorded at rollout time, stored in raw return units).
-        if prior_q_gt is not None:
-            B_prior = int(prior_q_gt.shape[0])
-            # q is already denormalized above when reward_normalizer is active.
-            # Under sym_aug, q has shape (2*B_eff,); take the unaugmented head.
-            q_unaug = q[:B_eff]
-            q_prior_pred = q_unaug[B_eff - B_prior :].reshape(B_prior)
-            gt = prior_q_gt.to(device=q_prior_pred.device, dtype=q_prior_pred.dtype).reshape(B_prior)
-            gap = q_prior_pred - gt
-            infos["critic/prior_q_gt"] = gt.mean().item()
-            infos["critic/prior_q_pred"] = q_prior_pred.mean().item()
-            infos["critic/prior_q_gap_mean"] = gap.mean().item()
-            infos["critic/prior_q_gap_abs"] = gap.abs().mean().item()
+        # if prior_q_gt is not None:
+        #     B_prior = int(prior_q_gt.shape[0])
+        #     # q is already denormalized above when reward_normalizer is active.
+        #     # Under sym_aug, q has shape (2*B_eff,); take the unaugmented head.
+        #     q_unaug = q[:B_eff]
+        #     q_prior_pred = q_unaug[B_eff - B_prior :].reshape(B_prior)
+        #     gt = prior_q_gt.to(device=q_prior_pred.device, dtype=q_prior_pred.dtype).reshape(B_prior)
+        #     gap = q_prior_pred - gt
+        #     infos["critic/prior_q_gt"] = gt.mean().item()
+        #     infos["critic/prior_q_pred"] = q_prior_pred.mean().item()
+        #     infos["critic/prior_q_gap_mean"] = gap.mean().item()
+        #     infos["critic/prior_q_gap_abs"] = gap.abs().mean().item()
 
         return infos
 
@@ -961,12 +996,12 @@ class SAC(TensorDictModuleBase):
     def train_actor(self, diagnostics: bool = False):
         batch = self.rb.sample(batch_size=self.cfg.actor_batch_size, steps=1).to(
             self.device
-        ) # [N,]
+        ).select(*self.train_keys) # [N,]
         if self.rb_prior is not None:
             batch_prior = self.rb_prior.sample(
                 batch_size=int(self.cfg.actor_batch_size * self.cfg.prior_data_ratio),
                 steps=1,
-            ).to(self.device).select(*batch.keys(True, True))
+            ).select(*self.train_keys).to(self.device)
             batch = torch.cat([batch, batch_prior], dim=0)
 
         weight = batch["priority_weight"]
@@ -1058,13 +1093,14 @@ class SAC(TensorDictModuleBase):
             q_for_log = q
             if self.reward_normalizer is not None:
                 q_for_log = self.reward_normalizer.denormalize_return_values(q_for_log)
-            mean_change = (dist.loc[: batch.shape[0]] - batch["loc"]).abs().mean()
+            # prior data may not contain "loc" key
+            # mean_change = (dist.loc[: batch.shape[0]] - batch["loc"]).abs().mean()
             infos = {
                 "actor/loss": actor_loss.item(),
                 "actor/grad_norm": actor_grad_norm.item(),
                 "actor/alpha": alpha.item(),
                 "actor/entropy": entropy_est.mean().item(),
-                "actor/mean_change": mean_change.item(),
+                # "actor/mean_change": mean_change.item(),
                 "actor/q_std": q_for_log.std(dim=1).mean().item(),
                 "actor/q_action_grad_norm": q_action_grad_norm.item(),
                 "actor/mean_loc": loc.abs().mean().item(),

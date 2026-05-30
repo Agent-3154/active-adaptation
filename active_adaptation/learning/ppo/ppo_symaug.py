@@ -252,7 +252,8 @@ class PPOPolicy(TensorDictModuleBase):
         adv = tensordict["adv"]
         adv_mean = adv.mean()
         adv_std = adv.std()
-        adv = (adv - adv_mean) / (adv_std + 1e-5)
+        adv = (adv - adv_mean) / adv_std.clamp_min(1e-7)
+        tensordict["adv"] = adv
 
         td = tensordict.select(*self.training_keys)
         for epoch in range(self.cfg.ppo_epochs):

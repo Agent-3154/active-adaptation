@@ -7,7 +7,7 @@ from .asset_cfg import (
 from . import quadruped
 from . import quadrupeds
 from . import humanoid
-from . import quadruped_manipulator
+from . import dummy_objects
 
 
 __all__ = [
