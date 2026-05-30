@@ -7,10 +7,8 @@ from typing_extensions import override
 
 from active_adaptation.utils.math import (
     clamp_norm,
-    quat_mul,
     quat_rotate,
     quat_rotate_inverse,
-    sample_quat_yaw,
     wrap_to_pi,
     yaw_quat,
 )
@@ -113,6 +111,10 @@ class LocoManipObject(Command):
         self.gripper_close_threshold = gripper_close_threshold
         self.gripper_open_threshold = gripper_open_threshold
 
+        self.phase_approach_end = 200
+        self.phase_grasp_end = 400
+        self.phase_lift_end = 500
+
         with torch.device(self.device):
             # FSM state per env
             self.state = torch.zeros(self.num_envs, dtype=torch.long)
@@ -121,6 +123,7 @@ class LocoManipObject(Command):
             self.grasp_height_per_env = torch.zeros(self.num_envs)
             self.grasp_point_w = torch.zeros(self.num_envs, 3)
             self.target_pos_w = torch.zeros(self.num_envs, 3)
+            self.robot_init_pos_w = torch.zeros(self.num_envs, 3)
             self.approach_standoff_w = torch.zeros(self.num_envs, 3)
             self.approach_yaw_w = torch.zeros(self.num_envs)
             self.target_standoff_w = torch.zeros(self.num_envs, 3)
@@ -147,11 +150,19 @@ class LocoManipObject(Command):
             self.cmd_eef_forward_b = torch.zeros(self.num_envs, 3)
 
             # Gripper: eef_status = continuous closedness [0,1]; cmd = {0,1}
+            self.should_grasp = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.eef_status = torch.zeros(self.num_envs, 1)
             self.cmd_eef_status = torch.zeros(self.num_envs, 1, dtype=torch.long)
 
             self.command_speed = torch.zeros(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
+
+            self.move_offset_w = torch.zeros(self.num_envs, 3)
+
+            self._forward_axis_b = torch.tensor([[1.0, 0.0, 0.0]])
+            # self._grasp_pre_offset = torch.tensor([[-0.15, 0.0, 0.0]])
+            self._grasp_cmd_offset = torch.tensor([[-0.15, 0.0, 0.0]])
+            self._lift_offset = torch.tensor([[0.0, 0.0, 0.15]])
 
         self.grasp_marker = None
         self.target_marker = None
@@ -172,7 +183,7 @@ class LocoManipObject(Command):
 
     def command(self, key: str = "dense") -> torch.Tensor:
         if key == "dense":
-            return torch.cat([
+            cmd = torch.cat([
                 self.cmd_linvel_b[:, :2],                    # 2
                 self.cmd_yawvel_b,                           # 1
                 self.cmd_eef_pos_b,                          # 3
@@ -181,7 +192,9 @@ class LocoManipObject(Command):
                 self.cmd_eef_forward_b - self.eef_forward_b, # 3
                 self.cmd_eef_status.float(),                 # 1
                 (1 - self.cmd_eef_status).float(),           # 1
-            ], dim=-1)
+            ], dim=-1) # [N, 17]
+            assert cmd.shape == (self.num_envs, 17)
+            return cmd
         elif key == "sparse":
             return torch.cat([
                 self.cmd_eef_pos_b,                          # 3
@@ -230,125 +243,208 @@ class LocoManipObject(Command):
         lo, hi = value_range
         return torch.rand(num_samples, device=self.device) * (hi - lo) + lo
 
-    def _sample_standoff(
+    def _compute_standoff(
         self,
-        ref_pos_w: torch.Tensor,
-        face_dir_w: torch.Tensor,
-        n: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return (standoff_pos_w, yaw) on a random arc around ref_pos,
-        with the yaw pointing back toward ref_pos."""
-        base_yaw = torch.atan2(face_dir_w[:, 1], face_dir_w[:, 0])
-        angle = base_yaw + self._sample_uniform(n, self.standoff_angle_range)
-        dist  = self._sample_uniform(n, self.standoff_distance_range)
-        standoff = ref_pos_w.clone()
-        standoff[:, 0] = ref_pos_w[:, 0] + dist * torch.cos(angle)
-        standoff[:, 1] = ref_pos_w[:, 1] + dist * torch.sin(angle)
+        ref_w: torch.Tensor,
+        robot_w: torch.Tensor,
+        distance: float,
+    ) -> torch.Tensor:
+        """Standoff on the segment from ``ref_w`` toward ``robot_w``."""
+        diff = robot_w - ref_w
+        direction = diff / diff.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        standoff = ref_w + direction * distance
         standoff[:, 2] = self.env.get_ground_height_at(standoff)
-        yaw = torch.atan2(
-            ref_pos_w[:, 1] - standoff[:, 1],
-            ref_pos_w[:, 0] - standoff[:, 0],
-        )
-        return standoff, yaw
+        return standoff
 
-    def _init_standoffs(
-        self,
-        env_ids: torch.Tensor,
-        obj_pos_w: torch.Tensor,
-        tgt_pos_w: torch.Tensor,
-        origins: torch.Tensor,
-    ) -> None:
-        n = len(env_ids)
-        approach_standoff, approach_yaw = self._sample_standoff(
-            obj_pos_w, origins - obj_pos_w, n
-        )
-        self.approach_standoff_w[env_ids] = approach_standoff
-        self.approach_yaw_w[env_ids] = approach_yaw
+    def _update_standoffs(self, env_ids: torch.Tensor) -> None:
+        robot_w = self.asset.data.root_link_pos_w[env_ids]
+        object_w = self.object.data.root_pos_w[env_ids]
+        target_w = self.target_pos_w[env_ids]
+        heading_w = self.asset.data.heading_w[env_ids]
 
-        target_standoff, target_yaw = self._sample_standoff(
-            tgt_pos_w, origins - tgt_pos_w, n
+        standoff_dist = 0.7
+        self.approach_standoff_w[env_ids] = self._compute_standoff(
+            object_w, robot_w, standoff_dist
         )
-        self.target_standoff_w[env_ids] = target_standoff
-        self.target_yaw_w[env_ids] = target_yaw
+        self.target_standoff_w[env_ids] = self._compute_standoff(
+            target_w, robot_w, standoff_dist
+        )
+        # Match SingleEEFLocoManip world-goal behavior: standoff yaw = current heading.
+        self.approach_yaw_w[env_ids] = heading_w
+        self.target_yaw_w[env_ids] = heading_w
 
     @override
     def sample_init(self, env_ids: torch.Tensor) -> dict:
         origins = self.env.scene.get_spawn_origins(env_ids)
         n = len(env_ids)
 
-        robot_init = self.init_root_state[env_ids].clone()
-        robot_init[:, :2] += origins[:, :2]
-        robot_init[:, 3:7] = quat_mul(
-            robot_init[:, 3:7], sample_quat_yaw(n, device=self.device)
-        )
-
+        # Object at env-local [2.0, 0., 0.]
         object_init = self.object_init_root_state[env_ids].clone()
-        obj_angle = torch.rand(n, device=self.device) * 2 * torch.pi
-        obj_dist  = self._sample_uniform(n, self.object_distance_range)
-        object_init[:, 0] = origins[:, 0] + obj_dist * torch.cos(obj_angle)
-        object_init[:, 1] = origins[:, 1] + obj_dist * torch.sin(obj_angle)
-        object_init[:, 2] += self.env.get_ground_height_at(object_init[:, :3])
-        object_init[:, 3:7] = sample_quat_yaw(n, device=self.device)
+        default_obj_z = object_init[:, 2].clone()
+        object_init[:, 0] = origins[:, 0] + 2.0
+        object_init[:, 1] = origins[:, 1] + 0.0
+        object_init[:, 2] = (
+            self.env.get_ground_height_at(object_init[:, :3]) + default_obj_z
+        )
         if object_init.shape[-1] > 7:
             object_init[:, 7:] = 0.0
 
-        # Target: a different direction from the origin
-        tgt_angle = obj_angle + torch.pi / 2 + (torch.rand(n, device=self.device) - 0.5) * torch.pi
-        tgt_dist  = self._sample_uniform(n, self.target_distance_range)
+        # Robot at env-local [0., y, z_default], default rotation
+        robot_init = self.init_root_state[env_ids].clone()
+        default_robot_z = robot_init[:, 2].clone()
+        y = self._sample_uniform(n, (-0.5, 0.5))
+        robot_init[:, 0] = origins[:, 0] + 0.0
+        robot_init[:, 1] = origins[:, 1] + y
+        robot_init[:, 2] = (
+            self.env.get_ground_height_at(robot_init[:, :3]) + default_robot_z
+        )
+
+        robot_init_pos_w = robot_init[:, :3].clone()
+        self.robot_init_pos_w[env_ids] = robot_init_pos_w
+
         target = origins.clone()
-        target[:, 0] = origins[:, 0] + tgt_dist * torch.cos(tgt_angle)
-        target[:, 1] = origins[:, 1] + tgt_dist * torch.sin(tgt_angle)
         target[:, 2] = self.env.get_ground_height_at(target)
         self.target_pos_w[env_ids] = target
 
         self.grasp_height_per_env[env_ids] = self._sample_uniform(n, self.grasp_height_range)
-        self._init_standoffs(env_ids, object_init[:, :3], target, origins)
-        self.state[env_ids] = self.APPROACH
 
         return {"robot": robot_init, self.object_name: object_init}
 
     def sample_commands(self, env_ids: torch.Tensor) -> None:
-        """Mid-episode resample: re-use existing object/target positions,
-        re-sample standoffs and restart from APPROACH."""
-        origins = self.env.scene.env_origins[env_ids]
-        obj_pos  = self.object.data.root_pos_w[env_ids]
-        tgt_pos  = self.target_pos_w[env_ids]
+        """Mid-episode resample: re-use existing object/target positions and restart."""
         self.grasp_height_per_env[env_ids] = self._sample_uniform(
             len(env_ids), self.grasp_height_range
         )
-        self._init_standoffs(env_ids, obj_pos, tgt_pos, origins)
-        self.state[env_ids] = self.APPROACH
 
     # ------------------------------------------------------------------ #
     # Per-step helpers                                                     #
     # ------------------------------------------------------------------ #
 
-    def _update_eef_state(self) -> None:
-        """Refresh EEF and gripper state tensors."""
-        yaw_q   = yaw_quat(self.asset.data.root_link_quat_w)
-        eef_quat_w = self.asset.data.body_link_quat_w[:, self.eef_body_idx]
-        forward_axis = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
+    def _compute_grasp_point(self, env_ids: torch.Tensor) -> torch.Tensor:
+        object_pos_w = self.object.data.root_pos_w[env_ids]
+        object_quat_w = self.object.data.root_quat_w[env_ids]
+        offset_obj = torch.zeros(len(env_ids), 3, device=self.device)
+        offset_obj[:, 2] = self.grasp_height_per_env[env_ids]
+        return object_pos_w + quat_rotate(object_quat_w, offset_obj)
 
-        self.eef_pos_w   = self.asset.data.body_link_pos_w[:, self.eef_body_idx]
-        self.eef_forward_w = quat_rotate(eef_quat_w, forward_axis)
-        self.eef_forward_b = quat_rotate_inverse(yaw_q, self.eef_forward_w)
+    def _sync_eef_pose(self, env_ids: torch.Tensor) -> torch.Tensor:
+        root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w[env_ids])
+        self.eef_pos_w[env_ids] = self.asset.data.body_link_pos_w[env_ids, self.eef_body_idx]
+        eef_quat_w = self.asset.data.body_link_quat_w[env_ids, self.eef_body_idx]
+        self.eef_forward_w[env_ids] = quat_rotate(eef_quat_w, self._forward_axis_b)
+        self.eef_forward_b[env_ids] = quat_rotate_inverse(root_yaw_q, self.eef_forward_w[env_ids])
+        return root_yaw_q
 
-        gripper_pos = self.asset.data.joint_pos[:, self.gripper_joint_ids]
-        openness = (
-            gripper_pos.abs().amax(dim=-1, keepdim=True) / self._gripper_max_open
-        ).clamp(0.0, 1.0)
-        self.eef_status = 1.0 - openness
+    def _set_eef_cmd_world(
+        self,
+        env_ids: torch.Tensor,
+        target_w: torch.Tensor,
+        height_ref_w: torch.Tensor,
+        root_pos_w: torch.Tensor,
+        root_yaw_q: torch.Tensor,
+    ) -> None:
+        self.cmd_eef_pos_w[env_ids] = target_w
+        self.cmd_eef_pos_b[env_ids] = quat_rotate_inverse(root_yaw_q, target_w - root_pos_w)
+        self.cmd_eef_pos_b[env_ids, 2] = (
+            height_ref_w[:, 2] - self.env.get_ground_height_at(height_ref_w)
+        )
 
-        self.pos_diff_w  = self.cmd_eef_pos_w - self.eef_pos_w
-        self.pos_diff_b  = quat_rotate_inverse(yaw_q, self.pos_diff_w)
-        self.pos_error_norm2 = self.pos_diff_w.square().sum(dim=-1, keepdim=True)
-        self.pos_error_norm  = self.pos_error_norm2.sqrt()
-        reached_now = self.pos_error_norm < self.eef_pos_threshold
-        self.eef_pos_reaching = reached_now & (~self.eef_pos_reached)
-        self.eef_pos_reached  = self.eef_pos_reached | reached_now
+    def _set_eef_cmd_from_body(self, env_ids: torch.Tensor) -> None:
+        root_pos_w = self.asset.data.root_link_pos_w[env_ids]
+        root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w[env_ids])
+        exy = torch.zeros(len(env_ids), 3, device=self.device)
+        exy[:, :2] = self.cmd_eef_pos_b[env_ids, :2]
+        delta_w = quat_rotate(root_yaw_q, exy)
+        horiz_w = root_pos_w + delta_w
+        ground_h = self.env.get_ground_height_at(horiz_w)
+        self.cmd_eef_pos_w[env_ids, :2] = horiz_w[:, :2]
+        self.cmd_eef_pos_w[env_ids, 2] = ground_h + self.cmd_eef_pos_b[env_ids, 2]
 
-        self.command_speed   = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
-        self.is_standing_env = self.command_speed < 0.1
+    def _sync_pos_error(self, env_ids: torch.Tensor, root_yaw_q: torch.Tensor) -> None:
+        self.pos_diff_w[env_ids] = self.cmd_eef_pos_w[env_ids] - self.eef_pos_w[env_ids]
+        self.pos_diff_b[env_ids] = quat_rotate_inverse(root_yaw_q, self.pos_diff_w[env_ids])
+        self.pos_error_norm2[env_ids] = self.pos_diff_w[env_ids].square().sum(dim=-1, keepdim=True)
+        self.pos_error_norm[env_ids] = self.pos_error_norm2[env_ids].sqrt()
+
+    def _set_forward_cmd(self, env_ids: torch.Tensor, root_yaw_q: torch.Tensor) -> None:
+        forward_w = self._forward_axis_b.expand(len(env_ids), -1)
+        self.cmd_eef_forward_w[env_ids] = forward_w
+        self.cmd_eef_forward_b[env_ids] = quat_rotate_inverse(root_yaw_q, forward_w)
+
+    def _phase_ids(self, mask: torch.Tensor) -> torch.Tensor:
+        return mask.nonzero(as_tuple=False).reshape(-1)
+
+    def _phase_approach(self, env_ids: torch.Tensor) -> None:
+        grasp_point = self._compute_grasp_point(env_ids)
+        self.grasp_point_w[env_ids] = grasp_point
+
+        root_pos_w = self.asset.data.root_link_pos_w[env_ids]
+        root_yaw_q = self._sync_eef_pose(env_ids)
+
+        self._set_eef_cmd_world(
+            env_ids,
+            grasp_point + self._grasp_cmd_offset,
+            grasp_point,
+            root_pos_w,
+            root_yaw_q,
+        )
+        self._sync_pos_error(env_ids, root_yaw_q)
+        self._set_forward_cmd(env_ids, root_yaw_q)
+        self.cmd_eef_status[env_ids, 0] = 0
+
+        self._drive_base(env_ids, self.approach_standoff_w[env_ids], torch.zeros(len(env_ids), device=self.device))
+
+    def _phase_grasp(self, env_ids: torch.Tensor) -> None:
+        grasp_point = self._compute_grasp_point(env_ids)
+        self.grasp_point_w[env_ids] = grasp_point
+
+        root_pos_w = self.asset.data.root_link_pos_w[env_ids]
+        root_yaw_q = self._sync_eef_pose(env_ids)
+
+        self.cmd_eef_pos_w[env_ids] = self.cmd_eef_pos_w[env_ids].lerp(grasp_point, 0.05)
+        self._set_eef_cmd_world(env_ids, self.cmd_eef_pos_w[env_ids], grasp_point, root_pos_w, root_yaw_q)
+        self._sync_pos_error(env_ids, root_yaw_q)
+        self._set_forward_cmd(env_ids, root_yaw_q)
+
+        pos_xy_error = self.pos_diff_w[env_ids, :2].norm(dim=-1, keepdim=True)
+        pos_error = (self.cmd_eef_pos_w[env_ids] - grasp_point).norm(dim=-1, keepdim=True)
+        should_grasp = (pos_xy_error < 0.02) & (pos_error < 0.02)
+        self.should_grasp[env_ids] = should_grasp | self.should_grasp[env_ids]
+        self.cmd_eef_status[env_ids, 0] = self.should_grasp[env_ids, 0].long()
+
+        self._drive_base(env_ids, self.approach_standoff_w[env_ids], torch.zeros(len(env_ids), device=self.device))
+
+    def _phase_lift(self, env_ids: torch.Tensor) -> None:
+        grasp_point = self._compute_grasp_point(env_ids)
+        self.grasp_point_w[env_ids] = grasp_point
+
+        root_pos_w = self.asset.data.root_link_pos_w[env_ids]
+        root_yaw_q = self._sync_eef_pose(env_ids)
+
+        lift_target = grasp_point + self._lift_offset
+        self._set_eef_cmd_world(env_ids, lift_target, grasp_point, root_pos_w, root_yaw_q)
+        self._sync_pos_error(env_ids, root_yaw_q)
+        self._set_forward_cmd(env_ids, root_yaw_q)
+        self.cmd_eef_status[env_ids, 0] = 1
+
+        self._drive_base(env_ids, self.approach_standoff_w[env_ids], torch.zeros(len(env_ids), device=self.device))
+
+    def _phase_move(self, env_ids: torch.Tensor) -> None:
+        grasp_point = self._compute_grasp_point(env_ids)
+        self.grasp_point_w[env_ids] = grasp_point
+
+        root_yaw_q = self._sync_eef_pose(env_ids)
+        self._set_eef_cmd_from_body(env_ids)
+        self._sync_pos_error(env_ids, root_yaw_q)
+        self._set_forward_cmd(env_ids, root_yaw_q)
+        self.cmd_eef_status[env_ids, 0] = 1
+
+        move_yaw = torch.full((len(env_ids),), torch.pi / 3, device=self.device)
+        self._drive_base(
+            env_ids,
+            self.approach_standoff_w[env_ids] + self.move_offset_w[env_ids],
+            move_yaw,
+        )
 
     def _drive_base(
         self,
@@ -356,11 +452,11 @@ class LocoManipObject(Command):
         standoff_w: torch.Tensor,
         yaw_w: torch.Tensor,
     ) -> None:
-        root_pos  = self.asset.data.root_link_pos_w[ids]
+        root_pos = self.asset.data.root_link_pos_w[ids]
         root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w[ids])
-        delta_w   = standoff_w - root_pos
+        delta_w = standoff_w - root_pos
         delta_w[:, 2] = 0.0
-        linvel_w  = clamp_norm(
+        linvel_w = clamp_norm(
             self.standoff_linvel_gain * delta_w, max=self.speed_limit
         )
         self.cmd_linvel_w[ids] = linvel_w
@@ -370,125 +466,6 @@ class LocoManipObject(Command):
             self.standoff_yaw_gain * yaw_err
         ).clamp(*self.yaw_rate_range)
 
-    def _set_eef_target(
-        self,
-        ids: torch.Tensor,
-        target_w: torch.Tensor,
-        forward_w: torch.Tensor,
-        gripper_closed: bool,
-    ) -> None:
-        root_pos  = self.asset.data.root_link_pos_w[ids]
-        yaw_q     = yaw_quat(self.asset.data.root_link_quat_w[ids])
-        self.cmd_eef_pos_w[ids] = target_w
-        delta_flat = (target_w - root_pos).clone()
-        delta_flat[:, 2] = 0.0
-        delta_b = quat_rotate_inverse(yaw_q, delta_flat)
-        self.cmd_eef_pos_b[ids, :2] = delta_b[:, :2]
-        self.cmd_eef_pos_b[ids, 2]  = (
-            target_w[:, 2] - self.env.get_ground_height_at(target_w)
-        )
-        fwd = forward_w / forward_w.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        self.cmd_eef_forward_w[ids] = fwd
-        self.cmd_eef_forward_b[ids] = quat_rotate_inverse(yaw_q, fwd)
-        self.cmd_eef_status[ids, 0] = int(gripper_closed)
-
-    # ------------------------------------------------------------------ #
-    # FSM                                                                  #
-    # ------------------------------------------------------------------ #
-
-    def _transition(self) -> None:
-        """Per-env state advancement based on current sensor readings."""
-        root_pos = self.asset.data.root_link_pos_w
-        heading  = self.asset.data.heading_w
-
-        approach_dist = (self.approach_standoff_w - root_pos)[:, :2].norm(dim=-1)
-        approach_yaw_err = wrap_to_pi(self.approach_yaw_w - heading).abs()
-        target_dist  = (self.target_standoff_w - root_pos)[:, :2].norm(dim=-1)
-
-        eef_close      = self.pos_error_norm.squeeze(-1) < self.eef_pos_threshold
-        at_approach    = (approach_dist < self.base_pos_threshold) & (approach_yaw_err < self.yaw_threshold)
-        at_target      = target_dist < self.base_pos_threshold
-        gripper_closed = self.eef_status.squeeze(-1) > self.gripper_close_threshold
-        gripper_open   = self.eef_status.squeeze(-1) < self.gripper_open_threshold
-
-        s = self.state
-        s = torch.where((s == self.APPROACH)   & at_approach,  torch.full_like(s, self.GRASP_POSE), s)
-        s = torch.where((s == self.GRASP_POSE) & eef_close,    torch.full_like(s, self.CLOSE),      s)
-        s = torch.where((s == self.CLOSE)      & gripper_closed, torch.full_like(s, self.LIFT),     s)
-        s = torch.where((s == self.LIFT)       & eef_close,    torch.full_like(s, self.MOVE),       s)
-        s = torch.where((s == self.MOVE)       & at_target,    torch.full_like(s, self.RELEASE),    s)
-        s = torch.where((s == self.RELEASE)    & gripper_open, torch.full_like(s, self.BACKUP),     s)
-        s = torch.where((s == self.BACKUP)     & at_approach,  torch.full_like(s, self.APPROACH),   s)
-        self.state = s
-
-    def _apply_commands(self) -> None:
-        """Compute grasp point and set base/EEF commands per FSM state."""
-        obj_pos_w  = self.object.data.root_pos_w
-        obj_quat_w = self.object.data.root_quat_w
-        grasp_off  = torch.zeros(self.num_envs, 3, device=self.device)
-        grasp_off[:, 2] = self.grasp_height_per_env
-        self.grasp_point_w = quat_rotate(obj_quat_w, grasp_off) + obj_pos_w
-
-        # Default: hold (updated per state below)
-        self.cmd_linvel_b.zero_()
-        self.cmd_linvel_w.zero_()
-        self.cmd_yawvel_b.zero_()
-
-        for st in range(self.BACKUP + 1):
-            ids = (self.state == st).nonzero(as_tuple=False).squeeze(-1)
-            if ids.numel() == 0:
-                continue
-
-            gp  = self.grasp_point_w[ids]
-            tgt = self.target_pos_w[ids]
-            app_st = self.approach_standoff_w[ids]
-            app_yw = self.approach_yaw_w[ids]
-            tgt_st = self.target_standoff_w[ids]
-            tgt_yw = self.target_yaw_w[ids]
-
-            if st == self.APPROACH:
-                self._drive_base(ids, app_st, app_yw)
-                eef_tgt = gp.clone()
-                eef_tgt[:, 2] += self.pre_grasp_height_offset
-                fwd = gp - app_st
-                self._set_eef_target(ids, eef_tgt, fwd, gripper_closed=False)
-
-            elif st == self.GRASP_POSE:
-                self._drive_base(ids, app_st, app_yw)
-                fwd = gp - app_st
-                self._set_eef_target(ids, gp, fwd, gripper_closed=False)
-
-            elif st == self.CLOSE:
-                self._drive_base(ids, app_st, app_yw)
-                fwd = gp - app_st
-                self._set_eef_target(ids, gp, fwd, gripper_closed=True)
-
-            elif st == self.LIFT:
-                self._drive_base(ids, app_st, app_yw)
-                lift_tgt = gp.clone()
-                lift_tgt[:, 2] += self.lift_height
-                fwd = lift_tgt - app_st
-                self._set_eef_target(ids, lift_tgt, fwd, gripper_closed=True)
-
-            elif st == self.MOVE:
-                self._drive_base(ids, tgt_st, tgt_yw)
-                lift_tgt = tgt.clone()
-                lift_tgt[:, 2] += self.lift_height
-                fwd = lift_tgt - tgt_st
-                self._set_eef_target(ids, lift_tgt, fwd, gripper_closed=True)
-
-            elif st == self.RELEASE:
-                self._drive_base(ids, tgt_st, tgt_yw)
-                fwd = tgt - tgt_st
-                self._set_eef_target(ids, tgt, fwd, gripper_closed=False)
-
-            elif st == self.BACKUP:
-                self._drive_base(ids, app_st, app_yw)
-                safe = app_st.clone()
-                safe[:, 2] += self.pre_grasp_height_offset
-                fwd = gp - app_st
-                self._set_eef_target(ids, safe, fwd, gripper_closed=False)
-
     # ------------------------------------------------------------------ #
     # Overrides                                                            #
     # ------------------------------------------------------------------ #
@@ -496,14 +473,38 @@ class LocoManipObject(Command):
     @override
     def reset(self, env_ids: torch.Tensor) -> None:
         self.sample_commands(env_ids)
-        self.eef_pos_reached[env_ids]  = False
+        self._update_standoffs(env_ids)
+        self.eef_pos_reached[env_ids] = False
         self.eef_pos_reaching[env_ids] = False
+        self.should_grasp[env_ids] = False
+        move_offset = torch.zeros(len(env_ids), 3, device=self.device)
+        move_offset[:, 0].uniform_(-1.0, 1.0)
+        move_offset[:, 1].uniform_(-1.0, 1.0)
+        self.move_offset_w[env_ids] = move_offset
 
     @override
     def update(self) -> None:
-        self._update_eef_state()
-        self._transition()
-        self._apply_commands()
+        step = self.env.episode_length_buf
+        approach_ids = self._phase_ids(step < self.phase_approach_end)
+        grasp_ids = self._phase_ids(
+            (step >= self.phase_approach_end) & (step < self.phase_grasp_end)
+        )
+        lift_ids = self._phase_ids(
+            (step >= self.phase_grasp_end) & (step < self.phase_lift_end)
+        )
+        move_ids = self._phase_ids(step >= self.phase_lift_end)
+
+        if approach_ids.numel() > 0:
+            self._phase_approach(approach_ids)
+        if grasp_ids.numel() > 0:
+            self._phase_grasp(grasp_ids)
+        if lift_ids.numel() > 0:
+            self._phase_lift(lift_ids)
+        if move_ids.numel() > 0:
+            self._phase_move(move_ids)
+
+        self.command_speed = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
+        self.is_standing_env = self.command_speed < 0.1
 
     @override
     def debug_draw(self) -> None:
@@ -523,10 +524,8 @@ class LocoManipObject(Command):
             self.cmd_eef_pos_w - self.eef_pos_w,
             color=(0.0, 0.0, 1.0, 1.0),
         )
-        if self.grasp_marker is not None:
-            self.grasp_marker.visualize(self.grasp_point_w)
-        if self.target_marker is not None:
-            self.target_marker.visualize(self.target_pos_w)
+        self.grasp_marker.visualize(self.cmd_eef_pos_w)
+        self.target_marker.visualize(self.approach_standoff_w)
 
 
 __all__ = ["LocoManipObject"]

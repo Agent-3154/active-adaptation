@@ -51,7 +51,7 @@ command:
   eef_body_name: grasp_point
   gripper_joint_names: "arm_joint[7,8]"
   object_name: object
-  object_distance_range: [2.0, 3.0]
+  object_distance_range: [1.0, 2.0]
   grasp_height_range: [0.1, 0.6]
   standoff_distance_range: [0.6, 0.7]
   standoff_angle_range: [-1.0471975512, 1.0471975512]
@@ -67,6 +67,7 @@ observation:
     joint_vel_multistep: {steps: 4, noise_std: 0.2}
     prev_actions: {steps: 2}
   # priv:
+    body_vel_b: {body_names: grasp_point}
     root_linvel_b:    {yaw_only: true}
     root_angvel_b:    {}
   extero:
