@@ -134,7 +134,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
     return asset_cfg, sensors
 
 
-def make_mjlab_cfg():
+def make_mjlab_cfg(motrix: bool = False):
     import mujoco
     from active_adaptation.assets.asset_cfg import EntityCfg
     from mjlab.entity import EntityArticulationInfoCfg
@@ -142,11 +142,11 @@ def make_mjlab_cfg():
     from mjlab.actuator import BuiltinPositionActuatorCfg
     from mjlab.sensor import ContactSensorCfg, ContactMatch
 
+    mjcf_path = ROBOT_MODEL_DIR / "a2" / "a2.xml"
+
     def spec_fn():
-        mjcf_path = str(ROBOT_MODEL_DIR / "a2" / "a2.xml")
-        spec = mujoco.MjSpec.from_file(str(mjcf_path))
-        return spec
-    
+        return mujoco.MjSpec.from_file(str(mjcf_path))
+
     cfg = EntityCfg(
         init_state=EntityCfg.InitialStateCfg(
             pos=INIT_POS,
@@ -199,14 +199,20 @@ def make_mjlab_cfg():
             history_length=3,
         ),
     )
+    if motrix:
+        from active_adaptation.envs.backends.motrix.mjcf import export_entity_mjcf
+
+        cfg.motrix_mjcf_path_fn = lambda c: export_entity_mjcf(c, mjcf_path)
     return cfg, sensors
 
 
-def make_cfg(backend: Literal["isaaclab", "mjlab"]):
+def make_cfg(backend: Literal["isaaclab", "mjlab", "motrix"]):
     if backend == "isaaclab":
         return make_isaaclab_cfg()
     elif backend == "mjlab":
-        return make_mjlab_cfg()
+        return make_mjlab_cfg(motrix=False)
+    elif backend == "motrix":
+        return make_mjlab_cfg(motrix=True)
     else:
         raise ValueError(f"Invalid backend: {backend}")
 

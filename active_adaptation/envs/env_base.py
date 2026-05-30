@@ -636,6 +636,9 @@ class _EnvBase(EnvBase, RegistryMixin):
         elif self.backend == "mjlab":
             torch.manual_seed(seed)
             np.random.seed(seed)
+        elif self.backend == "motrix":
+            torch.manual_seed(seed)
+            np.random.seed(seed)
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
 
@@ -679,5 +682,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             elif self.backend == "mjlab":
                 if self.sim.has_gui():
                     self.sim.viewer.close()
+                self.sim.close()
+            elif self.backend == "motrix":
                 self.sim.close()
             super().close(raise_if_closed=raise_if_closed)
