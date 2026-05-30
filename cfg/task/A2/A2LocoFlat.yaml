@@ -1,5 +1,5 @@
 # @package task
-name: A2Flat
+name: A2LocoFlat
 
 viewer:
   resolution: [1280, 720]
@@ -24,7 +24,7 @@ sim:
 input:
   action:
     _target_: JointPosition
-    action_scaling: {.*_joint: 0.5}
+    action_scaling: {.*_joint: 0.4}
     max_delay: 1
     alpha_range: [0.5, 1.0]
 
@@ -86,6 +86,7 @@ reward:
     # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
+  max_episode_length: {}
   crash: {body_names_expr: [base_link, .*thigh], t_thres: 0.06}
   fall_over: {xy_thres: 0.9}
   undesired_contact: {body_names: [.*_calf]}
@@ -96,10 +97,14 @@ randomization:
     base_link: [0.8, 1.2]
   perturb_body_materials:
     body_names: .*_foot
+    # isaac only
     static_friction_range:  [0.5, 3.0]
     dynamic_friction_range: [0.5, 3.0]
     restitution_range:      [0.0, 0.5]
-  motor_params:
+    # mujoco and mjlab only
+    solref_time_constant_range: [0.015, 0.03]
+    solref_dampratio_range: [0.5, 2.0]
+  actuator_pd_gains:
     stiffness_range:
       .*: [0.8, 1.1]
     damping_range:

@@ -80,21 +80,35 @@ class OptimizerGroup(torch.optim.Optimizer):
 
 
 class MuonAdamWWrapper(OptimizerGroup):
+    """Split 2-D (Muon) vs other (AdamW) params across modules.
+
+    Parameters
+    ----------
+    ignore_frozen
+        If True (default), parameters with ``requires_grad=False`` are omitted
+        from both optimizers (no optimizer state, no updates). If False, frozen
+        parameters are still registered; they are typically skipped at ``step``
+        when their gradient is ``None``.
+    """
+
     def __init__(
         self,
         modules: list[torch.nn.Module],
         lr: float,
         weight_decay: float = 0.01,
+        ignore_frozen: bool = True,
     ):
         seen: set[int] = set()
         muon_params: list[torch.nn.Parameter] = []
         adamw_params: list[torch.nn.Parameter] = []
         for module in modules:
-            for p in module.parameters():
+            for name, p in module.named_parameters():
                 if id(p) in seen:
                     continue
+                if ignore_frozen and not p.requires_grad:
+                    continue
                 seen.add(id(p))
-                if p.dim() == 2:
+                if p.dim() == 2 and not getattr(p, "_non_muon", False):
                     muon_params.append(p)
                 else:
                     adamw_params.append(p)
@@ -104,6 +118,12 @@ class MuonAdamWWrapper(OptimizerGroup):
             muon = torch.optim.Muon(muon_params, lr=lr, adjust_lr_fn="match_rms_adamw")
             optimizers.append(muon)
         if len(adamw_params) > 0:
-            adamw = torch.optim.AdamW(adamw_params, lr=lr, weight_decay=weight_decay)
+            adamw = torch.optim.AdamW(adamw_params, lr=lr, weight_decay=weight_decay, fused=True)
             optimizers.append(adamw)
+        if len(optimizers) == 0:
+            raise ValueError(
+                "MuonAdamWWrapper: no parameters were assigned to Muon or AdamW. "
+                "With ignore_frozen=True, every parameter may have requires_grad=False; "
+                "unfreeze at least some weights or pass ignore_frozen=False."
+            )
         super().__init__(optimizers)

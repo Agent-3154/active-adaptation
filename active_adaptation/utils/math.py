@@ -94,6 +94,11 @@ def yaw_rotate(yaw: torch.Tensor, vec: torch.Tensor):
     )
 
 
+def euler_rotate(rpy: torch.Tensor, vec: torch.Tensor):
+    quat = quat_from_euler_xyz(rpy)
+    return quat_rotate(quat, vec)
+
+
 def quat_from_yaw(yaw: torch.Tensor):
     return torch.cat(
         [
@@ -142,10 +147,7 @@ def quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     Raises:
         ValueError: Input shapes of ``q1`` and ``q2`` are not matching.
     """
-    # check input is correct
-    if q1.shape != q2.shape:
-        msg = f"Expected input quaternion shape mismatch: {q1.shape} != {q2.shape}."
-        raise ValueError(msg)
+    q1, q2 = torch.broadcast_tensors(q1, q2)
     # reshape to (N, 4) for multiplication
     shape = q1.shape
     q1 = q1.reshape(-1, 4)
@@ -265,6 +267,20 @@ def axis_angle_from_quat(quat: torch.Tensor, eps: float = 1.0e-6) -> torch.Tenso
         angle.abs() > eps, torch.sin(half_angle) / angle, 0.5 - angle * angle / 48
     )
     return quat[..., 1:4] / sin_half_angles_over_angles.unsqueeze(-1)
+
+
+def quat_angle_magnitude(quat: torch.Tensor, eps: float = 1.0e-9) -> torch.Tensor:
+    """Compute the rotation angle represented by a quaternion.
+
+    Args:
+        quat: The quaternion orientation in (w, x, y, z). Shape is (..., 4).
+        eps: Clamp for the scalar part to avoid undefined gradients near zero.
+
+    Returns:
+        Rotation angle in radians. Shape is (...,).
+    """
+    xyz_norm = torch.linalg.norm(quat[..., 1:], dim=-1)
+    return 2.0 * torch.atan2(xyz_norm, quat[..., 0].abs().clamp_min(eps))
 
 
 def sample_quat_yaw(size, yaw_range=(0, torch.pi * 2), device: torch.device = "cpu"):

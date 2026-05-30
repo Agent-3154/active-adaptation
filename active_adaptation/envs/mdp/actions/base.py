@@ -21,6 +21,10 @@ class Action(MDPComponent, RegistryMixin):
     @abc.abstractmethod
     def apply_action(self, substep: int):
         raise NotImplementedError
+    
+    def diagnostics(self) -> dict:
+        return {}
+
 
 __all__ = [
     "Action",

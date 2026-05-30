@@ -15,6 +15,17 @@ if TYPE_CHECKING:
 
 
 class Command(MDPComponent, RegistryMixin):
+    """High-level command source for the MDP.
+
+    Each env step, after simulation: ``update`` runs first, then rewards and
+    terminations read ``command_manager``, then ``step`` runs, then
+    observations are built. Override :meth:`update` to refresh command targets
+    and any tensors that rewards or terminations depend on. Override
+    :meth:`step` only when you need logic after reward/termination (e.g.
+    bookkeeping that must not affect this step's reward/termination, or state
+    consumed on the next step).
+    """
+
     def __init__(self, env: _EnvBase, teleop: bool = False) -> None:
         super().__init__(env)
         self.asset = env.scene.articulations["robot"]
@@ -22,6 +33,20 @@ class Command(MDPComponent, RegistryMixin):
         self.init_joint_pos = self.asset.data.default_joint_pos.clone()
         self.init_joint_vel = self.asset.data.default_joint_vel.clone()
         self.teleop = teleop
+    
+    def update(self) -> None:
+        """Refresh command targets and any tensors that rewards or terminations depend on."""
+        pass
+    
+    def step(self) -> None:
+        """Hook after rewards and terminations, before observations.
+
+        :meth:`update` runs earlier in the same env step so reward and
+        termination terms see the command state it sets. Use ``step`` for
+        follow-up work that should not influence this step's reward or
+        termination (most command implementations only need ``update``).
+        """
+        pass
 
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor | None:
         init_root_state = self.init_root_state[env_ids]

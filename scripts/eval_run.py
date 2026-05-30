@@ -95,19 +95,21 @@ def main():
     play_modes = sum([args.play, args.play_mujoco, args.play_mjlab])
     assert play_modes <= 1, "Use at most one of --play, --play_mujoco, --play_mjlab"
     if args.play:
+        # this will use the original backend during training
+        cfg["headless"] = False
         cfg["app"]["headless"] = False
         cfg["task"]["num_envs"] = 16
         cfg["export_policy"] = args.export
         play(cfg)
     elif args.play_mujoco:
         cfg["backend"] = "mujoco"
-        cfg["app"]["headless"] = False
+        cfg["headless"] = False
         cfg["task"]["num_envs"] = 1
         cfg["export_policy"] = args.export
         play(cfg)
     elif args.play_mjlab:
         cfg["backend"] = "mjlab"
-        cfg["app"]["headless"] = False
+        cfg["headless"] = False
         cfg["task"]["num_envs"] = 16
         cfg["export_policy"] = args.export
         play(cfg)

@@ -12,8 +12,9 @@ from omegaconf import OmegaConf, DictConfig
 from collections import OrderedDict
 from tqdm import tqdm
 from setproctitle import setproctitle
-
+from torchrl.envs import TransformedEnv
 from torchrl.envs.utils import set_exploration_type, ExplorationType
+from tensordict import TensorDictBase
 from tensordict.nn import TensorDictModuleBase
 
 import active_adaptation as aa
@@ -30,12 +31,103 @@ FILE_PATH = Path(__file__).resolve().parent
 CONFIG_PATH = FILE_PATH.parent / "cfg"
 
 
+class StackingCollector:
+    """Collect rollouts by appending per-step outputs then stacking.
+
+    This collector is simple and robust, but it allocates new per-step tensors
+    and a stacked output each iteration, which increases transient memory usage.
+    """
+
+    def __init__(
+        self,
+        env: TransformedEnv,
+        steps: int,
+        transitions: bool = False,
+    ):
+        self.env = env
+        self.steps = steps
+        self.transitions = transitions
+        self.device = env.device
+        self._observation_keys = list(env.observation_spec.keys(True, True))
+
+    @torch.no_grad()
+    @set_exploration_type(ExplorationType.RANDOM)
+    def collect(self, carry: TensorDictBase, rollout_policy: TensorDictModuleBase):
+        data = []
+        for _ in range(self.steps):
+            with ScopedTimer("policy_inference"):
+                carry = rollout_policy(carry)
+            td, carry = self.env.step_and_maybe_reset(carry)
+            private_keys = [
+                key
+                for key in td.keys(True, True)
+                if isinstance(key, str) and key.startswith("_")
+            ]
+            td = td.exclude(*private_keys)
+            if not self.transitions:
+                td["next"] = td["next"].exclude(*self._observation_keys)
+            if self.device is not None:
+                td = td.to(self.device)
+            data.append(td)
+        data = torch.stack(data, dim=1)
+        return data, carry
+
+
+class BufferCollector:
+    """Collect rollouts into a preallocated TensorDict buffer.
+
+    This collector reuses storage across iterations and can be more memory
+    efficient, but requires a fixed schema and careful handling of aliasing when
+    returning the internal buffer.
+    """
+
+    def __init__(self, env: TransformedEnv, steps: int, transitions: bool=False):
+        self.env = env
+        self.steps = steps
+        self.transitions = transitions
+        self._observation_keys = list(env.observation_spec.keys(True, True))
+        
+        buffer = env.fake_tensordict()
+        if not transitions:
+            buffer["next"] = buffer["next"].exclude(*self._observation_keys)
+        self._buffer = buffer.unsqueeze(1).expand(env.shape[0], steps).clone()
+        buffer_nbytes = sum(
+            value.numel() * value.element_size()
+            for _, value in self._buffer.items(True, True)
+            if torch.is_tensor(value)
+        )
+        logging.info(
+            "BufferCollector allocated %.2f MiB on %s",
+            buffer_nbytes / (1024**2),
+            self._buffer.device,
+        )
+    
+    @torch.no_grad()
+    @set_exploration_type(ExplorationType.RANDOM)
+    def collect(self, carry: TensorDictBase, rollout_policy: TensorDictModuleBase):
+        for i in range(self.steps):
+            with ScopedTimer("policy_inference"):
+                carry = rollout_policy(carry)
+            td, carry = self.env.step_and_maybe_reset(carry)
+            private_keys = [
+                key
+                for key in td.keys(True, True)
+                if isinstance(key, str) and key.startswith("_")
+            ]
+            td = td.exclude(*private_keys)
+            if not self.transitions:
+                td["next"] = td["next"].exclude(*self._observation_keys)
+            self._buffer[:, i] = td
+        # TensorDict.copy() returns a shallow copy
+        return self._buffer.copy(), carry
+
+
 @hydra.main(config_path=str(CONFIG_PATH), config_name="train", version_base=None)
 def main(cfg: DictConfig):
+    aa.init(cfg, auto_rank=True)
+
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
-
-    aa.init(cfg, auto_rank=True)
 
     print(
         f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}"
@@ -79,7 +171,8 @@ def main(cfg: DictConfig):
     checkpoint_interval = cfg.checkpoint_interval
     upload_interval = cfg.upload_interval
 
-    log_interval = (env.max_episode_length // cfg.algo.train_every) + 1
+    max_episode_length = cfg.task.max_episode_length
+    log_interval = (max_episode_length // cfg.algo.train_every) + 1
     logging.info(f"Log interval: {log_interval} steps")
 
     stats_keys = [
@@ -116,47 +209,12 @@ def main(cfg: DictConfig):
 
     ckpt_path = None
     carry = env.reset()
-    observation_keys = list(env.observation_spec.keys(True, True))
     transitions = cfg.algo.get("store_transitions", True)
-
-    @torch.no_grad()
-    @set_exploration_type(ExplorationType.RANDOM)
-    def collect(carry, rollout_policy: TensorDictModuleBase, transitions: bool=False):
-        """
-        If transitions is True, we collect and store transitions.
-        If transitions is False, we store only the trajectories. Due to autoreset, we do not have
-        the next states at terminal states. In this case, we approximate V_{t+1} with V_t.
-        """
-        data = []
-        for _ in range(cfg.algo.train_every):
-            carry = rollout_policy(carry)
-            td, carry = env.step_and_maybe_reset(carry)
-            private_keys = [
-                key
-                for key in td.keys(True, True)
-                if isinstance(key, str) and key.startswith("_")
-            ]
-            td = td.exclude(*private_keys)
-            if not transitions:
-                td["next"] = td["next"].exclude(*observation_keys)
-
-            data.append(td.to(policy.device))
-        data = torch.stack(data, dim=1)
-
-        if not transitions:
-            state_value = data["state_value"]
-            next_state_value = policy.compute_value(carry.copy())["state_value"]
-            next_state_value = torch.cat([
-                data["state_value"][:, 1:],
-                next_state_value.unsqueeze(1),
-            ], dim=1)
-            # since we have not stored the terminal states, we approximate V_{t+1} with V_t
-            data["next", "state_value"] = torch.where(
-                data["next", "done"],
-                state_value,
-                next_state_value,
-            )
-        return data, carry
+    collector = StackingCollector(
+        env,
+        steps=cfg.algo.train_every,
+        transitions=transitions,
+    )
 
     env_frames = 0
 
@@ -181,7 +239,20 @@ def main(cfg: DictConfig):
         for i in progress:
             rollout_start = time.perf_counter()
             with ScopedTimer("rollout") as rollout_timer:
-                data, carry = collect(carry, rollout_policy, transitions)
+                data, carry = collector.collect(carry, rollout_policy)
+                if not transitions:
+                    state_value = data["state_value"]
+                    next_state_value = policy.compute_value(carry.copy())["state_value"]
+                    next_state_value = torch.cat([
+                        data["state_value"][:, 1:],
+                        next_state_value.unsqueeze(1),
+                    ], dim=1)
+                    # Since terminal next observations are dropped, approximate V_{t+1} with V_t.
+                    data["next", "state_value"] = torch.where(
+                        data["next", "done"],
+                        state_value,
+                        next_state_value,
+                    )
             rollout_time = rollout_timer.last_time
 
             episode_stats.add(data)
@@ -196,9 +267,6 @@ def main(cfg: DictConfig):
             with ScopedTimer("training") as training_timer:
                 info.update(policy.train_op(data))
             training_time = training_timer.last_time
-
-            info.update(env.extra)
-            info.update(env.stats_ema)  # step-wise exponential moving average of stats
 
             if hasattr(policy, "step_schedule"):
                 policy.step_schedule(i / total_iters)
@@ -217,13 +285,15 @@ def main(cfg: DictConfig):
                 ckpt_path = save(policy, checkpoint_name, upload_to_wandb=should_upload)
 
             if aa.is_main_process():
-                ScopedTimer.print_summary(clear=True, depth=3)
+                ScopedTimer.print_summary(clear=True, depth=2)
                 print(
                     OmegaConf.to_yaml(
                         {k: v for k, v in info.items() if isinstance(v, (float, int))}
                     )
                 )
                 print(f"Latest checkpoint: {ckpt_path}")
+                info.update(env.extra)
+                info.update(env.stats_ema)  # step-wise exponential moving average of stats
                 run.log(info)
 
     if aa.is_main_process():

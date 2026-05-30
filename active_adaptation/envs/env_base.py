@@ -1,6 +1,7 @@
+import os
 import warnings
 from collections import OrderedDict
-from typing import Dict, Mapping, Tuple, cast
+from typing import Dict, Mapping, cast
 
 import numpy as np
 import torch
@@ -11,24 +12,28 @@ from torchrl.envs import EnvBase
 import active_adaptation
 import active_adaptation.envs.mdp as mdp
 import active_adaptation.utils.symmetry as symmetry_utils
-from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
+from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.video_recorder import (
     VideoRecorder,
     NullVideoRecorder,
     IsaacVideoRecorder,
+    RgbArrayVideoRecorder,
 )
 from active_adaptation.envs.utils import GroundQuery
 from active_adaptation.registry import RegistryMixin
-from active_adaptation.utils.profiling import ScopedTimer
 
 if active_adaptation.get_backend() == "isaac":
     import isaacsim.core.utils.torch as torch_utils
 
 
 EMA_DECAY = 0.99
-
-
+PROFILE_SYNC_TIMERS = os.environ.get("AA_PROFILE_SYNC_TIMERS", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 def parse_component_spec(name: str, cfg):
     if cfg is None or not hasattr(cfg, "items"):
         raise ValueError(f"Component '{name}' must be a mapping.")
@@ -83,7 +88,7 @@ class ObsGroup:
 
 
 class RewardGroup:
-    """Group of reward terms with internal EMA tracking for logging."""
+    """Group of reward terms; per-term EMA logging lives on each :class:`~mdp.Reward`."""
 
     def __init__(
         self,
@@ -103,38 +108,33 @@ class RewardGroup:
         self.rew_buf = torch.zeros(
             env.num_envs, self.enabled_rewards, device=env.device
         )
-        # EMA state per reward term (sum, count) for logging
-        self._ema: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {
-            key: (
-                torch.zeros(1, device=env.device),
-                torch.zeros(1, device=env.device),
-            )
-            for key in funcs.keys()
-        }
         if compile:
             self.compute = torch.compile(self.compute, fullgraph=True)
 
     def compute(self) -> torch.Tensor:
         rewards = []
+        if self.name in {"tracking", "tracking_metrics"}:
+            print_enabled = True
+            # print(f"Reward group '{self.name}':")
+        else:
+            print_enabled = False
         for key, func in self.funcs.items():
-            reward, count = func.compute()
+            reward = func.compute()
             self.env.stats[self.name, key].add_(reward)
-            ema_sum, ema_cnt = self._ema[key]
-            ema_sum.mul_(EMA_DECAY).add_(reward.sum())
-            cnt = count.item() if torch.is_tensor(count) else count
-            ema_cnt.mul_(EMA_DECAY).add_(cnt)
             if func.enabled:
                 rewards.append(reward)
         if len(rewards):
-            self.rew_buf[:] = torch.cat(rewards, 1)
+            self.rew_buf = torch.cat(rewards, 1)
         return self.rew_buf.sum(dim=1, keepdim=True)
 
     def get_ema_stats(self) -> Dict[str, float]:
-        """Return EMA mean per reward term (for logging)."""
-        result = {}
-        for key, (ema_sum, ema_cnt) in self._ema.items():
-            cnt = ema_cnt.clamp(min=1e-8)
-            result[key] = (ema_sum / cnt).item()
+        """Flatten per-term EMA metrics (e.g. mean, optional var) for logging."""
+        result: Dict[str, float] = {}
+        for key, func in self.funcs.items():
+            mean, var = func.get_ema_stats()
+            result[key] = mean.item()
+            if var is not None:
+                result[f"{key}_var"] = var.item()
         return result
 
 
@@ -153,12 +153,26 @@ class _EnvBase(EnvBase, RegistryMixin):
         self._setup_mdp_managers()
         self._build_tensor_specs()
 
-        [callback() for callback in self._startup_callbacks]
-
         self.timestamp: int = 0
         self.stats: TensorDict = self.reward_spec["stats"].zero()
         self.input_tensordict = None
         self.extra = {}
+        self._startup_done = False
+
+    @property
+    def max_episode_length(self) -> torch.Tensor:
+        return self._max_episode_length
+
+    @max_episode_length.setter
+    def max_episode_length(self, value: int | torch.Tensor):
+        if isinstance(value, int):
+            value = torch.full((self.num_envs, 1), value, device=self.device)
+        elif isinstance(value, torch.Tensor):
+            assert value.dtype == torch.long, "Max episode length must be an integer tensor"
+            assert value.shape == (self.num_envs, 1), "Max episode length must be a tensor of shape (num_envs, 1)"
+        else:
+            raise ValueError(f"Invalid type for max episode length: {type(value)}")
+        self._max_episode_length = value.to(self.device)
 
     # ---------------------------------------------------------------------
     # Initialization helpers
@@ -172,11 +186,11 @@ class _EnvBase(EnvBase, RegistryMixin):
             warnings.warn(
                 "Terrain type is not set. Please check if the scene is properly initialized."
             )
-        self.max_episode_length = int(self.cfg.max_episode_length)
         self.step_dt = float(self.cfg.sim.step_dt)
         self.physics_dt = float(self.sim.get_physics_dt())
         self.decimation = int(self.step_dt / self.physics_dt)
 
+        self.max_episode_length = int(self.cfg.max_episode_length)
         self.episode_length_buf = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device
         )
@@ -278,12 +292,14 @@ class _EnvBase(EnvBase, RegistryMixin):
             )
 
         # MDP: terminations
+        print("Termination functions:")
         for term_name, term_cfg in self.cfg.get("termination", {}).items():
             term_name, cls_name, term_kwargs = parse_component_spec(term_name, term_cfg)
             term = mdp.Termination.make(cls_name, self, **term_kwargs)
             if not term:
                 continue
             term = cast(mdp.Termination, term)
+            print(f"\t{term_name}: \t{'timeout' if term.is_timeout else 'termination'}")
             self.termination_funcs[term_name] = term
             self._add_mdp_component(term)
 
@@ -374,6 +390,13 @@ class _EnvBase(EnvBase, RegistryMixin):
     def set_progress(self, progress: int):
         self.current_iter = progress
 
+    @staticmethod
+    def _callback_label(callback) -> str:
+        owner = getattr(callback, "__self__", None)
+        if owner is not None:
+            return owner.__class__.__name__
+        return getattr(callback, "__qualname__", getattr(callback, "__name__", "callback"))
+
     @property
     def num_envs(self) -> int:
         return self.scene.num_envs
@@ -394,6 +417,10 @@ class _EnvBase(EnvBase, RegistryMixin):
     def _reset(
         self, tensordict: TensorDictBase | None = None, **kwargs
     ) -> TensorDictBase:
+        if not self._startup_done:
+            [callback() for callback in self._startup_callbacks]
+            self._startup_done = True
+            
         if tensordict is not None:
             env_mask = tensordict.get("_reset").reshape(self.num_envs)
             env_ids = env_mask.nonzero().squeeze(-1)
@@ -422,10 +449,8 @@ class _EnvBase(EnvBase, RegistryMixin):
         if not isinstance(init_state, dict):
             init_state = {"robot": init_state}
         for key, value in init_state.items():
-            if value is not None:
-                self.scene.articulations[key].write_root_state_to_sim(
-                    value, env_ids=env_ids
-                )
+            entity = self.scene[key]
+            entity.write_root_state_to_sim(value, env_ids=env_ids)
         self.stats[env_ids] = 0.0
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
@@ -441,16 +466,19 @@ class _EnvBase(EnvBase, RegistryMixin):
                     self._apply_action(substep)
                     [callback(substep) for callback in self._pre_step_callbacks]
                     self.scene.write_data_to_sim()
-                with ScopedTimer("simulation_step", sync=False):
+                with ScopedTimer("simulation_step", sync=PROFILE_SYNC_TIMERS):
                     self.sim.step(render=False)
                 with ScopedTimer("simulation_post_step", sync=False):
-                    self.scene.update(self.physics_dt)
-                    [callback(substep) for callback in self._post_step_callbacks]
+                    with ScopedTimer("scene.update", sync=PROFILE_SYNC_TIMERS):
+                        self.scene.update(self.physics_dt)
+                    with ScopedTimer("post_step_callbacks", sync=False):
+                        [callback(substep) for callback in self._post_step_callbacks]
+            # TODO: test if this is needed
+            # if self.backend == "mjlab":
+            #     with ScopedTimer("simulation_forward", sync=PROFILE_SYNC_TIMERS):
+            #         self.sim._sim.forward()
 
-            with ScopedTimer("update_callbacks", sync=False):
-                [callback() for callback in self._update_callbacks]
-
-        if self.sim.has_gui():
+        if self.sim.has_gui() and self.backend != "mjlab":
             self.sim.render()
 
         self.episode_length_buf.add_(1)
@@ -458,12 +486,19 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
 
+        with ScopedTimer("command_update", sync=False):
+            self.command_manager.update()
+        with ScopedTimer("update_callbacks", sync=False):
+            [callback() for callback in self._update_callbacks]
+            # for callback in self._update_callbacks:
+            #     with ScopedTimer(f"{callback.__self__.__class__.__name__}", sync=False):
+            #         callback()
         with ScopedTimer("reward", sync=False):
             tensordict = self._compute_reward(tensordict)
         with ScopedTimer("termination", sync=False):
             tensordict = self._compute_termination(tensordict)
-        with ScopedTimer("command", sync=False):
-            self.command_manager.update()
+        with ScopedTimer("command_step", sync=False):
+            self.command_manager.step()
         with ScopedTimer("observation", sync=False):
             tensordict = self._compute_observation(tensordict)
 
@@ -502,17 +537,16 @@ class _EnvBase(EnvBase, RegistryMixin):
         if self.mult_dt:
             rewards *= self.step_dt
 
-        self.stats["episode_len"][:] = self.episode_length_buf.unsqueeze(1)
+        self.stats["episode_len"][:] = self.episode_length_buf.reshape(self.num_envs, 1)
         self.stats["success"][:] = (
-            (self.episode_length_buf >= self.max_episode_length * 0.9)
-            .unsqueeze(1)
+            (self.episode_length_buf.reshape(self.num_envs, 1) >= self.max_episode_length * 0.9)
             .float()
         )
         tensordict.set("reward", rewards)
         return tensordict
 
     def _compute_termination(self, tensordict: TensorDictBase) -> TensorDictBase:
-        truncated = self.episode_length_buf[:, None] >= self.max_episode_length
+        truncated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
         terminated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
         discount = torch.ones((self.num_envs, 1), device=self.device)
         for key, func in self.termination_funcs.items():
@@ -574,13 +608,16 @@ class _EnvBase(EnvBase, RegistryMixin):
                 ...
                 rec.add_frame()
 
-        For non-Isaac backends, or when ``enabled`` is False, this returns a
-        no-op recorder so call sites don't need to branch.
+        For backends with ``rgb_array`` rendering support, this returns a
+        streaming recorder. Otherwise, or when ``enabled`` is False, this
+        returns a no-op recorder so call sites don't need to branch.
         """
         if not enabled:
             return NullVideoRecorder()
         if self.backend == "isaac":
             return IsaacVideoRecorder(self, path, enabled=True)
+        if self.backend == "mjlab":
+            return RgbArrayVideoRecorder(self, path, enabled=True)
         # Other backends: return a no-op recorder by default.
         return NullVideoRecorder()
 
@@ -593,10 +630,14 @@ class _EnvBase(EnvBase, RegistryMixin):
             except ModuleNotFoundError:
                 pass
             return torch_utils.set_seed(seed)
-        if self.backend == "mujoco":
+        elif self.backend == "mujoco":
             torch.manual_seed(seed)
             np.random.seed(seed)
-            return seed
+        elif self.backend == "mjlab":
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+        else:
+            raise ValueError(f"Unknown backend: {self.backend}")
 
     def render(self, mode: str = "human"):
         self.sim.render()
@@ -609,9 +650,11 @@ class _EnvBase(EnvBase, RegistryMixin):
                     *rgb_data.shape
                 )
                 return rgb_data[:, :, :3]
+            if self.backend == "mjlab":
+                return self.sim.render_rgb_array()
             raise NotImplementedError(
                 f"rgb_array mode not supported for backend '{self.backend}'. "
-                "Only Isaac backend supports rgb_array rendering."
+                "Only Isaac and mjlab backends support rgb_array rendering."
             )
         raise NotImplementedError(f"Render mode '{mode}' not supported.")
 
@@ -622,8 +665,10 @@ class _EnvBase(EnvBase, RegistryMixin):
         state_dict["reward_spec"] = self.reward_spec
         return state_dict
 
-    def get_extra_state(self) -> dict:
-        return dict(self.extra)
+    def diagnostics(self) -> dict:
+        d = dict(self.extra)
+        d.update(self.action_manager.diagnostics())
+        return d
 
     def close(self, *, raise_if_closed: bool = True):
         if not self.is_closed:
@@ -631,7 +676,8 @@ class _EnvBase(EnvBase, RegistryMixin):
                 del self.scene
                 self.sim.clear_all_callbacks()
                 self.sim.clear_instance()
-            elif self.backend == "mjlab" and self.sim.has_gui():
-                self.sim.viewer.close()
+            elif self.backend == "mjlab":
+                if self.sim.has_gui():
+                    self.sim.viewer.close()
+                self.sim.close()
             super().close(raise_if_closed=raise_if_closed)
-

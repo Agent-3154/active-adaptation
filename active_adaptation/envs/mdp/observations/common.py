@@ -63,17 +63,24 @@ class root_linacc_substep(Observation):
 
 
 class command(Observation):
-    def __init__(self, env):
+    def __init__(self, env, key: str = None):
         super().__init__(env)
         self.command_manager = self.env.command_manager
+        self.key = key
 
     @override
     def compute(self):
-        return self.command_manager.command
+        if self.key is not None:
+            return self.command_manager.command(self.key)
+        else:
+            return self.command_manager.command
     
     @override
     def symmetry_transform(self):
-        return self.command_manager.symmetry_transform()
+        if self.key is not None:
+            return self.command_manager.symmetry_transform(self.key)
+        else:
+            return self.command_manager.symmetry_transform()
 
 
 # class command_hidden(Observation):

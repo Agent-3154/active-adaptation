@@ -31,7 +31,7 @@ input:
       waist_roll_joint: 0.439
       waist_pitch_joint: 0.439
       .*ankle.*: 0.439
-      .*shoulder.*: 0.173
+      .*shoulder.*: 0.346
       .*elbow_joint: 0.173
       # .*wrist_roll.*: 0.173
       # .*wrist_pitch.*: 0.293
@@ -94,7 +94,7 @@ randomization:
     static_friction_range: [0.6, 2.0]
     dynamic_friction_range: [0.6, 2.0]
     restitution_range: [0.0, 0.2]
-  motor_params:
+  actuator_pd_gains:
     stiffness_range:
       .*: [0.8, 1.1]
     damping_range:
@@ -110,6 +110,7 @@ randomization:
     decay: 0.9
 
 termination:
+  max_episode_length: {}
   crash: 
     body_names_expr:
     - "pelvis"

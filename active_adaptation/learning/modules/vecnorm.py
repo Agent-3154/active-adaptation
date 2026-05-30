@@ -76,9 +76,16 @@ class VecNorm(nn.Module):
     def forward(self, input_vector: torch.Tensor):
         if not self.FROZEN:
             self._update(input_vector)
+        return self._normalize(input_vector)
+
+    def _normalize(self, input_vector: torch.Tensor):
         mean, std = self._compute()
         return (input_vector - mean) / std
-    
+
+    def denormalize(self, input_vector: torch.Tensor):
+        mean, std = self._compute()
+        return input_vector * std + mean
+
     def _update(self, input_vector: torch.Tensor):
         input_vector = input_vector.reshape(-1, *self.input_shape)
         if len(self.reduction_dims):
@@ -88,6 +95,11 @@ class VecNorm(nn.Module):
         else:
             sum_ = input_vector
             ssq_ = input_vector.square()
+        # Keep running-stat updates in buffer dtype (float32 by default).
+        # This avoids in-place dtype mismatches for fp16/bf16 inputs and is
+        # numerically safer for long-horizon accumulation.
+        sum_ = sum_.to(self.sum.dtype)
+        ssq_ = ssq_.to(self.ssq.dtype)
         if self.decay < 1.0:
             self.count.mul_(self.decay).add_(input_vector.shape[0])
             self.sum.mul_(self.decay).add_(sum_.sum(0))
@@ -119,32 +131,33 @@ class VecNorm(nn.Module):
         if not dist.is_available() or not dist.is_initialized():
             raise RuntimeError("Distributed training is not initialized")
 
-        if mode == "broadcast":
-            # Make all ranks identical to rank 0 by broadcasting buffers
-            dist.broadcast(self.sum, src=0)
-            dist.broadcast(self.ssq, src=0)
-            dist.broadcast(self.count, src=0)
-        elif mode == "aggregate":
-            # Aggregate raw moments across ranks
-            if self.decay < 1.0:
-                # EMA case: buffers store weighted sums (numerators) and effective counts
-                dist.all_reduce(self.sum, op=dist.ReduceOp.SUM)
-                dist.all_reduce(self.ssq, op=dist.ReduceOp.SUM)
-                dist.all_reduce(self.count, op=dist.ReduceOp.SUM)
+        with torch.no_grad():
+            if mode == "broadcast":
+                # Make all ranks identical to rank 0 by broadcasting buffers
+                dist.broadcast(self.sum, src=0)
+                dist.broadcast(self.ssq, src=0)
+                dist.broadcast(self.count, src=0)
+            elif mode == "aggregate":
+                # Aggregate raw moments across ranks
+                if self.decay < 1.0:
+                    # EMA case: buffers store weighted sums (numerators) and effective counts
+                    dist.all_reduce(self.sum, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(self.ssq, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(self.count, op=dist.ReduceOp.SUM)
+                else:
+                    # Non-EMA: buffers store means; with equal per-rank counts, average across ranks.
+                    world_size = dist.get_world_size()
+                    # Use float64 accumulators to reduce risk of overflow/precision loss
+                    mean_buf = self.sum.to(dtype=torch.float64)
+                    m2_buf = self.ssq.to(dtype=torch.float64)
+                    dist.all_reduce(mean_buf, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(m2_buf, op=dist.ReduceOp.SUM)
+                    mean_global = (mean_buf / world_size).to(dtype=self.sum.dtype)
+                    m2_global = (m2_buf / world_size).to(dtype=self.ssq.dtype)
+                    self.sum.copy_(mean_global)
+                    self.ssq.copy_(m2_global)
             else:
-                # Non-EMA: buffers store means; with equal per-rank counts, average across ranks.
-                world_size = dist.get_world_size()
-                # Use float64 accumulators to reduce risk of overflow/precision loss
-                mean_buf = self.sum.to(dtype=torch.float64)
-                m2_buf = self.ssq.to(dtype=torch.float64)
-                dist.all_reduce(mean_buf, op=dist.ReduceOp.SUM)
-                dist.all_reduce(m2_buf, op=dist.ReduceOp.SUM)
-                mean_global = (mean_buf / world_size).to(dtype=self.sum.dtype)
-                m2_global = (m2_buf / world_size).to(dtype=self.ssq.dtype)
-                self.sum.copy_(mean_global)
-                self.ssq.copy_(m2_global)
-        else:
-            raise ValueError(f"Invalid mode: {mode}")
+                raise ValueError(f"Invalid mode: {mode}")
     
 
     class freeze(_DecoratorContextManager):
@@ -190,4 +203,3 @@ if __name__ == "__main__":
         vecnorm(torch.randn(4096, 4) * torch.tensor([1, -2, 3, -4]))
     mean, std = vecnorm._compute()
     print(mean.squeeze(0), std.squeeze(0))
-

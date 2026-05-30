@@ -34,17 +34,10 @@ class NullVideoRecorder(VideoRecorder):
         return None
 
 
-class IsaacVideoRecorder(VideoRecorder):
-    """Video recorder for Isaac backend using Replicator rgb annotator.
-
-    Frames are buffered in memory and written on context exit so that videos are
-    still saved when the loop is interrupted with KeyboardInterrupt.
-    """
+class RgbArrayVideoRecorder(VideoRecorder):
+    """Stream frames from any backend that supports ``env.render("rgb_array")``."""
 
     def __init__(self, env, path: str | os.PathLike, enabled: bool = True, fps: Optional[int] = None):
-        # Only Isaac backend with replicator is expected to support rgb_array.
-        if not hasattr(env, "_rgb_annotator"):
-            raise ValueError("Environment does not have a `_rgb_annotator` for rgb_array rendering.")
         self._env = env
         self._enabled = bool(enabled)
         self._path = Path(path)
@@ -64,8 +57,16 @@ class IsaacVideoRecorder(VideoRecorder):
         if not self._enabled or self._writer is None:
             return
         frame = self._env.render("rgb_array")
-        # Ensure we have an H x W x 3 uint8 array on CPU.
-        frame_np = np.asarray(frame, dtype=np.uint8)
+        if frame is None:
+            raise ValueError("Environment returned no frame for rgb_array rendering.")
+        frame_np = np.asarray(frame)
+        if frame_np.ndim != 3:
+            raise ValueError(
+                f"Expected an HxWxC frame from rgb_array rendering, got shape {frame_np.shape!r}."
+            )
+        if frame_np.shape[-1] == 4:
+            frame_np = frame_np[..., :3]
+        frame_np = np.asarray(frame_np, dtype=np.uint8)
         self._writer.append_data(frame_np)
 
     def close(self):
@@ -77,3 +78,6 @@ class IsaacVideoRecorder(VideoRecorder):
         self._writer = None
         print(f"Video saved to: {self._path}")
 
+
+class IsaacVideoRecorder(RgbArrayVideoRecorder):
+    """Backward-compatible alias for older imports."""

@@ -87,6 +87,7 @@ reward:
     # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
+  max_episode_length: {}
   crash: {body_names_expr: [Head.*, base], t_thres: 0.06}
   fall_over: {xy_thres: 0.9}
   undesired_contact: {body_names: [Head.*, .*_calf]}
@@ -100,7 +101,7 @@ randomization:
   #   static_friction_range:  {".*_foot": [0.5, 4.0]}
   #   dynamic_friction_range: {".*_foot": [0.5, 4.0]}
   #   restitution_range:      {".*_foot": [0.0, 0.5]}
-  motor_params:
+  actuator_pd_gains:
     stiffness_range:
       .*: [0.8, 1.1]
     damping_range:

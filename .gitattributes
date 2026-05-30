@@ -1,0 +1,3 @@
+# uv: avoid line-by-line merges of the generated lockfile (resolve by picking one
+# side, then run `uv lock` after merging pyproject.toml).
+uv.lock merge=binary

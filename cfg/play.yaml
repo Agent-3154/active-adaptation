@@ -1,6 +1,6 @@
 hydra:
   run:
-    dir: ./outputs_play/${now:%Y-%m-%d}/${now:%H-%M-%S}-${task.name}-${algo.name}
+    dir: ./outputs/play/${now:%Y-%m-%d}/${now:%H-%M-%S}-${task.name}-${algo.name}
 
 headless: false
 
@@ -16,6 +16,7 @@ app: # isaac-specific
 seed: 42
 checkpoint_path: null
 export_policy: false
+discard_unused_obs: true
 
 defaults:
   - task: Velocity

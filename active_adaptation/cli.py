@@ -1,14 +1,11 @@
 import argparse
+import json
 import subprocess
 import warnings
-import argparse
-import importlib
-import importlib.util
-import importlib.metadata
-import json
 from pathlib import Path
 
-from .project_loading.manifest import CACHE_DIR, load_projects
+from .project_loading.discovery import _task_dir_for_path, discover_projects
+from .project_loading.manifest import CACHE_DIR, PROJECTS_FILE, load_projects, save_projects
 
 
 def aa_pull():
@@ -34,11 +31,10 @@ def aa_pull():
         print("Pulling active projects only")
 
     projects = load_projects()
-    project_paths = set()
-    project_paths.add(Path(__file__).resolve().parents[2])
+    project_paths = {Path(__file__).resolve().parents[1]}
 
-    for category in ["environment", "learning"]:
-        for project_info in projects[category].values():
+    for category in ("environment", "learning"):
+        for project_info in projects.get(category, {}).values():
             if args.all or project_info["enabled"]:
                 project_paths.add(Path(project_info["path"]))
 
@@ -50,79 +46,70 @@ def aa_pull():
             warnings.warn(
                 f"Failed to pull {project_path} with result: {result.returncode}"
             )
-            print(result.stderr)
 
 
 def aa_discover_projects(enabled: bool = False):
-    projects_file = CACHE_DIR / "projects.json"
-    if projects_file.exists():
-        projects = json.loads(projects_file.read_text())
-    else:
-        projects = {
-            "environment": {},
-            "learning": {},
-        }
-    for entry_point in importlib.metadata.entry_points(group="active_adaptation.projects"):
-        # get the module path
-        spec = importlib.util.find_spec(entry_point.value)
-        try:
-            # note that `value` may differ from `name`
-            pkg_path = Path(spec.origin).parent.absolute()
-        except Exception as e:
-            raise ValueError(f"Entrypoint {str(entry_point)} is invalid.") from e
+    projects = discover_projects(enabled=enabled)
 
-        env_projects = projects.setdefault("environment", {})
-        project_info = env_projects.setdefault(
-            entry_point.name,
-            {
-                "value": entry_point.value,
-                "path": str(pkg_path),
-                "type": "environment",
-                "enabled": enabled,
-            },
-        )
-        # Ensure path/value stay in sync with the entry point
-        project_info.setdefault("value", entry_point.value)
-        project_info.setdefault("path", str(pkg_path))
-
+    for project_info in projects.get("environment", {}).values():
         task_dir = _task_dir_for_path(Path(project_info["path"]))
         project_info["task_dir"] = str(task_dir) if task_dir is not None else None
-        print(f"Discovered project: {entry_point.name} at {project_info['path']}")
 
-    for entry_point in importlib.metadata.entry_points(group="active_adaptation.learning"):
-        # get the module path
-        spec = importlib.util.find_spec(entry_point.value)
-        try:
-            # note that `value` may differ from `name`
-            pkg_path = Path(spec.origin).parent.absolute()
-        except Exception as e:
-            raise ValueError(f"Entrypoint {str(entry_point)} is invalid.") from e
+    save_projects(projects)
+    print(f"Modify {PROJECTS_FILE} to enable/disable projects.")
+    return projects
 
-        learning_projects = projects.setdefault("learning", {})
-        project_info = learning_projects.setdefault(
-            entry_point.name,
-            {
-                "value": entry_point.value,
-                "path": str(pkg_path),
-                "type": "learning",
-                "enabled": enabled,
-            },
+
+def aa_project():
+    """
+    Enable or disable a logical project in projects.json.
+
+    The same entry-point name may appear under \"environment\" and/or \"learning\";
+    both parts are updated together when present.
+    """
+    parser = argparse.ArgumentParser(
+        description="Enable or disable a project (environment and/or learning manifest entries)",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+    for cmd, help_text in (
+        ("enable", "Turn the project on for imports and aa-pull (default scope)"),
+        ("disable", "Turn the project off"),
+    ):
+        p = sub.add_parser(cmd, help=help_text)
+        p.add_argument(
+            "name",
+            metavar="NAME",
+            help="Entry-point name as in projects.json (e.g. same as pyproject entry point name)",
         )
-        # Ensure path/value stay in sync with the entry point
-        project_info.setdefault("value", entry_point.value)
-        project_info.setdefault("path", str(pkg_path))
-        print(f"Discovered learning module: {entry_point.name} at {project_info['path']}")
-    projects_file.write_text(json.dumps(projects, indent=2))
-    print(f"Modify {projects_file} to enable/disable projects.")
+    args = parser.parse_args()
+    name = args.name.strip()
+    if not name:
+        raise SystemExit("Project name must be non-empty.")
 
+    projects = load_projects()
+    env = projects.setdefault("environment", {})
+    learning = projects.setdefault("learning", {})
+    in_env = name in env
+    in_learning = name in learning
 
-def _task_dir_for_path(project_path: Path) -> Path | None:
-    """Return cfg/task directory for a project path, or None if not found."""
-    for candidate in (project_path, project_path.parent, project_path.parent.parent):
-        task_dir = candidate / "cfg" / "task"
-        if task_dir.is_dir():
-            return task_dir
-    return None
+    if not in_env and not in_learning:
+        raise SystemExit(
+            f"Unknown project {name!r}: not in environment or learning manifest. "
+            f"Run aa-discover-projects first."
+        )
+
+    enabled = args.command == "enable"
+    updated: list[str] = []
+    if in_env:
+        env[name]["enabled"] = enabled
+        updated.append("environment")
+    if in_learning:
+        learning[name]["enabled"] = enabled
+        updated.append("learning")
+
+    save_projects(projects)
+    state = "enabled" if enabled else "disabled"
+    print(f"Project {name!r} {state} ({', '.join(updated)}).")
 
 
 def aa_list_tasks():
@@ -131,25 +118,23 @@ def aa_list_tasks():
     all projects from projects.json. Task names preserve the directory prefix
     (e.g. "G1/G1LocoFlat" instead of "G1LocoFlat").
     """
-    # active-adaptation's own cfg/task
-    repo_root = Path(__file__).parent.parent
+    repo_root = Path(__file__).resolve().parents[1]
     task_dirs: list[tuple[str, Path]] = []
     main_task_dir = repo_root / "cfg" / "task"
     if main_task_dir.is_dir():
         task_dirs.append(("active-adaptation", main_task_dir))
 
-    # cfg/task from each project in projects.json
-    projects_file = CACHE_DIR / "projects.json"
-    if projects_file.exists():
-        projects = json.loads(projects_file.read_text())
-        for project_name, project_info in projects.get("environment", {}).items():
-            task_dir_str = project_info.get("task_dir")
-            if task_dir_str:
-                task_dir = Path(task_dir_str)
-            if task_dir is not None and task_dir.is_dir() and not any(
-                d == task_dir for _, d in task_dirs
-            ):
-                task_dirs.append((project_name, task_dir))
+    projects = load_projects()
+    for project_name, project_info in projects.get("environment", {}).items():
+        task_dir_str = project_info.get("task_dir")
+        task_dir = Path(task_dir_str) if task_dir_str else _task_dir_for_path(
+            Path(project_info["path"])
+        )
+        if task_dir is None or not task_dir.is_dir():
+            continue
+        if any(existing_task_dir == task_dir for _, existing_task_dir in task_dirs):
+            continue
+        task_dirs.append((project_name, task_dir))
 
     for source_name, task_dir in task_dirs:
         for yaml_path in sorted(task_dir.rglob("*.yaml")):

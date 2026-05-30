@@ -51,10 +51,12 @@ from active_adaptation.learning.ppo.common import (
     make_batch,
     make_mlp,
     Actor,
+    Critic,
 )
 from active_adaptation.learning.ppo.ppo_base import PPOBase
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import check_parameters
+from active_adaptation.learning.utils.dormancy import DormancyTracker
 
 import active_adaptation as aa
 import torch.distributed as distr
@@ -72,6 +74,7 @@ class PPOConfig:
     clip_param: float = 0.2
     entropy_coef: float = 0.002
 
+    activation: str = "Mish"
     muon: bool = False # use Muon optimizer
     
     # symmetry options
@@ -118,14 +121,15 @@ class PPOPolicy(PPOBase):
 
         self.action_dim = env.action_manager.action_dim
         
+        activation = getattr(nn, self.cfg.activation)
         self.vecnorm = Seq(Mod(vecnorm, [OBS_KEY], ["_obs_normed"])).to(self.device)
         actor_module = Seq(
-            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_actor_feature"]),
+            Mod(make_mlp([256, 256, 256], activation=activation), ["_obs_normed"], ["_actor_feature"]),
             Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
         )
         self.critic = Seq(
-            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_critic_feature"]),
-            Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
+            Mod(make_mlp([256, 256, 256], activation=activation), ["_obs_normed"], ["_critic_feature"]),
+            Mod(Critic(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 
         if self.cfg.symnet:
@@ -175,6 +179,7 @@ class PPOPolicy(PPOBase):
                 for param in self.critic.parameters():
                     distr.broadcast(param, src=0)
         self.world_size = aa.get_world_size()
+        self.should_reduce_grads = aa.is_distributed() and not self.cfg.use_ddp
         
         if self.cfg.muon:
             self.opt = MuonAdamWWrapper(
@@ -194,15 +199,24 @@ class PPOPolicy(PPOBase):
 
         self.update = self._update
         if self.cfg.compile and not aa.is_distributed():
-            self.update = torch.compile(self.update, fullgraph=True)
+            self.update = torch.compile(self.update)
+        self._rollout_dormancy_tracker: Union[DormancyTracker, None] = None
 
     def get_rollout_policy(self, mode: str="train", critic: bool = False):
+        if self._rollout_dormancy_tracker is not None:
+            self._rollout_dormancy_tracker.close()
+            self._rollout_dormancy_tracker = None
+
         if critic:
             policy = Seq(self.vecnorm, self.critic, self.actor)
         else:
             policy = Seq(self.vecnorm, self.actor)
         if self.cfg.compile:
-            policy = torch.compile(policy, fullgraph=True)
+            policy = torch.compile(policy)
+        if self.cfg.debug:
+            tracker = DormancyTracker(policy)
+            policy.forward = tracker.wrap(policy.forward)
+            self._rollout_dormancy_tracker = tracker
         return policy
 
     def compute_value(self, tensordict):
@@ -253,8 +267,15 @@ class PPOPolicy(PPOBase):
         infos["actor/pg_loss_raw_before"] = pg_loss_before.mean().item()
         infos["critic/value_mean"] = tensordict["ret"].mean().item()
         infos["critic/value_std"] = tensordict["ret"].std().item()
+        infos["critic/value_max"] = tensordict["ret"].max().item()
         infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
         infos["critic/valid_ratio"] = valid_ratio.item()
+        
+        if self.cfg.debug and self._rollout_dormancy_tracker is not None:
+            dormancy = self._rollout_dormancy_tracker.compute_dormancy()
+            for module_name, value in dormancy.items():
+                infos[f"dormancy/{module_name}"] = value
+            self._rollout_dormancy_tracker.reset()
 
         if aa.is_distributed() and aa.is_main_process():
             loc_diffs, scale_diffs = check_vecnorm_divergence(self.vecnorm[0].module)
@@ -299,7 +320,7 @@ class PPOPolicy(PPOBase):
         self.opt.zero_grad()
         loss.backward()
 
-        if aa.is_distributed() and not self.cfg.use_ddp:
+        if self.should_reduce_grads:
             for param in self.actor.parameters():
                 distr.all_reduce(param.grad.data, op=distr.ReduceOp.SUM)
                 param.grad.data /= self.world_size

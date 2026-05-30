@@ -58,23 +58,33 @@ class IsaacBackendEnv(_EnvBase):
         )
 
         asset_cfg = registry.get("asset", self.cfg.robot.name)
-        if not isinstance(asset_cfg, AssetCfg):
+        if callable(asset_cfg):
+            asset_cfg, sensors = asset_cfg(backend="isaaclab")
+            scene_cfg.robot = asset_cfg
+            for name, sensor_cfg in sensors.items():
+                setattr(scene_cfg, name, sensor_cfg)
+        elif isinstance(asset_cfg, AssetCfg):
+            scene_cfg.robot = asset_cfg.isaaclab()
+            for sensor_cfg in asset_cfg.sensors_isaaclab:
+                setattr(scene_cfg, sensor_cfg.name, sensor_cfg.isaaclab())
+        else:
             raise ValueError(
-                "Asset configuration must be an instance of AssetCfg, "
+                "Asset configuration must be an instance of AssetCfg or callable, "
                 f"got {type(asset_cfg)}"
             )
-        scene_cfg.robot = asset_cfg.isaaclab()
-        for sensor_cfg in asset_cfg.sensors_isaaclab:
-            setattr(scene_cfg, sensor_cfg.name, sensor_cfg.isaaclab())
 
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
         terrain_name = self.cfg.get("terrain", "plane")
         scene_cfg.terrain = registry.get("terrain", terrain_name)
 
-        for obj in self.cfg.get("objects", []):
-            obj_cfg = registry.get("asset", obj.name).isaaclab()
-            obj_cfg.prim_path = "{ENV_REGEX_NS}/" + obj.name
-            setattr(scene_cfg, obj.name, obj_cfg)
+        from isaaclab.assets import ArticulationCfg, RigidObjectCfg
+
+        for obj_name, spec in self.cfg.get("objects", {}).items():
+            fn = registry.get("asset", spec.pop("_target_"))
+            cfg = fn(backend="isaaclab", **spec)
+            assert isinstance(cfg, (ArticulationCfg, RigidObjectCfg)), f"Asset configuration must be an instance of ArticulationCfg or RigidObjectCfg, got {type(cfg)}"
+            cfg.prim_path = "{ENV_REGEX_NS}/" + obj_name
+            setattr(scene_cfg, obj_name, cfg)
 
         sim_cfg = sim_utils.SimulationCfg(
             dt=self.cfg.sim.isaac_physics_dt,

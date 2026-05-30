@@ -2,24 +2,17 @@ import torch
 import hydra
 import numpy as np
 import time
-import wandb
-import logging
 import os
 import datetime
-
-from typing import Sequence
-from tensordict import TensorDictBase, TensorDict
-from tensordict.nn import TensorDictModuleBase as ModBase
+import imageio.v2 as imageio
 
 from termcolor import colored
-from collections import OrderedDict
-from torchvision.io import write_video
 from omegaconf import OmegaConf, DictConfig
-from active_adaptation.utils.wandb import parse_checkpoint_path, parse_checkpoint, CheckpointBase
+from tensordict import TensorDictBase
+from active_adaptation.utils.wandb import parse_checkpoint, CheckpointBase
+from active_adaptation.utils.profiling import ScopedTimer
 
 import active_adaptation
-
-# active_adaptation.import_projects()
 
 class Every:
     def __init__(self, func, steps):
@@ -33,7 +26,10 @@ class Every:
         self.i += 1
 
 
-def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
+def make_env_policy(
+    cfg: DictConfig,
+    checkpoint: CheckpointBase | None = None
+):
     OmegaConf.set_struct(cfg, False)
     cfg.seed = cfg.seed + active_adaptation.get_local_rank()
     
@@ -57,14 +53,17 @@ def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
     if policy_in_keys is None:
         raise ValueError("Specify `in_keys` (e.g., `policy`, `priv`) in `cfg.algo`.")
 
-    for obs_group_key in list(cfg.task.observation.keys()):
-        if (
-            obs_group_key not in policy_in_keys
-            and not obs_group_key.endswith("_")
-        ):
-            cfg.task.observation.pop(obs_group_key)
-            print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
-    
+    if cfg.discard_unused_obs:
+        def should_discard(key: str) -> bool:
+            return (
+                key not in policy_in_keys
+                and not key.endswith("_")
+            )
+        for obs_group_key in list(cfg.task.observation.keys()):
+            if should_discard(obs_group_key):
+                cfg.task.observation.pop(obs_group_key)
+                print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
+
     base_env = env_cls(cfg.task, str(cfg.device), headless=cfg.headless)
 
     if checkpoint is None:
@@ -72,6 +71,7 @@ def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
     if checkpoint is not None:
         checkpoint.update()
     checkpoint_path = checkpoint.get_path() if checkpoint else None
+    print(f"[Info]: Using checkpoint from: {checkpoint_path}")
     if checkpoint_path is not None:
         state_dict = torch.load(checkpoint_path, weights_only=False)
     else:
@@ -135,8 +135,9 @@ def evaluate(
 
     inference_time = []
     torch.compiler.cudagraph_mark_step_begin()
-    with set_exploration_type(exploration_type):
-        for i in tqdm(range(env.max_episode_length), miniters=10):
+    max_episode_length = env.cfg.max_episode_length
+    with ScopedTimer("rollout"), set_exploration_type(exploration_type):
+        for i in tqdm(range(max_episode_length), miniters=10):
             s = time.perf_counter()
             tensordict_ = policy(tensordict_)
             e = time.perf_counter()
@@ -171,12 +172,11 @@ def evaluate(
     # log video
     if len(frames):
         time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
-        video_array = np.stack(frames)
-        frames.clear()
         video_path = os.path.join(os.path.dirname(__file__), f"recording-{time_str}.mp4")
-        write_video(
-            video_path, video_array=video_array, fps=int(1 / env.step_dt), video_codec="h264"
-        )
+        with imageio.get_writer(video_path, fps=int(1 / env.step_dt), codec="h264") as writer:
+            for frame in frames:
+                writer.append_data(np.asarray(frame, dtype=np.uint8))
+        frames.clear()
 
     info["episode_cnt"] = episode_cnt
     return dict(sorted(info.items())), trajs, stats

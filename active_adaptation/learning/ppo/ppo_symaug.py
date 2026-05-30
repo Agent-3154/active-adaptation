@@ -47,6 +47,7 @@ from active_adaptation.learning.ppo.common import (
     ppo_clipped_loss,
     spo_loss,
     normalize,
+    CMD_KEY,
     OBS_KEY,
     ACTION_KEY,
     REWARD_KEY,
@@ -56,9 +57,13 @@ from active_adaptation.learning.ppo.common import (
     make_batch,
     make_mlp,
     Actor,
+    Critic,
+    CatTensors,
 )
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import check_parameters
+from active_adaptation.learning.utils.dormancy import DormancyTracker
+from active_adaptation.utils.profiling import ScopedTimer
 
 import active_adaptation as aa
 import torch.distributed as distr
@@ -76,6 +81,7 @@ class PPOConfig:
     clip_param: float = 0.2
     entropy_coef: float = 0.002
 
+    activation: str = "Mish"
     spo: bool = False # use Simple Policy Optimization Loss
     muon: bool = False # use Muon optimizer
     aux_coef: float = 0.0 # loss coefficient for auxiliary prediction loss
@@ -84,10 +90,15 @@ class PPOConfig:
     use_ddp: bool = True
     debug: bool = False # enable correctness checkers
 
-    in_keys: Tuple[str, ...] = (OBS_KEY,)
+    in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY,) # CMD_KEY is optional. One can embed the command into the observation.
 
 cs = ConfigStore.instance()
 cs.store("ppo_symaug", node=PPOConfig, group="algo")
+
+
+def vecnorm_sync_(module: nn.Module):
+    if isinstance(module, VecNorm):
+        module.synchronize(mode="broadcast")
 
 
 class PPOPolicy(TensorDictModuleBase):
@@ -103,6 +114,8 @@ class PPOPolicy(TensorDictModuleBase):
     ):
         super().__init__()
         self.cfg = PPOConfig(**cfg)
+        if self.cfg.debug and self.cfg.compile:
+            raise ValueError("Debug mode and compile mode cannot be enabled together")
         self.device = device
 
         self.entropy_coef = self.cfg.entropy_coef
@@ -115,22 +128,30 @@ class PPOPolicy(TensorDictModuleBase):
 
         fake_input = observation_spec.zero()
         
+        if CMD_KEY in observation_spec.keys(True, True):
+            self.cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transform().to(self.device)
+            obs_dim = observation_spec[OBS_KEY].shape[-1]
+            cmd_dim = observation_spec[CMD_KEY].shape[-1]
+            self.vecnorm = Seq(
+                CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False),
+                Mod(VecNorm((obs_dim + cmd_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
+            ).to(self.device)
+            self.training_keys = [CMD_KEY, OBS_KEY, ACTION_KEY]
+        else:
+            self.cmd_transform = None
+            obs_dim = observation_spec[OBS_KEY].shape[-1]
+            self.vecnorm = Mod(VecNorm((obs_dim,), decay=1.0), [OBS_KEY], ["_obs_normed"]).to(self.device)
+            self.training_keys = [OBS_KEY, ACTION_KEY]
+        
+        # the keys needed for `_update`
+        self.training_keys += ["action_log_prob", "adv", "ret", "is_init"]
         self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform().to(self.device)
         self.act_transform = env.action_manager.symmetry_transform().to(self.device)
         self.action_dim = env.action_manager.action_dim
 
-        self.vecnorm = Mod(
-            VecNorm(
-                input_shape=observation_spec[OBS_KEY].shape[-1:],
-                stats_shape=observation_spec[OBS_KEY].shape[-1:],
-                decay=1.0
-            ),
-            in_keys=[OBS_KEY],
-            out_keys=["_obs_normed"]
-        ).to(self.device)
-        
+        activation = getattr(nn, self.cfg.activation)
         actor_modules = [
-            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_actor_feature"]),
+            Mod(make_mlp([256, 256, 256], activation=activation), ["_obs_normed"], ["_actor_feature"]),
             Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
         ]
         if self.cfg.aux_coef > 0.0:
@@ -145,8 +166,8 @@ class PPOPolicy(TensorDictModuleBase):
         ).to(self.device)
         
         self.critic = Seq(
-            Mod(make_mlp([256, 256, 256]), ["_obs_normed"], ["_critic_feature"]),
-            Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
+            Mod(make_mlp([256, 256, 256], activation=activation), ["_obs_normed"], ["_critic_feature"]),
+            Mod(Critic(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 
         self.vecnorm(fake_input)
@@ -173,6 +194,7 @@ class PPOPolicy(TensorDictModuleBase):
                     distr.broadcast(param, src=0)
                 for param in self.critic.parameters():
                     distr.broadcast(param, src=0)
+        self.should_reduce_grads = aa.is_distributed() and not self.cfg.use_ddp
         self.world_size = aa.get_world_size()
 
         if self.cfg.muon:
@@ -193,20 +215,27 @@ class PPOPolicy(TensorDictModuleBase):
 
         self.update = self._update
         if self.cfg.compile and not aa.is_distributed():
-            # TODO: compile for multi-gpu training?
-            self.update = torch.compile(self.update, fullgraph=True)
-            # self.update = CudaGraphModule(self.update)
+            self.update = torch.compile(self.update)
+        self._rollout_dormancy_tracker: Union[DormancyTracker, None] = None
     
     def on_stage_start(self, stage: str):
         pass
 
     def get_rollout_policy(self, mode: str="train", critic: bool = False):
+        if self._rollout_dormancy_tracker is not None:
+            self._rollout_dormancy_tracker.close()
+            self._rollout_dormancy_tracker = None
+
         if critic:
             policy = Seq(self.vecnorm, self.actor, self.critic)
         else:
             policy = Seq(self.vecnorm, self.actor)
         if self.cfg.compile:
-            policy = torch.compile(policy, fullgraph=True)
+            policy = torch.compile(policy)
+        if self.cfg.debug:
+            tracker = DormancyTracker(policy)
+            policy.forward = tracker.wrap(policy.forward)
+            self._rollout_dormancy_tracker = tracker
         return policy
 
     @VecNorm.freeze()
@@ -215,16 +244,24 @@ class PPOPolicy(TensorDictModuleBase):
 
         tensordict = tensordict.exclude("stats")
         infos = []
-        self.compute_advantage(tensordict, self.critic, "adv", "ret")
+        with ScopedTimer("compute_advantage"):
+            self.compute_advantage(tensordict, self.critic, "adv", "ret")
         action = tensordict[ACTION_KEY]
         adv_unnormalized = tensordict["adv"]
         log_probs_before = tensordict["action_log_prob"]
-        tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
+        adv = tensordict["adv"]
+        adv_mean = adv.mean()
+        adv_std = adv.std()
+        adv = (adv - adv_mean) / adv_std.clamp_min(1e-7)
+        tensordict["adv"] = adv
 
+        td = tensordict.select(*self.training_keys)
         for epoch in range(self.cfg.ppo_epochs):
-            batch = make_batch(tensordict, self.cfg.num_minibatches)
+            batch = make_batch(td, self.cfg.num_minibatches)
             for minibatch in batch:
-                infos.append(self.update(minibatch))
+                minibatch = self._augment_symmetry(minibatch)
+                with ScopedTimer("update_minibatch"):
+                    infos.append(self.update(minibatch))
                 
                 if self.desired_kl is not None: # adaptive learning rate
                     kl = infos[-1]["actor/kl"]
@@ -239,24 +276,37 @@ class PPOPolicy(TensorDictModuleBase):
             tensordict_ = self.actor(tensordict.copy())
             dist = IndependentNormal(tensordict_["loc"], tensordict_["scale"])
             log_probs_after = dist.log_prob(action)
-            pg_loss_after = log_probs_after.reshape_as(adv_unnormalized) * adv_unnormalized
-            pg_loss_before = log_probs_before.reshape_as(adv_unnormalized) * adv_unnormalized
-            actor_feature = tensordict_["_actor_feature"].reshape(-1, tensordict_["_actor_feature"].shape[-1]) # [N*T, D]
-            critic_feature = tensordict_["_critic_feature"].reshape(-1, tensordict_["_critic_feature"].shape[-1]) # [N*T, D]
-            actor_effective_rank = effective_rank(actor_feature)
-            critic_effective_rank = effective_rank(critic_feature)
+            log_ratio = (log_probs_after - log_probs_before).reshape_as(adv_unnormalized)
+            # log π_new/π_old · A: first-order signal of whether the post-update policy
+            # shifts log-prob in the direction favored by the (unnormalized) advantage.
+            policy_gain = log_ratio * adv_unnormalized
+            # r(θ) · A with r = exp(log_ratio) = π_new/π_old; same weighted term as in
+            # the unclipped PPO surrogate, useful to monitor IS-weighted advantage mass.
+            weighted_ratio = log_ratio.exp() * adv_unnormalized
+            actor_effective_rank = effective_rank(tensordict_["_actor_feature"])
+            critic_effective_rank = effective_rank(tensordict_["_critic_feature"])
                 
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
         infos["actor/lr"] = self.opt.param_groups[0]["lr"]
-        infos["actor/pg_loss_raw_after"] = pg_loss_after.mean().item()
-        infos["actor/pg_loss_raw_before"] = pg_loss_before.mean().item()
+        infos["actor/policy_gain"] = policy_gain.mean().item()
+        infos["actor/weighted_ratio"] = weighted_ratio.mean().item()
         infos["actor/effective_rank"] = actor_effective_rank.item()
         infos["critic/effective_rank"] = critic_effective_rank.item()
         infos["critic/value_mean"] = tensordict["ret"].mean().item()
         infos["critic/value_std"] = tensordict["ret"].std().item()
+        infos["critic/value_max"] = tensordict["ret"].max().item()
         infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
+        infos["critic/adv_mean"] = adv_mean.item()
+        infos["critic/adv_std"] = adv_std.item()
+
+        if self.cfg.debug and self._rollout_dormancy_tracker is not None:
+            dormancy = self._rollout_dormancy_tracker.compute_dormancy()
+            for module_name, value in dormancy.items():
+                infos[f"dormancy/{module_name}"] = value
+            self._rollout_dormancy_tracker.reset()
+        
         if aa.is_distributed():
-            self.vecnorm.module.synchronize(mode="broadcast")
+            self.vecnorm.apply(vecnorm_sync_)
             if self.cfg.debug:
                 actor_diff = check_parameters(self.actor)
                 critic_diff = check_parameters(self.critic)
@@ -296,18 +346,20 @@ class PPOPolicy(TensorDictModuleBase):
         tensordict.set(ret_key, ret)
         return tensordict
 
-    def _update(self, tensordict: TensorDict):
-        bsize = tensordict.shape[0]
-        loc_old, scale_old = tensordict["loc"], tensordict["scale"]
-
+    def _augment_symmetry(self, tensordict: TensorDict) -> TensorDict:
         symmetry = tensordict.empty()
         symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
+        if self.cmd_transform is not None:
+            symmetry[CMD_KEY] = self.cmd_transform(tensordict[CMD_KEY])
         symmetry[OBS_KEY] = self.obs_transform(tensordict[OBS_KEY])
         symmetry["action_log_prob"] = tensordict["action_log_prob"]
         symmetry["adv"] = tensordict["adv"]
         symmetry["ret"] = tensordict["ret"]
         symmetry["is_init"] = tensordict["is_init"]
-        tensordict = torch.cat([tensordict.select(*symmetry.keys(True, True)), symmetry], dim=0)
+        return torch.cat([tensordict, symmetry])
+
+    def _update(self, tensordict: TensorDict):
+        bsize = tensordict.shape[0] // 2
 
         self.vecnorm(tensordict)
         
@@ -336,15 +388,16 @@ class PPOPolicy(TensorDictModuleBase):
 
         loss = policy_loss + entropy_loss + value_loss
         if self.cfg.aux_coef > 0.0:
-            aux_loss = (tensordict["aux_pred"].reshape_as(ret) - ret).square() * clamped
-            aux_loss = aux_loss.sum() / clamped.sum().clamp_min(1.0)
+            aux_weight = clamped.float() * valid
+            aux_loss = (tensordict["aux_pred"].reshape_as(ret) - ret).square() * aux_weight
+            aux_loss = aux_loss.sum() / aux_weight.sum().clamp_min(1.0)
             loss += self.cfg.aux_coef * aux_loss
         else:
-            aux_loss = torch.tensor(0.0)
+            aux_loss = ret.new_zeros(())
         self.opt.zero_grad()
         loss.backward()
 
-        if aa.is_distributed() and not self.cfg.use_ddp:
+        if self.should_reduce_grads:
             for param in self.actor.parameters():
                 distr.all_reduce(param.grad, op=distr.ReduceOp.SUM)
                 param.grad /= self.world_size
@@ -359,13 +412,7 @@ class PPOPolicy(TensorDictModuleBase):
         with torch.no_grad():
             explained_var = 1 - F.mse_loss(values, ret) / ret.var()
             clipfrac = clamped.float().mean()
-            loc, scale = dist.loc[:bsize], dist.scale[:bsize]
-            kl = torch.sum(
-                torch.log(scale) - torch.log(scale_old)
-                + (torch.square(scale_old) + torch.square(loc_old - loc)) / (2.0 * torch.square(scale))
-                - 0.5,
-                axis=-1,
-            ).mean()
+            approx_kl = ((ratio - 1.0) - log_ratio).mean()
             symmetry_loss = F.mse_loss(dist.mean[bsize:], self.act_transform(dist.mean[:bsize]))
             actor_feature_norm = torch.norm(tensordict["_actor_feature"], dim=-1).mean()
             critic_feature_norm = torch.norm(tensordict["_critic_feature"], dim=-1).mean()
@@ -374,7 +421,7 @@ class PPOPolicy(TensorDictModuleBase):
             "actor/entropy": entropy.detach(),
             "actor/grad_norm": actor_grad_norm,
             "actor/clamp_ratio": clipfrac,
-            "actor/kl": kl,
+            "actor/approx_kl": approx_kl,
             "actor/aux_loss": aux_loss,
             "actor/symmetry_loss": symmetry_loss.detach(),
             "actor/feature_norm": actor_feature_norm.detach(),
@@ -415,6 +462,7 @@ def effective_rank(X: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
     Uses p_i = σ_i² / Σσ_j² so p is the proportion of variance in each principal direction.
     Lower values indicate loss of expressivity (variance concentrated in few dimensions).
     """
+    X = X.reshape(-1, X.shape[-1])
     if X.numel() == 0 or X.shape[0] < 2 or X.shape[1] < 2:
         return torch.tensor(0.0, device=X.device, dtype=X.dtype)
     S = torch.linalg.svdvals(X)
@@ -425,4 +473,3 @@ def effective_rank(X: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
     p = S2 / S2.sum().clamp_min(eps)
     entropy = -(p * (p + eps).log()).sum()
     return entropy.exp()
-

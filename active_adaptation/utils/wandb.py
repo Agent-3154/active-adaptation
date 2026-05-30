@@ -25,7 +25,6 @@ import datetime
 import json
 import logging
 import math
-import os
 import threading
 import time
 from pathlib import Path
@@ -39,8 +38,6 @@ from omegaconf import OmegaConf
 from typing import Union
 
 import active_adaptation as aa
-
-from torch import distributed as torch_dist
 
 def dict_flatten(a: dict, delim="."):
     """Flatten a dict recursively.
@@ -301,6 +298,8 @@ class FileCheckpoint(CheckpointBase):
 class WandbCheckpoint(CheckpointBase):
     """Checkpoint from wandb run: run:<entity>/<project>/<run_id>[:<iteration>]. Fetched once in update()."""
     remote: bool = True
+    _DIST_WAIT_TIMEOUT_SEC = 300.0
+    _DIST_POLL_INTERVAL_SEC = 0.5
 
     def __init__(self, spec: str, api: "wandb.Api | None" = None) -> None:
         init_start = time.perf_counter()
@@ -318,13 +317,8 @@ class WandbCheckpoint(CheckpointBase):
             f"iteration={self._iteration}"
         )
         if api is None:
-            print("[WandbCheckpoint] creating wandb.Api()")
-            api_start = time.perf_counter()
-            self._api = wandb.Api()
-            print(
-                f"[WandbCheckpoint] wandb.Api() ready "
-                f"({time.perf_counter() - api_start:.2f}s)"
-            )
+            self._api = None
+            print("[WandbCheckpoint] deferring wandb.Api() creation")
         else:
             self._api = api
             print("[WandbCheckpoint] using injected wandb.Api")
@@ -339,6 +333,14 @@ class WandbCheckpoint(CheckpointBase):
     @property
     def run(self) -> "wandb.wandb_sdk.wandb_run.Run":
         if self._run is None:
+            if self._api is None:
+                print("[WandbCheckpoint] creating wandb.Api()")
+                api_start = time.perf_counter()
+                self._api = wandb.Api()
+                print(
+                    f"[WandbCheckpoint] wandb.Api() ready "
+                    f"({time.perf_counter() - api_start:.2f}s)"
+                )
             print(f"[WandbCheckpoint] fetching run metadata: {self._run_path}")
             run_start = time.perf_counter()
             self._run = self._api.run(self._run_path)
@@ -386,18 +388,24 @@ class WandbCheckpoint(CheckpointBase):
                     return -1
             checkpoints.sort(key=sort_by_time)
             checkpoint_file = checkpoints[-1]
-        path = str(root / checkpoint_file.name)
+        path = root / checkpoint_file.name
         last_ckpt_file = root / "last_checkpoint.txt"
         
         if last_ckpt_file.exists() and (root / checkpoint_file.name).exists():
             if last_ckpt_file.read_text().strip() == checkpoint_file.name:
                 logging.debug("Wandb checkpoint unchanged (%s), using cache", checkpoint_file.name)
                 print(f"[WandbCheckpoint] using cached checkpoint: {checkpoint_file.name}")
-                return path
+                return str(path)
             
-        print(f"[WandbCheckpoint] downloading checkpoint file: {checkpoint_file.name}")
+        print(f"[WandbCheckpoint] downloading checkpoint to {path}")
         download_start = time.perf_counter()
-        checkpoint_file.download(str(root), exist_ok=True)
+        try:
+            checkpoint_file.download(str(root), exist_ok=True)
+        except Exception as e:
+            # delete any partially downloaded file to avoid confusion on next attempt
+            if path.exists():
+                path.unlink()
+            raise e
         size_mb = checkpoint_file.size / (1024 * 1024)
         print(
             f"[WandbCheckpoint] downloaded checkpoint to {path} "
@@ -407,41 +415,71 @@ class WandbCheckpoint(CheckpointBase):
         iteration_str = Path(checkpoint_file.name).stem.split("_")[-1]
         iteration_val: Union[int, str] = int(iteration_str) if iteration_str.isdigit() else iteration_str
         
-        _manifest_add_file(run, checkpoint_file.name, Path(path), kind="checkpoint", iteration=iteration_val)
+        _manifest_add_file(
+            run,
+            checkpoint_file.name,
+            path,
+            kind="checkpoint",
+            iteration=iteration_val,
+        )
         print("[WandbCheckpoint] _download done")
-        return path
-    
+        return str(path)
+
     def _download_rank0(self) -> str:
         world_size = aa.get_world_size()
-        rank = aa.get_local_rank()
-        
-        if world_size > 1:
-            marker_name = (
-                ".dist_checkpoint_path_"
-                + self._run_path.replace("/", "__").replace(":", "_")
-                + ".txt"
-            )
-            marker_path = _get_store_dir() / marker_name
-            if rank == 0:
-                print(f"[WandbCheckpoint] distributed update: rank 0 downloading for world_size={world_size}")
-                path = self._download()
-                marker_path.write_text(path)
-            else:
-                env_rank = os.getenv("LOCAL_RANK", "?")
-                print(
-                    "[WandbCheckpoint] distributed update: "
-                    f"rank {rank} (LOCAL_RANK={env_rank}) waiting at barrier"
-                )
+        if world_size <= 1:
+            return self._download()
 
-            torch_dist.barrier()
-            if rank != 0:
-                if not marker_path.exists():
-                    raise RuntimeError(f"Checkpoint marker missing after barrier: {marker_path}")
-                path = marker_path.read_text().strip()
-                print(f"[WandbCheckpoint] rank {rank} using checkpoint path from marker: {path}")
-        else:
-            path = self._download()
-        return path
+        rank = aa.get_local_rank()
+        marker_name = (
+            ".dist_checkpoint_path_"
+            + self._run_path.replace("/", "__").replace(":", "_")
+            + ".json"
+        )
+        marker_path = _get_store_dir() / marker_name
+        if rank == 0:
+            print(
+                f"[WandbCheckpoint] distributed update: rank 0 downloading for world_size={world_size}"
+            )
+            try:
+                path = self._download()
+                payload = {"ok": True, "path": str(path), "error": None}
+            except Exception as exc:
+                payload = {"ok": False, "path": None, "error": repr(exc)}
+                marker_tmp = marker_path.with_suffix(".json.tmp")
+                marker_tmp.write_text(json.dumps(payload))
+                marker_tmp.replace(marker_path)
+                raise
+
+            marker_tmp = marker_path.with_suffix(".json.tmp")
+            marker_tmp.write_text(json.dumps(payload))
+            marker_tmp.replace(marker_path)
+            return str(path)
+
+        print(f"[WandbCheckpoint] distributed update: rank {rank} waiting for rank 0")
+        start = time.perf_counter()
+        while True:
+            if marker_path.exists():
+                payload = json.loads(marker_path.read_text())
+                if not payload.get("ok"):
+                    raise RuntimeError(
+                        f"Rank 0 failed to prepare W&B checkpoint {self._run_path}: "
+                        f"{payload.get('error')}"
+                    )
+                path = payload.get("path")
+                if not path:
+                    raise RuntimeError(
+                        f"Checkpoint marker missing path for {self._run_path}: {marker_path}"
+                    )
+                print(
+                    f"[WandbCheckpoint] rank {rank} using checkpoint path from rank 0: {path}"
+                )
+                return path
+            if time.perf_counter() - start > self._DIST_WAIT_TIMEOUT_SEC:
+                raise TimeoutError(
+                    f"Timed out waiting for rank 0 checkpoint marker: {marker_path}"
+                )
+            time.sleep(self._DIST_POLL_INTERVAL_SEC)
     
     def update(self) -> None:
         if self._path is None:

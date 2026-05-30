@@ -25,6 +25,7 @@ render_interval: -1
 render_decimation: 4
 seed: 42
 checkpoint_path: null
+discard_unused_obs: true
 
 camera_follow: true
 

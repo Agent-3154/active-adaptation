@@ -122,6 +122,7 @@ class IsaacSceneAdapter(SceneAdapter):
         from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
         import isaaclab.sim as sim_utils
 
+        color = tuple(map(float, color))
         marker = VisualizationMarkers(
             VisualizationMarkersCfg(
                 prim_path=prim_path,

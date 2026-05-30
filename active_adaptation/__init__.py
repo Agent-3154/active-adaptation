@@ -29,6 +29,7 @@ _CALLED_AT = None
 _LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
 _WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
 _MAIN_PROCESS = _LOCAL_RANK == 0
+_ISAACLAB_EXCLUDED_EXTENSIONS = ("omni.warp.core",)
 
 
 def is_main_process():
@@ -45,6 +46,26 @@ def get_local_rank():
 
 def get_world_size():
     return _WORLD_SIZE
+
+
+def _append_kit_arg(existing: str, arg: str) -> str:
+    existing = existing.strip()
+    if not existing:
+        return arg
+    if arg in existing:
+        return existing
+    return f"{existing} {arg}"
+
+
+def _apply_default_isaaclab_kit_args(app_config: dict) -> dict:
+    kit_args = str(app_config.get("kit_args", "") or "")
+    for index, extension in enumerate(_ISAACLAB_EXCLUDED_EXTENSIONS):
+        kit_args = _append_kit_arg(
+            kit_args,
+            f"--/app/extensions/excluded/{index}={extension}",
+        )
+    app_config["kit_args"] = kit_args
+    return app_config
 
 
 # Save original print function
@@ -123,23 +144,26 @@ def init(cfg: DictConfig, auto_rank: bool):
     elif _BACKEND == "mujoco":
         cfg.device = "cpu"  # force to use CPU for mujoco
 
-    if auto_rank and str(cfg.device).startswith("cuda"):
+    if auto_rank and (str(cfg.device) == "cuda"):
         cfg.device = f"cuda:{get_local_rank()}"
 
     if is_distributed():
+        import torch
         import torch.distributed as dist
 
         if dist.is_available() and not dist.is_initialized():
             dist.init_process_group(
                 backend="nccl",
-                world_size=get_world_size(),
-                rank=get_local_rank(),
+                # world_size=get_world_size(),
+                # rank=get_local_rank(),
+                init_method="env://",
             )
 
     if get_backend() == "isaac":
         from isaaclab.app import AppLauncher
 
-        app_config = OmegaConf.to_container(cfg.app)
+        app_config = OmegaConf.to_container(cfg.app, resolve=True)
+        app_config = _apply_default_isaaclab_kit_args(app_config)
         AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
 
     import_environment_projects()

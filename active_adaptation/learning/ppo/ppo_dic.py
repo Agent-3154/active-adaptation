@@ -403,7 +403,7 @@ class PPODICPolicy(TensorDictModuleBase):
             "adapt_hx": UnboundedContinuous((num_envs, 128), device=self.device),
             # "prev_action": UnboundedContinuous((num_envs, self.action_dim), device=self.device),
             # "prev_loc": UnboundedContinuous((num_envs, self.action_dim), device=self.device),
-        }, reset_key="done")
+        }, reset_key="done", expand_specs=False)
 
     def get_rollout_policy(self, mode: str="train"):
         modules = []

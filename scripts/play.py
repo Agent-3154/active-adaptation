@@ -41,10 +41,10 @@ def export_policy(env, policy, export_dir):
 
 @hydra.main(config_path=str(CONFIG_PATH), config_name="play", version_base=None)
 def main(cfg: DictConfig):
+    aa.init(cfg, auto_rank=True)
+
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
-
-    aa.init(cfg, auto_rank=True)
     
     from active_adaptation.helpers import make_env_policy
     checkpoint = parse_checkpoint(cfg.checkpoint_path)

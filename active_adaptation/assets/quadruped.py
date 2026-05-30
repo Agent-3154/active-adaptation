@@ -5,6 +5,7 @@ from active_adaptation.assets.asset_cfg import (
     InitialStateCfg,
     ActuatorCfg,
     ContactSensorCfg,
+    MjlabCollisionCfg,
 )
 from active_adaptation.registry import Registry
 from active_adaptation.utils.symmetry import mirrored
@@ -227,7 +228,7 @@ UNITREE_A2_CFG = AssetCfg(
             primary=".*",
             secondary=[],
             track_air_time=True,
-            history_length=3
+            history_length=3,
         ),
     ],
     sensors_mjlab=[
@@ -236,7 +237,26 @@ UNITREE_A2_CFG = AssetCfg(
             primary=".*",
             secondary=[],
             track_air_time=True,
-            history_length=3
+            history_length=3,
+            # Use "body" not "subtree": subtree uses mjOBJ_XBODY so contacts on
+            # descendant geoms (e.g. feet) count toward ancestors (base/thigh),
+            # unlike Isaac per-link sensors; body mode matches Isaac-style behavior.
+            primary_contact_match_mode="body",
+            primary_contact_match_pattern=".*",
+            primary_contact_match_entity="robot",
+            secondary_contact_match_mode="body",
+            secondary_contact_match_pattern="terrain",
+        ),
+    ],
+    mjlab_collisions=[
+        # no self collisions
+        MjlabCollisionCfg(
+            geom_names_expr=(".*_collision",),
+            contype=0,
+            conaffinity=1,
+            condim=3,
+            priority=1,
+            friction=(0.6, 0.01, 0.01),
         ),
     ],
     body_names_simulation=[
@@ -256,7 +276,7 @@ UNITREE_A2_CFG = AssetCfg(
         "FL_foot",
         "FR_foot",
         "RL_foot",
-        "RR_foot"
+        "RR_foot",
     ],
     joint_names_simulation=[
         "FL_hip_joint",
@@ -270,7 +290,7 @@ UNITREE_A2_CFG = AssetCfg(
         "FL_calf_joint",
         "FR_calf_joint",
         "RL_calf_joint",
-        "RR_calf_joint"
+        "RR_calf_joint",
     ],
 )
 
@@ -305,7 +325,12 @@ UNITREE_B2_CFG = AssetCfg(
             primary=".*",
             secondary=[],
             track_air_time=True,
-            history_length=3
+            history_length=3,
+            primary_contact_match_mode="body",
+            primary_contact_match_pattern=".*",
+            primary_contact_match_entity="robot",
+            secondary_contact_match_mode="body",
+            secondary_contact_match_pattern="terrain",
         ),
     ],
     actuators={
@@ -340,5 +365,5 @@ UNITREE_B2_CFG = AssetCfg(
     }),
 )
 
-registry.register("asset", "unitree_a2", UNITREE_A2_CFG)
-registry.register("asset", "unitree_b2", UNITREE_B2_CFG)
+# registry.register("asset", "unitree_a2", UNITREE_A2_CFG)
+# registry.register("asset", "unitree_b2", UNITREE_B2_CFG)

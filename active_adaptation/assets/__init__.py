@@ -2,23 +2,19 @@ from .asset_cfg import (
     AssetCfg,
     InitialStateCfg,
     ActuatorCfg,
-    ContactSensorCfg,
-    get_input_joint_indexing,
-    get_output_joint_indexing,
-    get_output_body_indexing,
+    ContactSensorCfg
 )
 from . import quadruped
+from . import quadrupeds
 from . import humanoid
-from pathlib import Path
+from . import dummy_objects
 
-ASSET_DIR = Path(__file__).parent
 
 __all__ = [
     "AssetCfg",
     "InitialStateCfg",
     "ActuatorCfg",
     "ContactSensorCfg",
-    "ASSET_DIR",
     "get_input_joint_indexing",
     "get_output_joint_indexing",
     "get_output_body_indexing",
