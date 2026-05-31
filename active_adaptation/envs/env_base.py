@@ -110,6 +110,9 @@ class RewardGroup:
         )
         if compile:
             self.compute = torch.compile(self.compute, fullgraph=True)
+    
+    def __getitem__(self, key: str) -> mdp.Reward:
+        return self.funcs[key]
 
     def compute(self) -> torch.Tensor:
         rewards = []

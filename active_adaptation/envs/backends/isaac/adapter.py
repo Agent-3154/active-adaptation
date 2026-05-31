@@ -165,6 +165,32 @@ class IsaacSceneAdapter(SceneAdapter):
         marker.set_visibility(True)
         return marker
 
+    def create_frame_marker(
+        self,
+        prim_path: str,
+        scale: tuple[float, float, float] = (0.5, 0.5, 0.5),
+    ):
+        """Create an Isaac Lab VisualizationMarkers with a single frame (for GUI debug).
+
+        Returns a VisualizationMarkers instance. Call .set_visibility(True) and
+        .visualize(positions_tensor) to use it.
+        """
+        from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, ISAAC_NUCLEUS_DIR
+        import isaaclab.sim as sim_utils
+        marker = VisualizationMarkers(
+            VisualizationMarkersCfg(
+                prim_path=prim_path,
+                markers={
+                    "frame": sim_utils.UsdFileCfg(
+                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
+                        scale=scale,
+                    )
+                },
+            )
+        )
+        marker.set_visibility(True)
+        return marker
+
     @override
     def get_spawn_origins(self, env_ids: torch.Tensor) -> torch.Tensor:
         if self._scene.terrain.terrain_origins is None:

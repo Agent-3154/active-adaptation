@@ -10,10 +10,12 @@ from typing_extensions import override
 
 from active_adaptation.utils.math import (
     euler_rotate,
+    quat_mul,
     quat_rotate,
     quat_rotate_inverse,
     wrap_to_pi,
     yaw_quat,
+    quat_from_euler_xyz
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
 from .base import Command
@@ -108,7 +110,11 @@ class SingleEEFLocoManip(Command):
             # (x,y): horizontal offsets in yaw-aligned frame; z: height above ground at target xy.
             self.cmd_eef_pos_b = torch.zeros(self.num_envs, 3)
             self.cmd_eef_pos_w = torch.zeros(self.num_envs, 3)
-            self.eef_pos_w = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_pos_pd = torch.zeros(self.num_envs, 2)
+            self.cmd_eef_pos_pd[:, 0].uniform_(5.0, 10.0)
+            self.cmd_eef_pos_pd[:, 1] = 2.0 * self.cmd_eef_pos_pd[:, 0].sqrt()  # kd, ζ=1
+            self.cmd_eef_vel_w = torch.zeros(self.num_envs, 3)  # computed by a PD controller
+            self.eef_rot_w = torch.zeros(self.num_envs, 4)
 
             self.pos_diff_w = torch.zeros(self.num_envs, 3)
             self.pos_diff_b = torch.zeros(self.num_envs, 3)
@@ -121,12 +127,15 @@ class SingleEEFLocoManip(Command):
             # in world frame mode, we sample world-frame forward and compute the corresponding body-frame target
             self.eef_forward_w = torch.zeros(self.num_envs, 3)
             self.eef_forward_b = torch.zeros(self.num_envs, 3)
+            self.eef_upward_w = torch.zeros(self.num_envs, 3)
+            self.eef_upward_b = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_rot_b = torch.zeros(self.num_envs, 4)
+
             self.cmd_eef_forward_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_forward_b = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_upward_w = torch.zeros(self.num_envs, 3)
+            self.cmd_eef_upward_b = torch.zeros(self.num_envs, 3)
 
-            # self.eef_up_w = torch.zeros(self.num_envs, 3)
-            self.cmd_eef_vel_b = torch.zeros(self.num_envs, 3)
-            self.cmd_eef_vel_w = torch.zeros(self.num_envs, 3)
             self.is_world_goal_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.local_env_ids = torch.empty(0, dtype=torch.long)
             self.world_env_ids = torch.empty(0, dtype=torch.long)
@@ -160,14 +169,42 @@ class SingleEEFLocoManip(Command):
             self.scene: IsaacSceneAdapter = self.env.scene
             self.marker = self.scene.create_sphere_marker(
                 "/Visuals/Command/target_eef_pos",
-                (1.0, 0.4, 0.0),
+                color=(1.0, 0.4, 0.0),
                 radius=0.03,
             )
             self.standoff_marker = self.scene.create_sphere_marker(
                 "/Visuals/Command/standoff_pos",
-                (0.0, 0.7, 1.0),
+                color=(0.0, 0.7, 1.0),
                 radius=0.04,
             )
+            self.eef_pose_marker = self.scene.create_frame_marker(
+                "/Visuals/Command/target_eef_pose",
+                scale=(0.1, 0.1, 0.1),
+            )
+    
+    @property
+    def cmd_eef_rot_w(self) -> torch.Tensor:
+        return quat_mul(yaw_quat(self.asset.data.root_link_quat_w), self.cmd_eef_rot_b)
+    
+    @property
+    def eef_pos_w(self) -> torch.Tensor:
+        return self.asset.data.body_link_pos_w[:, self.eef_body_idx]
+    
+    @property
+    def eef_vel_w(self) -> torch.Tensor:
+        return self.asset.data.body_link_lin_vel_w[:, self.eef_body_idx]
+
+    @property
+    def eef_pos_b(self) -> torch.Tensor:
+        pos = quat_rotate_inverse(
+            yaw_quat(self.asset.data.root_link_quat_w),
+            self.eef_pos_w - self.asset.data.root_link_pos_w
+        )
+        pos[:, 2] = (
+            self.eef_pos_w[:, 2]
+            - self.env.get_ground_height_at(self.eef_pos_w)
+        )
+        return pos
 
     def command(self, key: str = "dense") -> torch.Tensor:
         if key == "dense":
@@ -287,6 +324,10 @@ class SingleEEFLocoManip(Command):
         new_cmd_linvel_b[:, 0].uniform_(*self.linvel_x_range)
         new_cmd_linvel_b[:, 1].uniform_(*self.linvel_y_range)
         new_cmd_linvel_b[:, 2] = 0.0
+        # reject speeds that are too small
+        speed = new_cmd_linvel_b.norm(dim=-1)
+        valid = speed > 0.1
+        new_cmd_linvel_b[~valid] = 0.0
         new_cmd_yawvel_b = torch.zeros(len(env_ids), 1, device=self.device)
         new_cmd_yawvel_b[:, 0].uniform_(*self.yaw_rate_range)
         self.cmd_linvel_b[env_ids] = new_cmd_linvel_b
@@ -295,7 +336,10 @@ class SingleEEFLocoManip(Command):
     def sample_manip_commands(self, env_ids: torch.Tensor) -> None: # env_ids is always non-empty
         # in the body frame mode, always look body-frame forward
         self.cmd_eef_pos_b[env_ids] = self._sample_local_eef_offsets(env_ids)
-        self.cmd_eef_forward_b[env_ids] = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
+        rpy = torch.zeros(len(env_ids), 3, device=self.device)
+        rpy[:, 0].uniform_(-torch.pi / 2, torch.pi / 2)
+        rpy[:, 1].uniform_(-torch.pi / 6, torch.pi / 6)
+        self.cmd_eef_rot_b[env_ids] = quat_from_euler_xyz(rpy)
 
     def sample_world_goal_commands(self, env_ids: torch.Tensor) -> None:
         root_pos = self.asset.data.root_link_pos_w[env_ids]
@@ -414,6 +458,10 @@ class SingleEEFLocoManip(Command):
                 yaw_q[local_env_ids],
                 self.cmd_eef_forward_b[local_env_ids],
             )
+            self.cmd_eef_upward_w[local_env_ids] = quat_rotate(
+                yaw_q[local_env_ids],
+                self.cmd_eef_upward_b[local_env_ids],
+            )
         self.cmd_linvel_w = quat_rotate(yaw_q, self.cmd_linvel_b)
 
         root_pos = self.asset.data.root_link_pos_w
@@ -423,9 +471,6 @@ class SingleEEFLocoManip(Command):
         horiz_w = root_pos + delta_w
         ground_h = self.env.get_ground_height_at(horiz_w)
 
-        self.eef_pos_w = self.asset.data.body_link_pos_w[:, self.eef_body_idx]
-        self.eef_pos_b = quat_rotate_inverse(yaw_q, self.eef_pos_w - root_pos)
-
         self.cmd_eef_pos_w[:, :2] = horiz_w[:, :2]
         self.cmd_eef_pos_w[:, 2] = ground_h + self.cmd_eef_pos_b[:, 2]
         if world_env_ids.numel() > 0:
@@ -433,8 +478,11 @@ class SingleEEFLocoManip(Command):
         
         eef_quat_w = self.asset.data.body_link_quat_w[:, self.eef_body_idx]
         forward_axis_b = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
+        upward_axis_b = torch.tensor([[0.0, 0.0, 1.0]], device=self.device)
         self.eef_forward_w = quat_rotate(eef_quat_w, forward_axis_b)
         self.eef_forward_b = quat_rotate_inverse(yaw_q, self.eef_forward_w)
+        self.eef_upward_w = quat_rotate(eef_quat_w, upward_axis_b)
+        self.eef_upward_b = quat_rotate_inverse(yaw_q, self.eef_upward_w)
         self.eef_status = self.get_gripper_status()
 
         self.command_speed = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
@@ -472,6 +520,10 @@ class SingleEEFLocoManip(Command):
 
         self._sync_world_frames()
         self._update_eef_pos_error()
+        self.cmd_eef_vel_w = (
+            self.cmd_eef_pos_pd[:, 0, None] * self.pos_diff_w
+            - self.cmd_eef_pos_pd[:, 1, None] * self.eef_vel_w
+        )
 
     @override
     def debug_draw(self) -> None:
@@ -482,23 +534,23 @@ class SingleEEFLocoManip(Command):
         )
         self.env.debug_draw.vector(
             self.eef_pos_w,
-            self.eef_forward_w,
-            color=(1.0, 0.0, 0.0, 1.0),
-        )
-        self.env.debug_draw.vector(
-            self.eef_pos_w,
-            self.cmd_eef_forward_w,
-            color=(0.0, 1.0, 0.0, 1.0),
-        )
-        self.env.debug_draw.vector(
-            self.eef_pos_w,
             self.payload_force_w / 9.81,
             color=(0.0, 0.0, 1.0, 1.0),
+        )
+        self.env.debug_draw.vector(
+            self.eef_pos_w,
+            self.cmd_eef_vel_w,
+            color=(0.0, 1.0, 0.0, 1.0),
         )
         self.marker.visualize(self.cmd_eef_pos_w)
         world_env_ids = self.world_env_ids
         if self.standoff_marker is not None and world_env_ids.numel() > 0:
             self.standoff_marker.visualize(self.standoff_pos_w[world_env_ids])
+        
+        self.eef_pose_marker.visualize(
+            translations=self.cmd_eef_pos_w,
+            orientations=self.cmd_eef_rot_w,
+        )
 
 
 class eef_pos_tracking(Reward[SingleEEFLocoManip]):
@@ -610,7 +662,7 @@ class eef_vel_tracking(Reward[SingleEEFLocoManip]):
         super().__init__(env, weight, enabled=True, track_var=False)
         self.asset = self.command_manager.asset
         self.eef_body_idx = self.command_manager.eef_body_idx
-        self.sigma = 0.2
+        self.sigma = 0.25
     
     @override
     def _compute(self) -> torch.Tensor:
