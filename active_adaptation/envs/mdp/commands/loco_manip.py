@@ -114,6 +114,7 @@ class SingleEEFLocoManip(Command):
             self.cmd_eef_pos_pd[:, 0].uniform_(5.0, 10.0)
             self.cmd_eef_pos_pd[:, 1] = 2.0 * self.cmd_eef_pos_pd[:, 0].sqrt()  # kd, ζ=1
             self.cmd_eef_vel_w = torch.zeros(self.num_envs, 3)  # computed by a PD controller
+            self.cmd_eef_ref_vel_w = torch.zeros(self.num_envs, 3)
             self.eef_rot_w = torch.zeros(self.num_envs, 4)
 
             self.pos_diff_w = torch.zeros(self.num_envs, 3)
@@ -500,11 +501,45 @@ class SingleEEFLocoManip(Command):
         self.eef_pos_reaching = reached_now & (~self.eef_pos_reached)
         self.eef_pos_reached = self.eef_pos_reached | reached_now
 
+    def _compute_cmd_eef_ref_vel_w(self) -> torch.Tensor:
+        """World-frame velocity of the commanded EEF target.
+
+        Local envs: target is fixed in the yaw-aligned body frame, so it moves
+        with the base (root linear + angular transport of the horizontal offset).
+        World-goal envs: target is advanced explicitly by ``world_eef_vel_w``.
+        """
+        yaw_q = yaw_quat(self.asset.data.root_link_quat_w)
+        exy = torch.zeros(self.num_envs, 3, device=self.device)
+        exy[:, :2] = self.cmd_eef_pos_b[:, :2]
+        delta_w = quat_rotate(yaw_q, exy)
+        root_linvel_w = self.asset.data.root_link_lin_vel_w
+        root_angvel_w = self.asset.data.root_link_ang_vel_w
+        ref_vel = (
+            root_linvel_w * torch.tensor([1.0, 1.0, 0.0], device=self.device)
+            + torch.cross(root_angvel_w, delta_w, dim=-1)
+        )
+
+        world_mask = self.is_world_goal_env.squeeze(-1)
+        if world_mask.any():
+            ref_vel[world_mask] = self.world_eef_vel_w[world_mask]
+        return ref_vel
+
+    def _update_cmd_eef_vel(self) -> None:
+        """PD velocity command tracking a possibly moving world-frame target."""
+        self.cmd_eef_ref_vel_w = self._compute_cmd_eef_ref_vel_w()
+        kp = self.cmd_eef_pos_pd[:, 0, None]
+        kd = self.cmd_eef_pos_pd[:, 1, None]
+        vel_err = self.eef_vel_w - self.cmd_eef_ref_vel_w
+        self.cmd_eef_vel_w = (
+            self.cmd_eef_ref_vel_w + kp * self.pos_diff_w - kd * vel_err
+        )
+
     @override
     def reset(self, env_ids: torch.Tensor) -> None:
         self.sample_commands(env_ids)
         self._sync_world_frames()
         self._update_eef_pos_error()
+        self._update_cmd_eef_vel()
 
     @override
     def update(self) -> None:
@@ -520,10 +555,7 @@ class SingleEEFLocoManip(Command):
 
         self._sync_world_frames()
         self._update_eef_pos_error()
-        self.cmd_eef_vel_w = (
-            self.cmd_eef_pos_pd[:, 0, None] * self.pos_diff_w
-            - self.cmd_eef_pos_pd[:, 1, None] * self.eef_vel_w
-        )
+        self._update_cmd_eef_vel()
 
     @override
     def debug_draw(self) -> None:
@@ -666,7 +698,7 @@ class eef_vel_tracking(Reward[SingleEEFLocoManip]):
     
     @override
     def _compute(self) -> torch.Tensor:
-        diff_w = self.command_manager.cmd_eef_vel_w - self.asset.data.body_link_vel_w[:, self.eef_body_idx]
+        diff_w = self.command_manager.cmd_eef_vel_w - self.command_manager.eef_vel_w
         error_l2 = diff_w.square().sum(dim=-1, keepdim=True)
         rew = torch.exp(-error_l2 / self.sigma)
         return rew.reshape(self.num_envs, 1)
