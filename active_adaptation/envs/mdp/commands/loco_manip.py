@@ -378,9 +378,8 @@ class SingleEEFLocoManip(Command):
         eef_offset_w = torch.zeros(len(env_ids), 3, device=self.device)
         eef_offset_w[:, 0] = d * torch.cos(a)
         eef_offset_w[:, 1] = d * torch.sin(a)
-        eef_offset_w[:, 2] = 0.0
+        eef_offset_w[:, 2].uniform_(0.2, 0.9)
         world_eef_pos_w = standoff_pos_w + eef_offset_w
-        world_eef_pos_w[:, 2] = self.env.get_ground_height_at(world_eef_pos_w)
         world_eef_vel_w = torch.zeros(len(env_ids), 3, device=self.device)
 
         self.standoff_pos_w[env_ids] = standoff_pos_w
@@ -394,9 +393,13 @@ class SingleEEFLocoManip(Command):
         self.world_eef_pos_w[env_ids] = world_eef_pos_w
         self.world_eef_vel_w[env_ids] = world_eef_vel_w
         
-        yaw = torch.atan2(eef_offset_w[:, 1], eef_offset_w[:, 0])
-        pitch = torch.zeros_like(yaw)
-        pitch.uniform_(-torch.pi / 6, torch.pi / 6)
+        delta_w = eef_offset_w.clone()
+        delta_w[:, 2] -= root_pos[:, 2]
+        horiz = torch.hypot(delta_w[:, 0], delta_w[:, 1])
+        yaw = torch.atan2(delta_w[:, 1], delta_w[:, 0])
+        yaw = yaw + torch.empty_like(yaw).uniform_(-torch.pi / 6, torch.pi / 6)
+        pitch = torch.atan2(delta_w[:, 2], horiz)
+        pitch = pitch + torch.empty_like(pitch).uniform_(-torch.pi / 6, torch.pi / 6)
         roll = torch.zeros_like(yaw)
         rpy_w = torch.stack([roll, pitch, yaw], dim=-1)
 
