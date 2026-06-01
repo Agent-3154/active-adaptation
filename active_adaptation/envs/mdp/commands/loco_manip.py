@@ -340,7 +340,13 @@ class SingleEEFLocoManip(Command):
         rpy = torch.zeros(len(env_ids), 3, device=self.device)
         rpy[:, 0].uniform_(-torch.pi / 2, torch.pi / 2)
         rpy[:, 1].uniform_(-torch.pi / 6, torch.pi / 6)
-        self.cmd_eef_rot_b[env_ids] = quat_from_euler_xyz(rpy)
+        rot_quat = quat_from_euler_xyz(rpy)
+        forward_axis = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
+        upward_axis = torch.tensor([[0.0, 0.0, 1.0]], device=self.device)
+
+        self.cmd_eef_forward_b[env_ids] = quat_rotate(rot_quat, forward_axis)
+        self.cmd_eef_upward_b[env_ids] = quat_rotate(rot_quat, upward_axis)
+        self.cmd_eef_rot_b[env_ids] = rot_quat
 
     def sample_world_goal_commands(self, env_ids: torch.Tensor) -> None:
         root_pos = self.asset.data.root_link_pos_w[env_ids]
