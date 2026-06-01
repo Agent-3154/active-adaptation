@@ -364,23 +364,26 @@ class SingleEEFLocoManip(Command):
 
         standoff_offset_b = torch.zeros(len(env_ids), 3, device=self.device)
         a = torch.rand(len(env_ids), device=self.device) * torch.pi * 2
-        d = torch.rand(len(env_ids), device=self.device) * (self.standoff_distance_range[1] - self.standoff_distance_range[0]) + self.standoff_distance_range[0]
+        d = torch.empty(len(env_ids), device=self.device)
+        d.uniform_(self.standoff_distance_range[0], self.standoff_distance_range[1])
         standoff_offset_b[:, 0] = d * torch.cos(a)
         standoff_offset_b[:, 1] = d * torch.sin(a)
         standoff_offset_w = quat_rotate(root_yaw_q, standoff_offset_b)
         standoff_pos_w = root_pos + standoff_offset_w
         standoff_pos_w[:, 2] = self.env.get_ground_height_at(standoff_pos_w)
 
-        eef_offset_b = self._sample_local_eef_offsets(env_ids)
-        eef_offset_w = quat_rotate(root_yaw_q, eef_offset_b)
+        a = torch.rand(len(env_ids), device=self.device) * torch.pi * 2
+        d = torch.empty(len(env_ids), device=self.device)
+        d.uniform_(0.5, 0.7)
+        eef_offset_w = torch.zeros(len(env_ids), 3, device=self.device)
+        eef_offset_w[:, 0] = d * torch.cos(a)
+        eef_offset_w[:, 1] = d * torch.sin(a)
+        eef_offset_w[:, 2] = 0.0
         world_eef_pos_w = standoff_pos_w + eef_offset_w
-        world_eef_pos_w[:, 2] = (
-            self.env.get_ground_height_at(world_eef_pos_w) + eef_offset_b[:, 2]
-        )
+        world_eef_pos_w[:, 2] = self.env.get_ground_height_at(world_eef_pos_w)
         world_eef_vel_w = torch.zeros(len(env_ids), 3, device=self.device)
 
         self.standoff_pos_w[env_ids] = standoff_pos_w
-        self.standoff_yaw_w[env_ids, 0] = self.asset.data.heading_w[env_ids]
         yaw_gain = torch.empty(len(env_ids), 1, device=self.device)
         yaw_gain.uniform_(*self.standoff_yaw_gain_range)
         linvel_gain = torch.empty(len(env_ids), 1, device=self.device)
@@ -390,12 +393,14 @@ class SingleEEFLocoManip(Command):
 
         self.world_eef_pos_w[env_ids] = world_eef_pos_w
         self.world_eef_vel_w[env_ids] = world_eef_vel_w
-        delta_w = world_eef_pos_w - standoff_pos_w
-        yaw = torch.atan2(delta_w[:, 1], delta_w[:, 0])
+        
+        yaw = torch.atan2(eef_offset_w[:, 1], eef_offset_w[:, 0])
         pitch = torch.zeros_like(yaw)
         pitch.uniform_(-torch.pi / 6, torch.pi / 6)
         roll = torch.zeros_like(yaw)
         rpy_w = torch.stack([roll, pitch, yaw], dim=-1)
+
+        self.standoff_yaw_w[env_ids, 0] = yaw
         self.cmd_eef_rot_w[env_ids] = quat_from_euler_xyz(rpy_w)
 
     def _split_command_strategy(
@@ -623,18 +628,29 @@ class eef_pos_forward_tracking(Reward[SingleEEFLocoManip]):
         super().__init__(env, weight, enabled=enabled, track_var=track_var)
         self.asset = self.command_manager.asset
         self.eef_body_idx = self.command_manager.eef_body_idx
-        self.sigma = 0.1
+        self.pos_sigma = 0.1
+        self.rot_sigma = 0.4
+        self._base_height_rew = self.env.reward_groups["loco"]["base_height_exp"]
+        self.update()
     
     @override
-    def _compute(self) -> torch.Tensor:
-        rew_pos = torch.exp(-self.command_manager.pos_error_norm2 / self.sigma)
+    def update(self) -> None:
+        self.rew_pos_exp = torch.exp(-self.command_manager.pos_error_norm2 / self.pos_sigma)
+        self.rew_pos_l1 = -0.2 * self.command_manager.pos_error_norm
+
         forward_diff = self.command_manager.forward_diff_w
         forward_error_norm2 = forward_diff.square().sum(dim=-1, keepdim=True)
-        rew_forward = torch.exp(-forward_error_norm2 / 0.25)
+        self.rew_forward = torch.exp(-forward_error_norm2 / self.rot_sigma)
+        
         upward_diff = self.command_manager.upward_diff_w
         upward_error_norm2 = upward_diff.square().sum(dim=-1, keepdim=True)
-        rew_upward = torch.exp(-upward_error_norm2 / 0.25)
-        rew = rew_pos * rew_forward * rew_upward - 0.2 * self.command_manager.pos_error_norm
+        self.rew_upward = torch.exp(-upward_error_norm2 / self.rot_sigma)
+
+        self._base_height_rew.modifier.mul_(self.rew_pos_exp)
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        rew = self.rew_pos_exp * self.rew_forward * self.rew_upward + self.rew_pos_l1
         return rew.reshape(self.num_envs, 1)
 
 

@@ -40,14 +40,21 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
         self.weight = weight
         self.enabled = enabled
         self.track_var = track_var
-        d = self.device
-        self._ema_sum = torch.zeros(1, device=d)
-        self._ema_cnt = torch.zeros(1, device=d)
+        
+        # modifier allows flexible coupling of reward terms
+        self._modifier = torch.ones(self.num_envs, 1, device=self.device)
+
+        self._ema_sum = torch.zeros(1, device=self.device)
+        self._ema_cnt = torch.zeros(1, device=self.device)
         if track_var:
             # EMA of sum(x^2) so variance can be computed as E[x^2] - E[x]^2
-            self._ema_sum_sq = torch.zeros(1, device=d)
+            self._ema_sum_sq = torch.zeros(1, device=self.device)
         else:
             self._ema_sum_sq = None
+    
+    @property
+    def modifier(self) -> torch.Tensor:
+        return self._modifier
 
     def _update_ema(self, rew: torch.Tensor, count: torch.Tensor | float) -> None:
         dec = self._ema_decay
@@ -70,7 +77,9 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
             count = is_active.sum()
         else:
             raise TypeError(result)
-        rew = self.weight * rew
+        rew = self.weight * rew * self.modifier
+        # reset modifier
+        self._modifier = torch.ones(self.num_envs, 1, device=self.device)
         self._update_ema(rew, count)
         return rew
 
