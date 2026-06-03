@@ -72,6 +72,8 @@ class MotrixEntityData:
     joint_vel: torch.Tensor
     joint_pos_target: torch.Tensor
     joint_vel_target: torch.Tensor
+    
+    default_root_state: torch.Tensor
     default_joint_pos: torch.Tensor
     default_joint_vel: torch.Tensor
 
@@ -104,6 +106,15 @@ class MotrixEntityData:
     @property
     def root_link_ang_vel_w(self) -> torch.Tensor:
         return self.root_link_vel_w[:, 3:]
+    
+    @property
+    def root_com_lin_vel_w(self) -> torch.Tensor:
+        # TODO: use true com velocity
+        return self.root_link_vel_w[:, :3]
+
+    @property
+    def root_com_ang_vel_w(self) -> torch.Tensor:
+        return self.root_link_vel_w[:, 3:] # same as root_link_ang_vel_w
 
     @property
     def root_ang_vel_w(self) -> torch.Tensor:
@@ -341,13 +352,16 @@ class MotrixEntity:
         ).unsqueeze(0).expand(num_envs, -1)
 
         pose = self._as_tensor(self._body.get_pose(mx_data))
+        root_link_vel_w = self._read_root_link_vel_w()
+        root_state = torch.cat([pose, root_link_vel_w], dim=-1)
         self._data = MotrixEntityData(
             root_link_pose_w=pose,
-            root_link_vel_w=self._read_root_link_vel_w(),
+            root_link_vel_w=root_link_vel_w,
             joint_pos=joint_pos,
             joint_vel=joint_vel,
             joint_pos_target=default_joint_pos.clone(),
             joint_vel_target=default_joint_vel.clone(),
+            default_root_state=root_state,
             default_joint_pos=default_joint_pos,
             default_joint_vel=default_joint_vel,
         )
@@ -516,6 +530,11 @@ class MotrixEntity:
             data_view,
             self._to_numpy(self._actuator_ctrl[env_sel]),
         )
+
+
+class MotrixContactSensor:
+    ...
+    
 
 
 def wxyz2xyzw(quat_wxyz: torch.Tensor) -> torch.Tensor:

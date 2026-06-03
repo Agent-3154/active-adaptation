@@ -146,7 +146,7 @@ class Registry:
 
 class RegistryMixin:
 
-    supported_backends: tuple[str, ...] = ("isaac", "mujoco", "mjlab")
+    supported_backends: tuple[str, ...] = ("isaac", "mujoco", "mjlab", "motrix")
     """List of supported backends. Subclasses should override this to declare which backends they support."""
 
     namespace: str | None = None
