@@ -117,7 +117,11 @@ reward:
 
 termination:
   max_episode_length: {}
-  crash: {body_names_expr: [base_link, .*hip, .*thigh], t_thres: 0.06}
+  crash: {
+    body_names_expr: [base_link, .*hip, .*thigh],
+    t_thres: 0.06,
+    prob: 0.4,
+  }
   fall_over: {xy_thres: 0.9}
   undesired_contact: {body_names: [.*_calf]}
 

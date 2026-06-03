@@ -47,15 +47,12 @@ input:
         alpha_range: [0.8, 0.9]
 
 command:
-  _target_: LocoManipObject
+  _target_: LocoManipObjectScripted
   eef_body_name: grasp_point
-  gripper_joint_names: "arm_joint[7,8]"
+  gripper_body_names: [gripper_left, gripper_right]
   object_name: object
-  object_distance_range: [1.0, 2.0]
-  grasp_height_range: [0.1, 0.6]
-  standoff_distance_range: [0.6, 0.7]
-  standoff_angle_range: [-1.0471975512, 1.0471975512]
-  standoff_linvel_gain: 2.0
+  grasp_height_range: [0.3, 0.6]
+  standoff_linvel_gain: 1.0
   standoff_yaw_gain: 1.0
 
 observation:
