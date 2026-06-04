@@ -63,6 +63,7 @@ class MotrixSceneCfg:
     env_spacing: float = 2.0
     entities: dict[str, EntityCfg] = field(default_factory=dict)
     # we leave sensors and terrains to be added later
+    sensors: tuple[ContactSensorCfg, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -152,41 +153,53 @@ class MotrixEntityData:
         return self.root_link_ang_vel_w
 
 
+REDUCE_MAP = {
+    "mindist": mx.msd.ContactSensorReduce.MinDist,
+    "maxforce": mx.msd.ContactSensorReduce.MaxForce,
+    "netforce": mx.msd.ContactSensorReduce.NetForce,
+}
+
+
 class MotrixScene:
     def __init__(self, cfg: MotrixSceneCfg):
         self.cfg = cfg
         self._entities: dict[str, MotrixEntity] = {}
-        msd_scene = mx.msd.from_str(plane_xml)
-        for name, cfg in self.cfg.entities.items():
-            ent = MotrixEntity(cfg)
-            prefix = name + "_"
-            ent._prefix = prefix
-            msd_scene.attach(
-                ent.msd,
-                other_translation=ent.cfg.init_state.pos,
-                other_rotation=wxyz2xyzw(torch.tensor(ent.cfg.init_state.rot)).tolist(),
-                other_prefix=prefix,
-            )
-            for geom in ("FL", "RL", "FR", "RR"):
-                sensor = mx.msd.ContactSensor()
-                sensor.name = prefix + geom + "contact"
-                sensor.match_ = mx.msd.ContactMatch.geom_pair(
-                    f"{name}_{geom}_collision",
-                    "floor",
-                )
-                ent.msd.sensors.contact.append(sensor)
-            self._entities[name] = ent
-        self.msd_model: mx.SceneModel = msd_scene.build()
-        self.msd_data = mx.SceneData(self.msd_model, batch=(self.cfg.num_envs,))
-        self.msd_model.step(self.msd_data)
+        self._sensors: dict[str, MotrixContactSensor] = {}
+        self._msd_world = mx.msd.from_str(plane_xml)        
+
+        self._add_entities()
+        self._add_sensors()
+
+        self.mx_model: mx.SceneModel = self._msd_world.build()
+        self.mx_data = mx.SceneData(self.mx_model, batch=(self.cfg.num_envs,))
+        self.mx_model.step(self.mx_data)
 
         self._env_origins = compute_env_origins_grid(
             self.cfg.num_envs,
             self.cfg.env_spacing,
         )
         for name, ent in self._entities.items():
-            ent.initialize(self.msd_model, self.msd_data)
+            ent.initialize(self.mx_model, self.mx_data)
     
+    def _add_entities(self):
+        for name, cfg in self.cfg.entities.items():
+            ent = MotrixEntity(cfg)
+            prefix = name + "_"
+            ent._prefix = prefix
+            self._msd_world.attach(
+                ent.msd,
+                other_translation=ent.cfg.init_state.pos,
+                other_rotation=wxyz2xyzw(torch.tensor(ent.cfg.init_state.rot)).tolist(),
+                other_prefix=prefix,
+            )
+            self._entities[name] = ent
+    
+    def _add_sensors(self):
+        for sensor_cfg in self.cfg.sensors:
+            sensor = MotrixContactSensor(sensor_cfg)
+            sensor.edit_spec(self._msd_world)
+            self._sensors[sensor_cfg.name] = sensor
+
     def update(self, dt: float):
         for ent in self._entities.values():
             ent.update(dt)
@@ -259,23 +272,23 @@ class MotrixSim:
             self._render_ctx = RenderApp()
             self._render_app = self._render_ctx.__enter__()
             self._render_app.launch(
-                scene.msd_model,
+                scene.mx_model,
                 batch=scene.num_envs,
                 render_offset=scene.render_offsets,
             )
 
     def get_physics_dt(self) -> float:
-        return float(self.scene.msd_model.options.timestep)
+        return float(self.scene.mx_model.options.timestep)
 
     def has_gui(self) -> bool:
         return self._render_app is not None
 
     def step(self, render: bool = False) -> None:
-        self.scene.msd_model.step(self.scene.msd_data)
+        self.scene.mx_model.step(self.scene.mx_data)
 
     def render(self) -> None:
         if self._render_app is not None:
-            self._render_app.sync(self.scene.msd_data)
+            self._render_app.sync(self.scene.mx_data)
 
     def set_camera_view(self, eye=None, target=None, **kwargs) -> None:
         pass
@@ -590,8 +603,336 @@ class MotrixEntity:
         )
 
 
-class MotrixContactSensor:
+@dataclass
+class MotrixContactSensorData:
     ...
+
+
+import re
+from typing import Literal
+
+from mjlab.sensor.contact_sensor import ContactMatch, ContactSensorCfg
+
+
+class MotrixContactSensor:
+    """Add Motrix MSD contact sensors from an mjlab :class:`ContactSensorCfg`."""
+
+    _REPORT_FIELDS = frozenset(
+        {"found", "force", "torque", "dist", "pos", "normal", "tangent"}
+    )
+
+    def __init__(self, cfg: ContactSensorCfg) -> None:
+        self.cfg = cfg
+        self._primary_names: list[str] = []
+
+        if cfg.global_frame and cfg.reduce != "netforce":
+            if "normal" not in cfg.fields or "tangent" not in cfg.fields:
+                raise ValueError(
+                    f"Sensor '{cfg.name}': global_frame=True requires 'normal' and "
+                    "'tangent' in fields"
+                )
+        if cfg.track_air_time and "found" not in cfg.fields:
+            raise ValueError(
+                f"Sensor '{cfg.name}': track_air_time=True requires 'found' in fields"
+            )
+
+    def edit_spec(
+        self,
+        msd_scene: mx.msd.World,
+        entities: dict[str, MotrixEntity] | None = None,
+    ) -> None:
+        """Expand patterns and register one MSD contact sensor per primary."""
+        entities = entities or {}
+        self._primary_names.clear()
+
+        primary_names = self._resolve_primary_names(entities, self.cfg.primary, msd_scene)
+        if self.cfg.secondary is None or self.cfg.secondary_policy == "any":
+            secondary_name = None
+        else:
+            secondary_name = self._resolve_single_secondary(
+                entities,
+                self.cfg.secondary,
+                self.cfg.secondary_policy,
+                msd_scene,
+            )
+
+        if secondary_name is None:
+            raise ValueError(
+                f"Sensor '{self.cfg.name}': Motrix contact sensors require an explicit "
+                "secondary target (secondary_policy='any' is not supported)."
+            )
+
+        for prim in primary_names:
+            sensor_name = f"{self.cfg.name}_{prim}"
+            self._add_contact_sensor_to_spec(
+                msd_scene,
+                sensor_name,
+                self._sim_name(prim, self.cfg.primary.entity, entities),
+                self._sim_name(secondary_name, self.cfg.secondary.entity, entities),
+                self.cfg.fields,
+            )
+            self._primary_names.append(prim)
+
+    @staticmethod
+    def _entity_prefix(
+        entity_key: str | None,
+        entities: dict[str, MotrixEntity],
+    ) -> str:
+        if entity_key in (None, ""):
+            return ""
+        if entity_key in entities:
+            prefix = entities[entity_key]._prefix
+            return prefix if prefix is not None else f"{entity_key}_"
+        return f"{entity_key}_"
+
+    @classmethod
+    def _sim_name(
+        cls,
+        name: str,
+        entity_key: str | None,
+        entities: dict[str, MotrixEntity],
+    ) -> str:
+        prefix = cls._entity_prefix(entity_key, entities)
+        if not prefix:
+            return name
+        return name if name.startswith(prefix) else f"{prefix}{name}"
+
+    @staticmethod
+    def _walk_msd_links(link) -> list[str]:
+        names: list[str] = []
+        if link.name:
+            names.append(link.name)
+        for child in link.children:
+            names.extend(MotrixContactSensor._walk_msd_links(child))
+        return names
+
+    @staticmethod
+    def _walk_msd_geoms(link) -> list[str]:
+        names: list[str] = []
+        for geom in link.geoms:
+            if geom.name:
+                names.append(geom.name)
+        for child in link.children:
+            names.extend(MotrixContactSensor._walk_msd_geoms(child))
+        return names
+
+    @classmethod
+    def _link_names_from_msd(cls, msd_root) -> list[str]:
+        names: list[str] = []
+        for body in msd_root.hierarchy.bodies:
+            if body.link is not None:
+                names.extend(cls._walk_msd_links(body.link))
+        return names
+
+    @classmethod
+    def _geom_names_from_msd(cls, msd_root) -> list[str]:
+        names: list[str] = []
+        for body in msd_root.hierarchy.bodies:
+            if body.link is not None:
+                names.extend(cls._walk_msd_geoms(body.link))
+        return names
+
+    @classmethod
+    def _names_for_entity(
+        cls,
+        entities: dict[str, MotrixEntity],
+        entity_key: str,
+        mode: Literal["geom", "body", "subtree"],
+        msd_scene: mx.msd.World,
+    ) -> list[str]:
+        prefix = cls._entity_prefix(entity_key, entities)
+        if entity_key in entities:
+            ent = entities[entity_key]
+            if mode == "geom":
+                subset = cls._geom_names_from_msd(ent.msd)
+            else:
+                subset = ent.body_names
+            return [n if not prefix or n.startswith(prefix) else f"{prefix}{n}" for n in subset]
+        if mode == "geom":
+            all_names = cls._geom_names_from_msd(msd_scene)
+        else:
+            all_names = cls._link_names_from_msd(msd_scene)
+        if not prefix:
+            return all_names
+        return [n for n in all_names if n.startswith(prefix)]
+
+    @classmethod
+    def _strip_prefix(cls, names: list[str], prefix: str) -> list[str]:
+        if not prefix:
+            return list(names)
+        plen = len(prefix)
+        return [n[plen:] if n.startswith(prefix) else n for n in names]
+
+    @classmethod
+    def _apply_excludes(cls, names: list[str], excludes: tuple[str, ...]) -> list[str]:
+        if not excludes:
+            return names
+        exclude_patterns: list[re.Pattern[str]] = []
+        exclude_exact: set[str] = set()
+        for exc in excludes:
+            if any(c in exc for c in r".*+?[]{}()\|^$"):
+                exclude_patterns.append(re.compile(exc))
+            else:
+                exclude_exact.add(exc)
+        if exclude_exact:
+            names = [n for n in names if n not in exclude_exact]
+        if exclude_patterns:
+            names = [n for n in names if not any(rx.search(n) for rx in exclude_patterns)]
+        return names
+
+    def _resolve_primary_names(
+        self,
+        entities: dict[str, MotrixEntity],
+        match: ContactMatch,
+        msd_scene: mx.msd.World,
+    ) -> list[str]:
+        from mjlab.utils.lab_api.string import resolve_matching_names
+
+        if match.entity in (None, ""):
+            patterns = [match.pattern] if isinstance(match.pattern, str) else list(match.pattern)
+            return patterns
+
+        if match.entity not in entities and not self._entity_prefix(match.entity, entities):
+            raise ValueError(
+                f"Primary entity '{match.entity}' not found. "
+                f"Available: {list(entities.keys())}"
+            )
+
+        prefix = self._entity_prefix(match.entity, entities)
+        patterns = [match.pattern] if isinstance(match.pattern, str) else list(match.pattern)
+
+        if match.mode == "geom":
+            subset = self._strip_prefix(
+                self._names_for_entity(entities, match.entity, "geom", msd_scene),
+                prefix,
+            )
+            _, names = resolve_matching_names(patterns, subset, preserve_order=False)
+        elif match.mode in ("body", "subtree"):
+            subset = self._strip_prefix(
+                self._names_for_entity(entities, match.entity, "body", msd_scene),
+                prefix,
+            )
+            _, names = resolve_matching_names(patterns, subset, preserve_order=False)
+        else:
+            raise ValueError("Primary mode must be one of {'geom','body','subtree'}")
+
+        names = self._apply_excludes(names, match.exclude)
+
+        if not names:
+            raise ValueError(
+                f"Primary pattern '{match.pattern}' (after excludes) matched "
+                f"no names in '{match.entity}'"
+            )
+        return names
+
+    def _resolve_single_secondary(
+        self,
+        entities: dict[str, MotrixEntity],
+        match: ContactMatch,
+        policy: Literal["first", "any", "error"],
+        msd_scene: mx.msd.World,
+    ) -> str | None:
+        from mjlab.utils.lab_api.string import resolve_matching_names
+
+        if policy == "any":
+            return None
+
+        if isinstance(match.pattern, tuple):
+            raise ValueError(
+                "Secondary must specify a single name (string). "
+                "Use a single exact name or a regex that resolves to one name, "
+                "or set secondary_policy='any' if you want no filter."
+            )
+
+        if match.entity in (None, ""):
+            if match.mode not in {"geom", "body", "subtree"}:
+                raise ValueError("Secondary mode must be one of {'geom','body','subtree'}")
+            return match.pattern
+
+        if match.entity not in entities and not self._entity_prefix(match.entity, entities):
+            raise ValueError(
+                f"Secondary entity '{match.entity}' not found. "
+                f"Available: {list(entities.keys())}"
+            )
+
+        if match.mode == "subtree":
+            return match.pattern
+
+        prefix = self._entity_prefix(match.entity, entities)
+        if match.mode == "geom":
+            subset = self._strip_prefix(
+                self._names_for_entity(entities, match.entity, "geom", msd_scene),
+                prefix,
+            )
+            _, names = resolve_matching_names(match.pattern, subset, preserve_order=False)
+        elif match.mode == "body":
+            subset = self._strip_prefix(
+                self._names_for_entity(entities, match.entity, "body", msd_scene),
+                prefix,
+            )
+            _, names = resolve_matching_names(match.pattern, subset, preserve_order=False)
+        else:
+            raise ValueError("Secondary mode must be one of {'geom','body','subtree'}")
+
+        if not names:
+            raise ValueError(
+                f"Secondary pattern '{match.pattern}' matched nothing in '{match.entity}'"
+            )
+
+        if len(names) == 1 or policy == "first":
+            return names[0]
+
+        raise ValueError(
+            f"Secondary pattern '{match.pattern}' matched multiple: {names}. "
+            "Be explicit or set secondary_policy='first' or 'any'."
+        )
+
+    def _add_contact_sensor_to_spec(
+        self,
+        msd_world: mx.msd.World,
+        sensor_name: str,
+        primary_name: str,
+        secondary_name: str,
+        fields: tuple[str, ...],
+    ) -> None:
+        if self.cfg.secondary is not None and (
+            self.cfg.primary.mode != self.cfg.secondary.mode
+        ):
+            raise ValueError("Primary and secondary modes must be the same")
+        if self.cfg.num_slots != 1:
+            raise ValueError("num_slots must be 1 for motrix")
+
+        match_fn = {
+            "geom": mx.msd.ContactMatch.geom_pair,
+            "body": mx.msd.ContactMatch.link_pair,
+            "subtree": mx.msd.ContactMatch.subtree_pair,
+        }
+        sensor = mx.msd.ContactSensor()
+        sensor.name = sensor_name
+        sensor.match_ = match_fn[self.cfg.primary.mode](primary_name, secondary_name)
+        sensor.report = mx.msd.ContactSensorReport()
+
+        requested = set(fields)
+        unrecognized = requested - self._REPORT_FIELDS
+        if unrecognized:
+            raise ValueError("Unrecognized fields: " + ", ".join(sorted(unrecognized)))
+
+        for field in self._REPORT_FIELDS:
+            setattr(sensor.report, field, field in requested)
+
+        sensor.reduce = REDUCE_MAP[self.cfg.reduce]
+        sensor.max_num = self.cfg.num_slots
+        msd_world.sensors.contact.append(sensor)
+
+        if self.cfg.debug:
+            print(
+                "Adding Motrix contact sensor\n"
+                f"  name     : {sensor_name}\n"
+                f"  primary  : {primary_name}\n"
+                f"  secondary: {secondary_name}\n"
+                f"  fields   : {', '.join(fields)}\n"
+                f"  reduce   : {self.cfg.reduce}  num_slots={self.cfg.num_slots}"
+            )
 
 
 
