@@ -8,6 +8,7 @@ import motrixsim as mx
 from dataclasses import dataclass, field
 
 from active_adaptation.assets.asset_cfg import EntityCfg
+from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
 
 # MotrixSim runs on CPU; keep entity/scene tensors on CPU and copy to numpy at the boundary.
 _DEVICE = torch.device("cpu")
@@ -70,12 +71,28 @@ class MotrixEntityData:
     root_link_vel_w: torch.Tensor
     joint_pos: torch.Tensor
     joint_vel: torch.Tensor
+    joint_acc: torch.Tensor
     joint_pos_target: torch.Tensor
     joint_vel_target: torch.Tensor
     
     default_root_state: torch.Tensor
     default_joint_pos: torch.Tensor
     default_joint_vel: torch.Tensor
+
+    @property
+    def heading_w(self) -> torch.Tensor:
+        forward_w = quat_rotate(
+            self.root_link_quat_w,
+            torch.tensor([[1.0, 0.0, 0.0]]),
+        )
+        return torch.atan2(forward_w[:, 1], forward_w[:, 0])
+    
+    @property
+    def projected_gravity_b(self) -> torch.Tensor:
+        return quat_rotate(
+            self.root_link_quat_w,
+            torch.tensor([[0.0, 0.0, -1.0]]),
+        )
 
     @property
     def root_link_pos_w(self) -> torch.Tensor:
@@ -111,10 +128,24 @@ class MotrixEntityData:
     def root_com_lin_vel_w(self) -> torch.Tensor:
         # TODO: use true com velocity
         return self.root_link_vel_w[:, :3]
+    
+    @property
+    def root_com_lin_vel_b(self) -> torch.Tensor:
+        return quat_rotate_inverse(
+            self.root_link_quat_w,
+            self.root_com_lin_vel_w,
+        )
 
     @property
     def root_com_ang_vel_w(self) -> torch.Tensor:
         return self.root_link_vel_w[:, 3:] # same as root_link_ang_vel_w
+    
+    @property
+    def root_com_ang_vel_b(self) -> torch.Tensor:
+        return quat_rotate_inverse(
+            self.root_link_quat_w,
+            self.root_com_ang_vel_w,
+        )
 
     @property
     def root_ang_vel_w(self) -> torch.Tensor:
@@ -128,21 +159,33 @@ class MotrixScene:
         msd_scene = mx.msd.from_str(plane_xml)
         for name, cfg in self.cfg.entities.items():
             ent = MotrixEntity(cfg)
+            prefix = name + "_"
+            ent._prefix = prefix
             msd_scene.attach(
                 ent.msd,
                 other_translation=ent.cfg.init_state.pos,
                 other_rotation=wxyz2xyzw(torch.tensor(ent.cfg.init_state.rot)).tolist(),
-                other_prefix=name + "_",
+                other_prefix=prefix,
             )
+            for geom in ("FL", "RL", "FR", "RR"):
+                sensor = mx.msd.ContactSensor()
+                sensor.name = prefix + geom + "contact"
+                sensor.match_ = mx.msd.ContactMatch.geom_pair(
+                    f"{name}_{geom}_collision",
+                    "floor",
+                )
+                ent.msd.sensors.contact.append(sensor)
             self._entities[name] = ent
         self.msd_model: mx.SceneModel = msd_scene.build()
         self.msd_data = mx.SceneData(self.msd_model, batch=(self.cfg.num_envs,))
+        self.msd_model.step(self.msd_data)
+
         self._env_origins = compute_env_origins_grid(
             self.cfg.num_envs,
             self.cfg.env_spacing,
         )
         for name, ent in self._entities.items():
-            ent.initialize(name, self.msd_model, self.msd_data)
+            ent.initialize(self.msd_model, self.msd_data)
     
     def update(self, dt: float):
         for ent in self._entities.values():
@@ -198,9 +241,7 @@ class MotrixScene:
 
     @property
     def ground_mesh(self):
-        raise NotImplementedError(
-            f"Ground mesh raycasting is not implemented for {self.__class__.__name__}."
-        )
+        return None # TODO: implement ground mesh
 
 
 class MotrixSim:
@@ -267,6 +308,7 @@ class MotrixEntity:
         self._actuator_ctrl: torch.Tensor | None = None
         self._mx_model = None
         self._mx_data = None
+        self._prefix = None
 
     @staticmethod
     def _as_tensor(value) -> torch.Tensor:
@@ -281,6 +323,8 @@ class MotrixEntity:
     def _view_data(self, env_ids: torch.Tensor | slice | None) -> mx.SceneData:
         if env_ids is None:
             return self._mx_data
+        elif isinstance(env_ids, torch.Tensor):
+            env_ids = mx.DisjointIndices(env_ids.numpy())
         return self._mx_data[env_ids]
 
     @staticmethod
@@ -310,13 +354,12 @@ class MotrixEntity:
 
     def initialize(
         self,
-        entity_name: str,
         mx_model: mx.SceneModel,
         mx_data: mx.SceneData,
     ):
         self._mx_model = mx_model
         self._mx_data = mx_data
-        body_name = f"{entity_name}_base_link"
+        body_name = f"{self._prefix}base_link"
         self._body = mx_model.get_body(body_name)
         if self._body is None:
             raise ValueError(f"Body {body_name} not found in model")
@@ -325,10 +368,17 @@ class MotrixEntity:
         if self._floatingbase is None:
             raise ValueError(f"Body {body_name} has no floating base")
 
-        sim_joint_names = list(self.cfg.joint_names_simulation or [])
-        sim_body_names = list(self.cfg.body_names_simulation or [])
-        self._joint_names = sim_joint_names
-        self._body_names = sim_body_names
+        # TODO: find better ways to get joint and body names
+        self._joint_names = [
+            actuator.name.replace(self._prefix, "")
+            for actuator in self._body.actuators
+        ]
+        self._body_names = [
+            name.replace(self._prefix, "")
+            for name in self._mx_model.link_names if name.startswith(self._prefix)
+        ]
+
+        self._body.base_link.joint_indices
 
         from mjlab.utils.string import resolve_expr
 
@@ -341,12 +391,12 @@ class MotrixEntity:
         )
 
         default_joint_pos = torch.tensor(
-            resolve_expr(self.cfg.init_state.joint_pos, sim_joint_names, 0.0),
+            resolve_expr(self.cfg.init_state.joint_pos, self._joint_names, 0.0),
             dtype=torch.float32,
             device=_DEVICE,
         ).unsqueeze(0).expand(num_envs, -1)
         default_joint_vel = torch.tensor(
-            resolve_expr(self.cfg.init_state.joint_vel, sim_joint_names, 0.0),
+            resolve_expr(self.cfg.init_state.joint_vel, self._joint_names, 0.0),
             dtype=torch.float32,
             device=_DEVICE,
         ).unsqueeze(0).expand(num_envs, -1)
@@ -359,6 +409,7 @@ class MotrixEntity:
             root_link_vel_w=root_link_vel_w,
             joint_pos=joint_pos,
             joint_vel=joint_vel,
+            joint_acc=torch.zeros_like(joint_vel),
             joint_pos_target=default_joint_pos.clone(),
             joint_vel_target=default_joint_vel.clone(),
             default_root_state=root_state,
@@ -369,8 +420,14 @@ class MotrixEntity:
     def update(self, dt: float):
         self._data.root_link_pose_w = self._as_tensor(self._body.get_pose(self._mx_data))
         self._data.root_link_vel_w = self._read_root_link_vel_w()
-        self._data.joint_pos = self._as_tensor(self._body.get_joint_dof_pos(self._mx_data))
-        self._data.joint_vel = self._as_tensor(self._body.get_joint_dof_vel(self._mx_data))
+
+        joint_pos = self._as_tensor(self._body.get_joint_dof_pos(self._mx_data))
+        joint_vel = self._as_tensor(self._body.get_joint_dof_vel(self._mx_data))
+        joint_acc = (joint_vel - self._data.joint_vel) / dt
+
+        self._data.joint_pos = joint_pos
+        self._data.joint_vel = joint_vel
+        self._data.joint_acc = joint_acc
 
     @property
     def data(self) -> MotrixEntityData:
@@ -378,11 +435,11 @@ class MotrixEntity:
 
     @property
     def joint_names(self) -> list[str]:
-        return self._joint_names
+        return list(self._joint_names) # copy the list to avoid modifying the original
 
     @property
     def body_names(self) -> list[str]:
-        return self._body_names
+        return list(self._body_names) # copy the list to avoid modifying the original
 
     def find_joints(
         self,
@@ -453,14 +510,15 @@ class MotrixEntity:
         self._data.root_link_vel_w[env_sel] = root_state[:, 7:13]
 
         data_view = self._view_data(env_ids)
-        self._floatingbase.set_translation(data_view, self._to_numpy(root_state[:, :3]))
-        self._floatingbase.set_rotation(data_view, self._to_numpy(quat_xyzw))
-        self._floatingbase.set_global_linear_velocity(
-            data_view, self._to_numpy(root_state[:, 7:10])
-        )
-        self._floatingbase.set_global_angular_velocity(
-            data_view, self._to_numpy(root_state[:, 10:13])
-        )
+        translation = np.ascontiguousarray(root_state[:, :3])
+        quat_xyzw = np.ascontiguousarray(quat_xyzw)
+        lin_vel = np.ascontiguousarray(root_state[:, 7:10])
+        ang_vel = np.ascontiguousarray(root_state[:, 10:13])
+
+        self._floatingbase.set_translation(data_view, translation)
+        self._floatingbase.set_rotation(data_view, quat_xyzw)
+        self._floatingbase.set_global_linear_velocity(data_view, lin_vel)
+        self._floatingbase.set_global_angular_velocity(data_view, ang_vel)
         self._sync_kinematics()
 
     def write_joint_state_to_sim(
@@ -534,7 +592,7 @@ class MotrixEntity:
 
 class MotrixContactSensor:
     ...
-    
+
 
 
 def wxyz2xyzw(quat_wxyz: torch.Tensor) -> torch.Tensor:
