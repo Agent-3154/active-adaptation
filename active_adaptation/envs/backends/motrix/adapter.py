@@ -451,6 +451,9 @@ class MotrixEntity:
             self._mx_model.get_link_index(f"{self._prefix}{body_name}")
             for body_name in self._body_names
         ])
+        body_pose_w = self._mx_model.get_link_poses(mx_data)[:, self._link_indices]
+        body_pos_w = body_pose_w[:, :, :3]
+        body_quat_w = xyzw2wxyz(body_pose_w[:, :, 3:7])
         body_vel_w = self._mx_model.get_link_linear_velocities(mx_data)[:, self._link_indices]
 
         self._data = MotrixEntityData(
@@ -461,6 +464,8 @@ class MotrixEntity:
             joint_acc=torch.zeros_like(joint_vel),
             joint_pos_target=default_joint_pos.clone(),
             joint_vel_target=default_joint_vel.clone(),
+            body_link_pos_w=torch.from_numpy(body_pos_w),
+            body_link_quat_w=torch.from_numpy(body_quat_w),
             body_vel_w=body_vel_w,
             default_root_state=root_state,
             default_joint_pos=default_joint_pos,
@@ -476,8 +481,8 @@ class MotrixEntity:
         joint_acc = (joint_vel - self._data.joint_vel) / dt
 
         body_pose_w = self._mx_model.get_link_poses(self._mx_data)[:, self._link_indices]
-        body_pos_w = body_pose_w[:, :, :3]
-        body_quat_w = xyzw2wxyz(body_pose_w[:, :, 3:7])
+        body_pos_w = torch.from_numpy(body_pose_w[:, :, :3])
+        body_quat_w = torch.from_numpy(xyzw2wxyz(body_pose_w[:, :, 3:7]))
         body_vel_w = self._mx_model.get_link_linear_velocities(self._mx_data)[:, self._link_indices]
 
         self._data.joint_pos = joint_pos

@@ -126,7 +126,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.critic_loss_fn = nn.MSELoss(reduction="none")
         self.gae = GAE(0.99, 0.95)  
 
-        fake_input = observation_spec.zero()
+        fake_input = observation_spec.zero().to(self.device)
         
         if CMD_KEY in observation_spec.keys(True, True):
             self.cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transform().to(self.device)
@@ -265,8 +265,7 @@ class PPOPolicy(TensorDictModuleBase):
             batch = make_batch(td, self.cfg.num_minibatches)
             for minibatch in batch:
                 minibatch = self._augment_symmetry(minibatch)
-                with ScopedTimer("update_minibatch"):
-                    infos.append(self.update(minibatch))
+                infos.append(self.update(minibatch))
                 
                 if self.desired_kl is not None: # adaptive learning rate
                     kl = infos[-1]["actor/kl"]
