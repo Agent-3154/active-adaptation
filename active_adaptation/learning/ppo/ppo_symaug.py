@@ -242,18 +242,23 @@ class PPOPolicy(TensorDictModuleBase):
     def train_op(self, tensordict: TensorDict):
         assert VecNorm.FROZEN, "VecNorm must be frozen before training"
 
-        tensordict = tensordict.exclude("stats")
+        tensordict = tensordict.exclude("stats").to(self.device, non_blocking=True)
         infos = []
+
+        self.vecnorm.to(self.device, non_blocking=True)
+        self.actor.to(self.device)
+        self.critic.to(self.device)
+
         with ScopedTimer("compute_advantage"):
             self.compute_advantage(tensordict, self.critic, "adv", "ret")
-        action = tensordict[ACTION_KEY]
-        adv_unnormalized = tensordict["adv"]
-        log_probs_before = tensordict["action_log_prob"]
-        adv = tensordict["adv"]
-        adv_mean = adv.mean()
-        adv_std = adv.std()
-        adv = (adv - adv_mean) / adv_std.clamp_min(1e-7)
-        tensordict["adv"] = adv
+            action = tensordict[ACTION_KEY]
+            adv_unnormalized = tensordict["adv"]
+            log_probs_before = tensordict["action_log_prob"]
+            adv = tensordict["adv"]
+            adv_mean = adv.mean()
+            adv_std = adv.std()
+            adv = (adv - adv_mean) / adv_std.clamp_min(1e-7)
+            tensordict["adv"] = adv
 
         td = tensordict.select(*self.training_keys)
         for epoch in range(self.cfg.ppo_epochs):
@@ -358,6 +363,7 @@ class PPOPolicy(TensorDictModuleBase):
         symmetry["is_init"] = tensordict["is_init"]
         return torch.cat([tensordict, symmetry])
 
+    @ScopedTimer("ppo_update")
     def _update(self, tensordict: TensorDict):
         bsize = tensordict.shape[0] // 2
 

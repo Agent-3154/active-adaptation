@@ -144,7 +144,7 @@ def init(cfg: DictConfig, auto_rank: bool):
     elif _BACKEND == "mujoco":
         cfg.device = "cpu"  # force to use CPU for mujoco
     elif _BACKEND == "motrix":
-        cfg.device = "cpu"  # force to use CPU for motrixsim
+        pass # motrixsim env lives on CPU while policy training can be on GPU
 
     if auto_rank and (str(cfg.device) == "cuda"):
         cfg.device = f"cuda:{get_local_rank()}"

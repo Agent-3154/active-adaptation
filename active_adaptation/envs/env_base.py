@@ -414,6 +414,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                 result[f"reward.{group_key}/{rew_key}"] = value
         return result
 
+    @ScopedTimer("_reset", sync=True)
     def _reset(
         self, tensordict: TensorDictBase | None = None, **kwargs
     ) -> TensorDictBase:
@@ -453,6 +454,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             entity.write_root_state_to_sim(value, env_ids=env_ids)
         self.stats[env_ids] = 0.0
 
+    @ScopedTimer("_step", sync=True)
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
         with ScopedTimer("simulation", sync=False):
             with ScopedTimer("process_action", sync=False):
@@ -461,18 +463,17 @@ class _EnvBase(EnvBase, RegistryMixin):
                         input_manager.process_action(action)
 
             for substep in range(self.decimation):
-                with ScopedTimer("simulation_pre_step", sync=False):
+                with ScopedTimer("pre_step_callbacks", sync=False):
                     self.scene.zero_external_wrenches()
                     self._apply_action(substep)
                     [callback(substep) for callback in self._pre_step_callbacks]
                     self.scene.write_data_to_sim()
-                with ScopedTimer("simulation_step", sync=PROFILE_SYNC_TIMERS):
+                with ScopedTimer("sim.step", sync=PROFILE_SYNC_TIMERS):
                     self.sim.step(render=False)
-                with ScopedTimer("simulation_post_step", sync=False):
-                    with ScopedTimer("scene.update", sync=PROFILE_SYNC_TIMERS):
-                        self.scene.update(self.physics_dt)
-                    with ScopedTimer("post_step_callbacks", sync=False):
-                        [callback(substep) for callback in self._post_step_callbacks]
+                with ScopedTimer("scene.update", sync=PROFILE_SYNC_TIMERS):
+                    self.scene.update(self.physics_dt)
+                with ScopedTimer("post_step_callbacks", sync=False):
+                    [callback(substep) for callback in self._post_step_callbacks]
             # TODO: test if this is needed
             # if self.backend == "mjlab":
             #     with ScopedTimer("simulation_forward", sync=PROFILE_SYNC_TIMERS):

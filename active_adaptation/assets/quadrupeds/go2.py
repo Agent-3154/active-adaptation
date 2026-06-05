@@ -6,12 +6,13 @@ from typing import Literal
 
 registry = Registry.instance()
 
-INIT_POS = (0.0, 0.0, 0.6)
+INIT_POS = (0.0, 0.0, 0.4)
 INIT_JOINT_POS = {
-    ".*_hip_joint": 0.0,
-    "F[L,R]_thigh_joint": 0.6,
-    "R[L,R]_thigh_joint": 1.0,
-    ".*_calf_joint": -1.3,
+    ".*L_hip_joint": 0.1,
+    ".*R_hip_joint": -0.1,
+    "F[L,R]_thigh_joint": 0.7,
+    "R[L,R]_thigh_joint": 0.8,
+    ".*_calf_joint": -1.5,
 }
 
 JOINT_SYMMETRY_MAPPING = mirrored({
@@ -32,7 +33,7 @@ SPATIAL_SYMMETRY_MAPPING = mirrored({
     "RL_calf": "RR_calf",
     "FL_foot": "FR_foot",
     "RL_foot": "RR_foot",
-    "base_link": "base_link",
+    "base": "base",
 })
 
 JOINT_NAMES_SIMULATION = [
@@ -51,7 +52,7 @@ JOINT_NAMES_SIMULATION = [
 ]
 
 BODY_NAMES_SIMULATION = [
-    "base_link",
+    "base",
     "FL_hip",
     "FR_hip",
     "RL_hip",
@@ -70,70 +71,6 @@ BODY_NAMES_SIMULATION = [
     "RR_foot",
 ]
 
-EFFORT_LIMIT = 120.0
-VELOCITY_LIMIT = 30.0
-
-def make_isaaclab_cfg(self_collisions: bool = False):
-    from isaaclab.sensors import ContactSensorCfg
-    from active_adaptation.assets.asset_cfg import (
-        ArticulationCfg,
-        ImplicitActuatorCfg,
-        sim_utils
-    )
-    asset_cfg = ArticulationCfg(
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=str(ROBOT_MODEL_DIR / "a2" / "a2.usd"), 
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                retain_accelerations=False,
-                linear_damping=0.0,
-                angular_damping=0.0,
-                max_linear_velocity=1000.0,
-                max_angular_velocity=1000.0,
-                max_depenetration_velocity=1.0,
-            ),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=self_collisions,
-                solver_position_iteration_count=4,
-                solver_velocity_iteration_count=1,
-            ),
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                contact_offset=0.02,
-                rest_offset=0.0,
-            ),
-            activate_contact_sensors=True,
-        ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=INIT_POS,
-            joint_pos=INIT_JOINT_POS,
-            joint_vel={".*": 0.0},
-        ),
-        actuators={
-            "base_legs": ImplicitActuatorCfg(
-                joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
-                effort_limit_sim=120.0,
-                velocity_limit_sim=30.0,
-                stiffness=50.0,
-                damping=2.0,
-                friction=0.01,
-                armature=0.01,
-            ),
-        },
-        joint_symmetry_mapping=JOINT_SYMMETRY_MAPPING,
-        spatial_symmetry_mapping=SPATIAL_SYMMETRY_MAPPING,
-        joint_names_simulation=JOINT_NAMES_SIMULATION,
-        body_names_simulation=BODY_NAMES_SIMULATION,
-    )
-    sensors = {
-        "contact_forces": ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/.*",
-            track_air_time=True,
-            history_length=3,
-        )
-    }
-    return asset_cfg, sensors
-
-
 def make_mjlab_cfg(motrix: bool = False):
     import mujoco
     from active_adaptation.assets.asset_cfg import EntityCfg
@@ -142,7 +79,7 @@ def make_mjlab_cfg(motrix: bool = False):
     from mjlab.actuator import BuiltinPositionActuatorCfg
     from mjlab.sensor import ContactSensorCfg, ContactMatch
 
-    mjcf_path = ROBOT_MODEL_DIR / "a2" / "a2.xml"
+    mjcf_path = ROBOT_MODEL_DIR / "go2_unilab" / "go2.xml"
 
     def spec_fn():
         return mujoco.MjSpec.from_file(str(mjcf_path))
@@ -158,11 +95,11 @@ def make_mjlab_cfg(motrix: bool = False):
             actuators=(
                 BuiltinPositionActuatorCfg(
                     target_names_expr=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"),
-                    effort_limit=EFFORT_LIMIT,
-                    stiffness=50.0,
-                    damping=2.0,
-                    armature=0.01,
-                    frictionloss=0.01,
+                    effort_limit=23.5,
+                    stiffness=25.0,
+                    damping=0.5,
+                    # armature=0.01,
+                    # frictionloss=0.01,
                 ),
             ),
         ),
@@ -179,7 +116,7 @@ def make_mjlab_cfg(motrix: bool = False):
         joint_names_simulation=JOINT_NAMES_SIMULATION,
         body_names_simulation=BODY_NAMES_SIMULATION,
     )
-    sensors = (
+    sensors=(
         ContactSensorCfg(
             name="contact_forces",
             primary=ContactMatch(
@@ -206,14 +143,12 @@ def make_mjlab_cfg(motrix: bool = False):
     return cfg, sensors
 
 
-def make_cfg(backend: Literal["isaaclab", "mjlab", "motrix"]):
-    if backend == "isaaclab":
-        return make_isaaclab_cfg()
-    elif backend == "mjlab":
+def make_cfg(backend: Literal["mjlab", "motrix"]):
+    if backend == "mjlab":
         return make_mjlab_cfg(motrix=False)
     elif backend == "motrix":
         return make_mjlab_cfg(motrix=True)
     else:
         raise ValueError(f"Invalid backend: {backend}")
 
-registry.register("asset", "unitree_a2", make_cfg)
+registry.register("asset", "unitree_go2", make_cfg)

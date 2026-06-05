@@ -8,6 +8,7 @@ import motrixsim as mx
 from dataclasses import dataclass, field
 
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
+from active_adaptation.utils.profiling import ScopedTimer
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ def compute_env_origins_grid(
     env_origins[:, 1] = (jj.flatten()[:num_envs] - (num_cols - 1) / 2) * env_spacing
     return env_origins
 
-plane_xml = """
+PLANE_XML = """
 <mujoco model="ground">
   <compiler angle="radian" meshdir="meshes"/>
   <visual>
@@ -75,12 +76,17 @@ class MotrixSceneCfg:
 class MotrixEntityData:
     root_link_pose_w: torch.Tensor
     root_link_vel_w: torch.Tensor
+
     joint_pos: torch.Tensor
     joint_vel: torch.Tensor
     joint_acc: torch.Tensor
     joint_pos_target: torch.Tensor
     joint_vel_target: torch.Tensor
+
+    body_link_pos_w: torch.Tensor
+    body_link_quat_w: torch.Tensor
     body_vel_w: torch.Tensor
+
     default_root_state: torch.Tensor
     default_joint_pos: torch.Tensor
     default_joint_vel: torch.Tensor
@@ -178,14 +184,16 @@ class MotrixScene:
         self.cfg = cfg
         self._entities: dict[str, MotrixEntity] = {}
         self._sensors: dict[str, MotrixContactSensor] = {}
-        self._msd_world = mx.msd.from_str(plane_xml)        
+        self._msd_world = mx.msd.from_str(PLANE_XML)        
 
         self._add_entities()
         self._add_sensors()
+        # TODO: add terrain
 
         self.mx_model: mx.SceneModel = self._msd_world.build()
-        self.mx_model.options.max_iterations = 3
-        self.mx_model.options.timestep = 0.02
+        # TODO: make these configurable
+        self.mx_model.options.max_iterations = 6
+        self.mx_model.options.timestep = 0.01
 
         self.mx_data = mx.SceneData(self.mx_model, batch=(self.cfg.num_envs,))
         self.mx_model.step(self.mx_data)
@@ -219,10 +227,12 @@ class MotrixScene:
             self._sensors[sensor_cfg.name] = sensor
 
     def update(self, dt: float):
-        for ent in self._entities.values():
-            ent.update(dt)
-        for sensor in self._sensors.values():
-            sensor.update(dt)
+        with ScopedTimer("update_entities"):
+            for ent in self._entities.values():
+                ent.update(dt)
+        with ScopedTimer("update_sensors"):
+            for sensor in self._sensors.values():
+                sensor.update(dt)
     
     @property
     def entities(self) -> dict[str, MotrixEntity]:
@@ -330,6 +340,7 @@ class MotrixEntity:
                 "EntityCfg.motrix_mjcf_path_fn is required for MotrixEntity. "
                 "Set it in the asset's make_mjlab_cfg(motrix=True) factory."
             )
+        # TODO: implement `edit_spec` to programatically add actuators
         self.mjcf_path = cfg.motrix_mjcf_path_fn(cfg)
         self.msd = mx.msd.from_file(self.mjcf_path)
         self._joint_names = [
@@ -389,12 +400,9 @@ class MotrixEntity:
 
     def _read_root_link_vel_w(self) -> torch.Tensor:
         # Body has no velocity API; use the root link (see link.py / geom.py examples).
-        lin_vel = self._base_link.get_linear_velocity(self._mx_data)
-        ang_vel = self._base_link.get_angular_velocity(self._mx_data)
-        return torch.cat(
-            [self._as_tensor(lin_vel), self._as_tensor(ang_vel)],
-            dim=-1,
-        )
+        lin_vel = torch.from_numpy(self._base_link.get_linear_velocity(self._mx_data))
+        ang_vel = torch.from_numpy(self._base_link.get_angular_velocity(self._mx_data))
+        return torch.cat([lin_vel, ang_vel], dim=-1,)
 
     def _initialize(
         self,
@@ -403,14 +411,16 @@ class MotrixEntity:
     ):
         self._mx_model = mx_model
         self._mx_data = mx_data
-        body_name = f"{self._prefix}base_link"
-        self._body = mx_model.get_body(body_name)
+        base: mx.msd.Body = self.msd.hierarchy.bodies[0]
+        self.base_link_name = base.link.name
+        self.base_link_path = f"{self._prefix}{self.base_link_name}"
+        self._body = mx_model.get_body(self.base_link_path)
         if self._body is None:
-            raise ValueError(f"Body {body_name} not found in model")
+            raise ValueError(f"Body {self.base_link_path} not found in model")
         self._base_link = self._body.base_link
         self._floatingbase = self._body.floatingbase
         if self._floatingbase is None:
-            raise ValueError(f"Body {body_name} has no floating base")
+            raise ValueError(f"Body {self.base_link_path} has no floating base")
 
         self._body.base_link.joint_indices
         from mjlab.utils.string import resolve_expr
@@ -437,10 +447,10 @@ class MotrixEntity:
         root_link_vel_w = self._read_root_link_vel_w()
         root_state = torch.cat([pose, root_link_vel_w], dim=-1)
         
-        self._link_indices = [
+        self._link_indices = torch.tensor([
             self._mx_model.get_link_index(f"{self._prefix}{body_name}")
             for body_name in self._body_names
-        ]
+        ])
         body_vel_w = self._mx_model.get_link_linear_velocities(mx_data)[:, self._link_indices]
 
         self._data = MotrixEntityData(
@@ -461,16 +471,21 @@ class MotrixEntity:
         self._data.root_link_pose_w = self._as_tensor(self._body.get_pose(self._mx_data))
         self._data.root_link_vel_w = self._read_root_link_vel_w()
 
-        joint_pos = self._as_tensor(self._body.get_joint_dof_pos(self._mx_data))
-        joint_vel = self._as_tensor(self._body.get_joint_dof_vel(self._mx_data))
+        joint_pos = torch.from_numpy(self._body.get_joint_dof_pos(self._mx_data))
+        joint_vel = torch.from_numpy(self._body.get_joint_dof_vel(self._mx_data))
         joint_acc = (joint_vel - self._data.joint_vel) / dt
 
+        body_pose_w = self._mx_model.get_link_poses(self._mx_data)[:, self._link_indices]
+        body_pos_w = body_pose_w[:, :, :3]
+        body_quat_w = xyzw2wxyz(body_pose_w[:, :, 3:7])
         body_vel_w = self._mx_model.get_link_linear_velocities(self._mx_data)[:, self._link_indices]
 
         self._data.joint_pos = joint_pos
         self._data.joint_vel = joint_vel
         self._data.joint_acc = joint_acc
-        self._data.body_vel_w = torch.as_tensor(body_vel_w)
+        self._data.body_link_pos_w = body_pos_w
+        self._data.body_link_quat_w = body_quat_w
+        self._data.body_vel_w = torch.from_numpy(body_vel_w)
 
     @property
     def data(self) -> MotrixEntityData:
