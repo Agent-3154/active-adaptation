@@ -7,8 +7,11 @@ import torch
 import motrixsim as mx
 from dataclasses import dataclass, field
 
-from active_adaptation.assets.asset_cfg import EntityCfg
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from active_adaptation.assets.asset_cfg import EntityCfg
 
 # MotrixSim runs on CPU; keep entity/scene tensors on CPU and copy to numpy at the boundary.
 _DEVICE = torch.device("cpu")
@@ -52,7 +55,9 @@ plane_xml = """
 
   <worldbody>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
-    <geom name="floor" size="0 0 0.05" friction="1 .1 .1" type="plane" material="groundplane"/>
+    <body name="terrain">
+      <geom name="terrain_collision" size="0 0 0.05" friction="1 .1 .1" type="plane" material="groundplane"/>
+    </body>
   </worldbody>
 </mujoco>
 """
@@ -75,7 +80,7 @@ class MotrixEntityData:
     joint_acc: torch.Tensor
     joint_pos_target: torch.Tensor
     joint_vel_target: torch.Tensor
-    
+    body_vel_w: torch.Tensor
     default_root_state: torch.Tensor
     default_joint_pos: torch.Tensor
     default_joint_vel: torch.Tensor
@@ -151,6 +156,14 @@ class MotrixEntityData:
     @property
     def root_ang_vel_w(self) -> torch.Tensor:
         return self.root_link_ang_vel_w
+    
+    @property
+    def body_link_lin_vel_w(self) -> torch.Tensor:
+        return self.body_vel_w[:, :, :3]
+    
+    @property
+    def body_link_ang_vel_w(self) -> torch.Tensor:
+        return self.body_vel_w[:, :, 3:]
 
 
 REDUCE_MAP = {
@@ -171,6 +184,9 @@ class MotrixScene:
         self._add_sensors()
 
         self.mx_model: mx.SceneModel = self._msd_world.build()
+        self.mx_model.options.max_iterations = 3
+        self.mx_model.options.timestep = 0.02
+
         self.mx_data = mx.SceneData(self.mx_model, batch=(self.cfg.num_envs,))
         self.mx_model.step(self.mx_data)
 
@@ -178,13 +194,15 @@ class MotrixScene:
             self.cfg.num_envs,
             self.cfg.env_spacing,
         )
-        for name, ent in self._entities.items():
-            ent.initialize(self.mx_model, self.mx_data)
+        for ent in self._entities.values():
+            ent._initialize(self.mx_model, self.mx_data)
+        for sensor in self._sensors.values():
+            sensor._initialize(self.mx_model, self.mx_data)
     
     def _add_entities(self):
         for name, cfg in self.cfg.entities.items():
             ent = MotrixEntity(cfg)
-            prefix = name + "_"
+            prefix = name + "/"
             ent._prefix = prefix
             self._msd_world.attach(
                 ent.msd,
@@ -197,16 +215,18 @@ class MotrixScene:
     def _add_sensors(self):
         for sensor_cfg in self.cfg.sensors:
             sensor = MotrixContactSensor(sensor_cfg)
-            sensor.edit_spec(self._msd_world)
+            sensor.edit_spec(self._msd_world, self._entities)
             self._sensors[sensor_cfg.name] = sensor
 
     def update(self, dt: float):
         for ent in self._entities.values():
             ent.update(dt)
+        for sensor in self._sensors.values():
+            sensor.update(dt)
     
     @property
     def entities(self) -> dict[str, MotrixEntity]:
-        return self._entities
+        return dict(self._entities)
     
     @property
     def num_envs(self) -> int:
@@ -224,11 +244,11 @@ class MotrixScene:
     
     @property
     def articulations(self) -> dict[str, MotrixEntity]:
-        return self._entities
+        return dict(self._entities)
 
     @property
     def sensors(self) -> dict:
-        return {}
+        return dict(self._sensors)
 
     @property
     def device(self) -> str:
@@ -312,8 +332,19 @@ class MotrixEntity:
             )
         self.mjcf_path = cfg.motrix_mjcf_path_fn(cfg)
         self.msd = mx.msd.from_file(self.mjcf_path)
-        self._joint_names: list[str] = []
+        self._joint_names = [
+            a.name for a in self.msd.actuators
+        ]
         self._body_names: list[str] = []
+        self._geom_names: list[str] = []
+        
+        links: list[mx.msd.Link] = [self.msd.hierarchy.bodies[0].link]
+        while len(links):
+            link = links.pop(0)
+            self._body_names.append(link.name)
+            self._geom_names.extend(geom.name for geom in link.geoms)
+            links.extend(link.children)
+
         self._data = None
         self._body = None
         self._base_link = None
@@ -326,12 +357,12 @@ class MotrixEntity:
     @staticmethod
     def _as_tensor(value) -> torch.Tensor:
         if isinstance(value, torch.Tensor):
-            return value.detach().to(device=_DEVICE, dtype=torch.float32)
+            return value.to(dtype=torch.float32, device=_DEVICE)
         return torch.as_tensor(value, dtype=torch.float32, device=_DEVICE)
 
     @staticmethod
     def _to_numpy(value: torch.Tensor) -> np.ndarray:
-        return value.detach().cpu().numpy().astype(np.float32, copy=False)    
+        return value.cpu().numpy().astype(np.float32, copy=False)    
 
     def _view_data(self, env_ids: torch.Tensor | slice | None) -> mx.SceneData:
         if env_ids is None:
@@ -365,7 +396,7 @@ class MotrixEntity:
             dim=-1,
         )
 
-    def initialize(
+    def _initialize(
         self,
         mx_model: mx.SceneModel,
         mx_data: mx.SceneData,
@@ -381,20 +412,8 @@ class MotrixEntity:
         if self._floatingbase is None:
             raise ValueError(f"Body {body_name} has no floating base")
 
-        # TODO: find better ways to get joint and body names
-        self._joint_names = [
-            actuator.name.replace(self._prefix, "")
-            for actuator in self._body.actuators
-        ]
-        self._body_names = [
-            name.replace(self._prefix, "")
-            for name in self._mx_model.link_names if name.startswith(self._prefix)
-        ]
-
         self._body.base_link.joint_indices
-
         from mjlab.utils.string import resolve_expr
-
         joint_pos = self._as_tensor(self._body.get_joint_dof_pos(mx_data))
         joint_vel = self._as_tensor(self._body.get_joint_dof_vel(mx_data))
         num_envs = joint_pos.shape[0]
@@ -417,6 +436,13 @@ class MotrixEntity:
         pose = self._as_tensor(self._body.get_pose(mx_data))
         root_link_vel_w = self._read_root_link_vel_w()
         root_state = torch.cat([pose, root_link_vel_w], dim=-1)
+        
+        self._link_indices = [
+            self._mx_model.get_link_index(f"{self._prefix}{body_name}")
+            for body_name in self._body_names
+        ]
+        body_vel_w = self._mx_model.get_link_linear_velocities(mx_data)[:, self._link_indices]
+
         self._data = MotrixEntityData(
             root_link_pose_w=pose,
             root_link_vel_w=root_link_vel_w,
@@ -425,6 +451,7 @@ class MotrixEntity:
             joint_acc=torch.zeros_like(joint_vel),
             joint_pos_target=default_joint_pos.clone(),
             joint_vel_target=default_joint_vel.clone(),
+            body_vel_w=body_vel_w,
             default_root_state=root_state,
             default_joint_pos=default_joint_pos,
             default_joint_vel=default_joint_vel,
@@ -438,9 +465,12 @@ class MotrixEntity:
         joint_vel = self._as_tensor(self._body.get_joint_dof_vel(self._mx_data))
         joint_acc = (joint_vel - self._data.joint_vel) / dt
 
+        body_vel_w = self._mx_model.get_link_linear_velocities(self._mx_data)[:, self._link_indices]
+
         self._data.joint_pos = joint_pos
         self._data.joint_vel = joint_vel
         self._data.joint_acc = joint_acc
+        self._data.body_vel_w = torch.as_tensor(body_vel_w)
 
     @property
     def data(self) -> MotrixEntityData:
@@ -453,6 +483,10 @@ class MotrixEntity:
     @property
     def body_names(self) -> list[str]:
         return list(self._body_names) # copy the list to avoid modifying the original
+    
+    @property
+    def geom_names(self) -> list[str]:
+        return list(self._geom_names) # copy the list to avoid modifying the original
 
     def find_joints(
         self,
@@ -473,10 +507,20 @@ class MotrixEntity:
         preserve_order: bool = False,
     ) -> tuple[list[int], list[str]]:
         from mjlab.utils.lab_api.string import resolve_matching_names
-
         if body_subset is None:
             body_subset = self._body_names
         return resolve_matching_names(name_keys, body_subset, preserve_order)
+
+    def find_geoms(
+        self,
+        name_keys: str | list[str],
+        geom_subset: list[str] | None = None,
+        preserve_order: bool = False,
+    ) -> tuple[list[int], list[str]]:
+        from mjlab.utils.lab_api.string import resolve_matching_names
+        if geom_subset is None:
+            geom_subset = self._geom_names
+        return resolve_matching_names(name_keys, geom_subset, preserve_order)
 
     def set_joint_position_target(
         self,
@@ -532,7 +576,6 @@ class MotrixEntity:
         self._floatingbase.set_rotation(data_view, quat_xyzw)
         self._floatingbase.set_global_linear_velocity(data_view, lin_vel)
         self._floatingbase.set_global_angular_velocity(data_view, ang_vel)
-        self._sync_kinematics()
 
     def write_joint_state_to_sim(
         self,
@@ -560,7 +603,6 @@ class MotrixEntity:
         # Third arg excludes the free joint; root is written separately.
         self._body.set_dof_pos(data_view, self._to_numpy(pos), False)
         self._body.set_dof_vel(data_view, self._to_numpy(vel), False)
-        self._sync_kinematics()
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         env_sel = slice(None) if env_ids is None else env_ids
@@ -603,27 +645,44 @@ class MotrixEntity:
         )
 
 
-@dataclass
-class MotrixContactSensorData:
-    ...
-
-
 import re
+from dataclasses import dataclass
 from typing import Literal
 
-from mjlab.sensor.contact_sensor import ContactMatch, ContactSensorCfg
+from mjlab.sensor.contact_sensor import ContactMatch, ContactSensorCfg, ContactData
 
 
 class MotrixContactSensor:
-    """Add Motrix MSD contact sensors from an mjlab :class:`ContactSensorCfg`."""
+    """Add Motrix MSD contact sensors from an mjlab :class:`ContactSensorCfg`.
+    
+    We reuse the mjlab's ContactSensorCfg and ContactData classes for convenience.
+    """
 
     _REPORT_FIELDS = frozenset(
         {"found", "force", "torque", "dist", "pos", "normal", "tangent"}
     )
+    _FIELD_ORDER = ("found", "force", "torque", "dist", "pos", "normal", "tangent")
+    _FIELD_DIMS = {
+        "found": 1,
+        "force": 3,
+        "torque": 3,
+        "dist": 1,
+        "pos": 3,
+        "normal": 3,
+        "tangent": 3,
+    }
 
     def __init__(self, cfg: ContactSensorCfg) -> None:
         self.cfg = cfg
         self._primary_names: list[str] = []
+        self._sensor_names: list[str] = []
+        self._sensor_stride = 0
+        self._mx_model: mx.SceneModel | None = None
+        self._mx_data: mx.SceneData | None = None
+        self._cached_data: ContactData | None = None
+        self._cache_valid = False
+        self._air_time_state: _MotrixAirTimeState | None = None
+        self._history_state: dict[str, torch.Tensor] | None = None
 
         if cfg.global_frame and cfg.reduce != "netforce":
             if "normal" not in cfg.fields or "tangent" not in cfg.fields:
@@ -635,6 +694,17 @@ class MotrixContactSensor:
             raise ValueError(
                 f"Sensor '{cfg.name}': track_air_time=True requires 'found' in fields"
             )
+    
+    def find_bodies(
+        self,
+        name_keys: str | list[str],
+        body_subset: list[str] | None = None,
+        preserve_order: bool = False,
+    ) -> tuple[list[int], list[str]]:
+        from mjlab.utils.lab_api.string import resolve_matching_names
+        if body_subset is None:
+            body_subset = self.primary_names
+        return resolve_matching_names(name_keys, body_subset, preserve_order)
 
     def edit_spec(
         self,
@@ -642,10 +712,10 @@ class MotrixContactSensor:
         entities: dict[str, MotrixEntity] | None = None,
     ) -> None:
         """Expand patterns and register one MSD contact sensor per primary."""
-        entities = entities or {}
         self._primary_names.clear()
+        self._sensor_names.clear()
 
-        primary_names = self._resolve_primary_names(entities, self.cfg.primary, msd_scene)
+        primary_names = self._resolve_primary_names(entities, self.cfg.primary)
         if self.cfg.secondary is None or self.cfg.secondary_policy == "any":
             secondary_name = None
         else:
@@ -653,7 +723,6 @@ class MotrixContactSensor:
                 entities,
                 self.cfg.secondary,
                 self.cfg.secondary_policy,
-                msd_scene,
             )
 
         if secondary_name is None:
@@ -672,6 +741,224 @@ class MotrixContactSensor:
                 self.cfg.fields,
             )
             self._primary_names.append(prim)
+    
+    @property
+    def primary_names(self) -> list[str]:
+        return list(self._primary_names)
+
+    @property
+    def data(self) -> ContactData:
+        if not self._cache_valid:
+            self._cached_data = self._compute_data()
+            self._cache_valid = True
+        assert self._cached_data is not None
+        return self._cached_data
+
+    def _initialize(self, mx_model: mx.SceneModel, mx_data: mx.SceneData) -> None:
+        if not self._sensor_names:
+            raise RuntimeError(
+                f"There was an error initializing contact sensor '{self.cfg.name}'"
+            )
+
+        self._mx_model = mx_model
+        self._mx_data = mx_data
+        self._sensor_stride = sum(
+            self._FIELD_DIMS[field]
+            for field in self._FIELD_ORDER
+            if field in self.cfg.fields
+        )
+        self._cache_valid = False
+
+        n_primary = len(self._primary_names)
+        n_envs = int(mx_data.shape[0])
+
+        if self.cfg.track_air_time:
+            self._air_time_state = _MotrixAirTimeState(
+                current_air_time=torch.zeros((n_envs, n_primary), device=_DEVICE),
+                last_air_time=torch.zeros((n_envs, n_primary), device=_DEVICE),
+                current_contact_time=torch.zeros((n_envs, n_primary), device=_DEVICE),
+                last_contact_time=torch.zeros((n_envs, n_primary), device=_DEVICE),
+            )
+
+        if self.cfg.history_length > 0:
+            n_contacts = n_primary * self.cfg.num_slots
+            h = self.cfg.history_length
+            self._history_state = {}
+            if "force" in self.cfg.fields:
+                self._history_state["force"] = torch.zeros(
+                    (n_envs, n_contacts, h, 3), device=_DEVICE
+                )
+            if "torque" in self.cfg.fields:
+                self._history_state["torque"] = torch.zeros(
+                    (n_envs, n_contacts, h, 3), device=_DEVICE
+                )
+            if "dist" in self.cfg.fields:
+                self._history_state["dist"] = torch.zeros(
+                    (n_envs, n_contacts, h), device=_DEVICE
+                )
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        env_sel = slice(None) if env_ids is None else env_ids
+        self._cache_valid = False
+
+        if self._air_time_state is not None:
+            self._air_time_state.current_air_time[env_sel] = 0.0
+            self._air_time_state.last_air_time[env_sel] = 0.0
+            self._air_time_state.current_contact_time[env_sel] = 0.0
+            self._air_time_state.last_contact_time[env_sel] = 0.0
+
+        if self._history_state is not None:
+            for buf in self._history_state.values():
+                buf[env_sel] = 0.0
+
+    def update(self, dt: float) -> None:
+        if self._mx_model is None or self._mx_data is None:
+            raise RuntimeError(f"Sensor '{self.cfg.name}' not initialized")
+
+        raw = self._mx_model.get_sensor_values(self._sensor_names, self._mx_data)
+        contact_data = self._parse_sensor_values(raw)
+
+        if self.cfg.global_frame and self.cfg.reduce != "netforce":
+            contact_data = self._transform_to_global_frame(contact_data)
+
+        if self._air_time_state is not None and contact_data.found is not None:
+            elapsed_time = torch.full(
+                (contact_data.found.shape[0],),
+                float(dt),
+                device=_DEVICE,
+            ).unsqueeze(-1)
+            found = contact_data.found
+            if self.cfg.num_slots > 1:
+                found = found.view(found.shape[0], -1, self.cfg.num_slots).any(dim=-1)
+            is_contact = found > 0
+
+            state = self._air_time_state
+            is_first_contact = (state.current_air_time > 0) & is_contact
+            is_first_detached = (state.current_contact_time > 0) & ~is_contact
+
+            state.last_air_time[:] = torch.where(
+                is_first_contact,
+                state.current_air_time + elapsed_time,
+                state.last_air_time,
+            )
+            state.current_air_time[:] = torch.where(
+                ~is_contact,
+                state.current_air_time + elapsed_time,
+                torch.zeros_like(state.current_air_time),
+            )
+            state.last_contact_time[:] = torch.where(
+                is_first_detached,
+                state.current_contact_time + elapsed_time,
+                state.last_contact_time,
+            )
+            state.current_contact_time[:] = torch.where(
+                is_contact,
+                state.current_contact_time + elapsed_time,
+                torch.zeros_like(state.current_contact_time),
+            )
+
+            contact_data.current_air_time = state.current_air_time
+            contact_data.last_air_time = state.last_air_time
+            contact_data.current_contact_time = state.current_contact_time
+            contact_data.last_contact_time = state.last_contact_time
+
+        if self._history_state is not None:
+            if "force" in self._history_state and contact_data.force is not None:
+                self._history_state["force"] = self._history_state["force"].roll(1, dims=2)
+                self._history_state["force"][:, :, 0, :] = contact_data.force
+            if "torque" in self._history_state and contact_data.torque is not None:
+                self._history_state["torque"] = self._history_state["torque"].roll(1, dims=2)
+                self._history_state["torque"][:, :, 0, :] = contact_data.torque
+            if "dist" in self._history_state and contact_data.dist is not None:
+                self._history_state["dist"] = self._history_state["dist"].roll(1, dims=2)
+                self._history_state["dist"][:, :, 0] = contact_data.dist
+
+            contact_data.force_history = self._history_state.get("force")
+            contact_data.torque_history = self._history_state.get("torque")
+            contact_data.dist_history = self._history_state.get("dist")
+
+        self._cached_data = contact_data
+        self._cache_valid = True
+    
+    def compute_first_contact(self, dt: float, abs_tol: float = 1.0e-8) -> torch.Tensor:
+        if self._air_time_state is None:
+            raise RuntimeError(f"Sensor '{self.cfg.name}' must have track_air_time=True to use compute_first_contact")
+        is_in_contact = self._air_time_state.current_contact_time > 0.0
+        within_dt = self._air_time_state.current_contact_time < (dt + abs_tol)
+        return is_in_contact & within_dt
+    
+    def compute_first_air(self, dt: float, abs_tol: float = 1.0e-8) -> torch.Tensor:
+        if self._air_time_state is None:
+            raise RuntimeError(f"Sensor '{self.cfg.name}' must have track_air_time=True to use compute_first_air")
+        is_in_air = self._air_time_state.current_air_time > 0.0
+        within_dt = self._air_time_state.current_air_time < (dt + abs_tol)
+        return is_in_air & within_dt
+
+    def _compute_data(self) -> ContactData:
+        if self._mx_model is None or self._mx_data is None:
+            raise RuntimeError(f"Sensor '{self.cfg.name}' not initialized")
+        raw = self._mx_model.get_sensor_values(self._sensor_names, self._mx_data)
+        contact_data = self._parse_sensor_values(raw)
+        if self.cfg.global_frame and self.cfg.reduce != "netforce":
+            contact_data = self._transform_to_global_frame(contact_data)
+        if self._air_time_state is not None:
+            contact_data.current_air_time = self._air_time_state.current_air_time
+            contact_data.last_air_time = self._air_time_state.last_air_time
+            contact_data.current_contact_time = self._air_time_state.current_contact_time
+            contact_data.last_contact_time = self._air_time_state.last_contact_time
+        if self._history_state is not None:
+            contact_data.force_history = self._history_state.get("force")
+            contact_data.torque_history = self._history_state.get("torque")
+            contact_data.dist_history = self._history_state.get("dist")
+        return contact_data
+
+    def _parse_sensor_values(self, raw) -> ContactData:
+        n_primary = len(self._primary_names)
+        if n_primary == 0:
+            raise RuntimeError(f"Sensor '{self.cfg.name}' has no primaries")
+
+        values = torch.as_tensor(raw, dtype=torch.float32, device=_DEVICE)
+        if values.ndim == 1:
+            values = values.unsqueeze(0)
+        per_primary = values.view(values.shape[0], n_primary, self._sensor_stride)
+
+        field_offsets: dict[str, tuple[int, int]] = {}
+        cursor = 0
+        for field in self._FIELD_ORDER:
+            if field not in self.cfg.fields:
+                continue
+            dim = self._FIELD_DIMS[field]
+            field_offsets[field] = (cursor, cursor + dim)
+            cursor += dim
+
+        out = ContactData()
+        for field in self.cfg.fields:
+            start, end = field_offsets[field]
+            chunk = per_primary[..., start:end]
+            if chunk.shape[-1] == 1:
+                chunk = chunk.squeeze(-1)
+            setattr(out, field, chunk)
+        return out
+
+    def _transform_to_global_frame(self, data: ContactData) -> ContactData:
+        assert data.normal is not None and data.tangent is not None
+
+        normal = data.normal
+        tangent = data.tangent
+        tangent2 = torch.cross(normal, tangent, dim=-1)
+        rot = torch.stack([tangent, tangent2, normal], dim=-1)
+
+        has_contact = torch.norm(normal, dim=-1, keepdim=True) > 1e-8
+
+        if data.force is not None:
+            force_global = torch.einsum("...ij,...j->...i", rot, data.force)
+            data.force = torch.where(has_contact, force_global, data.force)
+
+        if data.torque is not None:
+            torque_global = torch.einsum("...ij,...j->...i", rot, data.torque)
+            data.torque = torch.where(has_contact, torque_global, data.torque)
+
+        return data
 
     @staticmethod
     def _entity_prefix(
@@ -682,8 +969,8 @@ class MotrixContactSensor:
             return ""
         if entity_key in entities:
             prefix = entities[entity_key]._prefix
-            return prefix if prefix is not None else f"{entity_key}_"
-        return f"{entity_key}_"
+            return prefix if prefix is not None else f"{entity_key}/"
+        return f"{entity_key}/"
 
     @classmethod
     def _sim_name(
@@ -696,72 +983,6 @@ class MotrixContactSensor:
         if not prefix:
             return name
         return name if name.startswith(prefix) else f"{prefix}{name}"
-
-    @staticmethod
-    def _walk_msd_links(link) -> list[str]:
-        names: list[str] = []
-        if link.name:
-            names.append(link.name)
-        for child in link.children:
-            names.extend(MotrixContactSensor._walk_msd_links(child))
-        return names
-
-    @staticmethod
-    def _walk_msd_geoms(link) -> list[str]:
-        names: list[str] = []
-        for geom in link.geoms:
-            if geom.name:
-                names.append(geom.name)
-        for child in link.children:
-            names.extend(MotrixContactSensor._walk_msd_geoms(child))
-        return names
-
-    @classmethod
-    def _link_names_from_msd(cls, msd_root) -> list[str]:
-        names: list[str] = []
-        for body in msd_root.hierarchy.bodies:
-            if body.link is not None:
-                names.extend(cls._walk_msd_links(body.link))
-        return names
-
-    @classmethod
-    def _geom_names_from_msd(cls, msd_root) -> list[str]:
-        names: list[str] = []
-        for body in msd_root.hierarchy.bodies:
-            if body.link is not None:
-                names.extend(cls._walk_msd_geoms(body.link))
-        return names
-
-    @classmethod
-    def _names_for_entity(
-        cls,
-        entities: dict[str, MotrixEntity],
-        entity_key: str,
-        mode: Literal["geom", "body", "subtree"],
-        msd_scene: mx.msd.World,
-    ) -> list[str]:
-        prefix = cls._entity_prefix(entity_key, entities)
-        if entity_key in entities:
-            ent = entities[entity_key]
-            if mode == "geom":
-                subset = cls._geom_names_from_msd(ent.msd)
-            else:
-                subset = ent.body_names
-            return [n if not prefix or n.startswith(prefix) else f"{prefix}{n}" for n in subset]
-        if mode == "geom":
-            all_names = cls._geom_names_from_msd(msd_scene)
-        else:
-            all_names = cls._link_names_from_msd(msd_scene)
-        if not prefix:
-            return all_names
-        return [n for n in all_names if n.startswith(prefix)]
-
-    @classmethod
-    def _strip_prefix(cls, names: list[str], prefix: str) -> list[str]:
-        if not prefix:
-            return list(names)
-        plen = len(prefix)
-        return [n[plen:] if n.startswith(prefix) else n for n in names]
 
     @classmethod
     def _apply_excludes(cls, names: list[str], excludes: tuple[str, ...]) -> list[str]:
@@ -784,9 +1005,7 @@ class MotrixContactSensor:
         self,
         entities: dict[str, MotrixEntity],
         match: ContactMatch,
-        msd_scene: mx.msd.World,
     ) -> list[str]:
-        from mjlab.utils.lab_api.string import resolve_matching_names
 
         if match.entity in (None, ""):
             patterns = [match.pattern] if isinstance(match.pattern, str) else list(match.pattern)
@@ -797,22 +1016,14 @@ class MotrixContactSensor:
                 f"Primary entity '{match.entity}' not found. "
                 f"Available: {list(entities.keys())}"
             )
+        ent = entities[match.entity]
 
-        prefix = self._entity_prefix(match.entity, entities)
         patterns = [match.pattern] if isinstance(match.pattern, str) else list(match.pattern)
 
         if match.mode == "geom":
-            subset = self._strip_prefix(
-                self._names_for_entity(entities, match.entity, "geom", msd_scene),
-                prefix,
-            )
-            _, names = resolve_matching_names(patterns, subset, preserve_order=False)
+            _, names = ent.find_geoms(patterns)
         elif match.mode in ("body", "subtree"):
-            subset = self._strip_prefix(
-                self._names_for_entity(entities, match.entity, "body", msd_scene),
-                prefix,
-            )
-            _, names = resolve_matching_names(patterns, subset, preserve_order=False)
+            _, names = ent.find_bodies(patterns)
         else:
             raise ValueError("Primary mode must be one of {'geom','body','subtree'}")
 
@@ -830,10 +1041,7 @@ class MotrixContactSensor:
         entities: dict[str, MotrixEntity],
         match: ContactMatch,
         policy: Literal["first", "any", "error"],
-        msd_scene: mx.msd.World,
     ) -> str | None:
-        from mjlab.utils.lab_api.string import resolve_matching_names
-
         if policy == "any":
             return None
 
@@ -854,23 +1062,15 @@ class MotrixContactSensor:
                 f"Secondary entity '{match.entity}' not found. "
                 f"Available: {list(entities.keys())}"
             )
+        ent = entities[match.entity]
 
         if match.mode == "subtree":
             return match.pattern
 
-        prefix = self._entity_prefix(match.entity, entities)
         if match.mode == "geom":
-            subset = self._strip_prefix(
-                self._names_for_entity(entities, match.entity, "geom", msd_scene),
-                prefix,
-            )
-            _, names = resolve_matching_names(match.pattern, subset, preserve_order=False)
+            _, names = ent.find_geoms(match.pattern)
         elif match.mode == "body":
-            subset = self._strip_prefix(
-                self._names_for_entity(entities, match.entity, "body", msd_scene),
-                prefix,
-            )
-            _, names = resolve_matching_names(match.pattern, subset, preserve_order=False)
+            _, names = ent.find_bodies(match.pattern)
         else:
             raise ValueError("Secondary mode must be one of {'geom','body','subtree'}")
 
@@ -923,6 +1123,7 @@ class MotrixContactSensor:
         sensor.reduce = REDUCE_MAP[self.cfg.reduce]
         sensor.max_num = self.cfg.num_slots
         msd_world.sensors.contact.append(sensor)
+        self._sensor_names.append(sensor_name)
 
         if self.cfg.debug:
             print(
@@ -934,6 +1135,13 @@ class MotrixContactSensor:
                 f"  reduce   : {self.cfg.reduce}  num_slots={self.cfg.num_slots}"
             )
 
+
+@dataclass
+class _MotrixAirTimeState:
+    current_air_time: torch.Tensor
+    last_air_time: torch.Tensor
+    current_contact_time: torch.Tensor
+    last_contact_time: torch.Tensor
 
 
 def wxyz2xyzw(quat_wxyz: torch.Tensor) -> torch.Tensor:

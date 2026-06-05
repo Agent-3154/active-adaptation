@@ -17,19 +17,16 @@ class MotrixBackendEnv(_EnvBase):
     def setup_scene(self):
         registry = Registry.instance()
         asset_cfg = registry.get("asset", self.cfg.robot.name)
-        if callable(asset_cfg):
-            asset_cfg, _sensors = asset_cfg(backend="motrix")
-        else:
-            raise ValueError(
-                "Motrix backend requires a callable asset factory, "
-                f"got {type(asset_cfg)}"
-            )
+        sensors = []
+        asset_cfg, _sensors = asset_cfg(backend="motrix")
+        sensors.extend(_sensors)
 
         self.terrain_type = self.cfg.get("terrain", "plane")
         scene_cfg = MotrixSceneCfg(
             num_envs=self.cfg.num_envs,
             env_spacing=2.5,
             entities={"robot": asset_cfg},
+            sensors=tuple(sensors)
         )
         self.scene = MotrixScene(scene_cfg)
         self.sim = MotrixSim(self.scene, headless=self.headless)

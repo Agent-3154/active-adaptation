@@ -184,7 +184,7 @@ def make_mjlab_cfg(motrix: bool = False):
             name="contact_forces",
             primary=ContactMatch(
                 mode="body",
-                pattern=".*",
+                pattern=".*_foot",
                 entity="robot",
             ),
             secondary=ContactMatch(
@@ -193,7 +193,7 @@ def make_mjlab_cfg(motrix: bool = False):
                 entity=None,
             ),
             fields=("found", "force"),
-            reduce="maxforce",
+            reduce="netforce",
             num_slots=1,
             track_air_time=True,
             history_length=3,

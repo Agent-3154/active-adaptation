@@ -52,7 +52,7 @@ class max_feet_height(Reward):
 
 
 class feet_sliding(Reward):
-    supported_backends = ("isaac", "mjlab")
+    supported_backends = ("isaac", "mjlab", "motrix")
 
     def __init__(self, env, body_names: str, weight: float):
         super().__init__(env, weight)
@@ -74,7 +74,7 @@ class feet_sliding(Reward):
         )
         if self.env.backend == "isaac":
             feet_speed = self.asset.data.body_com_lin_vel_w[:, self.body_ids].norm(dim=-1)
-        elif self.env.backend == "mjlab":
+        elif self.env.backend in ("mjlab", "motrix"):
             feet_speed = self.asset.data.body_link_lin_vel_w[:, self.body_ids].norm(dim=-1)
         sliding = (in_contact * feet_speed).sum(dim=1)
         return -sliding.reshape(self.num_envs, 1)
@@ -173,7 +173,7 @@ class feet_air_time(Reward):
 
 
 class feet_contact_count(Reward):
-    supported_backends = ("isaac", "mjlab")
+    supported_backends = ("isaac", "mjlab", "motrix")
 
     def __init__(self, env, body_names: str, weight: float):
         super().__init__(env, weight)
