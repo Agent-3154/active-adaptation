@@ -87,7 +87,7 @@ class undesired_contact(Termination):
     Soft termination based on the contact forces on the specified body names.
     """
 
-    supported_backends = ("isaac", )
+    supported_backends = ("isaac", "mjlab", "motrix")
 
     def __init__(
         self,
@@ -114,10 +114,12 @@ class undesired_contact(Termination):
 
     def compute(self, termination: torch.Tensor):
         terminated = torch.zeros(self.num_envs, 1, device=self.env.device, dtype=bool)
-        forces = self.contact_sensor.data.net_forces_w[
-            :, self.body_indices, : self.dim
-        ].norm(dim=-1, keepdim=True)
-        in_contact = (forces > self.thres).sum(dim=1)
+        # forces = self.contact_sensor.data.net_forces_w[
+        #     :, self.body_indices, : self.dim
+        # ].norm(dim=-1, keepdim=True)
+        # in_contact = (forces > self.thres).sum(dim=1)
+        contact_time = self.contact_sensor.data.current_contact_time[:, self.body_indices]
+        in_contact = (contact_time > 0.0).sum(dim=1, keepdim=True)
         discount = 0.8**in_contact
         return terminated, discount.reshape(self.num_envs, 1)
 

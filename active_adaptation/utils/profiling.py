@@ -1,7 +1,13 @@
+import sys
 import time
 import torch
 from torch.utils._contextlib import _DecoratorContextManager
-from typing import List, Dict, Tuple
+from typing import List, Dict, Optional
+
+_NAME_W = 36
+_SEP_W = _NAME_W + 8 + 10 + 10 + 8 + 4
+_LEVEL_ANSI = ("\033[36m", "\033[32m", "\033[33m", "\033[34m", "\033[35m", "\033[90m")
+_RESET = "\033[0m"
 
 
 class ScopedTimer(_DecoratorContextManager):
@@ -15,6 +21,8 @@ class ScopedTimer(_DecoratorContextManager):
     ...     time.sleep(1)
     >>> with ScopedTimer("step"):  # Reuses the same timer
     ...     time.sleep(1)
+    >>> print(timer.last_time)
+    1.0
     >>> ScopedTimer.print_summary(clear=True)
     """
 
@@ -36,54 +44,23 @@ class ScopedTimer(_DecoratorContextManager):
         return cls._instances[name]
 
     def __init__(self, name: str, sync: bool = False):
-        # Update sync flag if it's different
         self.sync = sync
 
     def clone(self):
-        """Required by ``_DecoratorContextManager`` for decorator usage.
-
-        For our singleton timer, cloning just returns ``self``, which is
-        sufficient since timing state is accumulated per named timer.
-        """
+        """Required by ``_DecoratorContextManager`` for decorator usage."""
         return self
 
-    def _detach(self):
-        """Detach this timer from its current parent or the root list."""
-        if self.parent is None:
-            if self in ScopedTimer._root_nodes:
-                ScopedTimer._root_nodes.remove(self)
-            return
-
-        if self in self.parent.children:
-            self.parent.children.remove(self)
-        self.parent = None
-
-    def _attach(self, parent: "ScopedTimer | None"):
-        """Attach this timer to a new parent or the root list."""
-        self.parent = parent
-        if parent is None:
-            if self not in ScopedTimer._root_nodes:
-                ScopedTimer._root_nodes.append(self)
-            return
-
-        if self not in parent.children:
-            parent.children.append(self)
-
     def __enter__(self):
-        # Update hierarchical parent/roots based on current stack at each use,
-        # so timers appear under the scopes where they are most recently used.
-        parent = ScopedTimer._stack[-1] if ScopedTimer._stack else None
-
-        if parent is None:
-            attached = self in ScopedTimer._root_nodes
-        else:
-            attached = self in parent.children
-
-        # Re-parent if needed so the summary tree reflects current usage.
-        if self.parent is not parent or not attached:
-            self._detach()
-            self._attach(parent)
-
+        if self.parent is None:
+            parent = ScopedTimer._stack[-1] if ScopedTimer._stack else None
+            if parent is None:
+                if self not in ScopedTimer._root_nodes:
+                    ScopedTimer._root_nodes.append(self)
+            else:
+                self.parent = parent
+                parent.children.append(self)
+                if self in ScopedTimer._root_nodes:
+                    ScopedTimer._root_nodes.remove(self)
         ScopedTimer._stack.append(self)
         self.start = time.perf_counter()
         return self
@@ -91,29 +68,48 @@ class ScopedTimer(_DecoratorContextManager):
     def __exit__(self, exc_type, exc_value, traceback):
         if self.sync:
             torch.cuda.synchronize()
-        self.end = time.perf_counter()
-        self.last_time = self.end - self.start
+        self.last_time = time.perf_counter() - self.start
         self.time += self.last_time
         self.count += 1
         ScopedTimer._stack.pop()
 
     @staticmethod
-    def _roots_for_summary() -> Tuple[List["ScopedTimer"], bool]:
-        """Timers with no parent are roots; fall back if _root_nodes desynced.
-
-        Returns (roots, flat) where ``flat`` means print without recursing
-        children (used when no node has parent=None).
-        """
-        if ScopedTimer._root_nodes:
-            return list(ScopedTimer._root_nodes), False
-        inferred = [t for t in ScopedTimer._instances.values() if t.parent is None]
-        if inferred:
-            return inferred, False
-        # No explicit roots (e.g. inconsistent tree): show every timer once, flat.
-        return sorted(ScopedTimer._instances.values(), key=lambda t: t.name), True
+    def _print_node(
+        node: "ScopedTimer",
+        depth: int,
+        max_depth: int,
+        total_time: float,
+        clear: bool,
+        color: bool,
+    ) -> None:
+        if max_depth > 0 and depth >= max_depth:
+            return
+        name = f"{'  ' * depth}{node.name}"
+        avg_ms = node.time / node.count * 1000 if node.count else 0.0
+        pct = node.time / total_time * 100 if total_time else 0.0
+        if color:
+            c = _LEVEL_ANSI[depth % len(_LEVEL_ANSI)]
+            pad = max(_NAME_W - len(name), 0)
+            print(
+                f"{c}{name}{_RESET}{' ' * pad}"
+                f" {c}{node.count:>8}{_RESET}"
+                f" {c}{node.time:>10.4f}{_RESET}"
+                f" {c}{avg_ms:>10.2f}{_RESET}"
+                f" {c}{pct:>7.1f}%{_RESET}"
+            )
+        else:
+            print(
+                f"{name:<{_NAME_W}} {node.count:>8} {node.time:>10.4f} "
+                f"{avg_ms:>10.2f} {pct:>7.1f}%"
+            )
+        if clear:
+            node.time = 0.0
+            node.count = 0
+        for child in node.children:
+            ScopedTimer._print_node(child, depth + 1, max_depth, total_time, clear, color)
 
     @staticmethod
-    def print_summary(clear: bool = True, depth: int = 3):
+    def print_summary(clear: bool = True, depth: int = 3, use_color: Optional[bool] = None):
         """Print timing summary for all timers.
 
         ``depth`` is the maximum tree depth to print (levels 0 .. depth-1). Use
@@ -123,46 +119,22 @@ class ScopedTimer(_DecoratorContextManager):
             print("No timers recorded.")
             return
 
-        roots, flat = ScopedTimer._roots_for_summary()
+        roots = ScopedTimer._root_nodes or [
+            t for t in ScopedTimer._instances.values() if t.parent is None
+        ]
+        if not roots:
+            roots = sorted(ScopedTimer._instances.values(), key=lambda t: t.name)
+
         total_time = sum(r.time for r in roots)
-        print("\n" + "=" * 70)
-        print(f"{'Timer Name':<30} {'Count':>8} {'Total (s)':>10} {'Avg (ms)':>10} {'%':>8}")
-        print("=" * 70)
+        color = sys.stdout.isatty() if use_color is None else use_color
+        max_depth = depth if depth > 0 else -1
 
-        if flat:
-            for node in roots:
-                avg_ms = (node.time / node.count * 1000) if node.count > 0 else 0
-                pct = (node.time / total_time * 100) if total_time > 0 else 0.0
-                print(
-                    f"{node.name:<30} {node.count:>8} {node.time:>10.4f} {avg_ms:>10.2f} {pct:>7.1f}%"
-                )
-                if clear:
-                    node.time = 0
-                    node.count = 0
-        else:
-            eff_depth = depth if depth > 0 else -1
-            for root in roots:
-                root.print_recursive(
-                    root, 0, clear=clear, max_depth=eff_depth, total_time=total_time
-                )
-
-        print("=" * 70 + "\n")
-
-    def print_recursive(self, node: "ScopedTimer", depth: int = 0, clear: bool = True, max_depth: int = -1, total_time: float = 0.0):
-        """Recursively print timer nodes in DFS order."""
-        # max_depth <= 0 means no limit; otherwise print while depth < max_depth.
-        if max_depth > 0 and depth >= max_depth:
-            return
-        indent = "  " * depth
-        avg_ms = (node.time / node.count * 1000) if node.count > 0 else 0
-        pct = (node.time / total_time * 100) if total_time > 0 else 0.0
+        print("\n" + "=" * _SEP_W)
         print(
-            f"{indent}{node.name:<30} {node.count:>8} {node.time:>10.4f} {avg_ms:>10.2f} {pct:>7.1f}%"
+            f"{'Timer Name':<{_NAME_W}} {'Count':>8} {'Total (s)':>10} "
+            f"{'Avg (ms)':>10} {'%':>8}"
         )
-        if clear:
-            node.time = 0
-            node.count = 0
-
-        for child in node.children:
-            self.print_recursive(child, depth + 1, clear=clear, max_depth=max_depth, total_time=total_time)
-
+        print("=" * _SEP_W)
+        for root in roots:
+            ScopedTimer._print_node(root, 0, max_depth, total_time, clear, color)
+        print("=" * _SEP_W + "\n")

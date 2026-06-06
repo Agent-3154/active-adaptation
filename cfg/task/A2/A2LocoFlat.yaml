@@ -68,7 +68,7 @@ reward:
     angvel_z_exp:       {weight: 0.8}
     angvel_xy_l2:       {weight: 0.02}
     linvel_z_l2:        {weight: 2.0}
-    base_height_exp:    {weight: 2.0, target_height: 0.4}
+    base_height_exp:    {weight: 2.0, target_height: 0.4, sigma: 0.4}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7}
