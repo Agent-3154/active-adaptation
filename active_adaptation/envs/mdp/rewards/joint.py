@@ -23,6 +23,7 @@ class joint_acc_l2(Reward):
 
 
 class energy_l1(Reward):
+    supported_backends = ("isaac", "mujoco", "mjlab")
     def __init__(self, env, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(env, weight, track_var=track_var)
         self.asset: Articulation = self.env.scene.articulations["robot"]
@@ -213,6 +214,9 @@ class joint_deviation_cum(Reward):
 
 
 class joint_torques_l2(Reward):
+
+    supported_backends = ("isaac", "mujoco", "mjlab")
+
     def __init__(self, env, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(env, weight, track_var=track_var)
         self.asset: Articulation = self.env.scene.articulations["robot"]

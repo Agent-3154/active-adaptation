@@ -53,6 +53,8 @@ class StackingCollector:
     @torch.no_grad()
     @set_exploration_type(ExplorationType.RANDOM)
     def collect(self, carry: TensorDictBase, rollout_policy: TensorDictModuleBase):
+        if self.device != rollout_policy.device:
+            rollout_policy = rollout_policy.to(self.device)
         data = []
         for _ in range(self.steps):
             with ScopedTimer("policy_inference"):
@@ -285,7 +287,7 @@ def main(cfg: DictConfig):
                 ckpt_path = save(policy, checkpoint_name, upload_to_wandb=should_upload)
 
             if aa.is_main_process():
-                ScopedTimer.print_summary(clear=True, depth=2)
+                ScopedTimer.print_summary(clear=True, depth=3)
                 print(
                     OmegaConf.to_yaml(
                         {k: v for k, v in info.items() if isinstance(v, (float, int))}

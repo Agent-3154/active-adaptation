@@ -40,12 +40,18 @@ def make_env_policy(
     backend = active_adaptation.get_backend()
     if backend == "isaac":
         env_cls = _EnvBase.registry[cfg.task.get("env_class", "IsaacBackendEnv")]
+        env_device = str(cfg.device)
     elif backend == "mujoco":
         env_cls = _EnvBase.registry[cfg.task.get("env_class", "MujocoBackendEnv")]
         cfg.task.num_envs = 1
         cfg.task.reward = {}
+        env_device = "cpu"
     elif backend == "mjlab":
         env_cls = _EnvBase.registry[cfg.task.get("env_class", "MjlabBackendEnv")]
+        env_device = str(cfg.device)
+    elif backend == "motrix":
+        env_cls = _EnvBase.registry[cfg.task.get("env_class", "MotrixBackendEnv")]
+        env_device = "cpu"
     else:
         raise ValueError(f"Unknown backend: {backend}")
     
@@ -64,7 +70,7 @@ def make_env_policy(
                 cfg.task.observation.pop(obs_group_key)
                 print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
 
-    base_env = env_cls(cfg.task, str(cfg.device), headless=cfg.headless)
+    base_env = env_cls(cfg.task, env_device, headless=cfg.headless)
 
     if checkpoint is None:
         checkpoint = parse_checkpoint(cfg.checkpoint_path)
@@ -84,13 +90,13 @@ def make_env_policy(
     
     # setup policy
     policy_cls = hydra.utils.get_class(cfg.algo._target_)
-    print(f"Creating policy {policy_cls} on device {base_env.device}")
+    print(f"Creating policy {policy_cls} on device {cfg.device}")
     policy = policy_cls(
         cfg.algo,
         env.observation_spec, 
         env.action_spec, 
         env.reward_spec,
-        device=base_env.device,
+        device=cfg.device,
         env=env
     )
     

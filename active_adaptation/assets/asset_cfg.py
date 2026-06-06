@@ -30,8 +30,9 @@ if aa.get_backend() == "isaac":
         joint_names_simulation: Optional[List[str]] = None
         body_names_simulation: Optional[List[str]] = None
 
-elif aa.get_backend() == "mjlab":
+elif aa.get_backend() in ("mjlab", "motrix"):
     import mujoco
+    from typing import Callable
     from mjlab.entity import EntityCfg as _EntityCfg, EntityArticulationInfoCfg
     from mjlab.actuator import BuiltinPositionActuatorCfg
     from mjlab.utils.spec_config import CollisionCfg
@@ -43,6 +44,7 @@ elif aa.get_backend() == "mjlab":
         spatial_symmetry_mapping: Optional[Dict[str, str]] = None
         joint_names_simulation: Optional[List[str]] = None
         body_names_simulation: Optional[List[str]] = None
+        motrix_mjcf_path_fn: Callable[["EntityCfg"], str] | None = None
 
 elif aa.get_backend() == "mujoco":
     import mujoco

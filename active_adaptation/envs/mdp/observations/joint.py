@@ -125,12 +125,15 @@ class joint_vel_multistep(joint_observation):
         steps: int=4,
         interval: int=1,
         noise_std: float=0.,
+        from_pos: bool=True,
     ):
         super().__init__(env, joint_names)
         self.steps = steps
         self.interval = interval
         self.noise_std_max = max(noise_std, 0.)
-        self.from_pos = True
+        self.from_pos = from_pos
+        if from_pos and self.env.decimation == 1:
+            raise ValueError("Cannot compute joint velocity from position when decimation is 1")
         shape = (self.num_envs, steps * interval, self.num_joints)
         
         self.joint_vel_multistep = torch.zeros(shape, device=self.device)

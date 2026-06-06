@@ -57,6 +57,7 @@ from active_adaptation.learning.ppo.ppo_base import PPOBase
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import check_parameters
 from active_adaptation.learning.utils.dormancy import DormancyTracker
+from active_adaptation.utils.profiling import ScopedTimer
 
 import active_adaptation as aa
 import torch.distributed as distr
@@ -111,7 +112,7 @@ class PPOPolicy(PPOBase):
         self.critic_loss_fn = nn.MSELoss(reduction="none")
         self.gae = GAE(0.99, 0.95)
 
-        fake_input = observation_spec.zero()
+        fake_input = observation_spec.zero().to(self.device)
 
         vecnorm = VecNorm(
             input_shape=observation_spec[OBS_KEY].shape[-1:],
@@ -226,18 +227,23 @@ class PPOPolicy(PPOBase):
     @VecNorm.freeze()
     def train_op(self, tensordict: TensorDict):
         assert VecNorm.FROZEN, "VecNorm must be frozen before training"
-        tensordict = tensordict.exclude("stats")
+        tensordict = tensordict.exclude("stats").to(self.device, non_blocking=True)
         valid_ratio = (~tensordict["is_init"]).sum() / tensordict.numel()
-
         infos = []
-        self.vecnorm(tensordict)
-        self.vecnorm(tensordict["next"])
-        self.compute_advantage(tensordict, self.critic, "adv", "ret")
+
+        self.vecnorm.to(self.device, non_blocking=True)
+        self.actor.to(self.device)
+        self.critic.to(self.device)
+
+        with ScopedTimer("compute_advantage"):
+            self.vecnorm(tensordict)
+            self.vecnorm(tensordict["next"])
+            self.compute_advantage(tensordict, self.critic, "adv", "ret")
         
-        action = tensordict[ACTION_KEY]
-        adv_unnormalized = tensordict["adv"]
-        log_probs_before = tensordict["action_log_prob"]
-        tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
+            action = tensordict[ACTION_KEY]
+            adv_unnormalized = tensordict["adv"]
+            log_probs_before = tensordict["action_log_prob"]
+            tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
 
         for epoch in range(self.cfg.ppo_epochs):
             batch = make_batch(tensordict, self.cfg.num_minibatches)
@@ -291,6 +297,7 @@ class PPOPolicy(PPOBase):
                 infos["critic/diff"] = critic_diff
         return dict(sorted(infos.items()))
 
+    @ScopedTimer("ppo_update")
     def _update(self, tensordict: TensorDict):
         action_data = tensordict[ACTION_KEY]
         log_probs_data = tensordict["action_log_prob"]

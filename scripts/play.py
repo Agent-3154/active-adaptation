@@ -59,7 +59,7 @@ def main(cfg: DictConfig):
         if isinstance(k, tuple) and k[0]=="stats"
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
-    rollout_policy = policy.get_rollout_policy("eval")
+    rollout_policy = policy.get_rollout_policy("eval").to(env.device)
     
     env.base_env.eval()
     carry = env.reset()

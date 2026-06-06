@@ -94,9 +94,9 @@ def set_backend(backend: str):
         raise RuntimeError(
             f"set_backend() already called at {_CALLED_AT['filename']}:{_CALLED_AT['lineno']} in {_CALLED_AT['function']}"
         )
-    if not backend in ("isaac", "mujoco", "mjlab"):
+    if not backend in ("isaac", "mujoco", "mjlab", "motrix"):
         raise ValueError(
-            f"backend must be either 'isaac' or 'mujoco' or 'mjlab', got {backend}"
+            f"backend must be either 'isaac' or 'mujoco' or 'mjlab' or 'motrix', got {backend}"
         )
     # Record the call site
     stack = inspect.stack()
@@ -143,6 +143,8 @@ def init(cfg: DictConfig, auto_rank: bool):
         cfg.device = "cuda"  # force to use GPU for mjlab
     elif _BACKEND == "mujoco":
         cfg.device = "cpu"  # force to use CPU for mujoco
+    elif _BACKEND == "motrix":
+        pass # motrixsim env lives on CPU while policy training can be on GPU
 
     if auto_rank and (str(cfg.device) == "cuda"):
         cfg.device = f"cuda:{get_local_rank()}"

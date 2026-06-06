@@ -219,6 +219,57 @@ class JointPosition(_DelayedJointAction):
             self.pos_target_bound_tracker.update(jpos_target)
 
 
+class JointPositionWithVelocityForward(_DelayedJointAction):
+    """
+    ExtremControl: Low-Latency Humanoid Teleoperation with Direct Extremity Control https://arxiv.org/pdf/2602.11321
+    """
+
+    def __init__(
+        self,
+        env,
+        action_scaling: Dict[str, float] = 0.5,
+        velocity_ff: float = 0.5,
+        max_delay: int = 2,
+        alpha_range: Tuple[float, float] = (0.5, 1.0),
+        track_pos_target_bounds: bool = False,
+    ):
+        super().__init__(
+            env,
+            action_scaling=action_scaling,
+            max_delay=max_delay,
+            alpha_range=alpha_range,
+            track_pos_target_bounds=track_pos_target_bounds,
+            track_vel_target_bounds=False
+        )
+        self.velocity_ff = velocity_ff
+        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
+        self.offset = torch.zeros_like(self.default_joint_pos)
+        # previous joint position target
+        self._jpos_target = self.default_joint_pos.clone()
+    
+    @override
+    def reset(self, env_ids: torch.Tensor):
+        super().reset(env_ids)
+        default_joint_pos = self.asset.data.default_joint_pos[env_ids.unsqueeze(1), self.joint_ids]
+        self.default_joint_pos[env_ids] = default_joint_pos + self.offset[env_ids]
+        self._jpos_target[env_ids] = self.default_joint_pos[env_ids]
+    
+    @override
+    def apply_action(self, substep: int):
+        self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
+        self.action_queue = self.action_queue.roll(-1, dims=1)
+
+        jpos_target = self.default_joint_pos + self.applied_action * self.action_scaling
+        jvel_target = self.velocity_ff * (jpos_target - self._jpos_target) / self.env.physics_dt
+        self._jpos_target = jpos_target
+
+        self.asset.set_joint_position_target(jpos_target, joint_ids=self.joint_ids)
+        self.asset.set_joint_velocity_target(jvel_target, joint_ids=self.joint_ids)
+
+        if self.track_pos_target_bounds:
+            self.pos_target_bound_tracker.update(jpos_target)
+
+
 class JointPositionDelta(_DelayedJointAction):
     """Incremental (integrated) joint-position controller.
 
@@ -376,6 +427,7 @@ class CorrelatedJointPosition(Action):
 
 __all__ = [
     "JointPosition",
+    "JointPositionWithVelocityForward",
     "JointPositionDelta",
     "JointVelocity",
     "CorrelatedJointPosition",
