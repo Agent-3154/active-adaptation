@@ -42,7 +42,12 @@ from dataclasses import dataclass
 from typing import Union, Tuple
 from collections import OrderedDict
 
-from active_adaptation.learning.modules import VecNorm, IndependentNormal, MLP
+from active_adaptation.learning.modules import (
+    VecNorm,
+    IndependentNormal,
+    MLP,
+    CatTensors,
+)
 from active_adaptation.learning.ppo.common import (
     ppo_clipped_loss,
     spo_loss,
@@ -56,7 +61,6 @@ from active_adaptation.learning.ppo.common import (
     make_batch,
     Actor,
     Critic,
-    CatTensors,
 )
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import check_parameters
@@ -130,14 +134,15 @@ class PPOPolicy(TensorDictModuleBase):
             self.cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transform().to(self.device)
             obs_dim = observation_spec[OBS_KEY].shape[-1]
             cmd_dim = observation_spec[CMD_KEY].shape[-1]
+            inp_dim = cmd_dim + obs_dim
             self.vecnorm = Seq(
                 CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False),
-                Mod(VecNorm((obs_dim + cmd_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
+                Mod(VecNorm((inp_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
             ).to(self.device)
             self.training_keys = [CMD_KEY, OBS_KEY, ACTION_KEY]
         else:
             self.cmd_transform = None
-            obs_dim = observation_spec[OBS_KEY].shape[-1]
+            inp_dim = obs_dim = observation_spec[OBS_KEY].shape[-1]
             self.vecnorm = Mod(VecNorm((obs_dim,), decay=1.0), [OBS_KEY], ["_obs_normed"]).to(self.device)
             self.training_keys = [OBS_KEY, ACTION_KEY]
         
@@ -149,7 +154,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         Activation = getattr(nn, self.cfg.activation)
         actor_mlp = MLP(
-            num_units=[obs_dim, 256, 256, 256],
+            num_units=[inp_dim, 256, 256, 256],
             activation=Activation,
             first_non_muon=True,
         )
@@ -169,7 +174,7 @@ class PPOPolicy(TensorDictModuleBase):
         ).to(self.device)
         
         critic_mlp = MLP(
-            num_units=[obs_dim, 512, 256, 256],
+            num_units=[inp_dim, 512, 256, 256],
             activation=Activation,
             first_non_muon=True,
         )

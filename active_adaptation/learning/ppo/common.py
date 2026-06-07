@@ -388,25 +388,6 @@ class NormalExtractor(nn.Module):
         return x_sample.flatten(-2), x_loc, x_scale
 
 
-class CatTensors(ModBase):
-    def __init__(self, in_keys, out_key, del_keys=False, sort=True):
-        super().__init__()
-        self.in_keys = in_keys
-        self.out_keys = [out_key]
-
-        self.del_keys = del_keys
-        self.sort = sort
-        if self.sort:
-            self.in_keys = sorted(self.in_keys)
-
-    def forward(self, tensordict: TensorDictBase):
-        out = torch.cat([tensordict.get(k) for k in self.in_keys], dim=-1)
-        tensordict.set(self.out_keys[0], out)
-        if self.del_keys:
-            tensordict.exclude(*self.in_keys, inplace=True)
-        return tensordict
-
-
 def normalize(x: torch.Tensor, subtract_mean: bool = False):
     if subtract_mean:
         return (x - x.mean()) / x.std().clamp(1e-7)

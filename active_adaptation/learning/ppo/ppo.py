@@ -41,15 +41,17 @@ from active_adaptation.learning.modules import (
     VecNorm, 
     IndependentNormal, 
     SymmetryWrapper,
+    MLP,
+    CatTensors,
 )
 from active_adaptation.learning.ppo.common import (
     normalize,
+    CMD_KEY,
     OBS_KEY,
     ACTION_KEY,
     REWARD_KEY,
     GAE,
     make_batch,
-    make_mlp,
     Actor,
     Critic,
 )
@@ -86,7 +88,7 @@ class PPOConfig:
     use_ddp: bool = True
     debug: bool = False # enable correctness checkers
 
-    in_keys: Tuple[str, ...] = (OBS_KEY,)
+    in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY,)
 
 
 cs = ConfigStore.instance()
@@ -114,22 +116,40 @@ class PPOPolicy(PPOBase):
 
         fake_input = observation_spec.zero().to(self.device)
 
-        vecnorm = VecNorm(
-            input_shape=observation_spec[OBS_KEY].shape[-1:],
-            stats_shape=observation_spec[OBS_KEY].shape[-1:],
-            decay=1.0
-        )
+        if CMD_KEY in observation_spec.keys(True, True):
+            obs_dim = observation_spec[OBS_KEY].shape[-1]
+            cmd_dim = observation_spec[CMD_KEY].shape[-1]
+            inp_dim = cmd_dim + obs_dim
+            self.vecnorm = Seq(
+                CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False),
+                Mod(VecNorm((inp_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
+            ).to(self.device)
+            self.training_keys = [CMD_KEY, OBS_KEY, ACTION_KEY]
+        else:
+            inp_dim = obs_dim = observation_spec[OBS_KEY].shape[-1]
+            self.vecnorm = Mod(VecNorm((obs_dim,), decay=1.0), [OBS_KEY], ["_obs_normed"]).to(self.device)
+            self.training_keys = [OBS_KEY, ACTION_KEY]
 
         self.action_dim = env.action_manager.action_dim
         
         activation = getattr(nn, self.cfg.activation)
-        self.vecnorm = Seq(Mod(vecnorm, [OBS_KEY], ["_obs_normed"])).to(self.device)
+        actor_mlp = MLP(
+            num_units=[inp_dim, 256, 256, 256],
+            activation=activation,
+            first_non_muon=True,
+        )
         actor_module = Seq(
-            Mod(make_mlp([256, 256, 256], activation=activation), ["_obs_normed"], ["_actor_feature"]),
+            Mod(actor_mlp, ["_obs_normed"], ["_actor_feature"]),
             Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
         )
+
+        critic_mlp = MLP(
+            num_units=[inp_dim, 512, 256, 256],
+            activation=activation,
+            first_non_muon=True,
+        )
         self.critic = Seq(
-            Mod(make_mlp([256, 256, 256], activation=activation), ["_obs_normed"], ["_critic_feature"]),
+            Mod(critic_mlp, ["_obs_normed"], ["_critic_feature"]),
             Mod(Critic(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 

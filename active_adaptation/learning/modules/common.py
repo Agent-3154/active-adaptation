@@ -6,6 +6,25 @@ from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import TensorDictModuleBase
 
 
+class CatTensors(TensorDictModuleBase):
+    def __init__(self, in_keys, out_key, del_keys=False, sort=True):
+        super().__init__()
+        self.in_keys = in_keys
+        self.out_keys = [out_key]
+
+        self.del_keys = del_keys
+        self.sort = sort
+        if self.sort:
+            self.in_keys = sorted(self.in_keys)
+
+    def forward(self, tensordict: TensorDictBase):
+        out = torch.cat([tensordict.get(k) for k in self.in_keys], dim=-1)
+        tensordict.set(self.out_keys[0], out)
+        if self.del_keys:
+            tensordict.exclude(*self.in_keys, inplace=True)
+        return tensordict
+
+
 class MLP(nn.Module):
     """Multi-Layer Perceptron with configurable layer normalization.
 
