@@ -42,11 +42,10 @@ from dataclasses import dataclass
 from typing import Union, Tuple
 from collections import OrderedDict
 
-from active_adaptation.learning.modules import VecNorm, IndependentNormal
+from active_adaptation.learning.modules import VecNorm, IndependentNormal, MLP
 from active_adaptation.learning.ppo.common import (
     ppo_clipped_loss,
     spo_loss,
-    normalize,
     CMD_KEY,
     OBS_KEY,
     ACTION_KEY,
@@ -55,7 +54,6 @@ from active_adaptation.learning.ppo.common import (
     DONE_KEY,
     GAE,
     make_batch,
-    make_mlp,
     Actor,
     Critic,
     CatTensors,
@@ -149,9 +147,10 @@ class PPOPolicy(TensorDictModuleBase):
         self.act_transform = env.action_manager.symmetry_transform().to(self.device)
         self.action_dim = env.action_manager.action_dim
 
-        activation = getattr(nn, self.cfg.activation)
+        Activation = getattr(nn, self.cfg.activation)
+        actor_mlp = MLP(num_units=[256, 256, 256], activation=Activation, first_non_muon=True)
         actor_modules = [
-            Mod(make_mlp([256, 256, 256], activation=activation), ["_obs_normed"], ["_actor_feature"]),
+            Mod(actor_mlp, ["_obs_normed"], ["_actor_feature"]),
             Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
         ]
         if self.cfg.aux_coef > 0.0:
@@ -165,8 +164,9 @@ class PPOPolicy(TensorDictModuleBase):
             return_log_prob=True
         ).to(self.device)
         
+        critic_mlp = MLP(num_units=[512, 256, 256], activation=Activation, first_non_muon=True)
         self.critic = Seq(
-            Mod(make_mlp([256, 256, 256], activation=activation), ["_obs_normed"], ["_critic_feature"]),
+            Mod(critic_mlp, ["_obs_normed"], ["_critic_feature"]),
             Mod(Critic(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 

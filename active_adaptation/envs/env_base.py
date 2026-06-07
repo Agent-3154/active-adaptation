@@ -417,7 +417,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                 result[f"reward.{group_key}/{rew_key}"] = value
         return result
 
-    @ScopedTimer("_reset", sync=True)
+    @ScopedTimer("env._reset", sync=PROFILE_SYNC_TIMERS)
     def _reset(
         self, tensordict: TensorDictBase | None = None, **kwargs
     ) -> TensorDictBase:
@@ -457,7 +457,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             entity.write_root_state_to_sim(value, env_ids=env_ids)
         self.stats[env_ids] = 0.0
 
-    @ScopedTimer("_step", sync=True)
+    @ScopedTimer("env._step", sync=PROFILE_SYNC_TIMERS)
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
         with ScopedTimer("simulation", sync=False):
             with ScopedTimer("process_action", sync=False):
@@ -494,17 +494,12 @@ class _EnvBase(EnvBase, RegistryMixin):
             self.command_manager.update()
         with ScopedTimer("update_callbacks", sync=False):
             [callback() for callback in self._update_callbacks]
-            # for callback in self._update_callbacks:
-            #     with ScopedTimer(f"{callback.__self__.__class__.__name__}", sync=False):
-            #         callback()
-        with ScopedTimer("reward", sync=False):
-            tensordict = self._compute_reward(tensordict)
-        with ScopedTimer("termination", sync=False):
-            tensordict = self._compute_termination(tensordict)
+
+        tensordict = self._compute_reward(tensordict)
+        tensordict = self._compute_termination(tensordict)
         with ScopedTimer("command_step", sync=False):
             self.command_manager.step()
-        with ScopedTimer("observation", sync=False):
-            tensordict = self._compute_observation(tensordict)
+        tensordict = self._compute_observation(tensordict)
 
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()
@@ -526,6 +521,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             for input_manager in self.input_managers.values()
         ]
 
+    @ScopedTimer("env.compute_reward", sync=PROFILE_SYNC_TIMERS)
     def _compute_reward(self, tensordict: TensorDictBase) -> TensorDictBase:
         if not self.reward_groups:
             tensordict.set("reward", torch.ones((self.num_envs, 1), device=self.device))
@@ -549,6 +545,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict.set("reward", rewards)
         return tensordict
 
+    @ScopedTimer("env.compute_termination", sync=PROFILE_SYNC_TIMERS)
     def _compute_termination(self, tensordict: TensorDictBase) -> TensorDictBase:
         truncated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
         terminated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
@@ -573,6 +570,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict.set("discount", discount)
         return tensordict
 
+    @ScopedTimer("env.compute_observation", sync=PROFILE_SYNC_TIMERS)
     def _compute_observation(self, tensordict: TensorDictBase) -> TensorDictBase:
         [
             group.compute(tensordict, self.timestamp)
