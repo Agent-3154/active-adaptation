@@ -23,6 +23,97 @@ from active_adaptation.utils.symmetry import SymmetryTransform
 from .base import Command
 from ..rewards.base import Reward
 
+from dataclasses import dataclass, replace
+
+
+@dataclass
+class EEFCommandStruct:
+    cmd_eef_pos_b: torch.Tensor
+    cmd_eef_pos_w: torch.Tensor
+    cmd_pos_world: torch.BoolTensor
+
+    cmd_eef_rot_b: torch.Tensor
+    cmd_eef_rot_w: torch.Tensor
+    cmd_rot_world: torch.BoolTensor
+
+    cmd_eef_forward_b: torch.Tensor
+    cmd_eef_forward_w: torch.Tensor
+    cmd_eef_upward_b: torch.Tensor
+    cmd_eef_upward_w: torch.Tensor
+
+    pos_diff_w: torch.Tensor
+    pos_diff_b: torch.Tensor
+    forward_diff_w: torch.Tensor
+    forward_diff_b: torch.Tensor
+    upward_diff_w: torch.Tensor
+    upward_diff_b: torch.Tensor
+
+    def sync(
+        self,
+        root_pos_w: torch.Tensor,
+        root_yaw_quat: torch.Tensor,
+        eef_pos_w: torch.Tensor,
+        eef_quat_w: torch.Tensor,
+    ) -> EEFCommandStruct:
+        cmd_eef_pos_w, cmd_eef_pos_b = torch.cond(
+            self.cmd_pos_world,
+            self.world_from_body,
+            self.body_from_world,
+            (root_pos_w, root_yaw_quat, cmd_eef_pos_w, cmd_eef_pos_b)
+        )
+        
+        pos_diff_w = self.cmd_eef_pos_w - eef_pos_w
+        pos_diff_b = quat_rotate_inverse(
+            root_yaw_quat,
+            pos_diff_w
+        )
+        forward_diff_w = self.cmd_eef_forward_w - eef_quat_w
+        forward_diff_b = quat_rotate_inverse(
+            root_yaw_quat,
+            forward_diff_w
+        )
+        upward_diff_w = self.cmd_eef_upward_w - eef_quat_w
+        upward_diff_b = quat_rotate_inverse(
+            root_yaw_quat,
+            upward_diff_w
+        )
+        return replace(
+            self,
+            cmd_eef_pos_w=cmd_eef_pos_w,
+            cmd_eef_pos_b=cmd_eef_pos_b,
+            pos_diff_w=pos_diff_w,
+            pos_diff_b=pos_diff_b,
+            forward_diff_w=forward_diff_w,
+            forward_diff_b=forward_diff_b,
+            upward_diff_w=upward_diff_w,
+            upward_diff_b=upward_diff_b,
+        )
+    
+    @staticmethod
+    def world_from_body(
+        root_pos_w: torch.Tensor,
+        root_yaw_quat: torch.Tensor,
+        cmd_eef_pos_w: torch.Tensor,
+        cmd_eef_pos_b: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        cmd_eef_pos_w = (
+            root_pos_w * torch.tensor([1., 1., 0.], device=root_pos_w.device)
+            + quat_rotate(root_yaw_quat, cmd_eef_pos_b)
+        )
+        return cmd_eef_pos_w, cmd_eef_pos_b
+    
+    @staticmethod
+    def body_from_world(
+        root_pos_w: torch.Tensor,
+        root_yaw_quat: torch.Tensor,
+        cmd_eef_pos_w: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        cmd_eef_pos_b = quat_rotate_inverse(
+            root_yaw_quat,
+            cmd_eef_pos_w - root_pos_w * torch.tensor([1., 1., 0.], device=root_pos_w.device)
+        )
+        return cmd_eef_pos_w, cmd_eef_pos_b
+
 
 class SingleEEFLocoManip(Command):
     """Command vector: base velocity, yaw rate, EEF position, and EEF forward target.

@@ -101,7 +101,7 @@ reward:
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
-    joint_torques_l2:   {weight: 2.0e-4, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
+    joint_torques_l2:   {weight: 1.0e-4, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}

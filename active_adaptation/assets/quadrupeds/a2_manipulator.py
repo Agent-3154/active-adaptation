@@ -20,6 +20,8 @@ from active_adaptation.assets.quadrupeds.a2 import (
     JOINT_SYMMETRY_MAPPING as A2_JOINT_SYMMETRY_MAPPING,
     SPATIAL_SYMMETRY_MAPPING as A2_SPATIAL_SYMMETRY_MAPPING,
     VELOCITY_LIMIT,
+    LEGS_STIFFNESS,
+    LEGS_DAMPING,
 )
 from active_adaptation.registry import Registry
 
@@ -64,6 +66,8 @@ BODY_NAMES_SIMULATION = [*A2_BODY_NAMES_SIMULATION, *_ARM_BODIES]
 
 ARM_EFFORT_LIMIT = 80.0
 ARM_VELOCITY_LIMIT = 20.0
+ARM_STIFFNESS = 40.0
+ARM_DAMPING = 1.0
 
 
 def make_isaaclab_cfg(self_collisions: bool = False):
@@ -107,8 +111,8 @@ def make_isaaclab_cfg(self_collisions: bool = False):
                 joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
                 effort_limit_sim=EFFORT_LIMIT,
                 velocity_limit_sim=VELOCITY_LIMIT,
-                stiffness=50.0,
-                damping=2.0,
+                stiffness=LEGS_STIFFNESS,
+                damping=LEGS_DAMPING,
                 friction=0.01,
                 armature=0.01,
             ),
@@ -116,8 +120,8 @@ def make_isaaclab_cfg(self_collisions: bool = False):
                 joint_names_expr=["arm_joint[1-6]"],
                 effort_limit_sim=ARM_EFFORT_LIMIT,
                 velocity_limit_sim=ARM_VELOCITY_LIMIT,
-                stiffness=50.0,
-                damping=2.0,
+                stiffness=ARM_STIFFNESS,
+                damping=ARM_DAMPING,
                 friction=0.01,
                 armature=0.01,
             ),
@@ -168,16 +172,16 @@ def make_mjlab_cfg():
                 BuiltinPositionActuatorCfg(
                     target_names_expr=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"),
                     effort_limit=EFFORT_LIMIT,
-                    stiffness=50.0,
-                    damping=2.0,
+                    stiffness=LEGS_STIFFNESS,
+                    damping=LEGS_DAMPING,
                     armature=0.01,
                     frictionloss=0.01,
                 ),
                 BuiltinPositionActuatorCfg(
                     target_names_expr=("arm_joint[1-8]",),
                     effort_limit=ARM_EFFORT_LIMIT,
-                    stiffness=50.0,
-                    damping=2.0,
+                    stiffness=ARM_STIFFNESS,
+                    damping=ARM_DAMPING,
                     armature=0.01,
                     frictionloss=0.01,
                 ),
