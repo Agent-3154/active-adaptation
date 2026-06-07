@@ -148,7 +148,11 @@ class PPOPolicy(TensorDictModuleBase):
         self.action_dim = env.action_manager.action_dim
 
         Activation = getattr(nn, self.cfg.activation)
-        actor_mlp = MLP(num_units=[256, 256, 256], activation=Activation, first_non_muon=True)
+        actor_mlp = MLP(
+            num_units=[obs_dim, 256, 256, 256],
+            activation=Activation,
+            first_non_muon=True,
+        )
         actor_modules = [
             Mod(actor_mlp, ["_obs_normed"], ["_actor_feature"]),
             Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
@@ -164,7 +168,11 @@ class PPOPolicy(TensorDictModuleBase):
             return_log_prob=True
         ).to(self.device)
         
-        critic_mlp = MLP(num_units=[512, 256, 256], activation=Activation, first_non_muon=True)
+        critic_mlp = MLP(
+            num_units=[obs_dim, 512, 256, 256],
+            activation=Activation,
+            first_non_muon=True,
+        )
         self.critic = Seq(
             Mod(critic_mlp, ["_obs_normed"], ["_critic_feature"]),
             Mod(Critic(1), ["_critic_feature"], ["state_value"])
