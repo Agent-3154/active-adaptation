@@ -21,7 +21,7 @@ from active_adaptation.utils.math import (
     quat_from_euler_xyz
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
-from .base import Command
+from .base import CommandV2
 from ..rewards.base import RewardV2
 
 from dataclasses import dataclass, replace
@@ -119,7 +119,7 @@ class EEFCommandStruct:
         return cmd_eef_pos_w, cmd_eef_pos_b
 
 
-class SingleEEFLocoManip(Command):
+class SingleEEFLocoManip(CommandV2):
     """Command vector: base velocity, yaw rate, EEF position, and EEF forward target.
 
     Dense layout (17D, body/yaw frame):
@@ -139,7 +139,6 @@ class SingleEEFLocoManip(Command):
 
     def __init__(
         self,
-        env,
         eef_body_name: str,
         gripper_joint_names: str,
         workspace_range: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]
@@ -154,20 +153,7 @@ class SingleEEFLocoManip(Command):
         standoff_yaw_gain_range: Tuple[float, float] = (1.0, 2.0),
         resample_interval: int = 300,
         resample_prob: float = 0.75,
-        teleop: bool = False,
     ) -> None:
-        super().__init__(env, teleop)
-        body_ids, _ = self.asset.find_bodies(eef_body_name)
-        if len(body_ids) != 1:
-            raise ValueError(
-                f"Expected exactly one body matching {eef_body_name!r}, got {body_ids.numel()}"
-            )
-        self.eef_body_idx = body_ids[0]
-        self.gripper_joint_ids, _ = self.asset.find_joints(gripper_joint_names)
-        self.gripper_joint_ids = torch.tensor(self.gripper_joint_ids, device=self.device)
-        limits = self.asset.data.soft_joint_pos_limits[0, self.gripper_joint_ids]
-        self._gripper_max_open = limits.abs().amax(dim=-1).max().clamp_min(1e-6)
-
         if workspace_range is None and workspace_profile is None:
             raise ValueError(
                 "Either workspace_range or workspace_profile must be provided"
@@ -179,6 +165,9 @@ class SingleEEFLocoManip(Command):
         if not 0.0 <= world_goal_prob <= 1.0:
             raise ValueError("world_goal_prob must be in [0, 1]")
 
+        self.eef_body_name = eef_body_name
+        self.gripper_joint_names = gripper_joint_names
+        self.workspace_range = workspace_range
         self.workspace_profile = workspace_profile
         self.linvel_x_range = linvel_x_range
         self.linvel_y_range = linvel_y_range
@@ -190,13 +179,27 @@ class SingleEEFLocoManip(Command):
         self.resample_interval = resample_interval
         self.resample_prob = resample_prob
 
+    @override
+    def _initialize(self, env: "EnvBase") -> None:
+        super()._initialize(env)
+        body_ids, _ = self.asset.find_bodies(self.eef_body_name)
+        if len(body_ids) != 1:
+            raise ValueError(
+                f"Expected exactly one body matching {self.eef_body_name!r}, got {body_ids.numel()}"
+            )
+        self.eef_body_idx = body_ids[0]
+        self.gripper_joint_ids, _ = self.asset.find_joints(self.gripper_joint_names)
+        self.gripper_joint_ids = torch.tensor(self.gripper_joint_ids, device=self.device)
+        limits = self.asset.data.soft_joint_pos_limits[0, self.gripper_joint_ids]
+        self._gripper_max_open = limits.abs().amax(dim=-1).max().clamp_min(1e-6)
+
         with torch.device(self.device):
-            if workspace_range is not None:
+            if self.workspace_range is not None:
                 lows = torch.tensor(
-                    [workspace_range[i][0] for i in range(3)], dtype=torch.float32
+                    [self.workspace_range[i][0] for i in range(3)], dtype=torch.float32
                 )
                 highs = torch.tensor(
-                    [workspace_range[i][1] for i in range(3)], dtype=torch.float32
+                    [self.workspace_range[i][1] for i in range(3)], dtype=torch.float32
                 )
                 self._eef_pos_low = lows.unsqueeze(0).expand(self.num_envs, -1).clone()
                 self._eef_pos_high = highs.unsqueeze(0).expand(self.num_envs, -1).clone()

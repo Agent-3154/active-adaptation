@@ -119,7 +119,7 @@ randomization:
   #   static_friction_range:  {".*_foot": [0.5, 4.0]}
   #   dynamic_friction_range: {".*_foot": [0.5, 4.0]}
   #   restitution_range:      {".*_foot": [0.0, 0.5]}
-  motor_params:
+  actuator_pd_gains:
     stiffness_range:
       .*: [0.8, 1.1]
     damping_range:

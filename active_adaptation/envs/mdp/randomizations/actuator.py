@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import torch
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from typing_extensions import override
 
 import active_adaptation
-from active_adaptation.envs.mdp.randomizations.base import Randomization
+from active_adaptation.envs.mdp.randomizations.base import RandomizationV2
 from active_adaptation.envs.mdp.randomizations.common import NestedRangeType
+
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import _EnvBase
 
 if active_adaptation.get_backend() == "isaac":
     from isaaclab.utils.string import resolve_matching_names_values
@@ -16,7 +19,7 @@ if active_adaptation.get_backend() == "mjlab":
     from mjlab.actuator import BuiltinPositionActuator
 
 
-class actuator_pd_gains(Randomization):
+class actuator_pd_gains(RandomizationV2):
     """Randomize PD stiffness and damping gains.
 
     For the **mjlab** backend, only ``BuiltinPositionActuator`` is supported: we
@@ -29,7 +32,7 @@ class actuator_pd_gains(Randomization):
     """
 
     supported_backends = ("isaac", "mjlab")
-    
+
     mj_fields = (
         "actuator_gainprm",
         "actuator_biasprm",
@@ -37,14 +40,16 @@ class actuator_pd_gains(Randomization):
 
     def __init__(
         self,
-        env,
         stiffness_range: Optional[NestedRangeType] = None,
         damping_range: Optional[NestedRangeType] = None,
     ):
-        super().__init__(env)
-        self.asset = self.env.scene.articulations["robot"]
         self.stiffness_range = dict(stiffness_range) if stiffness_range is not None else None
         self.damping_range = dict(damping_range) if damping_range is not None else None
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.asset = self.env.scene.articulations["robot"]
 
         if self.env.backend == "mjlab":
             self._init_mjlab()
@@ -135,4 +140,3 @@ class actuator_pd_gains(Randomization):
                 rand = torch.rand(len(env_ids), len(self.damping_id), device=self.device)
                 damping = rand * self.damping_scale + self.damping_low
                 self.asset.write_joint_damping_to_sim(damping, self.damping_id, env_ids)
-

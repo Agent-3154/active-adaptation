@@ -1,4 +1,3 @@
-from .backends.mujoco.mujoco import MJArticulationCfg
 from .env_base import _EnvBase
 from .backends.isaac import IsaacBackendEnv
 from .backends.mjlab import MjlabBackendEnv

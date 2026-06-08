@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
 import torch
 from typing_extensions import override
+from tensordict import TensorDict
 
 from active_adaptation.utils.math import (
     quat_mul,
@@ -14,10 +15,13 @@ from active_adaptation.utils.math import (
     quat_from_euler_xyz,
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
-from ..base import Command
+from ..base import CommandV2
+
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import EnvBase
 
 
-class LocoManipSparse(Command):
+class LocoManipSparse(CommandV2):
     """Sparse loco-manip command: EEF position target only, no base velocity command.
 
     Sampling strategy:
@@ -37,31 +41,33 @@ class LocoManipSparse(Command):
 
     def __init__(
         self,
-        env,
         eef_body_name: str,
         gripper_joint_names: str,
         eef_z_range: Tuple[float, float] = (0.2, 0.75),
         spawn_radius_range: Tuple[float, float] = (1.0, 3.0),
         resample_interval: int = 300,
         resample_prob: float = 0.75,
-        teleop: bool = False,
     ) -> None:
-        super().__init__(env, teleop)
-        body_ids, _ = self.asset.find_bodies(eef_body_name)
-        if len(body_ids) != 1:
-            raise ValueError(
-                f"Expected exactly one body matching {eef_body_name!r}, got {body_ids.numel()}"
-            )
-        self.eef_body_idx = body_ids[0]
-        self.gripper_joint_ids, _ = self.asset.find_joints(gripper_joint_names)
-        self.gripper_joint_ids = torch.tensor(self.gripper_joint_ids, device=self.device)
-        limits = self.asset.data.soft_joint_pos_limits[0, self.gripper_joint_ids]
-        self._gripper_max_open = limits[:, 1]
-        
+        self.eef_body_name = eef_body_name
+        self.gripper_joint_names = gripper_joint_names
         self.eef_z_range = eef_z_range
         self.spawn_radius_range = spawn_radius_range
         self.resample_interval = resample_interval
         self.resample_prob = resample_prob
+
+    @override
+    def _initialize(self, env: "EnvBase") -> None:
+        super()._initialize(env)
+        body_ids, _ = self.asset.find_bodies(self.eef_body_name)
+        if len(body_ids) != 1:
+            raise ValueError(
+                f"Expected exactly one body matching {self.eef_body_name!r}, got {body_ids.numel()}"
+            )
+        self.eef_body_idx = body_ids[0]
+        self.gripper_joint_ids, _ = self.asset.find_joints(self.gripper_joint_names)
+        self.gripper_joint_ids = torch.tensor(self.gripper_joint_ids, device=self.device)
+        limits = self.asset.data.soft_joint_pos_limits[0, self.gripper_joint_ids]
+        self._gripper_max_open = limits[:, 1]
 
         with torch.device(self.device):
             self.cmd_eef_pos_b = torch.zeros(self.num_envs, 3)
@@ -300,6 +306,53 @@ class LocoManipSparse(Command):
             translations=self.cmd_eef_pos_w,
             orientations=self.cmd_eef_rot_w,
         )
+        
+    @staticmethod
+    def relabel_command(tensordict: TensorDict) -> TensorDict:
+        """Compute the necessary states and commands from a rollout.
+        This is used to relabel the command from `SingleEEFLocoManip` to `LocoManipSparse`.
+        """
+        device = tensordict.device
+        assert tensordict["is_world_goal"].all()
+        root_pos_w = tensordict["root_state_w"][..., :3]
+        root_quat_w = tensordict["root_state_w"][..., 3:7]
+        root_yaw_quat = yaw_quat(root_quat_w)
+        cmd_eef_pos_w = tensordict["world_eef_pos_w"]
+        cmd_eef_pos_b = quat_rotate_inverse(
+            root_yaw_quat,
+            cmd_eef_pos_w - root_pos_w * torch.tensor([1.0, 1.0, 0.0], device=device)
+        )
+        cmd_eef_rot_w = tensordict["cmd_eef_rot_w"]
+        cmd_eef_forward_w = quat_rotate(cmd_eef_rot_w, torch.tensor([[1.0, 0.0, 0.0]], device=device))
+        cmd_eef_forward_b = quat_rotate_inverse(root_yaw_quat, cmd_eef_forward_w)
+        cmd_eef_upward_w = quat_rotate(cmd_eef_rot_w, torch.tensor([[0.0, 0.0, 1.0]], device=device))
+        cmd_eef_upward_b = quat_rotate_inverse(root_yaw_quat, cmd_eef_upward_w)
+
+        eef_pos_w = tensordict["eef_pos_w"]
+        eef_quat_w = tensordict["eef_quat_w"]
+        pos_diff_w = cmd_eef_pos_w - eef_pos_w
+        pos_diff_b = quat_rotate_inverse(root_yaw_quat, pos_diff_w)
+        pos_error_norm2 = pos_diff_w.square().sum(dim=-1, keepdim=True)
+        pos_error_norm = pos_error_norm2.sqrt()
+        eef_forward_w = quat_rotate(eef_quat_w, torch.tensor([[1.0, 0.0, 0.0]], device=device))
+        eef_upward_w = quat_rotate(eef_quat_w, torch.tensor([[0.0, 0.0, 1.0]], device=device))
+        forward_diff_b = quat_rotate_inverse(root_yaw_quat, cmd_eef_forward_w - eef_forward_w)
+        upward_diff_b = quat_rotate_inverse(root_yaw_quat, cmd_eef_upward_w - eef_upward_w)
+        
+        command_sparse = torch.cat([
+            cmd_eef_pos_b,
+            pos_diff_b,
+            cmd_eef_forward_b,
+            forward_diff_b,
+            cmd_eef_upward_b,
+            upward_diff_b,
+            tensordict["eef_status"]
+        ], dim=-1)
+
+        tensordict["pos_error_norm2"] = pos_error_norm2
+        tensordict["pos_error_norm"] = pos_error_norm
+        tensordict["command"] = command_sparse
+        return tensordict
 
 
 __all__ = ["LocoManipSparse"]

@@ -112,9 +112,8 @@ def set_backend(backend: str):
 
 
 def get_backend():
-    if not _BACKEND_SET:
-        raise RuntimeError("set_backend() must be called before get_backend()")
-    return _BACKEND
+    """Return None if the backend is not set."""
+    return _BACKEND if _BACKEND_SET else None
 
 
 def init(cfg: DictConfig, auto_rank: bool):

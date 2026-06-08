@@ -2,32 +2,40 @@ from __future__ import annotations
 
 import torch
 
-from typing_extensions import override, Tuple
+from typing import TYPE_CHECKING, Tuple
+from typing_extensions import override
 
 from active_adaptation.utils.math import quat_rotate
 
-from .base import Action
+from .base import ActionV2
 
 
-class Marker(Action):
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import _EnvBase
+
+
+class Marker(ActionV2):
     """
     This is a marker action that visualizes a set of markers in the world frame.
     It does not have a fixed action dimension, and the action is the position of the markers in the world frame.
     """
+
     def __init__(
         self,
-        env,
         body_frame: bool = False,
         color: Tuple[float, float, float] = (0.0, 1.0, 0.0),
-        radius: float = 0.05
+        radius: float = 0.05,
     ):
-        super().__init__(env)
-        self.asset = self.env.scene.articulations["robot"]
+        super().__init__()
         self.body_frame = body_frame
         self.color = tuple(color)
         self.radius = radius
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.has_gui = self.env.sim.has_gui()
-        self.action_dim = 3 # not actually limited to 3
+        self.action_dim = 3  # not actually limited to 3
 
         if self.has_gui and self.env.backend == "isaac":
             from isaaclab.markers import (
@@ -56,7 +64,7 @@ class Marker(Action):
     def process_action(self, action: torch.Tensor):
         if not self.has_gui or action is None:
             return
-        
+
         assert action.shape[-1] == 3
 
         if self.body_frame:

@@ -157,7 +157,7 @@ class RewardGroup:
 
         for rew_name, rew_cfg in group_cfg.items():
             rew_name, cls_name, rew_kwargs = parse_component_spec(rew_name, rew_cfg)
-            reward: mdp.RewardV2 = mdp.RewardV2.make(cls_name, **rew_kwargs)
+            reward = mdp.RewardV2.make(cls_name, **rew_kwargs)
             if not reward:
                 continue
             funcs[rew_name] = reward
@@ -249,12 +249,15 @@ class _EnvBase(EnvBase, RegistryMixin):
         # MDP: command manager
         command_cfg = dict(self.cfg.command)
         class_name = command_cfg.pop("_target_", None)
-        if class_name is None:
-            raise ValueError("Command config must provide `_target_`.")
-        command = mdp.Command.make(class_name, self, **command_cfg)
+        try:
+            command = mdp.Command.make(class_name, self, **command_cfg)
+        except ValueError:
+            command = mdp.CommandV2.make(class_name, **command_cfg)
         if not command:
             raise ValueError(f"Command class '{class_name}' not found")
-        self.command_manager = cast(mdp.Command, command)
+        if isinstance(command, mdp.CommandV2):
+            command._initialize(self)
+        self.command_manager = command
         self._pre_step_callbacks.append(self.command_manager.pre_step)
         self._reset_callbacks.append(self.command_manager.reset)
         self._debug_draw_callbacks.append(self.command_manager.debug_draw)
@@ -264,8 +267,14 @@ class _EnvBase(EnvBase, RegistryMixin):
             _, input_cls_name, input_kwargs = parse_component_spec(
                 input_name, input_cfg
             )
-            input_cls = mdp.Action.registry[input_cls_name]
-            input_manager = cast(mdp.Action, input_cls(self, **input_kwargs))
+            try:
+                input_manager = mdp.Action.make(input_cls_name, self, **input_kwargs)
+            except ValueError:
+                input_manager = mdp.ActionV2.make(input_cls_name, **input_kwargs)
+            if not input_manager:
+                continue
+            if isinstance(input_manager, mdp.ActionV2):
+                input_manager._initialize(self)
             self.input_managers[input_name] = input_manager
             self._reset_callbacks.append(input_manager.reset)
             self._debug_draw_callbacks.append(input_manager.debug_draw)
@@ -273,10 +282,14 @@ class _EnvBase(EnvBase, RegistryMixin):
         # MDP: randomizations
         for rand_name, rand_cfg in self.cfg.get("randomization", {}).items():
             rand_name, cls_name, rand_kwargs = parse_component_spec(rand_name, rand_cfg)
-            rand = mdp.Randomization.make(cls_name, self, **rand_kwargs)
+            try:
+                rand = mdp.Randomization.make(cls_name, self, **rand_kwargs)
+            except ValueError:
+                rand = mdp.RandomizationV2.make(cls_name, **rand_kwargs)
             if not rand:
                 continue
-            rand = cast(mdp.Randomization, rand)
+            if isinstance(rand, mdp.RandomizationV2):
+                rand._initialize(self)
             self.randomizations[rand_name] = rand
             self._add_mdp_component(rand)
 
@@ -287,10 +300,14 @@ class _EnvBase(EnvBase, RegistryMixin):
                 obs_name, obs_cls_name, obs_kwargs = parse_component_spec(
                     obs_name, obs_cfg
                 )
-                obs = mdp.Observation.make(obs_cls_name, self, **obs_kwargs)
+                try:
+                    obs = mdp.Observation.make(obs_cls_name, self, **obs_kwargs)
+                except ValueError:
+                    obs = mdp.ObservationV2.make(obs_cls_name, **obs_kwargs)
                 if not obs:
                     continue
-                obs = cast(mdp.Observation, obs)
+                if isinstance(obs, mdp.ObservationV2):
+                    obs._initialize(self)
                 funcs[obs_name] = obs
                 self._add_mdp_component(obs)
             self.observation_funcs[group_name] = ObsGroup(group_name, funcs)
@@ -310,10 +327,14 @@ class _EnvBase(EnvBase, RegistryMixin):
         print("Termination functions:")
         for term_name, term_cfg in self.cfg.get("termination", {}).items():
             term_name, cls_name, term_kwargs = parse_component_spec(term_name, term_cfg)
-            term = mdp.Termination.make(cls_name, self, **term_kwargs)
+            try:
+                term = mdp.Termination.make(cls_name, self, **term_kwargs)
+            except ValueError:
+                term = mdp.TerminationV2.make(cls_name, **term_kwargs)
             if not term:
                 continue
-            term = cast(mdp.Termination, term)
+            if isinstance(term, mdp.TerminationV2):
+                term._initialize(self)
             print(f"\t{term_name}: \t{'timeout' if term.is_timeout else 'termination'}")
             self.termination_funcs[term_name] = term
             self._add_mdp_component(term)
