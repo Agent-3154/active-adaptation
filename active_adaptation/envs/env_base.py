@@ -1,7 +1,7 @@
 import os
 import warnings
 from collections import OrderedDict
-from typing import Dict, Mapping, cast
+from typing import Callable, Dict, Mapping, cast
 
 import numpy as np
 import torch
@@ -92,23 +92,23 @@ class RewardGroup:
 
     def __init__(
         self,
-        env: "_EnvBase",
         name: str,
         funcs: OrderedDict[str, mdp.Reward],
         enabled: bool = True,
         compile: bool = False,
     ):
-        self.env = env
         self.name = name
         self.funcs = funcs
         self.enabled = enabled
         self.compile = compile
-
         self.enabled_rewards = sum(func.enabled for func in funcs.values())
-        self.rew_buf = torch.zeros(
-            env.num_envs, self.enabled_rewards, device=env.device
-        )
-        if compile:
+    
+    def _initialize(self, env: "_EnvBase"):
+        self.env = env
+        for func in self.funcs.values():
+            if isinstance(func, mdp.RewardV2):
+                func._initialize(env)
+        if self.compile:
             self.compute = torch.compile(self.compute, fullgraph=True)
     
     def __getitem__(self, key: str) -> mdp.Reward:
@@ -139,6 +139,33 @@ class RewardGroup:
             if var is not None:
                 result[f"{key}_var"] = var.item()
         return result
+    
+    @classmethod
+    def create_from(
+        cls,
+        group_name: str,
+        group_cfg: dict,
+        *,
+        register_component: Callable[[mdp.MDPComponent], None] | None = None,
+    ) -> "RewardGroup":
+        print(f"Reward group: {group_name}")
+        funcs: OrderedDict[str, mdp.Reward] = OrderedDict()
+
+        group_cfg = dict(group_cfg)
+        enabled = group_cfg.pop("_enabled_", True)
+        compile = group_cfg.pop("_compile_", False)
+
+        for rew_name, rew_cfg in group_cfg.items():
+            rew_name, cls_name, rew_kwargs = parse_component_spec(rew_name, rew_cfg)
+            reward: mdp.RewardV2 = mdp.RewardV2.make(cls_name, **rew_kwargs)
+            if not reward:
+                continue
+            funcs[rew_name] = reward
+            if register_component is not None:
+                register_component(reward)
+            print(f"\t{rew_name}: \t{reward.weight:.2f}")
+
+        return cls(group_name, funcs, enabled, compile)
 
 
 class _EnvBase(EnvBase, RegistryMixin):
@@ -272,27 +299,13 @@ class _EnvBase(EnvBase, RegistryMixin):
         reward_cfg = dict(self.cfg.reward)
         self.mult_dt = reward_cfg.pop("_mult_dt_", True)
         for group_name, group_cfg in reward_cfg.items():
-            print(f"Reward group: {group_name}")
-            funcs = OrderedDict()
-
-            group_cfg = dict(group_cfg)
-            enabled = group_cfg.pop("_enabled_", True)
-            compile = group_cfg.pop("_compile_", False)
-            self._enabled_reward_groups += int(enabled)
-
-            for rew_name, rew_cfg in group_cfg.items():
-                rew_name, cls_name, rew_kwargs = parse_component_spec(rew_name, rew_cfg)
-                reward = mdp.Reward.make(cls_name, self, **rew_kwargs)
-                if not reward:
-                    continue
-                reward = cast(mdp.Reward, reward)
-                funcs[rew_name] = reward
-                self._add_mdp_component(reward)
-                print(f"\t{rew_name}: \t{reward.weight:.2f}")
-
-            self.reward_groups[group_name] = RewardGroup(
-                self, group_name, funcs, enabled, compile
+            rg = RewardGroup.create_from(
+                group_name,
+                group_cfg,
+                register_component=self._add_mdp_component,
             )
+            self._enabled_reward_groups += int(rg.enabled)
+            self.reward_groups[group_name] = rg
 
         # MDP: terminations
         print("Termination functions:")
@@ -423,6 +436,8 @@ class _EnvBase(EnvBase, RegistryMixin):
     ) -> TensorDictBase:
         if not self._startup_done:
             [callback() for callback in self._startup_callbacks]
+            for reward_group in self.reward_groups.values():
+                reward_group._initialize(self)
             self._startup_done = True
             
         if tensordict is not None:

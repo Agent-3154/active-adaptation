@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
 import torch
 import torch.nn.functional as F
 from typing_extensions import override
+from tensordict import TensorDict
 
 from active_adaptation.utils.math import (
     clamp_norm,
@@ -21,9 +22,12 @@ from active_adaptation.utils.math import (
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
 from .base import Command
-from ..rewards.base import Reward
+from ..rewards.base import RewardV2
 
 from dataclasses import dataclass, replace
+
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import EnvBase
 
 
 @dataclass
@@ -687,14 +691,13 @@ class SingleEEFLocoManip(Command):
         )
 
 
-class eef_pos_tracking(Reward[SingleEEFLocoManip]):
-    
-    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(env, weight, enabled=True, track_var=False)
-        self.asset = self.command_manager.asset
-        self.eef_body_idx = self.command_manager.eef_body_idx
+class eef_pos_tracking(RewardV2[SingleEEFLocoManip]):
+    """Exponential position tracking with a small L1 penalty."""
+
+    def __init__(self, weight: float, enabled: bool = True, track_var: bool = False):
+        super().__init__(weight, enabled=enabled, track_var=track_var)
         self.sigma = 0.1
-    
+
     @override
     def _compute(self) -> torch.Tensor:
         error_norm_sq = self.command_manager.pos_error_norm2
@@ -703,27 +706,27 @@ class eef_pos_tracking(Reward[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1)
 
 
-class eef_pos_error_l1(Reward[SingleEEFLocoManip]):
-    """This is a metric instead of reward"""
-    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(env, weight, enabled=enabled, track_var=track_var)
-        self.asset = self.command_manager.asset
-        self.eef_body_idx = self.command_manager.eef_body_idx
-    
+class eef_pos_error_l1(RewardV2[SingleEEFLocoManip]):
+    """L1 end-effector position error (metric, not a shaped reward)."""
+
     @override
     def _compute(self) -> torch.Tensor:
         return self.command_manager.pos_error_norm.reshape(self.num_envs, 1)
 
 
-class eef_pos_forward_tracking(Reward[SingleEEFLocoManip]):
+class eef_pos_forward_tracking(RewardV2[SingleEEFLocoManip]):
     """Multiplicative reward of position and forward tracking."""
 
-    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(env, weight, enabled=enabled, track_var=track_var)
-        self.asset = self.command_manager.asset
-        self.eef_body_idx = self.command_manager.eef_body_idx
+    def __init__(self, weight: float, enabled: bool = True, track_var: bool = False):
+        super().__init__(weight, enabled=enabled, track_var=track_var)
         self.pos_sigma = 0.1
         self.rot_sigma = 0.4
+    
+    @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
+        self.asset = self.command_manager.asset
+        self.eef_body_idx = self.command_manager.eef_body_idx
         self._base_height_rew = self.env.reward_groups["loco"]["base_height_exp"]
         self.update()
     
@@ -746,15 +749,28 @@ class eef_pos_forward_tracking(Reward[SingleEEFLocoManip]):
     def _compute(self) -> torch.Tensor:
         rew = self.rew_pos_exp * self.rew_forward * self.rew_upward + self.rew_pos_l1
         return rew.reshape(self.num_envs, 1)
+    
+    def relabel(self, tensordict: TensorDict) -> torch.Tensor:
+        T, N = tensordict.shape[:2]
+        pos_error_norm2 = tensordict["pos_error_norm2"]
+        pos_error_norm = tensordict["pos_error_norm"]
+        rew = torch.exp(-pos_error_norm2 / self.pos_sigma) - 0.2 * pos_error_norm
+        forward_diff = tensordict["forward_diff_w"]
+        forward_error_norm2 = forward_diff.square().sum(dim=-1, keepdim=True)
+        rew *= torch.exp(-forward_error_norm2 / self.rot_sigma)
+        upward_diff = tensordict["upward_diff_w"]
+        upward_error_norm2 = upward_diff.square().sum(dim=-1, keepdim=True)
+        rew *= torch.exp(-upward_error_norm2 / self.rot_sigma)
+        rew += -0.2 * pos_error_norm
+        return rew.reshape(T, N, 1)
 
 
-class eef_pos_progress(Reward[SingleEEFLocoManip]):
+class eef_pos_progress(RewardV2[SingleEEFLocoManip]):
     """Reward the reduction in EEF position error: ``prev_error - curr_error``."""
-
-    def __init__(
-        self, env, weight: float, enabled: bool = True, track_var: bool = False
-    ):
-        super().__init__(env, weight, enabled=enabled, track_var=track_var)
+    
+    @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
         self.prev_pos_error_norm = torch.zeros(self.num_envs, 1, device=self.device)
         self.rew = torch.zeros(self.num_envs, 1, device=self.device)
 
@@ -776,13 +792,20 @@ class eef_pos_progress(Reward[SingleEEFLocoManip]):
         # the value may be incorrect at the first step
         active = (self.env.episode_length_buf > 1)
         return self.rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
+    
+    def relabel(self, tensordict: TensorDict) -> torch.Tensor:
+        # zero-pad the first step
+        T, N = tensordict.shape[:2]
+        pos_error_norm = tensordict["pos_error_norm"]
+        rew = torch.cat([
+            torch.zeros(1, N, 1, device=self.device),
+            pos_error_norm[1:] - pos_error_norm[:-1]
+        ], dim=0)
+        return rew.reshape(T, N, 1)
 
 
-class eef_pos_reaching(Reward[SingleEEFLocoManip]):
+class eef_pos_reaching(RewardV2[SingleEEFLocoManip]):
     """One-step reward for reaching the EEF position target."""
-
-    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(env, weight, enabled=enabled, track_var=track_var)
 
     @override
     def _compute(self) -> torch.Tensor:
@@ -790,11 +813,8 @@ class eef_pos_reaching(Reward[SingleEEFLocoManip]):
         return rew, self.command_manager.eef_pos_reaching
 
 
-class eef_pos_reached(Reward[SingleEEFLocoManip]):
+class eef_pos_reached(RewardV2[SingleEEFLocoManip]):
     """Reward for staying in an episode after the EEF position target is reached."""
-
-    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(env, weight, enabled=enabled, track_var=track_var)
 
     @override
     def _compute(self) -> torch.Tensor:
@@ -802,16 +822,13 @@ class eef_pos_reached(Reward[SingleEEFLocoManip]):
         return rew, self.command_manager.eef_pos_reached
 
 
-class eef_vel_tracking(Reward[SingleEEFLocoManip]):
-    """
-    Optionally track the velocity of the end-effector.
-    """
-    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(env, weight, enabled=True, track_var=False)
-        self.asset = self.command_manager.asset
-        self.eef_body_idx = self.command_manager.eef_body_idx
+class eef_vel_tracking(RewardV2[SingleEEFLocoManip]):
+    """Exponential reward for tracking commanded end-effector velocity."""
+
+    def __init__(self, weight: float, enabled: bool = True, track_var: bool = False):
+        super().__init__(weight, enabled=enabled, track_var=track_var)
         self.sigma = 0.25
-    
+
     @override
     def _compute(self) -> torch.Tensor:
         diff_w = self.command_manager.cmd_eef_vel_w - self.command_manager.eef_vel_w
@@ -820,24 +837,24 @@ class eef_vel_tracking(Reward[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1)
 
 
-class eef_forward_tracking(Reward[SingleEEFLocoManip]):
-    """
-    Track the commanded end-effector forward direction in world frame.
-    """
+class eef_forward_tracking(RewardV2[SingleEEFLocoManip]):
+    """Track the commanded end-effector forward direction in world frame."""
 
     def __init__(
         self,
-        env,
         weight: float,
         enabled: bool = True,
         track_var: bool = False,
         pos_error_threshold: float = 0.15,
     ):
-        super().__init__(env, weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, enabled=enabled, track_var=track_var)
+        self.pos_error_threshold = pos_error_threshold
+
+    @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
         self.asset = self.command_manager.asset
         self.eef_body_idx = self.command_manager.eef_body_idx
-        self.forward_axis_b = torch.tensor([1.0, 0.0, 0.0], device=self.device)
-        self.pos_error_threshold = pos_error_threshold
 
     @override
     def _compute(self) -> torch.Tensor:
@@ -852,29 +869,30 @@ class eef_forward_tracking(Reward[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
-class eef_up_tracking(Reward[SingleEEFLocoManip]):
-    """
-    Track a global EEF pitch target through the end-effector up direction.
-    """
+class eef_up_tracking(RewardV2[SingleEEFLocoManip]):
+    """Track a global EEF pitch target through the end-effector up direction."""
 
     def __init__(
         self,
-        env,
         weight: float,
         enabled: bool = True,
         track_var: bool = False,
         pos_error_threshold: float = 0.15,
     ):
-        super().__init__(env, weight, enabled=enabled, track_var=track_var)
-        self.asset = self.command_manager.asset
-        self.eef_body_idx = self.command_manager.eef_body_idx
+        super().__init__(weight, enabled=enabled, track_var=track_var)
         self.pos_error_threshold = pos_error_threshold
 
     @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
+        self.asset = self.command_manager.asset
+        self.eef_body_idx = self.command_manager.eef_body_idx
+
+    @override
     def _compute(self) -> torch.Tensor:
-        rew = (self.command_manager.eef_up_w * self.command_manager.cmd_eef_up_w).sum(
-            dim=-1, keepdim=True
-        )
+        rew = (
+            self.command_manager.eef_upward_w * self.command_manager.cmd_eef_upward_w
+        ).sum(dim=-1, keepdim=True)
         pos_error = (
             self.command_manager.cmd_eef_pos_w
             - self.asset.data.body_link_pos_w[:, self.eef_body_idx]
@@ -883,23 +901,23 @@ class eef_up_tracking(Reward[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
-class eef_angvel_penalty(Reward[SingleEEFLocoManip]):
-    """
-    Penalize oscillation of the end-effector.
-    """
-    def __init__(self, env, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(env, weight, enabled=True, track_var=False)
+class eef_angvel_penalty(RewardV2[SingleEEFLocoManip]):
+    """Penalize end-effector angular velocity to reduce oscillation."""
+
+    @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
         self.asset = self.command_manager.asset
         self.eef_body_idx = self.command_manager.eef_body_idx
-    
+
     @override
     def _compute(self) -> torch.Tensor:
         angvel = self.asset.data.body_link_ang_vel_w[:, self.eef_body_idx]
-        rew = - angvel.square().sum(dim=-1, keepdim=True)
+        rew = -angvel.square().sum(dim=-1, keepdim=True)
         return rew.reshape(self.num_envs, 1)
 
 
-class eef_grasp(Reward[SingleEEFLocoManip]):
+class eef_grasp(RewardV2[SingleEEFLocoManip]):
     """Binary cross-entropy gripper reward on ``cmd_eef_status`` vs ``eef_status``."""
 
     @override

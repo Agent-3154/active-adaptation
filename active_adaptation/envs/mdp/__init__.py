@@ -2,7 +2,7 @@ from .base import MDPComponent, is_method_implemented
 from .actions.base import Action
 from .commands.base import Command
 from .observations.base import Observation
-from .rewards.base import Reward
+from .rewards.base import Reward, RewardV2
 from .randomizations.base import Randomization
 from .terminations.base import Termination
 
@@ -20,6 +20,7 @@ __all__ = [
     "Command",
     "Observation",
     "Reward",
+    "RewardV2",
     "Termination",
     "Randomization",
     "actions",
