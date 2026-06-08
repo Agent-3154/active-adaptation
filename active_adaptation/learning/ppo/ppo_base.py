@@ -52,9 +52,16 @@ class PPOBase(TensorDictModuleBase):
         values = tensordict["state_value"]
         next_values = tensordict["next", "state_value"]
 
-        rewards = tensordict[REWARD_KEY].sum(-1, keepdim=True)
+        rewards = tensordict[REWARD_KEY]
+        if isinstance(rewards, TensorDict):
+            rewards = torch.concat(list(rewards.values()), dim=-1)
+        rewards = rewards.sum(-1, keepdim=True)
+        tensordict["next", "reward_aggregated"] = rewards
         if clamp_reward:
             rewards = rewards.clamp_min(0.0)
+        # scale according to the effective horizon
+        rewards = rewards * (1. - self.gae.gamma)
+
         discount = tensordict["next", "discount"]
         terms = tensordict[TERM_KEY]
         dones = tensordict[DONE_KEY]

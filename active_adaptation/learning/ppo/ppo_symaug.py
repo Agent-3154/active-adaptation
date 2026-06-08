@@ -312,7 +312,8 @@ class PPOPolicy(TensorDictModuleBase):
         infos["critic/value_mean"] = tensordict["ret"].mean().item()
         infos["critic/value_std"] = tensordict["ret"].std().item()
         infos["critic/value_max"] = tensordict["ret"].max().item()
-        infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
+        reward_aggregated = tensordict["next", "reward_aggregated"]
+        infos["critic/neg_rew_ratio"] = (reward_aggregated <= 0.).float().mean().item()
         infos["critic/adv_mean"] = adv_mean.item()
         infos["critic/adv_std"] = adv_std.item()
 
@@ -342,6 +343,7 @@ class PPOPolicy(TensorDictModuleBase):
         critic: Mod, 
         adv_key: str="adv",
         ret_key: str="ret",
+        clamp_reward: bool = True,  # avoid suicide due to negative rewards
     ):
         keys = tensordict.keys(True, True)
         if not ("state_value" in keys and ("next", "state_value") in keys):
@@ -352,7 +354,16 @@ class PPOPolicy(TensorDictModuleBase):
         values = tensordict["state_value"]
         next_values = tensordict["next", "state_value"]
 
-        rewards = tensordict[REWARD_KEY].sum(-1, keepdim=True).clamp_min(0.)
+        rewards = tensordict[REWARD_KEY]
+        if isinstance(rewards, TensorDict):
+            rewards = torch.concat(list(rewards.values()), dim=-1)
+        rewards = rewards.sum(-1, keepdim=True)
+        tensordict["next", "reward_aggregated"] = rewards
+        if clamp_reward:
+            rewards = rewards.clamp_min(0.0)
+        # scale according to the effective horizon
+        rewards = rewards * (1. - self.gae.gamma)
+
         discount = tensordict["next", "discount"]
         terms = tensordict[TERM_KEY]
         dones = tensordict[DONE_KEY]

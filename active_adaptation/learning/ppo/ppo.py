@@ -294,7 +294,8 @@ class PPOPolicy(PPOBase):
         infos["critic/value_mean"] = tensordict["ret"].mean().item()
         infos["critic/value_std"] = tensordict["ret"].std().item()
         infos["critic/value_max"] = tensordict["ret"].max().item()
-        infos["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
+        reward_aggregated = tensordict["next", "reward_aggregated"]
+        infos["critic/neg_rew_ratio"] = (reward_aggregated <= 0.).float().mean().item()
         infos["critic/valid_ratio"] = valid_ratio.item()
         
         if self.cfg.debug and self._rollout_dormancy_tracker is not None:

@@ -297,7 +297,6 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         # MDP: rewards
         reward_cfg = dict(self.cfg.reward)
-        self.mult_dt = reward_cfg.pop("_mult_dt_", True)
         for group_name, group_cfg in reward_cfg.items():
             rg = RewardGroup.create_from(
                 group_name,
@@ -350,37 +349,23 @@ class _EnvBase(EnvBase, RegistryMixin):
             [self.num_envs], dtype=torch.long, device=self.device
         )
 
-        reward_spec = Composite(
-            {
-                "stats": {
-                    "episode_len": Unbounded([self.num_envs, 1]),
-                    "success": Unbounded([self.num_envs, 1]),
-                }
-            },
-            shape=[self.num_envs],
-        ).to(self.device)
-        reward_spec_extensions = Composite({})
+        reward_spec = Composite({})
 
+        scalar = Unbounded(1, device=self.device)
         for group_name, reward_group in self.reward_groups.items():
+            if reward_group.enabled:
+                reward_spec["reward", group_name] = scalar.clone()
             for rew_name in reward_group.funcs.keys():
-                reward_spec_extensions["stats", group_name, rew_name] = Unbounded(
-                    1, device=self.device
-                )
-            reward_spec_extensions["stats", group_name, "return"] = Unbounded(
-                1, device=self.device
-            )
+                reward_spec["stats", group_name, rew_name] = scalar.clone()
+            reward_spec["stats", group_name, "return"] = scalar.clone()
 
         for term_name in self.termination_funcs.keys():
-            reward_spec_extensions["stats", "termination", term_name] = Unbounded(
-                1, device=self.device
-            )
+            reward_spec["stats", "termination", term_name] = scalar.clone()
 
-        reward_spec_extensions["reward"] = Unbounded(
-            self._enabled_reward_groups, device=self.device
-        )
-        reward_spec_extensions["discount"] = Unbounded(1, device=self.device)
-        reward_spec.update(reward_spec_extensions.expand(self.num_envs).to(self.device))
-        self.reward_spec = reward_spec
+        reward_spec["discount"] = Unbounded(1, device=self.device)
+        reward_spec["stats", "success"] = scalar.clone()
+        reward_spec["stats", "episode_len"] = scalar.clone()
+        self.reward_spec = reward_spec.expand(self.num_envs).to(self.device)
 
     def _add_mdp_component(self, component: mdp.MDPComponent):
         if mdp.is_method_implemented(component, mdp.MDPComponent, "startup"):
@@ -542,22 +527,17 @@ class _EnvBase(EnvBase, RegistryMixin):
             tensordict.set("reward", torch.ones((self.num_envs, 1), device=self.device))
             return tensordict
 
-        all_rewards = []
         for group, reward_group in self.reward_groups.items():
             reward = reward_group.compute()
             self.stats[group, "return"].add_(reward)
             if reward_group.enabled:
-                all_rewards.append(reward)
-        rewards = torch.cat(all_rewards, dim=1)
-        if self.mult_dt:
-            rewards *= self.step_dt
+                tensordict["reward", group] = reward
 
         self.stats["episode_len"][:] = self.episode_length_buf.reshape(self.num_envs, 1)
         self.stats["success"][:] = (
             (self.episode_length_buf.reshape(self.num_envs, 1) >= self.max_episode_length * 0.9)
             .float()
         )
-        tensordict.set("reward", rewards)
         return tensordict
 
     @ScopedTimer("env.compute_termination", sync=PROFILE_SYNC_TIMERS)
