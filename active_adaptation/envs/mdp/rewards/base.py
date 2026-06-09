@@ -4,6 +4,7 @@ import abc
 import torch
 
 from typing import Generic, TypeVar, Tuple, TYPE_CHECKING
+from tensordict import TensorDictBase
 
 from active_adaptation.registry import RegistryMixin
 if TYPE_CHECKING:
@@ -201,6 +202,10 @@ class RewardV2(Generic[CT], MDPComponent, RegistryMixin):
 
     @abc.abstractmethod
     def _compute(self) -> torch.Tensor:
+        raise NotImplementedError
+    
+    def relabel(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """Relabel the reward."""
         raise NotImplementedError
 
 

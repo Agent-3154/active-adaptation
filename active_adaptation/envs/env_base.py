@@ -93,7 +93,7 @@ class RewardGroup:
     def __init__(
         self,
         name: str,
-        funcs: OrderedDict[str, mdp.Reward],
+        funcs: OrderedDict[str, mdp.RewardV2],
         enabled: bool = True,
         compile: bool = False,
     ):
@@ -111,7 +111,7 @@ class RewardGroup:
         if self.compile:
             self.compute = torch.compile(self.compute, fullgraph=True)
     
-    def __getitem__(self, key: str) -> mdp.Reward:
+    def __getitem__(self, key: str) -> mdp.RewardV2:
         return self.funcs[key]
 
     def compute(self) -> torch.Tensor:
@@ -139,6 +139,14 @@ class RewardGroup:
             if var is not None:
                 result[f"{key}_var"] = var.item()
         return result
+    
+    def relabel(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """Relabel the reward group."""
+        T, N = tensordict.shape[:2]
+        rew = torch.zeros(T, N, 1, device=tensordict.device)
+        for name, func in self.funcs.items():
+            rew = rew + func.weight * func.relabel(tensordict)
+        return rew.reshape(T, N, 1)
     
     @classmethod
     def create_from(

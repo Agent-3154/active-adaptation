@@ -19,7 +19,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
@@ -39,8 +39,11 @@ from tensordict.nn import (
 
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional, TYPE_CHECKING
 from collections import OrderedDict
+
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import _EnvBase
 
 from active_adaptation.learning.modules import (
     VecNorm,
@@ -66,6 +69,7 @@ from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import check_parameters
 from active_adaptation.learning.utils.dormancy import DormancyTracker
 from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.symmetry import SymmetryTransform
 
 import active_adaptation as aa
 import torch.distributed as distr
@@ -112,7 +116,10 @@ class PPOPolicy(TensorDictModuleBase):
         action_spec: Composite, 
         reward_spec: TensorSpec,
         device,
-        env=None,
+        *,
+        cmd_transform: Optional[SymmetryTransform] = None,
+        obs_transform: Optional[SymmetryTransform] = None,
+        act_transform: Optional[SymmetryTransform] = None,
     ):
         super().__init__()
         self.cfg = PPOConfig(**cfg)
@@ -129,28 +136,24 @@ class PPOPolicy(TensorDictModuleBase):
         self.gae = GAE(0.99, 0.95)  
 
         fake_input = observation_spec.zero().to(self.device)
-        
-        if CMD_KEY in observation_spec.keys(True, True):
-            self.cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transform().to(self.device)
-            obs_dim = observation_spec[OBS_KEY].shape[-1]
-            cmd_dim = observation_spec[CMD_KEY].shape[-1]
-            inp_dim = cmd_dim + obs_dim
-            self.vecnorm = Seq(
-                CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False),
-                Mod(VecNorm((inp_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
-            ).to(self.device)
-            self.training_keys = [CMD_KEY, OBS_KEY, ACTION_KEY]
-        else:
-            self.cmd_transform = None
-            inp_dim = obs_dim = observation_spec[OBS_KEY].shape[-1]
-            self.vecnorm = Mod(VecNorm((obs_dim,), decay=1.0), [OBS_KEY], ["_obs_normed"]).to(self.device)
-            self.training_keys = [OBS_KEY, ACTION_KEY]
+        self.cmd_transform = cmd_transform.to(self.device)
+        self.obs_transform = obs_transform.to(self.device)
+        self.act_transform = act_transform.to(self.device)
         
         # the keys needed for `_update`
-        self.training_keys += ["action_log_prob", "adv", "ret", "is_init"]
-        self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform().to(self.device)
-        self.act_transform = env.action_manager.symmetry_transform().to(self.device)
-        self.action_dim = env.action_manager.action_dim
+        self.training_keys = ["action_log_prob", "adv", "ret", "is_init"]
+        if CMD_KEY in observation_spec.keys(True, True):
+            self.training_keys += [CMD_KEY, OBS_KEY, ACTION_KEY]
+            inp_dim = fake_input[CMD_KEY].shape[-1] + fake_input[OBS_KEY].shape[-1]
+        else:
+            self.training_keys += [OBS_KEY, ACTION_KEY]
+            inp_dim = fake_input[OBS_KEY].shape[-1]
+        self.action_dim = action_spec.shape[-1]
+
+        self.vecnorm = Seq(
+            CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False),
+            Mod(VecNorm((inp_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
+        ).to(self.device)
 
         Activation = getattr(nn, self.cfg.activation)
         actor_mlp = MLP(
@@ -198,6 +201,39 @@ class PPOPolicy(TensorDictModuleBase):
         self.actor.apply(init_)
         self.critic.apply(init_)
 
+        self._rollout_dormancy_tracker: Union[DormancyTracker, None] = None
+    
+    @classmethod
+    def from_env(cls, cfg: PPOConfig, env: _EnvBase, device: str):
+        observation_spec = env.observation_spec
+        action_spec = env.action_spec
+        reward_spec = env.reward_spec
+        if CMD_KEY in observation_spec.keys(True, True):
+            cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transform()
+        else:
+            cmd_transform = None
+        obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform()
+        act_transform = env.action_manager.symmetry_transform()
+        policy = cls(
+            cfg=cfg,
+            observation_spec=observation_spec,
+            action_spec=action_spec,
+            reward_spec=reward_spec,
+            device=device,
+            cmd_transform=cmd_transform,
+            obs_transform=obs_transform,
+            act_transform=act_transform,
+        )
+        return policy
+
+    @classmethod
+    def from_state_dict(cls, state_dict: OrderedDict, device: str):
+        pass
+        return cls(...)
+
+    def on_stage_start(self, stage: str):
+        if not stage in ("train", ""):
+            return
         if aa.is_distributed():
             if self.cfg.use_ddp:
                 self.actor = DDP(self.actor, device_ids=[aa.get_local_rank()])
@@ -213,7 +249,7 @@ class PPOPolicy(TensorDictModuleBase):
         if self.cfg.muon:
             self.opt = MuonAdamWWrapper(
                 [self.actor, self.critic],
-                lr=cfg.lr,
+                lr=self.cfg.lr,
                 weight_decay=0.01
             )
         else:
@@ -222,17 +258,13 @@ class PPOPolicy(TensorDictModuleBase):
                     {"params": self.actor.parameters()},
                     {"params": self.critic.parameters()},
                 ],
-                lr=cfg.lr,
+                lr=self.cfg.lr,
                 weight_decay=0.01
             )
 
         self.update = self._update
         if self.cfg.compile and not aa.is_distributed():
             self.update = torch.compile(self.update)
-        self._rollout_dormancy_tracker: Union[DormancyTracker, None] = None
-    
-    def on_stage_start(self, stage: str):
-        pass
 
     def get_rollout_policy(self, mode: str="train", critic: bool = False):
         if self._rollout_dormancy_tracker is not None:
@@ -466,6 +498,11 @@ class PPOPolicy(TensorDictModuleBase):
             if isinstance(module, DDP):
                 module = module.module
             state_dict[name] = module.state_dict()
+        
+        if self.cmd_transform is not None:
+            state_dict["cmd_transform"] = self.cmd_transform.state_dict()
+        state_dict["obs_transform"] = self.obs_transform.state_dict()
+        state_dict["act_transform"] = self.act_transform.state_dict()
         return state_dict
     
     def load_state_dict(self, state_dict, strict=True):

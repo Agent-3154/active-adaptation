@@ -93,14 +93,7 @@ def make_env_policy(
     # setup policy
     policy_cls = hydra.utils.get_class(cfg.algo._target_)
     print(f"Creating policy {policy_cls} on device {cfg.device}")
-    policy = policy_cls(
-        cfg.algo,
-        env.observation_spec, 
-        env.action_spec, 
-        env.reward_spec,
-        device=cfg.device,
-        env=env
-    )
+    policy = policy_cls.from_env(cfg.algo, env, device=cfg.device)
     
     if "policy" in state_dict.keys():
         print(colored("[Info]: Load policy from checkpoint.", "green"))

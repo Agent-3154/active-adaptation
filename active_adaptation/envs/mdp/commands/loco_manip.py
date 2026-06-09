@@ -258,6 +258,11 @@ class SingleEEFLocoManip(CommandV2):
             self.has_payload = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.payload_force_w = torch.zeros(self.num_envs, 3)
         
+        self.init_eef_pos_b = quat_rotate_inverse(
+            yaw_quat(self.asset.data.root_link_quat_w),
+            self.eef_pos_w - self.asset.data.root_link_pos_w * torch.tensor([1., 1., 0.], device=self.device)
+        )
+        
         self.update()
 
         self.marker = None
@@ -451,12 +456,24 @@ class SingleEEFLocoManip(CommandV2):
 
     def sample_manip_commands(self, env_ids: torch.Tensor) -> None: # env_ids is always non-empty
         # in the body frame mode, always look body-frame forward
-        self.cmd_eef_pos_b[env_ids] = self._sample_local_eef_offsets(env_ids)
+        cmd_eef_pos_b = self._sample_local_eef_offsets(env_ids)
         rpy = torch.zeros(len(env_ids), 3, device=self.device)
         rpy[:, 0].uniform_(-torch.pi / 2, torch.pi / 2)
         rpy[:, 1].uniform_(-torch.pi / 6, torch.pi / 6)
         rot_quat = quat_from_euler_xyz(rpy)
         self.cmd_eef_rot_b[env_ids] = rot_quat
+
+        use_init = torch.rand(len(env_ids), 1, device=self.device) < 0.25
+        self.cmd_eef_pos_b[env_ids] = torch.where(
+            use_init,
+            self.init_eef_pos_b[env_ids],
+            cmd_eef_pos_b
+        )
+        self.cmd_eef_rot_b[env_ids] = torch.where(
+            use_init,
+            torch.tensor([[1., 0., 0., 0.]], device=self.device),
+            rot_quat
+        )
 
     def sample_world_goal_commands(self, env_ids: torch.Tensor) -> None:
         root_pos = self.asset.data.root_link_pos_w[env_ids]
