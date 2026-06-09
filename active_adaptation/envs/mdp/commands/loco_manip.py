@@ -178,6 +178,7 @@ class SingleEEFLocoManip(CommandV2):
         self.standoff_yaw_gain_range = standoff_yaw_gain_range
         self.resample_interval = resample_interval
         self.resample_prob = resample_prob
+        self.cmd_eef_pos_clamp_range = -1.0
 
     @override
     def _initialize(self, env: "EnvBase") -> None:
@@ -234,7 +235,7 @@ class SingleEEFLocoManip(CommandV2):
             self.cmd_eef_upward_w = torch.zeros(self.num_envs, 3)
             self.cmd_eef_upward_b = torch.zeros(self.num_envs, 3)
 
-            self.is_world_goal_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
+            self.is_world_goal = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.local_env_ids = torch.empty(0, dtype=torch.long)
             self.world_env_ids = torch.empty(0, dtype=torch.long)
             # world goal eef position and velocity
@@ -251,6 +252,7 @@ class SingleEEFLocoManip(CommandV2):
             self.standoff_yaw_w = torch.zeros(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
             self.command_speed = torch.zeros(self.num_envs, 1)
+            self.base_pos_error = torch.zeros(self.num_envs, 1)
 
             # payload applied at grasp point (force, unit: N)
             self.has_payload = torch.zeros(self.num_envs, 1, dtype=torch.bool)
@@ -515,14 +517,14 @@ class SingleEEFLocoManip(CommandV2):
 
     def sample_commands(self, env_ids: torch.Tensor) -> None:
         local_env_ids, world_env_ids = self._split_command_strategy(env_ids)
-        self.is_world_goal_env[env_ids] = False
+        self.is_world_goal[env_ids] = False
         self.eef_pos_reached[env_ids] = False
         self.eef_pos_reaching[env_ids] = False
         if local_env_ids.numel() > 0:
             self.sample_loco_commands(local_env_ids)
             self.sample_manip_commands(local_env_ids)
         if world_env_ids.numel() > 0:
-            self.is_world_goal_env[world_env_ids] = True
+            self.is_world_goal[world_env_ids] = True
             self.sample_world_goal_commands(world_env_ids)
         self.sample_eef_status_commands(env_ids)
         keep_world = (self.world_env_ids[:, None] != env_ids[None, :]).all(dim=1)
@@ -535,7 +537,13 @@ class SingleEEFLocoManip(CommandV2):
         root_pos = self.asset.data.root_link_pos_w[env_ids]
         yaw_q = self.root_yaw_quat[env_ids]
 
-        cmd_eef_pos_w = root_pos + clamp_norm(self.world_eef_pos_w[env_ids] - root_pos, max=0.6)
+        if self.cmd_eef_pos_clamp_range > 0.0:
+            cmd_eef_pos_w = (
+                root_pos + 
+                clamp_norm(self.world_eef_pos_w[env_ids] - root_pos, max=self.cmd_eef_pos_clamp_range)
+            )
+        else:
+            cmd_eef_pos_w = self.world_eef_pos_w[env_ids]
         cmd_eef_pos_b = quat_rotate_inverse(
             yaw_q,
             cmd_eef_pos_w - root_pos * torch.tensor([1., 1., 0.], device=self.device)
@@ -553,6 +561,7 @@ class SingleEEFLocoManip(CommandV2):
         cmd_linvel_b[:, 2] = 0.0
         self.cmd_linvel_b[env_ids] = cmd_linvel_b
         self.cmd_linvel_w[env_ids] = quat_rotate(yaw_q, cmd_linvel_b)
+        self.base_pos_error[env_ids] = standoff_delta_b.norm(dim=-1, keepdim=True)
 
         yaw_error = wrap_to_pi(
             self.standoff_yaw_w[env_ids] - self.asset.data.heading_w[env_ids, None]
@@ -588,6 +597,7 @@ class SingleEEFLocoManip(CommandV2):
                 self.root_yaw_quat[local_env_ids],
                 self.cmd_eef_rot_b[local_env_ids]
             )
+            self.base_pos_error[local_env_ids] = 0.0
 
         # always compute forward and upward in world frame
         self.cmd_eef_forward_w = quat_rotate(
@@ -614,11 +624,13 @@ class SingleEEFLocoManip(CommandV2):
     def reset(self, env_ids: torch.Tensor) -> None:
         self.sample_commands(env_ids)
         self._sync_world_frames()
+        self.base_pos_error[env_ids] = 0.0
 
     @override
     def update(self) -> None:
         self.root_pos_w = self.asset.data.root_link_pos_w
         self.root_yaw_quat = yaw_quat(self.asset.data.root_link_quat_w)
+        self.eef_state_w = self.asset.data.body_link_state_w[:, self.eef_body_idx]
 
         interval = (
             (self.env.episode_length_buf - 20) % self.resample_interval == 0
@@ -692,6 +704,18 @@ class SingleEEFLocoManip(CommandV2):
             translations=self.cmd_eef_pos_w,
             orientations=self.cmd_eef_rot_w,
         )
+    
+    def get_state(self) -> TensorDict:
+        d = {
+            "is_world_goal": self.is_world_goal,
+            "world_eef_pos_w": self.world_eef_pos_w,
+            "cmd_eef_rot_w": self.cmd_eef_rot_w,
+            "eef_state_w": self.eef_state_w,
+            "eef_status": self.eef_status,
+            "cmd_eef_status": self.cmd_eef_status,
+            "root_state_w": self.asset.data.root_state_w,
+        }
+        return TensorDict(d, [self.num_envs], device=self.device)
 
 
 class eef_pos_tracking(RewardV2[SingleEEFLocoManip]):
@@ -720,10 +744,17 @@ class eef_pos_error_l1(RewardV2[SingleEEFLocoManip]):
 class eef_pos_forward_tracking(RewardV2[SingleEEFLocoManip]):
     """Multiplicative reward of position and forward tracking."""
 
-    def __init__(self, weight: float, enabled: bool = True, track_var: bool = False):
+    def __init__(
+        self,
+        weight: float,
+        enabled: bool = True,
+        track_var: bool = False,
+        base_pos_error_threshold: float = 1.0,
+    ):
         super().__init__(weight, enabled=enabled, track_var=track_var)
         self.pos_sigma = 0.1
         self.rot_sigma = 0.4
+        self.base_pos_error_threshold = base_pos_error_threshold
     
     @override
     def _initialize(self, env: "EnvBase"):
@@ -750,18 +781,19 @@ class eef_pos_forward_tracking(RewardV2[SingleEEFLocoManip]):
 
     @override
     def _compute(self) -> torch.Tensor:
+        active = self.command_manager.base_pos_error < self.base_pos_error_threshold
         rew = self.rew_pos_exp * self.rew_forward * self.rew_upward + self.rew_pos_l1
-        return rew.reshape(self.num_envs, 1)
+        return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
     
     def relabel(self, tensordict: TensorDict) -> torch.Tensor:
         T, N = tensordict.shape[:2]
-        pos_error_norm2 = tensordict["pos_error_norm2"]
-        pos_error_norm = tensordict["pos_error_norm"]
+        pos_error_norm2 = tensordict["command_state", "pos_error_norm2"]
+        pos_error_norm = tensordict["command_state", "pos_error_norm"]
         rew = torch.exp(-pos_error_norm2 / self.pos_sigma) - 0.2 * pos_error_norm
-        forward_diff = tensordict["forward_diff_w"]
+        forward_diff = tensordict["command_state", "forward_diff_w"]
         forward_error_norm2 = forward_diff.square().sum(dim=-1, keepdim=True)
         rew *= torch.exp(-forward_error_norm2 / self.rot_sigma)
-        upward_diff = tensordict["upward_diff_w"]
+        upward_diff = tensordict["command_state", "upward_diff_w"]
         upward_error_norm2 = upward_diff.square().sum(dim=-1, keepdim=True)
         rew *= torch.exp(-upward_error_norm2 / self.rot_sigma)
         rew += -0.2 * pos_error_norm
@@ -798,11 +830,12 @@ class eef_pos_progress(RewardV2[SingleEEFLocoManip]):
     
     def relabel(self, tensordict: TensorDict) -> torch.Tensor:
         # zero-pad the first step
+        step_dt = tensordict["env_meta"]["step_dt"]
         T, N = tensordict.shape[:2]
-        pos_error_norm = tensordict["pos_error_norm"]
+        pos_error_norm = tensordict["command_state", "pos_error_norm"]
         rew = torch.cat([
-            torch.zeros(1, N, 1, device=self.device),
-            pos_error_norm[1:] - pos_error_norm[:-1]
+            torch.zeros(1, N, 1, device=tensordict.device),
+            (pos_error_norm[1:] - pos_error_norm[:-1]) / step_dt
         ], dim=0)
         return rew.reshape(T, N, 1)
 
@@ -918,6 +951,13 @@ class eef_angvel_penalty(RewardV2[SingleEEFLocoManip]):
         angvel = self.asset.data.body_link_ang_vel_w[:, self.eef_body_idx]
         rew = -angvel.square().sum(dim=-1, keepdim=True)
         return rew.reshape(self.num_envs, 1)
+    
+    def relabel(self, tensordict: TensorDict) -> TensorDict:
+        T, N = tensordict.shape[:2]
+        eef_state_w = tensordict["command_state", "eef_state_w"]
+        eef_angvel_w = eef_state_w[..., 10:13]
+        rew = -eef_angvel_w.square().sum(dim=-1, keepdim=True)
+        return rew.reshape(T, N, 1)
 
 
 class eef_grasp(RewardV2[SingleEEFLocoManip]):
@@ -930,6 +970,12 @@ class eef_grasp(RewardV2[SingleEEFLocoManip]):
         target = cmd.cmd_eef_status.float()
         bce = F.binary_cross_entropy(pred, target, reduction="none")
         return (1.0 - bce).reshape(self.num_envs, 1)
+    
+    def relabel(self, tensordict: TensorDict) -> TensorDict:
+        eef_status = tensordict["command_state", "eef_status"]
+        cmd_eef_status = tensordict["command_state", "cmd_eef_status"]
+        rew = F.binary_cross_entropy(eef_status, cmd_eef_status, reduction="none")
+        return rew.reshape(self.num_envs, 1)
 
 
 __all__ = ["SingleEEFLocoManip"]
