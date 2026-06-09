@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from typing import TYPE_CHECKING
+from tensordict import TensorDict
 
 from active_adaptation.registry import RegistryMixin
 from active_adaptation.utils.math import quat_mul, sample_quat_yaw
@@ -111,6 +112,13 @@ class CommandV2(MDPComponent, RegistryMixin):
             sample_quat_yaw(len(env_ids), device=self.device),
         )
         return init_root_state
+    
+    # for relabeling
+    def get_state(self) -> TensorDict:
+        raise NotImplementedError()
+
+    def relabel_command(self, tensordict: TensorDict) -> TensorDict:
+        raise NotImplementedError()
 
 
 __all__ = ["Command", "CommandV2"]

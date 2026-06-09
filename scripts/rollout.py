@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from torchrl.envs.utils import set_exploration_type, ExplorationType
-from tensordict import TensorDict
+from tensordict import TensorDict, NonTensorData
 
 import active_adaptation as aa
 from active_adaptation.utils.helpers import EpisodeStats
@@ -42,14 +42,15 @@ class RolloutWriter:
 
     def add(self, tensordict: TensorDict):
         assert tensordict.ndim == 1
-        td = tensordict.detach().cpu()
-        self._rows.append(td.clone())
+        td = tensordict.detach().clone().cpu(non_blocking=True)
+        self._rows.append(td)
         if len(self._rows) > self._max_size:
             self._rows = self._rows[-self._max_size :]
         return len(self._rows)
 
     def close(
         self,
+        env_meta: dict[str, float],
         *,
         episode_count: int = 0,
         episode_stats: dict[str, float] | None = None,
@@ -57,6 +58,7 @@ class RolloutWriter:
         if not self._rows:
             return
         stacked: TensorDict = torch.stack(self._rows, dim=0)
+        stacked["env_meta"] = NonTensorData(env_meta)
         print(stacked)
         payload = {
             "format_version": ROLLOUT_FORMAT_VERSION,
@@ -126,13 +128,14 @@ def main(cfg):
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
         for _ in tqdm(range(cfg.num_steps)):
             carry = rollout_policy(carry)
+            command_state = env.command_manager.get_state().clone()
             td, carry = env.step_and_maybe_reset(carry)
             episode_stats.add(td)
 
             private_keys = [key for key in td.keys(True, True) if is_private_key(key)]
             td = td.exclude(*private_keys, inplace=True)
             td = td.exclude(*exclude_keys, inplace=True)
-            
+            td["command_state"] = command_state
             writer.add(td)
 
         episode_count = int(len(episode_stats))
@@ -140,7 +143,11 @@ def main(cfg):
         if episode_count > 0:
             episode_stats_meta = episode_stats_to_metadata(episode_stats.pop())
 
-    writer.close(episode_count=episode_count, episode_stats=episode_stats_meta)
+    writer.close(
+        env_meta = {"step_dt": env.step_dt, "physics_dt": env.physics_dt},
+        episode_count=episode_count,
+        episode_stats=episode_stats_meta
+    )
     env.close()
 
 

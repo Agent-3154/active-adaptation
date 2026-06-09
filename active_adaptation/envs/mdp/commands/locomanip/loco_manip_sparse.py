@@ -13,6 +13,7 @@ from active_adaptation.utils.math import (
     sample_quat_yaw,
     yaw_quat,
     quat_from_euler_xyz,
+    clamp_norm,
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
 from ..base import CommandV2
@@ -54,6 +55,7 @@ class LocoManipSparse(CommandV2):
         self.spawn_radius_range = spawn_radius_range
         self.resample_interval = resample_interval
         self.resample_prob = resample_prob
+        self.cmd_eef_pos_clamp_range = -1.0
 
     @override
     def _initialize(self, env: "EnvBase") -> None:
@@ -307,37 +309,53 @@ class LocoManipSparse(CommandV2):
             orientations=self.cmd_eef_rot_w,
         )
         
-    @staticmethod
-    def relabel_command(tensordict: TensorDict) -> TensorDict:
+    def relabel_command(self, tensordict: TensorDict) -> TensorDict:
         """Compute the necessary states and commands from a rollout.
         This is used to relabel the command from `SingleEEFLocoManip` to `LocoManipSparse`.
         """
         device = tensordict.device
-        assert tensordict["is_world_goal"].all()
-        root_pos_w = tensordict["root_state_w"][..., :3]
-        root_quat_w = tensordict["root_state_w"][..., 3:7]
+        forward_vec = torch.tensor([[1.0, 0.0, 0.0]], device=device)
+        upward_vec = torch.tensor([[0.0, 0.0, 1.0]], device=device)
+
+        command_state = tensordict["command_state"]
+        assert command_state["is_world_goal"].all()
+        root_state_w = command_state["root_state_w"]
+        root_pos_w = root_state_w[..., :3]
+        root_quat_w = root_state_w[..., 3:7]
         root_yaw_quat = yaw_quat(root_quat_w)
-        cmd_eef_pos_w = tensordict["world_eef_pos_w"]
+        world_eef_pos_w = command_state["world_eef_pos_w"]
+        
+        if self.cmd_eef_pos_clamp_range > 0.0:
+            cmd_eef_pos_w = (
+                root_pos_w + 
+                clamp_norm(world_eef_pos_w - root_pos_w, max=self.cmd_eef_pos_clamp_range)
+            )
+        else:
+            cmd_eef_pos_w = world_eef_pos_w
+        
         cmd_eef_pos_b = quat_rotate_inverse(
             root_yaw_quat,
             cmd_eef_pos_w - root_pos_w * torch.tensor([1.0, 1.0, 0.0], device=device)
         )
-        cmd_eef_rot_w = tensordict["cmd_eef_rot_w"]
-        cmd_eef_forward_w = quat_rotate(cmd_eef_rot_w, torch.tensor([[1.0, 0.0, 0.0]], device=device))
+        cmd_eef_rot_w = command_state["cmd_eef_rot_w"]
+        cmd_eef_forward_w = quat_rotate(cmd_eef_rot_w, forward_vec.reshape(1, 1, 3))
         cmd_eef_forward_b = quat_rotate_inverse(root_yaw_quat, cmd_eef_forward_w)
-        cmd_eef_upward_w = quat_rotate(cmd_eef_rot_w, torch.tensor([[0.0, 0.0, 1.0]], device=device))
+        cmd_eef_upward_w = quat_rotate(cmd_eef_rot_w, upward_vec.reshape(1, 1, 3))
         cmd_eef_upward_b = quat_rotate_inverse(root_yaw_quat, cmd_eef_upward_w)
 
-        eef_pos_w = tensordict["eef_pos_w"]
-        eef_quat_w = tensordict["eef_quat_w"]
+        eef_state_w = command_state["eef_state_w"]
+        eef_pos_w = eef_state_w[..., :3]
+        eef_quat_w = eef_state_w[..., 3:7]
         pos_diff_w = cmd_eef_pos_w - eef_pos_w
         pos_diff_b = quat_rotate_inverse(root_yaw_quat, pos_diff_w)
         pos_error_norm2 = pos_diff_w.square().sum(dim=-1, keepdim=True)
         pos_error_norm = pos_error_norm2.sqrt()
-        eef_forward_w = quat_rotate(eef_quat_w, torch.tensor([[1.0, 0.0, 0.0]], device=device))
-        eef_upward_w = quat_rotate(eef_quat_w, torch.tensor([[0.0, 0.0, 1.0]], device=device))
-        forward_diff_b = quat_rotate_inverse(root_yaw_quat, cmd_eef_forward_w - eef_forward_w)
-        upward_diff_b = quat_rotate_inverse(root_yaw_quat, cmd_eef_upward_w - eef_upward_w)
+        eef_forward_w = quat_rotate(eef_quat_w, forward_vec.reshape(1, 1, 3))
+        eef_upward_w = quat_rotate(eef_quat_w, upward_vec.reshape(1, 1, 3))
+        forward_diff_w = cmd_eef_forward_w - eef_forward_w
+        upward_diff_w = cmd_eef_upward_w - eef_upward_w
+        forward_diff_b = quat_rotate_inverse(root_yaw_quat, forward_diff_w)
+        upward_diff_b = quat_rotate_inverse(root_yaw_quat, upward_diff_w)
         
         command_sparse = torch.cat([
             cmd_eef_pos_b,
@@ -346,12 +364,14 @@ class LocoManipSparse(CommandV2):
             forward_diff_b,
             cmd_eef_upward_b,
             upward_diff_b,
-            tensordict["eef_status"]
+            command_state["eef_status"],
+            (1 - command_state["eef_status"])
         ], dim=-1)
-
-        tensordict["pos_error_norm2"] = pos_error_norm2
-        tensordict["pos_error_norm"] = pos_error_norm
-        tensordict["command"] = command_sparse
+        tensordict["command_state", "forward_diff_w"] = forward_diff_w
+        tensordict["command_state", "upward_diff_w"] = upward_diff_w
+        tensordict["command_state", "pos_error_norm2"] = pos_error_norm2
+        tensordict["command_state", "pos_error_norm"] = pos_error_norm
+        tensordict["command_relabeled"] = command_sparse
         return tensordict
 
 

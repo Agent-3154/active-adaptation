@@ -6,13 +6,18 @@ import os
 import datetime
 import imageio.v2 as imageio
 
+from typing import Union
 from termcolor import colored
 from omegaconf import OmegaConf, DictConfig
+
+from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
 from tensordict import TensorDictBase
-from active_adaptation.utils.wandb import parse_checkpoint, CheckpointBase
-from active_adaptation.utils.profiling import ScopedTimer
 
 import active_adaptation
+from active_adaptation.utils.wandb import parse_checkpoint, CheckpointBase
+from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.envs import _EnvBase
+
 
 class Every:
     def __init__(self, func, steps):
@@ -29,12 +34,9 @@ class Every:
 def make_env_policy(
     cfg: DictConfig,
     checkpoint: CheckpointBase | None = None
-):
+) -> tuple[Union[TransformedEnv, _EnvBase], torch.nn.Module]:
     OmegaConf.set_struct(cfg, False)
     cfg.seed = cfg.seed + active_adaptation.get_local_rank()
-    
-    from active_adaptation.envs import _EnvBase
-    from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
     
     # Select the appropriate backend-specific environment class
     backend = active_adaptation.get_backend()
