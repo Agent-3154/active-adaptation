@@ -10,7 +10,12 @@ import datetime
 import hydra
 import torch
 from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
+
 from omegaconf import OmegaConf
+from hydra.conf import HydraConf, RunDir
+from hydra.core.config_store import ConfigStore
 from tqdm import tqdm
 
 from torchrl.envs.utils import set_exploration_type, ExplorationType
@@ -27,7 +32,69 @@ from active_adaptation.rollout_io import (
     update_metadata_shapes,
 )
 
+
+DEFAULTS = [
+    {"task": "Velocity"},
+    {"algo": "ppo"},
+    "_self_",
+]
+
+
+@dataclass
+class IsaacAppConfig:
+    """Isaac Lab AppLauncher settings (resolved from parent config)."""
+
+    headless: bool = "${..headless}"
+    """Mirror ``headless``; passed to Isaac Lab's AppLauncher."""
+    enable_cameras: bool = False
+    """Keep cameras off during headless rollout collection."""
+
+
+@dataclass
+class RolloutConfig:
+    """Hydra root config for policy rollout and transition collection."""
+
+    defaults: List[Any] = field(default_factory=lambda: DEFAULTS)
+    """Hydra defaults list: task config, algo config, then this config."""
+    hydra: HydraConf = field(default_factory=HydraConf)
+    """Hydra runtime settings (output directory, etc.)."""
+    num_steps: Any = "${oc.select:task.max_episode_length,1000}"
+    """Number of env steps to collect; defaults to ``task.max_episode_length``."""
+    headless: bool = True
+    """Run simulation without a rendering window."""
+    backend: str = "isaac"
+    """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
+    device: str = "cuda"
+    """Torch device for policy inference (e.g. ``cuda``, ``cpu``)."""
+    seed: int = 42
+    """Random seed (offset by local rank in distributed runs)."""
+    store_transitions: bool = True
+    """Keep full next-step observations in saved transitions."""
+    run_critic: bool = True
+    """Run the critic during rollout (adds value estimates to the policy path)."""
+    checkpoint_path: Optional[str] = None
+    """Path or WandB URI to a policy checkpoint; ``null`` starts from scratch."""
+    discard_unused_obs: bool = False
+    """Drop observation groups not listed in ``algo.in_keys``."""
+    app: IsaacAppConfig = field(default_factory=IsaacAppConfig)
+    """Backend-specific application launcher config."""
+
+
+cs = ConfigStore.instance()
+cs.store(
+    name="rollout",
+    node=RolloutConfig(
+        hydra=HydraConf(
+            run=RunDir(
+                dir="./outputs_rollout/${now:%Y-%m-%d}/${now:%H-%M-%S}-${task.name}-${algo.name}"
+            )
+        )
+    ),
+)
+
+
 FILE_PATH = Path(__file__).parent
+CONFIG_PATH = FILE_PATH.parent / "cfg"
 
 
 class RolloutWriter:
@@ -86,8 +153,8 @@ class RolloutWriter:
         print(f"Wrote rollout metadata to {out_path.with_suffix('.json')}")
 
 
-@hydra.main(config_path="../cfg", config_name="rollout", version_base=None)
-def main(cfg):
+@hydra.main(config_path=str(CONFIG_PATH), config_name="rollout", version_base=None)
+def main(cfg: RolloutConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 

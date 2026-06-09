@@ -153,6 +153,7 @@ class SingleEEFLocoManip(CommandV2):
         standoff_yaw_gain_range: Tuple[float, float] = (1.0, 2.0),
         resample_interval: int = 300,
         resample_prob: float = 0.75,
+        cmd_eef_pos_clamp_range: float = -1.0,
     ) -> None:
         if workspace_range is None and workspace_profile is None:
             raise ValueError(
@@ -178,7 +179,7 @@ class SingleEEFLocoManip(CommandV2):
         self.standoff_yaw_gain_range = standoff_yaw_gain_range
         self.resample_interval = resample_interval
         self.resample_prob = resample_prob
-        self.cmd_eef_pos_clamp_range = -1.0
+        self.cmd_eef_pos_clamp_range = cmd_eef_pos_clamp_range
 
     @override
     def _initialize(self, env: "EnvBase") -> None:

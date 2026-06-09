@@ -7,7 +7,12 @@ import time
 import datetime
 from pathlib import Path
 
-from omegaconf import OmegaConf, DictConfig
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
+
+from omegaconf import OmegaConf
+from hydra.conf import HydraConf, RunDir, JobConf
+from hydra.core.config_store import ConfigStore
 
 from collections import OrderedDict
 from tqdm import tqdm
@@ -25,6 +30,93 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+
+DEFAULTS = [
+    {"task": "Velocity"},
+    {"algo": "ppo"},
+    "_self_",
+]
+
+
+@dataclass
+class IsaacAppConfig:
+    """Isaac Lab AppLauncher settings (resolved from parent config)."""
+
+    headless: bool = "${..headless}"
+    """Mirror ``headless``; passed to Isaac Lab's AppLauncher."""
+    enable_cameras: bool = "${..eval_render}"
+    """Mirror ``eval_render``; enables camera sensors for final eval rendering."""
+
+
+@dataclass
+class WandbConfig:
+    """Weights & Biases logging settings."""
+
+    name: str = "${..exp_name}/${now:%m-%d}_${now:%H-%M}"
+    """Run display name (derived from ``exp_name`` and timestamp)."""
+    job_type: str = "train"
+    """WandB job type label."""
+    project: str = "${oc.select:task.project,active_adaptation}"
+    """WandB project; falls back to ``active_adaptation`` if unset on the task."""
+    mode: str = "online"
+    """WandB mode: ``online``, ``offline``, or ``disabled``."""
+    tags: List[str] = field(default_factory=list)
+    """Optional tags attached to the WandB run."""
+
+
+@dataclass
+class TrainConfig:
+    """Hydra root config for PPO training."""
+
+    defaults: List[Any] = field(default_factory=lambda: DEFAULTS)
+    """Hydra defaults list: task config, algo config, then this config."""
+    hydra: HydraConf = field(default_factory=HydraConf)
+    """Hydra runtime settings (output directory, chdir, etc.)."""
+
+    headless: bool = True
+    """Run simulation without a rendering window."""
+    exp_name: str = "${oc.select:task.name,test}-${oc.select:algo.name,none}"
+    """Experiment label used in run names and WandB metadata."""
+    backend: str = "isaac"
+    """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
+    device: str = "cuda"
+    """Torch device for training (adjusted per local rank when using CUDA)."""
+
+    app: IsaacAppConfig = field(default_factory=IsaacAppConfig)
+    """Backend-specific application launcher config."""
+    total_frames: int = 150_000_000
+    """Total environment frames to collect across all ranks before stopping."""
+
+    eval_render: bool = False
+    """Render the environment during the final post-training evaluation."""
+    checkpoint_interval: int = 4
+    """Save a local checkpoint every N training iterations."""
+    upload_interval: int = 100
+    """Upload a checkpoint to WandB every N training iterations."""
+
+    seed: int = 42
+    """Random seed (offset by local rank in distributed runs)."""
+    checkpoint_path: Optional[str] = None
+    """Path or WandB URI to resume from; ``null`` trains from scratch."""
+    discard_unused_obs: bool = True
+    """Drop observation groups not listed in ``algo.in_keys``."""
+    wandb: WandbConfig = field(default_factory=WandbConfig)
+    """WandB logging configuration."""
+
+
+cs = ConfigStore.instance()
+cs.store(
+    name="train",
+    node=TrainConfig(
+        hydra=HydraConf(
+            run=RunDir(
+                dir="./outputs_train/${now:%Y-%m-%d}/${now:%H-%M-%S}-${task.name}-${algo.name}"
+            ),
+            job=JobConf(chdir=True),
+        )
+    ),
+)
 
 
 FILE_PATH = Path(__file__).resolve().parent
@@ -125,11 +217,11 @@ class BufferCollector:
 
 
 @hydra.main(config_path=str(CONFIG_PATH), config_name="train", version_base=None)
-def main(cfg: DictConfig):
-    aa.init(cfg, auto_rank=True)
-
+def main(cfg: TrainConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
+
+    aa.init(cfg, auto_rank=True)
 
     print(
         f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}"
@@ -166,7 +258,7 @@ def main(cfg: DictConfig):
     policy: PPOBase
 
     frames_per_batch = env.num_envs * cfg.algo.train_every
-    total_frames = cfg.get("total_frames", -1) // aa.get_world_size()
+    total_frames = cfg.total_frames // aa.get_world_size()
     total_frames = total_frames // frames_per_batch * frames_per_batch
     total_iters = total_frames // frames_per_batch
     
