@@ -195,7 +195,7 @@ def main(cfg: RolloutConfig):
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
         for _ in tqdm(range(cfg.num_steps)):
             carry = rollout_policy(carry)
-            command_state = env.command_manager.get_state().clone()
+            command_state = env.command_manager.get_state()
             td, carry = env.step_and_maybe_reset(carry)
             episode_stats.add(td)
 

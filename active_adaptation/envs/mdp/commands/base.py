@@ -7,6 +7,7 @@ from tensordict import TensorDict
 
 from active_adaptation.registry import RegistryMixin
 from active_adaptation.utils.math import quat_mul, sample_quat_yaw
+from abc import abstractmethod
 
 from ..base import MDPComponent
 
@@ -18,13 +19,11 @@ if TYPE_CHECKING:
 class Command(MDPComponent, RegistryMixin):
     """High-level command source for the MDP.
 
-    Each env step, after simulation: ``update`` runs first, then rewards and
-    terminations read ``command_manager``, then ``step`` runs, then
-    observations are built. Override :meth:`update` to refresh command targets
-    and any tensors that rewards or terminations depend on. Override
-    :meth:`step` only when you need logic after reward/termination (e.g.
-    bookkeeping that must not affect this step's reward/termination, or state
-    consumed on the next step).
+    Each env step, after simulation: :meth:`sync_state` runs first, then rewards
+    and terminations read ``command_manager``, then :meth:`update` runs, then
+    observations are built. Override :meth:`sync_state` to refresh intermediate
+    tensors that rewards or terminations depend on without changing commands.
+    Override :meth:`update` when commands may change (e.g. resampling).
     """
 
     def __init__(self, env: _EnvBase, teleop: bool = False) -> None:
@@ -34,19 +33,13 @@ class Command(MDPComponent, RegistryMixin):
         self.init_joint_pos = self.asset.data.default_joint_pos.clone()
         self.init_joint_vel = self.asset.data.default_joint_vel.clone()
         self.teleop = teleop
-    
-    def update(self) -> None:
-        """Refresh command targets and any tensors that rewards or terminations depend on."""
-        pass
-    
-    def step(self) -> None:
-        """Hook after rewards and terminations, before observations.
 
-        :meth:`update` runs earlier in the same env step so reward and
-        termination terms see the command state it sets. Use ``step`` for
-        follow-up work that should not influence this step's reward or
-        termination (most command implementations only need ``update``).
-        """
+    def sync_state(self) -> None:
+        """Refresh intermediate state for rewards/terminations; do not change commands."""
+        pass
+
+    def update(self) -> None:
+        """Hook after rewards and terminations, before observations."""
         pass
 
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor | None:
@@ -95,13 +88,25 @@ class CommandV2(MDPComponent, RegistryMixin):
         """``True`` after :meth:`_initialize` has been called."""
         return self._initialized
 
+    @abstractmethod
+    def sync_state(self) -> None:
+        """
+        Refresh intermediate state tensors that rewards or terminations depend on.
+        The command should not change during `sync_state`.
+        
+        We make this method abstract so that the users are explicitly aware of the
+        difference between `sync_state` and `update`.
+        """
+    
+    @abstractmethod
     def update(self) -> None:
-        """Refresh command targets and any tensors that rewards or terminations depend on."""
-        pass
+        """Hook after rewards and terminations, before observations.
 
-    def step(self) -> None:
-        """Hook after rewards and terminations, before observations."""
-        pass
+        The command may change during `update`, e.g., gets resampled.
+        
+        We make this method abstract so that the users are explicitly aware of the
+        difference between `sync_state` and `update`.
+        """
 
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor | None:
         init_root_state = self.init_root_state[env_ids]

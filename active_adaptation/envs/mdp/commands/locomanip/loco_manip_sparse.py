@@ -121,7 +121,7 @@ class LocoManipSparse(CommandV2):
                 "/Visuals/Command/target_eef_pose",
                 scale=(0.1, 0.1, 0.1),
             )
-        self.update()
+        self.sync_state()
 
     @property
     def command(self) -> torch.Tensor:
@@ -229,9 +229,7 @@ class LocoManipSparse(CommandV2):
         # Running FK at each reset is expensive.
         # self._sync_command()
 
-    @override
-    def update(self) -> None:
-        # update common terms
+    def _read_robot_state(self) -> None:
         self.root_pos_w = self.asset.data.root_link_pos_w
         self.root_yaw_quat = yaw_quat(self.asset.data.root_link_quat_w)
         self.eef_pos_w = self.asset.data.body_link_pos_w[:, self.eef_body_idx]
@@ -244,23 +242,12 @@ class LocoManipSparse(CommandV2):
         self.eef_upward_b = quat_rotate_inverse(self.root_yaw_quat, self.eef_upward_w)
         self.eef_status = self.get_gripper_status()
 
-        interval = (self.env.episode_length_buf - 20) % self.resample_interval == 0
-        resample = (
-            interval
-            & self._env_mask_prob(self.num_envs, self.resample_prob, self.device)
-            & self.eef_pos_reached.squeeze(1) # do not resample if not reached yet
-        )
-        env_ids = resample.nonzero(as_tuple=False).squeeze(-1)
-        if env_ids.numel() > 0:
-            self.sample_commands(env_ids)
-        
+    def _sync_command_from_targets(self) -> None:
         self.cmd_eef_pos_w = self.world_eef_pos_w.clone()
         self.cmd_eef_pos_b = quat_rotate_inverse(
             self.root_yaw_quat,
             self.world_eef_pos_w - self.root_pos_w * torch.tensor([1.0, 1.0, 0.0], device=self.device),
         )
-        
-        # always compute forward and upward in world frame
         self.cmd_eef_forward_w = quat_rotate(
             self.cmd_eef_rot_w,
             torch.tensor([[1.0, 0.0, 0.0]], device=self.device),
@@ -271,13 +258,14 @@ class LocoManipSparse(CommandV2):
         )
         self.cmd_eef_forward_b = quat_rotate_inverse(
             self.root_yaw_quat,
-            self.cmd_eef_forward_w
+            self.cmd_eef_forward_w,
         )
         self.cmd_eef_upward_b = quat_rotate_inverse(
             self.root_yaw_quat,
-            self.cmd_eef_upward_w
+            self.cmd_eef_upward_w,
         )
 
+    def _compute_tracking_errors(self) -> None:
         self.pos_diff_w = self.cmd_eef_pos_w - self.eef_pos_w
         self.pos_diff_b = quat_rotate_inverse(
             yaw_quat(self.asset.data.root_link_quat_w),
@@ -285,17 +273,42 @@ class LocoManipSparse(CommandV2):
         )
         self.pos_error_norm2 = self.pos_diff_w.square().sum(dim=-1, keepdim=True)
         self.pos_error_norm = self.pos_error_norm2.sqrt()
-        
+
         self.forward_diff_w = self.cmd_eef_forward_w - self.eef_forward_w
         self.forward_diff_b = quat_rotate_inverse(
             self.root_yaw_quat,
-            self.forward_diff_w
+            self.forward_diff_w,
         )
         self.upward_diff_w = self.cmd_eef_upward_w - self.eef_upward_w
         self.upward_diff_b = quat_rotate_inverse(
             self.root_yaw_quat,
-            self.upward_diff_w
+            self.upward_diff_w,
         )
+
+    def _maybe_resample_commands(self) -> None:
+        interval = (self.env.episode_length_buf - 20) % self.resample_interval == 0
+        resample = (
+            interval
+            & self._env_mask_prob(self.num_envs, self.resample_prob, self.device)
+            & self.eef_pos_reached.squeeze(1)
+        )
+        env_ids = resample.nonzero(as_tuple=False).squeeze(-1)
+        if env_ids.numel() > 0:
+            self.sample_commands(env_ids)
+
+    @override
+    def sync_state(self) -> None:
+        """Refresh tracking errors from post-physics robot state and current targets."""
+        self._read_robot_state()
+        self._sync_command_from_targets()
+        self._compute_tracking_errors()
+
+    @override
+    def update(self) -> None:
+        """Resample targets for the next physics step, then refresh obs fields."""
+        self._maybe_resample_commands()
+        self._sync_command_from_targets()
+        self._compute_tracking_errors()
 
     @override
     def debug_draw(self) -> None:

@@ -169,7 +169,7 @@ class LocoManipObject(_LocoManipObjectBase):
         self.cmd_object_target_w[env_ids] = obj_pos_w + offset
 
     @override
-    def update(self) -> None:
+    def sync_state(self) -> None:
         """Refresh object pose and body-frame target / error terms."""
         self.object_pos_w = self.object.data.root_pos_w
         self.root_pos_w = self.asset.data.root_link_pos_w
@@ -183,6 +183,10 @@ class LocoManipObject(_LocoManipObjectBase):
         self.object_target_diff_b = quat_rotate_inverse(
             self.root_yaw_q, self.object_target_diff_w)
         self.object_target_error_norm = self.object_target_diff_w.norm(dim=-1, keepdim=True)
+
+    @override
+    def update(self) -> None:
+        pass
 
     @override
     def debug_draw(self) -> None:
@@ -478,9 +482,8 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
 
         self.phase_ids[env_ids] = 0 # reset to approach phase
         self.should_grasp[env_ids] = False
-    
-    @override
-    def update(self) -> None:
+
+    def _read_robot_and_object_state(self) -> None:
         self.root_pos_w = self.asset.data.root_link_pos_w
         self.root_yaw_quat = yaw_quat(self.asset.data.root_link_quat_w)
         self.object_pos_w = self.object.data.root_pos_w
@@ -489,14 +492,7 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         offset_obj[:, 2] = self.grasp_height_per_env
         self.grasp_point_w = self.object_pos_w + quat_rotate(self.object_quat_w, offset_obj)
 
-        approach_ids = (self.phase_ids == 0).nonzero(as_tuple=False).squeeze(-1)
-        self._phase_approach(approach_ids)
-        lift_ids = (self.phase_ids == 1).nonzero(as_tuple=False).squeeze(-1)
-        self._phase_lift(lift_ids)
-        move_ids = (self.phase_ids == 2).nonzero(as_tuple=False).squeeze(-1)
-        self._phase_move(move_ids)
-        
-        # always compute forward and upward in world frame
+    def _sync_command_orientation(self) -> None:
         self.cmd_eef_forward_w = quat_rotate(
             self.cmd_eef_rot_w,
             torch.tensor([[1.0, 0.0, 0.0]], device=self.device),
@@ -507,13 +503,14 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         )
         self.cmd_eef_forward_b = quat_rotate_inverse(
             self.root_yaw_quat,
-            self.cmd_eef_forward_w
+            self.cmd_eef_forward_w,
         )
         self.cmd_eef_upward_b = quat_rotate_inverse(
             self.root_yaw_quat,
-            self.cmd_eef_upward_w
+            self.cmd_eef_upward_w,
         )
 
+    def _compute_tracking_errors(self) -> None:
         forward_axis_b = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
         upward_axis_b = torch.tensor([[0.0, 0.0, 1.0]], device=self.device)
         self.eef_forward_w = quat_rotate(self.eef_quat_w, forward_axis_b)
@@ -529,16 +526,36 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         self.forward_diff_w = self.cmd_eef_forward_w - self.eef_forward_w
         self.forward_diff_b = quat_rotate_inverse(
             self.root_yaw_quat,
-            self.forward_diff_w
+            self.forward_diff_w,
         )
         self.upward_diff_w = self.cmd_eef_upward_w - self.eef_upward_w
         self.upward_diff_b = quat_rotate_inverse(
             self.root_yaw_quat,
-            self.upward_diff_w
+            self.upward_diff_w,
         )
 
         self.command_speed = self.cmd_linvel_w.norm(dim=-1, keepdim=True)
         self.is_standing_env = self.command_speed < 0.1
+
+    @override
+    def sync_state(self) -> None:
+        self._read_robot_and_object_state()
+        self._sync_command_orientation()
+        self._compute_tracking_errors()
+
+    @override
+    def update(self) -> None:
+        self._read_robot_and_object_state()
+
+        approach_ids = (self.phase_ids == 0).nonzero(as_tuple=False).squeeze(-1)
+        self._phase_approach(approach_ids)
+        lift_ids = (self.phase_ids == 1).nonzero(as_tuple=False).squeeze(-1)
+        self._phase_lift(lift_ids)
+        move_ids = (self.phase_ids == 2).nonzero(as_tuple=False).squeeze(-1)
+        self._phase_move(move_ids)
+
+        self._sync_command_orientation()
+        self._compute_tracking_errors()
 
     @override
     def debug_draw(self) -> None:

@@ -159,23 +159,8 @@ class Twist(Command):
         self.is_standing_env[env_ids] = True
 
     @override
-    def update(self) -> None:
-        # Tracking error and curriculum integrals use the command that was active during sim
-        # (last step's output). Rewards and terminations run after this.
-        self._update_twist_tracking()
-
-    @override
-    def step(self) -> None:
-        # Advance commands for the next physics step; observations read this state.
-        if self.teleop:
-            if self.env.backend != "isaac":
-                self._step_twist_command()
-            else:
-                self._step_teleop()
-        else:
-            self._step_twist_command()
-
-    def _update_twist_tracking(self) -> None:
+    def sync_state(self) -> None:
+        # Tracking error and curriculum integrals use the command that was active during sim.
         self.body_heading_w = self.asset.data.heading_w.unsqueeze(1)
         self.lin_vel_w = self.asset.data.root_com_lin_vel_w
         self.ang_vel_w = self.asset.data.root_com_ang_vel_w
@@ -194,6 +179,17 @@ class Twist(Command):
         self.current_speed = self.lin_vel_w.norm(dim=-1, keepdim=True)
         self.distance_commanded = self.distance_commanded + self.command_speed * self.env.step_dt
         self.distance_traveled = self.distance_traveled + self.current_speed * self.env.step_dt
+
+    @override
+    def update(self) -> None:
+        # Advance commands for the next physics step; observations read this state.
+        if self.teleop:
+            if self.env.backend != "isaac":
+                self._step_twist_command()
+            else:
+                self._step_teleop()
+        else:
+            self._step_twist_command()
 
     def _step_twist_command(self) -> None:
         max_command_speed = (2.5 - self.cmd_yawvel_b.abs()).clamp(0.0)
@@ -416,15 +412,7 @@ class PositionVelocityTracking(Command):
         self.is_standing_env[env_ids] = False
     
     @override
-    def update(self):
-        self.ref_linvel_b = (
-            self.ref_linvel_b 
-            + clamp_norm((self.ref_linvel_b_next - self.ref_linvel_b) * 0.1, max=0.1)
-        )
-        self.ref_linvel_w = yaw_rotate(self.ref_yaw_w, self.ref_linvel_b)
-        self.ref_pos_w = self.ref_pos_w + self.ref_linvel_w * self.env.step_dt
-        self.ref_yaw_w = self.ref_yaw_w + self.ref_yawvel_w * self.env.step_dt
-
+    def sync_state(self) -> None:
         self.cmd_linvel_w = (
             (self.ref_pos_w - self.asset.data.root_link_pos_w)
             + self.ref_linvel_w
@@ -441,6 +429,16 @@ class PositionVelocityTracking(Command):
         self.cmd_pos_w = self.ref_pos_w.clone()
         self.cmd_yawvel_b = self.cmd_yawvel_w.clone()
 
+    @override
+    def update(self) -> None:
+        self.ref_linvel_b = (
+            self.ref_linvel_b
+            + clamp_norm((self.ref_linvel_b_next - self.ref_linvel_b) * 0.1, max=0.1)
+        )
+        self.ref_linvel_w = yaw_rotate(self.ref_yaw_w, self.ref_linvel_b)
+        self.ref_pos_w = self.ref_pos_w + self.ref_linvel_w * self.env.step_dt
+        self.ref_yaw_w = self.ref_yaw_w + self.ref_yawvel_w * self.env.step_dt
+
         resample_lin_vel = (
             ((self.env.episode_length_buf - 20) % self.resample_interval == 0)
             & (torch.rand(self.num_envs, device=self.device) < self.resample_prob)
@@ -456,7 +454,7 @@ class PositionVelocityTracking(Command):
                 ref_lin_vel_b,
             )
             self.ref_linvel_b_next[resample_ids] = ref_lin_vel_b
-        
+
         resample_yaw_vel = (
             ((self.env.episode_length_buf - 20) % self.resample_interval == 0)
             & (torch.rand(self.num_envs, device=self.device) < self.resample_prob)

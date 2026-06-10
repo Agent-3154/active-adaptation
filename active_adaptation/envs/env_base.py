@@ -519,15 +519,15 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
 
-        with ScopedTimer("command_update", sync=False):
-            self.command_manager.update()
+        with ScopedTimer("command.sync_state", sync=False):
+            self.command_manager.sync_state()
         with ScopedTimer("update_callbacks", sync=False):
             [callback() for callback in self._update_callbacks]
 
         tensordict = self._compute_reward(tensordict)
         tensordict = self._compute_termination(tensordict)
-        with ScopedTimer("command_step", sync=False):
-            self.command_manager.step()
+        with ScopedTimer("command.update", sync=False):
+            self.command_manager.update()
         tensordict = self._compute_observation(tensordict)
 
         tensordict.set("episode_id", self.episode_id.clone())
