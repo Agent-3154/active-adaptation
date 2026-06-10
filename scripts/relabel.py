@@ -63,7 +63,9 @@ def main(cfg):
         tensordict[key] = rew
     
     rollout["stacked"] = tensordict
-    torch.save(rollout, rollout_path.with_suffix(".relabeled.pt"))
+    save_path = rollout_path.with_suffix(".relabeled.pt")
+    torch.save(rollout, save_path)
+    print(f"Rollout saved to {save_path}")
 
 
 if __name__ == "__main__":

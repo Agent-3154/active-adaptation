@@ -672,16 +672,6 @@ class SingleEEFLocoManip(CommandV2):
         self.sample_commands(env_ids)
         # self._sync_world_frames()
         self.base_pos_error[env_ids] = 0.0
-        d = {
-            "is_world_goal": self.is_world_goal,
-            "world_eef_pos_w": self.world_eef_pos_w,
-            "cmd_eef_rot_w": self.cmd_eef_rot_w,
-            "eef_state_w": self.eef_state_w,
-            "eef_status": self.eef_status,
-            "cmd_eef_status": self.cmd_eef_status,
-            "root_state_w": self.asset.data.root_state_w,
-        }
-        self._state = TensorDict(d, [self.num_envs], device=self.device).clone()
 
     @override
     def sync_state(self) -> None:
@@ -697,6 +687,7 @@ class SingleEEFLocoManip(CommandV2):
             "eef_status": self.eef_status,
             "cmd_eef_status": self.cmd_eef_status,
             "root_state_w": self.asset.data.root_state_w,
+            "base_pos_error": self.base_pos_error,
         }
         self._state = TensorDict(d, [self.num_envs], device=self.device).clone()
 
@@ -830,14 +821,14 @@ class eef_pos_forward_tracking(RewardV2[SingleEEFLocoManip]):
         base_pos_error = tensordict["command_state", "base_pos_error"]
         pos_error_norm2 = tensordict["command_state", "pos_error_norm2"]
         pos_error_norm = tensordict["command_state", "pos_error_norm"]
-        rew = torch.exp(-pos_error_norm2 / self.pos_sigma) - 0.2 * pos_error_norm
+        rew_pos = torch.exp(-pos_error_norm2 / self.pos_sigma)
         forward_diff = tensordict["command_state", "forward_diff_w"]
         forward_error_norm2 = forward_diff.square().sum(dim=-1, keepdim=True)
-        rew *= torch.exp(-forward_error_norm2 / self.rot_sigma)
+        rew_forward = torch.exp(-forward_error_norm2 / self.rot_sigma)
         upward_diff = tensordict["command_state", "upward_diff_w"]
         upward_error_norm2 = upward_diff.square().sum(dim=-1, keepdim=True)
-        rew *= torch.exp(-upward_error_norm2 / self.rot_sigma)
-        rew += -0.2 * pos_error_norm
+        rew_upward = torch.exp(-upward_error_norm2 / self.rot_sigma)
+        rew = rew_pos * rew_forward * rew_upward + -0.2 * pos_error_norm
         rew *= (base_pos_error < self.base_pos_error_threshold)
         return rew.reshape(T, N, 1)
 
