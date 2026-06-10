@@ -145,8 +145,7 @@ class StackingCollector:
     @torch.no_grad()
     @set_exploration_type(ExplorationType.RANDOM)
     def collect(self, carry: TensorDictBase, rollout_policy: TensorDictModuleBase):
-        if self.device != rollout_policy.device:
-            rollout_policy = rollout_policy.to(self.device)
+        rollout_policy = rollout_policy.to(device=self.device)
         data = []
         for _ in range(self.steps):
             with ScopedTimer("policy_inference"):
@@ -319,7 +318,7 @@ def main(cfg: TrainConfig):
 
     for stage in stages:
 
-        policy.on_stage_start(stage)
+        policy.on_stage_start(stage, env)
         rollout_policy = policy.get_rollout_policy(
             "train",
             critic=not transitions,

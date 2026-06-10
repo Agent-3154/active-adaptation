@@ -81,6 +81,21 @@ class ObsGroup:
         return torch.cat([func.compute() for func in self.funcs.values()], dim=-1)
 
     def symmetry_transform(self):
+        """Return the mirror transform for the concatenated observation group.
+
+        Each observation component defines a local
+        :class:`~active_adaptation.utils.symmetry.SymmetryTransform` matching
+        the tensor slice produced by that component's ``compute()`` method.
+        ``ObsGroup`` concatenates observations in ``self.funcs`` order, so the
+        full group transform is the concatenation of the same per-component
+        transforms in the same order.
+
+        This is used by symmetry augmentation/equivariance losses to mirror a
+        complete policy observation without each learner needing to know how the
+        observation was assembled. When adding a new observation term, implement
+        its ``symmetry_transform()`` with the same dimension, permutation, and
+        sign convention as its output tensor.
+        """
         transforms = [
             func.symmetry_transform().to(func.device) for func in self.funcs.values()
         ]

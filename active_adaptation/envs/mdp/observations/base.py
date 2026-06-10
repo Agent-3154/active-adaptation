@@ -29,7 +29,22 @@ class Observation(Generic[CT], MDPComponent, RegistryMixin):
         raise NotImplementedError
 
     def symmetry_transform(self) -> SymmetryTransform:
-        pass
+        """Return the mirror transform for this observation term's output slice.
+
+        The transform describes how this observation changes under the task's
+        left/right symmetry. It must have the same width and ordering as the
+        tensor returned by :meth:`compute`. Implementations usually build a
+        :class:`SymmetryTransform` from a permutation and sign flips: swap
+        left/right quantities, negate lateral or yaw-like components, and leave
+        invariant scalars unchanged.
+
+        Observation groups concatenate term outputs in config order, so each
+        observation returns only its local transform; :class:`ObsGroup`
+        concatenates those local transforms into the full observation transform.
+        Components with no meaningful symmetry should override this method and
+        raise ``NotImplementedError`` explicitly.
+        """
+        return NotImplementedError
 
 
 class ObservationV2(Generic[CT], MDPComponent, RegistryMixin):
@@ -66,7 +81,22 @@ class ObservationV2(Generic[CT], MDPComponent, RegistryMixin):
         raise NotImplementedError
 
     def symmetry_transform(self) -> SymmetryTransform:
-        pass
+        """Return the mirror transform for this observation term's output slice.
+
+        The transform describes how this observation changes under the task's
+        left/right symmetry. It must have the same width and ordering as the
+        tensor returned by :meth:`compute`. Implementations usually build a
+        :class:`SymmetryTransform` from a permutation and sign flips: swap
+        left/right quantities, negate lateral or yaw-like components, and leave
+        invariant scalars unchanged.
+
+        Observation groups concatenate term outputs in config order, so each
+        observation returns only its local transform; :class:`ObsGroup`
+        concatenates those local transforms into the full observation transform.
+        Components with no meaningful symmetry should override this method and
+        raise ``NotImplementedError`` explicitly.
+        """
+        return NotImplementedError
 
 
 __all__ = ["Observation", "ObservationV2"]

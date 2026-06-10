@@ -231,7 +231,7 @@ class PPOPolicy(TensorDictModuleBase):
         pass
         return cls(...)
 
-    def on_stage_start(self, stage: str):
+    def on_stage_start(self, stage: str, env: _EnvBase):
         if not stage in ("train", ""):
             return
         if aa.is_distributed():
