@@ -796,14 +796,15 @@ class SAC(TensorDictModuleBase):
         if isinstance(reward, TensorDict):
             reward = torch.cat(list(reward.values()), dim=-1)
         reward = reward.sum(-1, keepdim=True).clamp_min(0.)
-        # scale by effective horizon
-        reward = reward * (1.0 - self.cfg.gamma)
         
         if self.cfg.debug:
             reward = torch.ones_like(reward) * (1.0 - self.cfg.gamma)
 
         if self.reward_normalizer is not None:
             reward = self.reward_normalizer.normalize_rewards(reward)
+        else:
+            # scale by effective horizon
+            reward = reward * (1.0 - self.cfg.gamma)
 
         # maybe concat and normalize the observation
         self.preproc(batch)
