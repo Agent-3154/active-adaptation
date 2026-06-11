@@ -19,17 +19,20 @@ from hydra.core.config_store import ConfigStore
 from tensordict import TensorDict
 from tensordict.nn import (
     TensorDictModuleBase,
+    TensorDictModule as Mod,
+    TensorDictSequential as Seq,
 )
 
 from torchrl.data import Composite, TensorSpec
 from torchrl.objectives import hold_out_net
 
 import active_adaptation as aa
-from active_adaptation.learning.modules import VecNorm, IndependentNormal, ConditionalBlock
+from active_adaptation.learning.modules import VecNorm, IndependentNormal, ConditionalBlock, CatTensors
 from active_adaptation.learning.ppo.common import (
     ACTION_KEY,
     DONE_KEY,
     OBS_KEY,
+    CMD_KEY,
     REWARD_KEY,
     TERM_KEY,
     soft_copy_,
@@ -142,7 +145,7 @@ class SACConfig:
     # ``None`` disables synchronization entirely (single rank only).
     grad_sync_mode: str | None = "ddp"
 
-    in_keys: Tuple[str, ...] = (OBS_KEY, ACTION_KEY)
+    in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
 
 cs.store(name="sac", node=SACConfig, group="algo")
@@ -323,8 +326,8 @@ class SAC(TensorDictModuleBase):
 
     # keys to select from the batch for training
     train_keys = (
-        OBS_KEY, ("next", OBS_KEY), ACTION_KEY, REWARD_KEY,
-        TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
+        CMD_KEY, OBS_KEY, ("next", OBS_KEY), ("next", CMD_KEY), ACTION_KEY,
+        REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
         "priority_weight", "replay_flat_index"
     )
 
@@ -346,8 +349,8 @@ class SAC(TensorDictModuleBase):
         self.action_spec = action_spec
         self.reward_spec = reward_spec
 
-        self.obs_transform = obs_transform
-        self.act_transform = act_transform
+        self.obs_transform = obs_transform.to(device) if obs_transform is not None else None
+        self.act_transform = act_transform.to(device) if act_transform is not None else None
 
         self.grad_sync_mode = self.cfg.grad_sync_mode
         if self.grad_sync_mode not in {"manual", "ddp", None}:
@@ -361,13 +364,21 @@ class SAC(TensorDictModuleBase):
             )
 
         fake = observation_spec.zero()
-        obs_dim = fake[OBS_KEY].shape[-1]
+        preproc = []
+        if CMD_KEY in observation_spec.keys(True, True):
+            obs_dim = fake[OBS_KEY].shape[-1] + fake[CMD_KEY].shape[-1]
+            preproc.append(CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False))
+        else:
+            obs_dim = fake[OBS_KEY].shape[-1]
+            preproc.append(Mod(nn.Identity(), [OBS_KEY], ["_input"]))
         act_dim = action_spec.shape[-1]
 
         if self.cfg.vecnorm:
             self.vecnorm_obs = VecNorm(obs_dim, decay=1.0).to(device)
         else:
             self.vecnorm_obs = nn.Identity()
+        preproc.append(Mod(self.vecnorm_obs, ["_input"], ["_input_normed"]))
+        self.preproc = Seq(*preproc).to(device)
         
         if (self.obs_transform is not None) and (self.act_transform is not None):
             self.has_symmetry = True
@@ -608,6 +619,9 @@ class SAC(TensorDictModuleBase):
         if cfg.sym_aug:
             obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform()
             act_transform = env.action_manager.symmetry_transform()
+            if CMD_KEY in env.observation_spec.keys(True, True):
+                cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transform()
+                obs_transform = SymmetryTransform.cat([cmd_transform, obs_transform])
         else:
             obs_transform = None
             act_transform = None
@@ -624,7 +638,7 @@ class SAC(TensorDictModuleBase):
     def get_rollout_policy(self, mode: str = "train", critic: bool = False) -> TensorDictModuleBase:
         """Train: optional AR(1) pre-tanh rollout noise; eval/deploy: deterministic squash of the Gaussian mean."""
         policy = SACRolloutPolicy(
-            self.vecnorm_obs,
+            self.preproc,
             self.actor,
             self.DistClass,
             use_correlated=self.cfg.use_correlated,
@@ -782,20 +796,23 @@ class SAC(TensorDictModuleBase):
         if isinstance(reward, TensorDict):
             reward = torch.cat(list(reward.values()), dim=-1)
         reward = reward.sum(-1, keepdim=True).clamp_min(0.)
+        # scale by effective horizon
+        reward = reward * (1.0 - self.cfg.gamma)
         
         if self.cfg.debug:
             reward = torch.ones_like(reward) * (1.0 - self.cfg.gamma)
 
         if self.reward_normalizer is not None:
             reward = self.reward_normalizer.normalize_rewards(reward)
-        else:
-            # scale by effective horizon
-            reward = reward * (1.0 - self.cfg.gamma)
+
+        # maybe concat and normalize the observation
+        self.preproc(batch)
+        self.preproc(batch["next"])
 
         if self.cfg.n_steps == 1:
-            obs = batch[OBS_KEY]
+            obs = batch["_input_normed"]
             act = batch[ACTION_KEY]
-            next_obs = batch["next", OBS_KEY]
+            next_obs = batch["next", "_input_normed"]
             term = batch[TERM_KEY].float()
             env_disc = batch.get(("next", "discount"))
             if env_disc is None:
@@ -810,14 +827,14 @@ class SAC(TensorDictModuleBase):
             assert self.msr is not None
             batch_done = batch[DONE_KEY][:self.msr.n_steps]
             batch_term = batch[TERM_KEY][:self.msr.n_steps]
-            if (next_obs := batch.get(("next", OBS_KEY))) is None:
+            if (next_obs := batch.get(("next", "_input_normed"))) is None:
                 assert batch.shape[0] == self.msr.n_steps + 1
                 next_obs = torch.where(
                     batch_done,
                     batch[OBS_KEY][:self.msr.n_steps], # repeat the last obs as the terminal obs
                     batch[OBS_KEY][1:self.msr.n_steps+1],
                 )
-            obs = batch[OBS_KEY][0]
+            obs = batch["_input_normed"][0]
             act = batch[ACTION_KEY][0]
             env_disc_ms = batch.get(("next", "discount"))
             if env_disc_ms is not None:
@@ -830,9 +847,6 @@ class SAC(TensorDictModuleBase):
                 env_discount=env_disc_ms,
             )
             is_init = batch["is_init"][0]
-
-        obs = self.vecnorm_obs(obs)
-        next_obs = self.vecnorm_obs(next_obs)
 
         weight = batch["priority_weight"]
         replay_flat_idx = batch["replay_flat_index"].long()
@@ -1016,8 +1030,8 @@ class SAC(TensorDictModuleBase):
         importance_weights_base = weight
         importance_weights = weight.clone()
 
-        obs = batch[OBS_KEY]
-        obs = self.vecnorm_obs(obs)
+        self.preproc(batch)
+        obs = batch["_input_normed"]
         act = batch[ACTION_KEY]
         is_init = batch["is_init"]
 
@@ -1150,7 +1164,7 @@ class SACRolloutPolicy(TensorDictModuleBase):
 
     def __init__(
         self,
-        vecnorm_obs: nn.Module,
+        preproc: nn.Module,
         actor: nn.Module,
         DistClass: type[torch.distributions.Distribution],
         *,
@@ -1160,7 +1174,7 @@ class SACRolloutPolicy(TensorDictModuleBase):
         critic: bool = False,
     ):
         super().__init__()
-        self.vecnorm_obs = vecnorm_obs
+        self.preproc = preproc
         self.actor = actor
         self.DistClass = DistClass
         self.use_correlated = use_correlated
@@ -1179,7 +1193,8 @@ class SACRolloutPolicy(TensorDictModuleBase):
         self.out_keys = out_keys
 
     def forward(self, tensordict: TensorDict) -> TensorDict:
-        obs = self.vecnorm_obs(tensordict[OBS_KEY])
+        self.preproc(tensordict)
+        obs = tensordict["_input_normed"]
         loc, scale = self.actor(obs)
         dist = self.DistClass(loc, scale)
 
