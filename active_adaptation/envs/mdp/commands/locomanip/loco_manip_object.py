@@ -271,6 +271,11 @@ class LocoManipObject(_LocoManipObjectBase):
             root_yaw_q,
             object_target_diff_w
         )
+        object_target_error_norm = object_target_diff_w.norm(dim=-1, keepdim=True)
+        cmd_object_vel_w = clamp_norm(
+            self.object_vel_gain * object_target_diff_w,
+            max=self.object_vel_limit,
+        )
         command = torch.cat([
             object_pos_b,
             object_vel_b,
@@ -285,6 +290,8 @@ class LocoManipObject(_LocoManipObjectBase):
             command[1:],
         )
         next_command[-1] = command[-1]
+        tensordict["command_state", "object_target_error_norm"] = object_target_error_norm
+        tensordict["command_state", "cmd_object_vel_w"] = cmd_object_vel_w
         tensordict["next", "command"] = next_command
         return tensordict
 
