@@ -93,9 +93,6 @@ reward:
     base_height_exp:    {weight: 1.0, target_height: 0.37, sigma: 0.5}
   manip:
     eef_pos_forward_tracking: {weight: 1.5}
-    # eef_vel_tracking:     {weight: 1.0}
-    # eef_pos_tracking:   {weight: 1.2}
-    # eef_forward_tracking: {weight: 1.0}
     eef_grasp:          {weight: 1.0}
     eef_angvel_penalty: {weight: 0.005}
   regularization:

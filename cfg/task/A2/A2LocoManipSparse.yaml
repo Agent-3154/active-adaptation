@@ -73,7 +73,8 @@ reward:
     base_height_exp:    {weight: 1.0, target_height: 0.37, sigma: 0.5}
   manip:
     eef_pos_forward_tracking: {weight: 1.5}
-    eef_pos_progress:   {weight: 0.5}
+    # eef_pos_progress:   {weight: 0.5}
+    eef_grasp:          {weight: 1.0}
     eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0005}
@@ -87,6 +88,8 @@ reward:
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:
     _enabled_: false
+    feet_contact_count: {weight: 1.0, body_names: .*_foot}
+    eef_pos_error_l1:   {weight: 1.0}
 
 termination:
   max_episode_length: {}

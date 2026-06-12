@@ -47,15 +47,18 @@ def main(cfg):
 
     T, N = tensordict.shape[:2]
     print(f"Relabeling command...")
-    tensordict = command.relabel_command(tensordict)
+    command.relabel_command(tensordict)
 
     reward_cfg = cfg.task.reward
     for group_name, group_cfg in reward_cfg.items():
         key = ("next", "reward", group_name)
         if tensordict.get(key) is not None:
             continue
-        print(f"Relabeling reward group: {group_name}")
         reward_group = RewardGroup.create_from(group_name, group_cfg)
+        if not reward_group.enabled:
+            continue
+
+        print(f"Relabeling reward group: {group_name}")
         rew = torch.zeros(T, N, 1, device=tensordict.device)
         for name, func in reward_group.funcs.items():
             print(f"\tRelabeling reward {name}...")

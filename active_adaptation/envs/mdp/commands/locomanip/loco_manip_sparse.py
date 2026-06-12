@@ -384,7 +384,15 @@ class LocoManipSparse(CommandV2):
         tensordict["command_state", "upward_diff_w"] = upward_diff_w
         tensordict["command_state", "pos_error_norm2"] = pos_error_norm2
         tensordict["command_state", "pos_error_norm"] = pos_error_norm
-        tensordict["command_relabeled"] = command_sparse
+        tensordict["command"] = command_sparse
+        next_command = torch.empty_like(command_sparse)
+        next_command[:-1] = torch.where(
+            tensordict["next", "done"][:-1],
+            command_sparse[:-1],
+            command_sparse[1:],
+        )
+        next_command[-1] = command_sparse[-1]
+        tensordict["next", "command"] = next_command
         return tensordict
 
 

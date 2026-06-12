@@ -667,10 +667,14 @@ class SAC(TensorDictModuleBase):
         print(self.rb)
         if self.cfg.prior_data is not None:
             self.rb_prior = ReplayBuffer.from_rollout(self.cfg.prior_data)
+            def fn(rew: torch.Tensor | TensorDict) -> torch.Tensor:
+                if isinstance(rew, TensorDict):
+                    rew = torch.cat(list(rew.values()), dim=-1)
+                return rew.sum(-1, keepdim=True).clamp_min(0.)
             self.rb_prior.compute_return(
                 REWARD_KEY,
                 gamma=self.cfg.gamma,
-                fn=lambda x: x.sum(-1, keepdim=True).clamp_min(0.)
+                fn=fn,
             )
             print("Prior data buffer:")
             print(self.rb_prior)

@@ -143,13 +143,13 @@ class RolloutWriter:
         )
         save_rollout_with_metadata(out_path, payload, metadata)
         size = out_path.stat().st_size
+        if episode_stats:
+            for key, value in sorted(episode_stats.items()):
+                print(f"  {key}: {value:.4f}")
         print(
             f"Collected rollout disk usage: {size:,} bytes ({format_bytes(size)}) at {out_path}"
         )
         print(f"Episodes completed: {episode_count}")
-        if episode_stats:
-            for key, value in sorted(episode_stats.items()):
-                print(f"  {key}: {value:.4f}")
         print(f"Wrote rollout metadata to {out_path.with_suffix('.json')}")
 
 
