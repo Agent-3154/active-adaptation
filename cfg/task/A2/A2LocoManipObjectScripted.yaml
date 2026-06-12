@@ -1,5 +1,5 @@
 # @package task
-name: A2LocoManipObject
+name: A2LocoManipObjectScripted
 
 viewer:
   resolution: [1280, 720]
@@ -54,7 +54,7 @@ command:
   object_name: object
   grasp_height_range: [0.3, 0.6]
   standoff_distance: 0.6
-  standoff_linvel_gain: 1.0
+  standoff_linvel_gain: 1.5
   standoff_yaw_gain: 1.0
 
 observation:

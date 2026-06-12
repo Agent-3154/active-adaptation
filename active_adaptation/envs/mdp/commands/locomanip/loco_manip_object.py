@@ -115,20 +115,15 @@ class _LocoManipObjectBase(CommandV2):
         n = len(env_ids)
 
         object_init = self.object_init_root_state[env_ids].clone()
-        default_obj_z = object_init[:, 2].clone()
-        object_init[:, 0] = origins[:, 0] + 2.0
-        object_init[:, 1] = origins[:, 1] + 0.0
-        object_init[:, 2] = (
-            self.env.get_ground_height_at(object_init[:, :3]) + default_obj_z
-        )
-        if object_init.shape[-1] > 7:
-            object_init[:, 7:] = 0.0
+        xy_offset = torch.zeros(n, 2, device=self.device)
+        xy_offset[:, 0].uniform_(1.2, 2.0)
+        object_init[:, :2] = xy_offset + origins[:, :2]
+        object_init[:, 7:] = 0.0
 
         robot_init = self.init_root_state[env_ids].clone()
         default_robot_z = robot_init[:, 2].clone()
         # y = self._sample_uniform(n, (-0.5, 0.5), self.device)
-        robot_init[:, 0] = origins[:, 0]
-        robot_init[:, 1] = origins[:, 1]
+        robot_init[:, :2] = origins[:, :2]
         robot_init[:, 2] = (
             self.env.get_ground_height_at(robot_init[:, :3]) + default_robot_z
         )
@@ -171,6 +166,7 @@ class LocoManipObject(_LocoManipObjectBase):
         target_offset_range: Tuple[float, float] = (-2.0, 2.0),
         object_vel_gain: float = 1.0,
         object_vel_limit: float = 0.5,
+        grasp_height_range: Tuple[float, float] = (0.3, 0.6),
     ) -> None:
         super().__init__(
             eef_body_name=eef_body_name,
@@ -181,11 +177,22 @@ class LocoManipObject(_LocoManipObjectBase):
         self.target_offset_range = target_offset_range
         self.object_vel_gain = object_vel_gain
         self.object_vel_limit = object_vel_limit
+        self.grasp_height_range = grasp_height_range
     
     @override
     def _initialize(self, env: "EnvBase") -> None:
         super()._initialize(env)
+        self.grasp_height_per_env = torch.zeros(self.num_envs, device=self.device)
         self.sync_state()
+
+        if self.env.backend == "isaac" and self.env.sim.has_gui():
+            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+            self.scene: IsaacSceneAdapter = self.env.scene
+            self.grasp_point_marker = self.scene.create_sphere_marker(
+                "/Visuals/Command/object_grasp_point",
+                (1.0, 0.4, 0.0),
+                radius=0.03
+            )
 
     def command(self, key: str = "object") -> torch.Tensor:
         if key == "object":
@@ -193,6 +200,8 @@ class LocoManipObject(_LocoManipObjectBase):
                 [
                     self.object_pos_b,
                     self.object_vel_b,
+                    self.grasp_point_b,
+                    self.grasp_point_diff_b,
                     self.cmd_object_target_b,
                     self.object_target_diff_b
                 ],
@@ -205,11 +214,15 @@ class LocoManipObject(_LocoManipObjectBase):
         if key == "object":
             object_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             object_vel_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+            grasp_point_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+            grasp_point_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             cmd_object_target_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             object_target_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             return SymmetryTransform.cat([
                 object_pos_b,
                 object_vel_b,
+                grasp_point_b,
+                grasp_point_diff_b,
                 cmd_object_target_b,
                 object_target_diff_b
             ])
@@ -218,6 +231,7 @@ class LocoManipObject(_LocoManipObjectBase):
     @override
     def reset(self, env_ids: torch.Tensor) -> None:
         self._sample_target(env_ids)
+        self.grasp_height_per_env[env_ids] = self._sample_uniform(len(env_ids), self.grasp_height_range, self.device)
     
     def _sample_target(self, env_ids: torch.Tensor) -> None:
         obj_pos_w = self.object.data.root_link_pos_w[env_ids]
@@ -252,6 +266,18 @@ class LocoManipObject(_LocoManipObjectBase):
         self.object_target_diff_b = quat_rotate_inverse(
             self.root_yaw_q, self.object_target_diff_w)
         self.object_target_error_norm = self.object_target_diff_w.norm(dim=-1, keepdim=True)
+        offset_obj = torch.zeros(self.num_envs, 3, device=self.device)
+        offset_obj[:, 2] = self.grasp_height_per_env
+        self.grasp_point_w = self.object_pos_w + quat_rotate(self.object_quat_w, offset_obj)
+        self.grasp_point_b = quat_rotate_inverse(
+            self.root_yaw_q,
+            self.grasp_point_w - self.root_pos_w
+        )
+        self.grasp_point_diff_w = self.grasp_point_w - self.eef_pos_w
+        self.grasp_point_diff_b = quat_rotate_inverse(
+            self.root_yaw_q,
+            self.grasp_point_diff_w
+        )
 
     @override
     def update(self) -> None:
@@ -272,6 +298,12 @@ class LocoManipObject(_LocoManipObjectBase):
             self.cmd_object_vel_w,
             color=(1.0, 0.0, 0.0, 1.0),
         )
+        self.grasp_point_marker.visualize(self.grasp_point_w)
+        self.env.debug_draw.vector(
+            self.eef_pos_w,
+            self.grasp_point_diff_w,
+            color=(0.0, 1.0, 0.0, 1.0),
+        )
     
     @override
     def relabel_command(self, tensordict: TensorDict) -> TensorDict:
@@ -281,6 +313,8 @@ class LocoManipObject(_LocoManipObjectBase):
         T, N = tensordict.shape[:2]
         root_state_w = tensordict["command_state", "root_state_w"]
         root_yaw_q = yaw_quat(root_state_w[..., 3:7])
+        eef_state_w = tensordict["command_state", "eef_state_w"]
+        eef_pos_w = eef_state_w[..., :3]
         object_state_w = tensordict["command_state", "object_state_w"]
         object_pos_w = object_state_w[..., :3]
         object_vel_w = object_state_w[..., 7:10]
@@ -309,9 +343,21 @@ class LocoManipObject(_LocoManipObjectBase):
             self.object_vel_gain * object_target_diff_w,
             max=self.object_vel_limit,
         )
+        grasp_point_w = tensordict["command_state", "grasp_point_w"]
+        grasp_point_b = quat_rotate_inverse(
+            root_yaw_q,
+            grasp_point_w - root_state_w[..., :3]
+        )
+        grasp_point_diff_w = grasp_point_w - eef_pos_w
+        grasp_point_diff_b = quat_rotate_inverse(
+            root_yaw_q,
+            grasp_point_diff_w
+        )
         command = torch.cat([
             object_pos_b,
             object_vel_b,
+            grasp_point_b,
+            grasp_point_diff_b,
             cmd_object_target_b,
             object_target_diff_b
         ], dim=-1)
@@ -325,6 +371,7 @@ class LocoManipObject(_LocoManipObjectBase):
         next_command[-1] = command[-1]
         tensordict["command_state", "object_target_error_norm"] = object_target_error_norm
         tensordict["command_state", "cmd_object_vel_w"] = cmd_object_vel_w
+        tensordict["command_state", "grasp_point_diff_w"] = grasp_point_diff_w
         tensordict["next", "command"] = next_command
         return tensordict
 
@@ -663,6 +710,7 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         d = {
             "root_state_w": self.asset.data.root_state_w,
             "object_state_w": self.object.data.root_state_w,
+            "grasp_point_w": self.grasp_point_w,
             "eef_state_w": self.asset.data.body_link_state_w[:, self.eef_body_idx],
             "eef_status": self.get_gripper_status(),
             "cmd_eef_status": self.cmd_eef_status,
@@ -820,27 +868,16 @@ class object_grasp_pos(RewardV2[LocoManipObject]):
 
     @override
     def _compute(self) -> torch.Tensor:
-        # self.command_manager.object_
-        xy_diff = quat_rotate_inverse(
-            self.command_manager.object_quat_w,
-            self.command_manager.eef_pos_w - self.command_manager.object_pos_w
-        )[:, :2]
-        error = xy_diff.norm(dim=-1, keepdim=True)
+        diff = self.command_manager.grasp_point_diff_w
+        error = diff.norm(dim=-1, keepdim=True)
         return torch.exp(-error.square() / self.grasp_sigma)
     
     @override
     def relabel(self, tensordict: TensorDict) -> torch.Tensor:
         T, N = tensordict.shape[:2]
-        object_state_w = tensordict["command_state", "object_state_w"]
-        object_pos_w = object_state_w[..., :3]
-        object_quat_w = object_state_w[..., 3:7]
-        eef_state_w = tensordict["command_state", "eef_state_w"]
-        eef_pos_w = eef_state_w[..., :3]
-        xy_diff = quat_rotate_inverse(
-            object_quat_w,
-            eef_pos_w - object_pos_w
-        )[..., :2].norm(dim=-1, keepdim=True)
-        rew = torch.exp(-xy_diff.square() / self.grasp_sigma)
+        diff = tensordict["command_state", "grasp_point_diff_w"]
+        error = diff.norm(dim=-1, keepdim=True)
+        rew = torch.exp(-error.square() / self.grasp_sigma)
         return rew.reshape(T, N, 1)
 
 
