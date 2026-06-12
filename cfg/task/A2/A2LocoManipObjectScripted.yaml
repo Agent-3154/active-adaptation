@@ -47,16 +47,18 @@ input:
         alpha_range: [0.8, 0.9]
 
 command:
-  _target_: LocoManipObject
+  _target_: LocoManipObjectScripted
   eef_body_name: grasp_point
+  gripper_body_names: [gripper_left, gripper_right]
   object_name: object
-  target_offset_range: [-2.0, 2.0]
-  object_vel_gain: 1.0
-  object_vel_limit: 0.5
+  grasp_height_range: [0.3, 0.6]
+  standoff_distance: 0.6
+  standoff_linvel_gain: 1.0
+  standoff_yaw_gain: 1.0
 
 observation:
   command:
-    command:  {key: "object"}
+    command:  {key: "dense"}
   policy:
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {steps: 4, noise_std: 0.05}
@@ -79,9 +81,6 @@ reward:
     angvel_xy_l2:       {weight: 0.01}
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 1.0, target_height: 0.4, sigma: 0.4}
-  manip:
-    object_pos_tracking: {weight: 1.0}
-    object_vel_tracking: {weight: 1.0}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints

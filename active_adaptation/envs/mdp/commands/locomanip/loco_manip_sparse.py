@@ -69,7 +69,7 @@ class LocoManipSparse(CommandV2):
         self.gripper_joint_ids, _ = self.asset.find_joints(self.gripper_joint_names)
         self.gripper_joint_ids = torch.tensor(self.gripper_joint_ids, device=self.device)
         limits = self.asset.data.soft_joint_pos_limits[0, self.gripper_joint_ids]
-        self._gripper_max_open = limits[:, 1]
+        self._gripper_max_open = limits.abs().amax(dim=-1).max().clamp_min(1e-6)
 
         with torch.device(self.device):
             self.cmd_eef_pos_b = torch.zeros(self.num_envs, 3)
@@ -111,6 +111,7 @@ class LocoManipSparse(CommandV2):
             self._scale_xyz[:, 1].uniform_(0.0, 0.3)
             self._scale_xyz[:, 2].uniform_(0.0, 0.1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
+            self.base_pos_error = torch.zeros(self.num_envs, 1)
 
         self.marker = None
         if self.env.backend == "isaac" and self.env.sim.has_gui():

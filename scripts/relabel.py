@@ -27,6 +27,30 @@ cs = ConfigStore.instance()
 cs.store(name="relabel", node=RelabelConfig)
 
 
+def mean_episode_return(
+    reward: torch.Tensor,
+    is_init: torch.Tensor,
+    done: torch.Tensor,
+) -> tuple[float, int]:
+    """Mean undiscounted return over completed episodes in a stacked rollout.
+
+    Accumulates ``reward[t]`` per env, resetting on ``is_init[t]``, and records
+    the running sum when ``done[t]`` is true.
+    """
+    T, N = reward.shape[:2]
+    ep_ret = torch.zeros(N, 1, device=reward.device, dtype=reward.dtype)
+    completed: list[torch.Tensor] = []
+    for t in range(T):
+        ep_ret = ep_ret * (~is_init[t]).float()
+        ep_ret = ep_ret + reward[t]
+        if done[t].any():
+            completed.append(ep_ret[done[t].squeeze(-1)].clone())
+    if not completed:
+        return float("nan"), 0
+    returns = torch.cat(completed, dim=0)
+    return returns.mean().item(), returns.numel()
+
+
 @hydra.main(config_path="../cfg", config_name="relabel", version_base=None)
 def main(cfg):
     OmegaConf.resolve(cfg)
@@ -46,6 +70,12 @@ def main(cfg):
     print(tensordict)
 
     T, N = tensordict.shape[:2]
+    # rollout must contain "is_init" and ("next", "done")
+    is_init = tensordict["is_init"]
+    done = tensordict["next", "done"]
+    assert is_init.shape == (T, N, 1), f"Expected `is_init` tensor with shape [T, N, 1], got {is_init.shape}"
+    assert done.shape == (T, N, 1), f"Expected `(next, done)` tensor with shape [T, N, 1], got {done.shape}"
+
     print(f"Relabeling command...")
     command.relabel_command(tensordict)
 
@@ -64,6 +94,11 @@ def main(cfg):
             print(f"\tRelabeling reward {name}...")
             rew = rew + func.weight * func.relabel(tensordict)
         tensordict[key] = rew
+        mean_ret, n_episodes = mean_episode_return(rew, is_init, done)
+        print(
+            f"\tmean episode return ({group_name}): {mean_ret:.4f} "
+            f"({n_episodes} completed episodes)"
+        )
     
     rollout["stacked"] = tensordict
     save_path = rollout_path.with_suffix(".relabeled.pt")

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Tuple
 
 import torch
 from typing_extensions import override
+from tensordict import TensorDict
 
 from active_adaptation.utils.math import (
     clamp_norm,
@@ -15,7 +16,8 @@ from active_adaptation.utils.math import (
     yaw_quat,
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
-from ..base import CommandV2
+from active_adaptation.envs.mdp.commands.base import CommandV2
+from active_adaptation.envs.mdp.rewards.base import RewardV2
 
 if TYPE_CHECKING:
     from isaaclab.assets import RigidObject
@@ -32,13 +34,9 @@ class _LocoManipObjectBase(CommandV2):
         self,
         eef_body_name: str,
         object_name: str = "object",
-        target_xy_range: Tuple[Tuple[float, float], Tuple[float, float]] | None = None,
     ) -> None:
         self.eef_body_name = eef_body_name
         self.object_name = object_name
-        if target_xy_range is None:
-            target_xy_range = ((-0.5, 0.5), (-0.5, 0.5))
-        self.target_xy_range = target_xy_range
 
     @override
     def _initialize(self, env: "EnvBase") -> None:
@@ -60,9 +58,9 @@ class _LocoManipObjectBase(CommandV2):
             self.object_pos_w = torch.zeros(self.num_envs, 3)
             self.cmd_object_target_w = torch.zeros(self.num_envs, 3)
             self.cmd_object_target_b = torch.zeros(self.num_envs, 3)
-            self.object_target_diff_w = torch.zeros(self.num_envs, 3)
-            self.object_target_diff_b = torch.zeros(self.num_envs, 3)
-            self.object_target_error_norm = torch.zeros(self.num_envs, 1)
+            self.cmd_object_vel_w = torch.zeros(self.num_envs, 3)
+            
+            self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
 
     @property
     def eef_pos_w(self) -> torch.Tensor:
@@ -136,11 +134,33 @@ class LocoManipObject(_LocoManipObjectBase):
     ``diff_z`` use terrain-relative heights, matching the EEF command convention.
     """
 
+    def __init__(
+        self,
+        eef_body_name: str,
+        object_name: str = "object",
+        target_offset_range: Tuple[float, float] = (-2.0, 2.0),
+        object_vel_gain: float = 1.0,
+        object_vel_limit: float = 0.5,
+    ) -> None:
+        super().__init__(
+            eef_body_name=eef_body_name,
+            object_name=object_name,
+        )
+        self.target_offset_range = target_offset_range
+        self.object_vel_gain = object_vel_gain
+        self.object_vel_limit = object_vel_limit
+    
+    @override
+    def _initialize(self, env: "EnvBase") -> None:
+        super()._initialize(env)
+        self.sync_state()
+
     def command(self, key: str = "object") -> torch.Tensor:
         if key == "object":
             return torch.cat(
                 [
                     self.object_pos_b,
+                    self.object_vel_b,
                     self.cmd_object_target_b,
                     self.object_target_diff_b
                 ],
@@ -152,10 +172,12 @@ class LocoManipObject(_LocoManipObjectBase):
     def symmetry_transform(self, key: str = "object"):
         if key == "object":
             object_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+            object_vel_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             cmd_object_target_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             object_target_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
             return SymmetryTransform.cat([
                 object_pos_b,
+                object_vel_b,
                 cmd_object_target_b,
                 object_target_diff_b
             ])
@@ -163,20 +185,34 @@ class LocoManipObject(_LocoManipObjectBase):
 
     @override
     def reset(self, env_ids: torch.Tensor) -> None:
+        self._sample_target(env_ids)
+    
+    def _sample_target(self, env_ids: torch.Tensor) -> None:
         obj_pos_w = self.object.data.root_link_pos_w[env_ids]
         offset = torch.zeros_like(obj_pos_w)
-        offset[:, :2].uniform_(-1.0, 1.0)
+        offset[:, :2].uniform_(self.target_offset_range[0], self.target_offset_range[1])
         self.cmd_object_target_w[env_ids] = obj_pos_w + offset
 
     @override
     def sync_state(self) -> None:
         """Refresh object pose and body-frame target / error terms."""
         self.object_pos_w = self.object.data.root_pos_w
+        self.object_vel_w = self.object.data.root_lin_vel_w
+
         self.root_pos_w = self.asset.data.root_link_pos_w
         self.root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w)
+        
         self.object_pos_b = quat_rotate_inverse(
             self.root_yaw_q,
             self.object_pos_w - self.root_pos_w
+        )
+        self.object_vel_b = quat_rotate_inverse(
+            self.root_yaw_q,
+            self.object_vel_w,
+        )
+        self.cmd_object_target_b = quat_rotate_inverse(
+            self.root_yaw_q,
+            self.cmd_object_target_w - self.root_pos_w,
         )
 
         self.object_target_diff_w = self.cmd_object_target_w - self.object_pos_w
@@ -186,7 +222,10 @@ class LocoManipObject(_LocoManipObjectBase):
 
     @override
     def update(self) -> None:
-        pass
+        self.cmd_object_vel_w = clamp_norm(
+            self.object_vel_gain * self.object_target_diff_w,
+            max=self.object_vel_limit,
+        )
 
     @override
     def debug_draw(self) -> None:
@@ -195,6 +234,59 @@ class LocoManipObject(_LocoManipObjectBase):
             self.object_target_diff_w,
             color=(0.0, 0.0, 1.0, 1.0),
         )
+        self.env.debug_draw.vector(
+            self.object_pos_w,
+            self.cmd_object_vel_w,
+            color=(1.0, 0.0, 0.0, 1.0),
+        )
+    
+    @override
+    def relabel_command(self, tensordict: TensorDict) -> TensorDict:
+        """
+        Use the final object pose in a trajectory as the target pose.
+        """
+        T, N = tensordict.shape[:2]
+        root_state_w = tensordict["command_state", "root_state_w"]
+        root_yaw_q = yaw_quat(root_state_w[..., 3:7])
+        object_state_w = tensordict["command_state", "object_state_w"]
+        object_pos_w = object_state_w[..., :3]
+        object_vel_w = object_state_w[..., 7:10]
+        # object_quat_w = object_state_w[..., 3:7] # unused for now
+        object_pos_b = quat_rotate_inverse(
+            root_yaw_q,
+            object_pos_w - root_state_w[..., :3]
+        )
+        object_vel_b = quat_rotate_inverse(
+            root_yaw_q,
+            object_vel_w,
+        )
+        object_final_pos_w = object_pos_w[-1]
+        cmd_object_target_w = object_final_pos_w.expand(T, N, 3)
+        cmd_object_target_b = quat_rotate_inverse(
+            root_yaw_q,
+            cmd_object_target_w - root_state_w[..., :3]
+        )
+        object_target_diff_w = cmd_object_target_w - object_pos_w
+        object_target_diff_b = quat_rotate_inverse(
+            root_yaw_q,
+            object_target_diff_w
+        )
+        command = torch.cat([
+            object_pos_b,
+            object_vel_b,
+            cmd_object_target_b,
+            object_target_diff_b
+        ], dim=-1)
+        tensordict["command"] = command
+        next_command = torch.empty_like(command)
+        next_command[:-1] = torch.where(
+            tensordict["next", "done"][:-1],
+            command[:-1],
+            command[1:],
+        )
+        next_command[-1] = command[-1]
+        tensordict["next", "command"] = next_command
+        return tensordict
 
 
 class LocoManipObjectScripted(_LocoManipObjectBase):
@@ -210,20 +302,15 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         gripper_body_names: str,
         object_name: str = "object",
         grasp_height_range: Tuple[float, float] = (0.3, 0.5),
-        target_xy_range: Tuple[Tuple[float, float], Tuple[float, float]] | None = None,
         standoff_distance: float = 0.65,
         standoff_linvel_gain: float = 2.0,
         standoff_yaw_gain: float = 1.0,
         speed_limit: float = 0.8,
         yaw_rate_range: Tuple[float, float] = (-1.0, 1.0),
-        phase_approach_end: int = 200,
-        phase_grasp_end: int = 400,
-        phase_lift_end: int = 500,
     ) -> None:
         super().__init__(
             eef_body_name=eef_body_name,
             object_name=object_name,
-            target_xy_range=target_xy_range,
         )
 
         self.gripper_body_names = gripper_body_names
@@ -233,9 +320,6 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         self.standoff_yaw_gain = standoff_yaw_gain
         self.speed_limit = speed_limit
         self.yaw_rate_range = yaw_rate_range
-        self.phase_approach_end = phase_approach_end
-        self.phase_grasp_end = phase_grasp_end
-        self.phase_lift_end = phase_lift_end
 
     @override
     def _initialize(self, env: "EnvBase") -> None:
@@ -542,6 +626,12 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         self._read_robot_and_object_state()
         self._sync_command_orientation()
         self._compute_tracking_errors()
+        d = {
+            "root_state_w": self.asset.data.root_state_w,
+            "object_state_w": self.object.data.root_state_w,
+        }
+        self._state = TensorDict(d, [self.num_envs], device=self.device).clone()
+
 
     @override
     def update(self) -> None:
@@ -579,6 +669,109 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
             translations=self.cmd_eef_pos_w,
             orientations=self.cmd_eef_rot_w,
         )
+    
+    @override
+    def get_state(self) -> TensorDict:
+        return self._state
 
 
-__all__ = ["LocoManipObject", "LocoManipObjectScripted"]
+class object_distance_progress(RewardV2[LocoManipObject]):
+    """Reward the reduction in object-to-target distance: ``prev_error - curr_error``."""
+
+    @override
+    def _initialize(self, env: "EnvBase") -> None:
+        super()._initialize(env)
+        self.prev_error_norm = torch.zeros(self.num_envs, 1, device=self.device)
+        self.rew = torch.zeros(self.num_envs, 1, device=self.device)
+
+    @override
+    def reset(self, env_ids: torch.Tensor) -> None:
+        self.prev_error_norm[env_ids] = self.command_manager.object_target_error_norm[
+            env_ids
+        ]
+        self.rew[env_ids] = 0.0
+
+    @override
+    def update(self) -> None:
+        curr_error = self.command_manager.object_target_error_norm
+        self.rew = (self.prev_error_norm - curr_error) / self.env.step_dt
+        self.prev_error_norm = curr_error.clone()
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        active = self.env.episode_length_buf > 1
+        return self.rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
+
+    def relabel(self, tensordict: TensorDict) -> torch.Tensor:
+        step_dt = tensordict["env_meta"]["step_dt"]
+        T, N = tensordict.shape[:2]
+        error_norm = tensordict["command_state", "object_target_error_norm"]
+        rew = torch.cat(
+            [
+                torch.zeros(1, N, 1, device=tensordict.device),
+                (error_norm[:-1] - error_norm[1:]) / step_dt,
+            ],
+            dim=0,
+        )
+        return rew.reshape(T, N, 1)
+
+
+class object_pos_tracking(RewardV2[LocoManipObject]):
+    """Exponential reward for tracking the commanded object target position."""
+
+    def __init__(
+        self,
+        weight: float,
+        enabled: bool = True,
+        track_var: bool = False,
+        pos_sigma: float = 0.25,
+    ):
+        super().__init__(weight, enabled, track_var)
+        self.pos_sigma = pos_sigma
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        error = self.command_manager.object_target_error_norm
+        rew = torch.exp(-error.square() / self.pos_sigma)
+        return rew.reshape(self.num_envs, 1)
+
+    def relabel(self, tensordict: TensorDict) -> torch.Tensor:
+        error = tensordict["command_state", "object_target_error_norm"]
+        return torch.exp(-error.square() / self.pos_sigma)
+
+
+class object_vel_tracking(RewardV2[LocoManipObject]):
+    """Exponential reward for tracking the commanded object linear velocity."""
+
+    def __init__(
+        self,
+        weight: float,
+        enabled: bool = True,
+        track_var: bool = False,
+        vel_sigma: float = 0.25,
+    ):
+        super().__init__(weight, enabled, track_var)
+        self.vel_sigma = vel_sigma
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        diff = self.command_manager.cmd_object_vel_w - self.command_manager.object_vel_w
+        error = diff.norm(dim=-1, keepdim=True)
+        rew = torch.exp(-error.square() / self.vel_sigma)
+        return rew.reshape(self.num_envs, 1)
+
+    def relabel(self, tensordict: TensorDict) -> torch.Tensor:
+        cmd_object_vel_w = tensordict["command_state", "cmd_object_vel_w"]
+        object_vel_w = tensordict["command_state", "object_state_w"][..., 7:10]
+        diff = cmd_object_vel_w - object_vel_w
+        error = diff.norm(dim=-1, keepdim=True)
+        return torch.exp(-error.square() / self.vel_sigma)
+
+
+__all__ = [
+    "LocoManipObject",
+    "LocoManipObjectScripted",
+    "object_distance_progress",
+    "object_pos_tracking",
+    "object_vel_tracking",
+]
