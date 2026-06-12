@@ -33,10 +33,14 @@ class _LocoManipObjectBase(CommandV2):
     def __init__(
         self,
         eef_body_name: str,
+        gripper_joint_names: str,
+        gripper_body_names: str,
         object_name: str = "object",
     ) -> None:
         self.eef_body_name = eef_body_name
         self.object_name = object_name
+        self.gripper_joint_names = gripper_joint_names
+        self.gripper_body_names = gripper_body_names
 
     @override
     def _initialize(self, env: "EnvBase") -> None:
@@ -53,6 +57,18 @@ class _LocoManipObjectBase(CommandV2):
         self.object_init_root_state = self.object.data.default_root_state.clone()
 
         self.contact_forces: ContactSensor = self.env.scene.sensors["contact_forces"]
+
+        self.gripper_joint_ids, _ = self.asset.find_joints(self.gripper_joint_names)
+        self.gripper_joint_ids = torch.tensor(self.gripper_joint_ids, device=self.device)
+        limits = self.asset.data.soft_joint_pos_limits[0, self.gripper_joint_ids]
+        self._gripper_max_open = limits.abs().amax(dim=-1).max().clamp_min(1e-6)
+
+        gripper_body_ids, _ = self.contact_forces.find_bodies(self.gripper_body_names)
+        if len(gripper_body_ids) != 2:
+            raise ValueError(
+                f"Expected exactly two bodies matching {self.gripper_body_names!r}, got {len(gripper_body_ids)}"
+            )
+        self.gripper_body_ids = torch.tensor(gripper_body_ids, device=self.device)
 
         with torch.device(self.device):
             self.object_pos_w = torch.zeros(self.num_envs, 3)
@@ -116,7 +132,19 @@ class _LocoManipObjectBase(CommandV2):
         robot_init[:, 2] = (
             self.env.get_ground_height_at(robot_init[:, :3]) + default_robot_z
         )
-        return {"robot": robot_init, self.object_name: object_init}        
+        return {"robot": robot_init, self.object_name: object_init}     
+
+    def get_gripper_status(self) -> torch.Tensor:
+        """Return gripper closedness in ``[0, 1]`` (0=open, 1=closed)."""
+        gripper_pos = self.asset.data.joint_pos[:, self.gripper_joint_ids]
+        openness = (
+            gripper_pos.abs().amax(dim=-1, keepdim=True) / self._gripper_max_open
+        ).clamp(0.0, 1.0)
+        joint_closedness = 1.0 - openness
+
+        ct = self.contact_forces.data.current_contact_time[:, self.gripper_body_ids]
+        both_in_contact = ct.gt(0.0).all(dim=-1, keepdim=True).float()
+        return joint_closedness.maximum(both_in_contact)
 
 
 class LocoManipObject(_LocoManipObjectBase):
@@ -137,6 +165,8 @@ class LocoManipObject(_LocoManipObjectBase):
     def __init__(
         self,
         eef_body_name: str,
+        gripper_joint_names: str,
+        gripper_body_names: str,
         object_name: str = "object",
         target_offset_range: Tuple[float, float] = (-2.0, 2.0),
         object_vel_gain: float = 1.0,
@@ -145,6 +175,8 @@ class LocoManipObject(_LocoManipObjectBase):
         super().__init__(
             eef_body_name=eef_body_name,
             object_name=object_name,
+            gripper_joint_names=gripper_joint_names,
+            gripper_body_names=gripper_body_names,
         )
         self.target_offset_range = target_offset_range
         self.object_vel_gain = object_vel_gain
@@ -197,6 +229,7 @@ class LocoManipObject(_LocoManipObjectBase):
     def sync_state(self) -> None:
         """Refresh object pose and body-frame target / error terms."""
         self.object_pos_w = self.object.data.root_pos_w
+        self.object_quat_w = self.object.data.root_quat_w
         self.object_vel_w = self.object.data.root_lin_vel_w
 
         self.root_pos_w = self.asset.data.root_link_pos_w
@@ -306,6 +339,7 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
     def __init__(
         self,
         eef_body_name: str,
+        gripper_joint_names: str,
         gripper_body_names: str,
         object_name: str = "object",
         grasp_height_range: Tuple[float, float] = (0.3, 0.5),
@@ -318,9 +352,9 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         super().__init__(
             eef_body_name=eef_body_name,
             object_name=object_name,
+            gripper_joint_names=gripper_joint_names,
+            gripper_body_names=gripper_body_names,
         )
-
-        self.gripper_body_names = gripper_body_names
         self.grasp_height_range = grasp_height_range
         self.standoff_distance = standoff_distance
         self.standoff_linvel_gain = standoff_linvel_gain
@@ -338,13 +372,6 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
                 f"Expected exactly one body matching {self.eef_body_name!r}, got {len(body_ids)}"
             )
         self.eef_body_idx = body_ids[0]
-
-        gripper_body_ids, _ = self.contact_forces.find_bodies(self.gripper_body_names)
-        if len(gripper_body_ids) != 2:
-            raise ValueError(
-                f"Expected exactly two bodies matching {self.gripper_body_names!r}, got {len(gripper_body_ids)}"
-            )
-        self.gripper_body_ids = torch.tensor(gripper_body_ids, device=self.device)
 
         with torch.device(self.device):
             self.grasp_height_per_env = torch.zeros(self.num_envs)
@@ -564,7 +591,7 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         self.approach_standoff_w[env_ids] = standoff
 
         move_offset = torch.zeros(len(env_ids), 3, device=self.device)
-        move_offset[:, 0].uniform_(-1.0, 1.0)
+        move_offset[:, 0].uniform_(-2.0, 2.0)
         move_offset[:, 1].uniform_(-2.0, 2.0)
         move_yaw = torch.zeros(len(env_ids), 1, device=self.device)
         move_yaw.uniform_(-torch.pi / 2, torch.pi / 2)
@@ -636,6 +663,9 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         d = {
             "root_state_w": self.asset.data.root_state_w,
             "object_state_w": self.object.data.root_state_w,
+            "eef_state_w": self.asset.data.body_link_state_w[:, self.eef_body_idx],
+            "eef_status": self.get_gripper_status(),
+            "cmd_eef_status": self.cmd_eef_status,
         }
         self._state = TensorDict(d, [self.num_envs], device=self.device).clone()
 
@@ -773,6 +803,45 @@ class object_vel_tracking(RewardV2[LocoManipObject]):
         diff = cmd_object_vel_w - object_vel_w
         error = diff.norm(dim=-1, keepdim=True)
         return torch.exp(-error.square() / self.vel_sigma)
+
+
+class object_grasp_pos(RewardV2[LocoManipObject]):
+    """Reward reaching for the grasp point."""
+
+    def __init__(
+        self,
+        weight: float,
+        enabled: bool = True,
+        track_var: bool = False,
+        grasp_sigma: float = 0.25,
+    ):
+        super().__init__(weight, enabled, track_var)
+        self.grasp_sigma = grasp_sigma
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        # self.command_manager.object_
+        xy_diff = quat_rotate_inverse(
+            self.command_manager.object_quat_w,
+            self.command_manager.eef_pos_w - self.command_manager.object_pos_w
+        )[:, :2]
+        error = xy_diff.norm(dim=-1, keepdim=True)
+        return torch.exp(-error.square() / self.grasp_sigma)
+    
+    @override
+    def relabel(self, tensordict: TensorDict) -> torch.Tensor:
+        T, N = tensordict.shape[:2]
+        object_state_w = tensordict["command_state", "object_state_w"]
+        object_pos_w = object_state_w[..., :3]
+        object_quat_w = object_state_w[..., 3:7]
+        eef_state_w = tensordict["command_state", "eef_state_w"]
+        eef_pos_w = eef_state_w[..., :3]
+        xy_diff = quat_rotate_inverse(
+            object_quat_w,
+            eef_pos_w - object_pos_w
+        )[..., :2].norm(dim=-1, keepdim=True)
+        rew = torch.exp(-xy_diff.square() / self.grasp_sigma)
+        return rew.reshape(T, N, 1)
 
 
 __all__ = [

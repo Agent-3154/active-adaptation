@@ -49,6 +49,7 @@ input:
 command:
   _target_: LocoManipObjectScripted
   eef_body_name: grasp_point
+  gripper_joint_names: "arm_joint[7,8]"
   gripper_body_names: [gripper_left, gripper_right]
   object_name: object
   grasp_height_range: [0.3, 0.6]
