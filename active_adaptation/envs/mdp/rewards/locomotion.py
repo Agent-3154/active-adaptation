@@ -5,6 +5,7 @@ from typing_extensions import override
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
 from .base import RewardV2
 from active_adaptation.envs.mdp.commands.locomotion import Twist
+from active_adaptation.envs.utils import find_sensor_bodies
 
 if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
@@ -85,15 +86,18 @@ class undesired_contact(RewardV2):
         super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
-
-        self.articulation_body_ids = self.asset.find_bodies(self.body_names)[0]
-        self.body_ids, self.body_names = self.contact_sensor.find_bodies(self.body_names)
+        self.body_ids, self.body_names = find_sensor_bodies(
+            self.asset, self.contact_sensor, self.body_names
+        )
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
         self.num_bodies = len(self.body_ids)
 
+    @override
     def update(self):
         contact = self.contact_sensor.data.current_contact_time[:, self.body_ids] > 0.0
         self.undesired_contact = -contact.float().sum(1, keepdim=True)
 
+    @override
     def _compute(self) -> torch.Tensor:
         return self.undesired_contact.reshape(self.num_envs, 1)
 

@@ -245,6 +245,7 @@ class LocoManipObject(_LocoManipObjectBase):
         self.object_pos_w = self.object.data.root_pos_w
         self.object_quat_w = self.object.data.root_quat_w
         self.object_vel_w = self.object.data.root_lin_vel_w
+        self.eef_status = self.get_gripper_status()
 
         self.root_pos_w = self.asset.data.root_link_pos_w
         self.root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w)

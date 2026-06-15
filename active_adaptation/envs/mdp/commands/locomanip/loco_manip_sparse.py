@@ -333,9 +333,9 @@ class LocoManipSparse(CommandV2):
 
         command_state = tensordict["command_state"]
         assert command_state["is_world_goal"].all()
-        root_state_w = command_state["root_state_w"]
-        root_pos_w = root_state_w[..., :3]
-        root_quat_w = root_state_w[..., 3:7]
+        root_pose_w = command_state["root_pose_w"]
+        root_pos_w = root_pose_w[..., :3]
+        root_quat_w = root_pose_w[..., 3:7]
         root_yaw_quat = yaw_quat(root_quat_w)
         world_eef_pos_w = command_state["world_eef_pos_w"]
         
@@ -357,9 +357,9 @@ class LocoManipSparse(CommandV2):
         cmd_eef_upward_w = quat_rotate(cmd_eef_rot_w, upward_vec.reshape(1, 1, 3))
         cmd_eef_upward_b = quat_rotate_inverse(root_yaw_quat, cmd_eef_upward_w)
 
-        eef_state_w = command_state["eef_state_w"]
-        eef_pos_w = eef_state_w[..., :3]
-        eef_quat_w = eef_state_w[..., 3:7]
+        eef_pose_w = command_state["eef_pose_w"]
+        eef_pos_w = eef_pose_w[..., :3]
+        eef_quat_w = eef_pose_w[..., 3:7]
         pos_diff_w = cmd_eef_pos_w - eef_pos_w
         pos_diff_b = quat_rotate_inverse(root_yaw_quat, pos_diff_w)
         pos_error_norm2 = pos_diff_w.square().sum(dim=-1, keepdim=True)

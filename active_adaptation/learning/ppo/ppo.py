@@ -35,7 +35,7 @@ from tensordict.nn import (
 
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
-from typing import Union, Tuple
+from typing import Union, Tuple, TYPE_CHECKING
 
 from active_adaptation.learning.modules import (
     VecNorm, 
@@ -60,6 +60,9 @@ from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import check_parameters
 from active_adaptation.learning.utils.dormancy import DormancyTracker
 from active_adaptation.utils.profiling import ScopedTimer
+
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import _EnvBase
 
 import active_adaptation as aa
 import torch.distributed as distr
@@ -222,6 +225,17 @@ class PPOPolicy(PPOBase):
         if self.cfg.compile and not aa.is_distributed():
             self.update = torch.compile(self.update)
         self._rollout_dormancy_tracker: Union[DormancyTracker, None] = None
+    
+    @classmethod
+    def from_env(cls, cfg: PPOConfig, env: "_EnvBase", device: str):
+        return cls(
+            cfg=cfg,
+            observation_spec=env.observation_spec,
+            action_spec=env.action_spec,
+            reward_spec=env.reward_spec,
+            device=device,
+            env=env,
+        )
 
     def get_rollout_policy(self, mode: str="train", critic: bool = False):
         if self._rollout_dormancy_tracker is not None:

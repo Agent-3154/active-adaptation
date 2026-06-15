@@ -28,6 +28,7 @@ from dataclasses import dataclass, replace
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import EnvBase
+    from mjlab.entity import Entity
 
 
 @dataclass
@@ -401,11 +402,21 @@ class SingleEEFLocoManip(CommandV2):
     
     @override
     def pre_step(self, substep: int) -> None:
-        self.asset._external_force_b[:, self.eef_body_idx] = quat_rotate_inverse(
-            self.asset.data.body_link_quat_w[:, self.eef_body_idx],
-            self.payload_force_w,
-        )
-        self.asset.has_external_wrench = True
+        if self.env.backend == "isaac":
+            self.asset._external_force_b[:, self.eef_body_idx] = quat_rotate_inverse(
+                self.asset.data.body_link_quat_w[:, self.eef_body_idx],
+                self.payload_force_w,
+            )
+            self.asset.has_external_wrench = True
+        elif self.env.backend == "mjlab":
+            entity: Entity = self.asset
+            entity.write_external_wrench_to_sim(
+                self.payload_force_w,
+                torch.zeros_like(self.payload_force_w),
+                body_ids=self.eef_body_idx,
+            )
+        else:
+            raise ValueError(f"Invalid backend: {self.env.backend}")
     
     def get_gripper_status(self) -> torch.Tensor:
         """Return gripper closedness in ``[0, 1]`` (0=open, 1=closed)."""
@@ -637,7 +648,7 @@ class SingleEEFLocoManip(CommandV2):
     def _read_robot_state(self) -> None:
         self.root_pos_w = self.asset.data.root_link_pos_w
         self.root_yaw_quat = yaw_quat(self.asset.data.root_link_quat_w)
-        self.eef_state_w = self.asset.data.body_link_state_w[:, self.eef_body_idx]
+        self.eef_pose_w = self.asset.data.body_link_pose_w[:, self.eef_body_idx]
 
         forward_axis_b = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
         upward_axis_b = torch.tensor([[0.0, 0.0, 1.0]], device=self.device)
@@ -683,10 +694,10 @@ class SingleEEFLocoManip(CommandV2):
             "is_world_goal": self.is_world_goal,
             "world_eef_pos_w": self.world_eef_pos_w,
             "cmd_eef_rot_w": self.cmd_eef_rot_w,
-            "eef_state_w": self.eef_state_w,
+            "eef_pose_w": self.eef_pose_w,
             "eef_status": self.eef_status,
             "cmd_eef_status": self.cmd_eef_status,
-            "root_state_w": self.asset.data.root_state_w,
+            "root_pose_w": self.asset.data.root_link_pose_w,
             "base_pos_error": self.base_pos_error,
         }
         self._state = TensorDict(d, [self.num_envs], device=self.device).clone()
@@ -714,36 +725,37 @@ class SingleEEFLocoManip(CommandV2):
 
     @override
     def debug_draw(self) -> None:
-        self.env.debug_draw.vector(
-            self.asset.data.root_link_pos_w,
-            self.cmd_linvel_w,
-            color=(1.0, 1.0, 1.0, 1.0),
-        )
-        # self.env.debug_draw.vector(
-        #     self.eef_pos_w,
-        #     self.payload_force_w / 9.81,
-        #     color=(0.0, 0.0, 1.0, 1.0),
-        # )
-        self.env.debug_draw.vector(
-            self.eef_pos_w,
-            self.cmd_eef_forward_w,
-            color=(1.0, 0.0, 0.0, 1.0),
-        )
-        self.env.debug_draw.vector(
-            self.eef_pos_w,
-            self.cmd_eef_upward_w,
-            color=(0.0, 0.0, 1.0, 1.0),
-        )
-        world_env_ids = self.world_env_ids
-        
-        if self.standoff_marker is not None and world_env_ids.numel() > 0:
-            self.standoff_marker.visualize(self.standoff_pos_w[world_env_ids])
-            self.marker.visualize(self.world_eef_pos_w[world_env_ids])
-        
-        self.eef_pose_marker.visualize(
-            translations=self.cmd_eef_pos_w,
-            orientations=self.cmd_eef_rot_w,
-        )
+        if self.env.backend == "isaac":
+            self.env.debug_draw.vector(
+                self.asset.data.root_link_pos_w,
+                self.cmd_linvel_w,
+                color=(1.0, 1.0, 1.0, 1.0),
+            )
+            # self.env.debug_draw.vector(
+            #     self.eef_pos_w,
+            #     self.payload_force_w / 9.81,
+            #     color=(0.0, 0.0, 1.0, 1.0),
+            # )
+            self.env.debug_draw.vector(
+                self.eef_pos_w,
+                self.cmd_eef_forward_w,
+                color=(1.0, 0.0, 0.0, 1.0),
+            )
+            self.env.debug_draw.vector(
+                self.eef_pos_w,
+                self.cmd_eef_upward_w,
+                color=(0.0, 0.0, 1.0, 1.0),
+            )
+            world_env_ids = self.world_env_ids
+            
+            if self.standoff_marker is not None and world_env_ids.numel() > 0:
+                self.standoff_marker.visualize(self.standoff_pos_w[world_env_ids])
+                self.marker.visualize(self.world_eef_pos_w[world_env_ids])
+            
+            self.eef_pose_marker.visualize(
+                translations=self.cmd_eef_pos_w,
+                orientations=self.cmd_eef_rot_w,
+            )
     
     def get_state(self) -> TensorDict:
         return self._state

@@ -1,0 +1,136 @@
+# @package task
+name: B2Z1LocoManip
+
+viewer:
+  resolution: [1280, 720]
+  lookat: [0., 0., 0.]
+  eye: [4.0, 4.0, 4.0]
+
+robot:
+  name: unitree_b2_z1
+# terrain: slopes_boxes
+terrain: plane
+
+
+# common
+num_envs: 4096
+max_episode_length: 1000
+
+sim:
+  step_dt: 0.02
+  isaac_physics_dt: 0.005
+  mujoco_physics_dt: 0.002
+
+input:
+  action:
+    _target_: ConcatenatedAction
+    actions:
+      - _target_: JointPosition
+        action_scaling:
+          .*_hip_joint: 0.4
+          .*_thigh_joint: 0.4
+          .*_calf_joint: 0.4
+          z1_wrist_angle: 0.35
+          z1_forearm_roll: 0.35
+          z1_wrist_rotate: 0.35
+          z1_jointGripper: 0.5
+        max_delay: 1
+        alpha_range: [0.8, 0.9]
+      - _target_: JointPositionDelta
+        action_scaling:
+          z1_waist: 0.4
+          z1_shoulder: 0.4
+          z1_elbow: 0.4
+        max_delay: 1
+        alpha_range: [0.8, 0.9]
+
+command:
+  _target_: SingleEEFLocoManip
+  eef_body_name: ee_gripper_link
+  gripper_joint_names: z1_jointGripper
+  # Heading-frame (x,y) offsets from root + z above terrain; tuned for Z1 on B2.
+  workspace_range:
+    - [0.3, 0.85]
+    - [-0.3, 0.3]
+    - [0.3, 1.2]
+  world_goal_prob: 0.25
+  standoff_distance_range: [1.0, 3.0]
+  standoff_linvel_gain_range: [1.0, 2.0]
+  standoff_yaw_gain_range: [1.0, 2.0]
+
+observation:
+  command:
+    command:  {key: dense}
+  command_sparse:
+    command:  {key: sparse}
+  policy:
+    gravity_multistep: {steps: 4, noise_std: 0.05}
+    joint_pos_multistep: {steps: 4, noise_std: 0.05}
+    joint_vel_multistep: {steps: 4, noise_std: 0.2}
+    prev_actions: {steps: 2}
+  # priv:
+    body_vel_b: {body_names: ee_gripper_link}
+    root_linvel_b:    {yaw_only: true}
+    root_angvel_b:    {}
+  # extero:
+  #   height_scan: {
+  #     x_range: [-1.2, 1.2],
+  #     y_range: [-1.0, 1.0],
+  #     resolution: [0.1, 0.1],
+  #     flatten: false,
+  #   }
+
+reward:
+  loco:
+    linvel_exp:         {weight: 1.5, dim: 2}
+    linvel_projection:  {weight: 0.5}
+    angvel_z_exp:       {weight: 0.8}
+    angvel_xy_l2:       {weight: 0.01}
+    linvel_z_l2:        {weight: 2.0}
+    base_height_exp:    {weight: 1.0, target_height: 0.5, sigma: 0.5}
+  manip:
+    eef_pos_forward_tracking: {weight: 1.5}
+    eef_grasp:          {weight: 1.0}
+    eef_angvel_penalty: {weight: 0.005}
+  regularization:
+    energy_l1:          {weight: 0.0005}
+    joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(z1_jointGripper)).*" }
+    joint_torques_l2:   {weight: 1.0e-4, joint_names: "(?!(z1_jointGripper)).*" }
+    survival:           {weight: 1.0}
+    action_rate_l2:     {weight: 0.01}
+    action_rate2_l2:    {weight: 0.002}
+    feet_air_time:      {weight: 0.4, body_names: .*_foot, thres: 0.5}
+    feet_sliding:       {weight: 0.2, body_names: .*_foot}
+    undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
+  debug:
+    _enabled_: false
+    linvel_projection:  {weight: 0.5}
+    feet_contact_count: {weight: 1.0, body_names: .*_foot}
+    eef_pos_error_l1:   {weight: 1.0}
+
+termination:
+  max_episode_length: {}
+  crash: {
+    body_names_expr: [base_link, .*hip, .*thigh],
+    t_thres: 0.06,
+    prob: 0.4,
+  }
+  fall_over: {xy_thres: 0.9}
+  undesired_contact: {body_names: [.*_calf]}
+
+randomization:
+  perturb_body_mass:
+    .*: [0.8, 1.2]
+  perturb_body_materials:
+    body_names: .*_foot
+    static_friction_range:  [0.5, 3.0]
+    dynamic_friction_range: [0.5, 3.0]
+    restitution_range:      [0.0, 0.5]
+  actuator_pd_gains:
+    stiffness_range:
+      .*: [0.8, 1.1]
+    damping_range:
+      .*: [0.8, 1.1]
+  reset_joint_states_scale:
+    pos_scales:
+      .*: [0.8, 1.2]
