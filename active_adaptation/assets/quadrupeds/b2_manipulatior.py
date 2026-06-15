@@ -239,7 +239,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
                 effort_limit_sim=ARM_EFFORT_LIMIT,
                 velocity_limit_sim=10.0,
                 stiffness=GRIPPER_STIFFNESS,
-                damping_sim=ARM_DAMPING,
+                damping=ARM_DAMPING,
                 friction=0.01,
                 armature=0.01,
             ),
