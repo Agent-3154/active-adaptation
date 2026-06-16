@@ -1,0 +1,22 @@
+[project]
+name = "aa-isaac51-env"
+version = "0.1.0"
+requires-python = "==3.11.*"
+dependencies = [
+    "active-adaptation",
+    # Keep this pinned to the Isaac 5.1-compatible version.
+    "isaacsim[all,extscache]==5.1.0",
+    "warp-lang < 1.13",
+]
+
+[tool.uv.sources]
+active-adaptation = { path = "../..", editable = true }
+
+[[tool.uv.index]]
+url = "https://pypi.nvidia.com/"
+
+[tool.uv]
+package = false
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'"
+]

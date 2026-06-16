@@ -9,7 +9,7 @@ authors = [
     {name = "btx0424@SUSTech"}
 ]
 keywords = ["robotics", "rl"]
-requires-python = "==3.11.*"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "setproctitle",
     "hydra-core",
@@ -27,21 +27,10 @@ dependencies = [
     "torchrl",
     "torch",
     "imageio",
-    "mujoco",
-    "huggingface_hub>=0.30",
     "linuxfd",
     "pdbpp",
     "scipy",
     "trimesh",
-    "warp-lang",
-]
-
-[project.optional-dependencies]
-rollout = [
-    "nicegui",
-]
-mjlab = [
-    "mjlab==1.2.0",
 ]
 
 [project.scripts]

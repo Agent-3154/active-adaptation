@@ -4,6 +4,7 @@ import numpy as np
 import time
 import os
 import datetime
+import importlib
 import imageio.v2 as imageio
 
 from typing import Union
@@ -31,6 +32,19 @@ class Every:
         self.i += 1
 
 
+def _ensure_backend_env_imported(backend: str):
+    backend_modules = {
+        "isaac": "active_adaptation.envs.backends.isaac",
+        "mujoco": "active_adaptation.envs.backends.mujoco",
+        "mjlab": "active_adaptation.envs.backends.mjlab",
+        "motrix": "active_adaptation.envs.backends.motrix",
+    }
+    module_name = backend_modules.get(backend)
+    if module_name is None:
+        raise ValueError(f"Unknown backend: {backend}")
+    importlib.import_module(module_name)
+
+
 def make_env_policy(
     cfg: DictConfig,
     checkpoint: CheckpointBase | None = None
@@ -40,6 +54,7 @@ def make_env_policy(
     
     # Select the appropriate backend-specific environment class
     backend = active_adaptation.get_backend()
+    _ensure_backend_env_imported(backend)
     if backend == "isaac":
         env_cls = _EnvBase.registry[cfg.task.get("env_class", "IsaacBackendEnv")]
         env_device = str(cfg.device)

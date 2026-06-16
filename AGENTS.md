@@ -4,7 +4,7 @@
 `active_adaptation/` contains the core package: environments in `envs/`, RL code in `learning/`, shared helpers in `utils/`, `sensors/`, and `project_loading/`. Hydra config lives under `cfg/` with shared defaults in `cfg/base/`, experiments in `cfg/exp/`, and task definitions in `cfg/task/`. Runtime entry points are in `scripts/` (`train_ppo.py`, `eval.py`, `play.py`, `launch_ddp.sh`). Extension projects live in `projects/` and register through `pyproject.toml`. Large robot and scene assets are expected under `.cache/aa-robot-models/`, not committed into the package.
 
 ## Build, Test, and Development Commands
-Install in a Python 3.11 environment with `pip install -e .`.
+Install in a Python 3.11 environment with `uv sync` (or `pip install -e .` for legacy workflows).
 Use `aa-discover-projects` to refresh discovered project/task metadata, and `aa-list-tasks` to inspect available task IDs.
 Typical workflows:
 
@@ -14,6 +14,56 @@ python scripts/eval.py task=Go2/Go2Flat algo=ppo eval_render=true
 python scripts/play.py task=Go2/Go2Flat algo=ppo checkpoint_path=/path/to/checkpoint.pt
 bash scripts/launch_ddp.sh 0,1 train_ppo.py task=G1/G1LocoFlat algo=ppo
 ```
+
+## Environment Management
+Use `uv` as the default environment manager and keep backend stacks isolated.
+
+### Why this repo needs split environments
+- `isaac` and `mjlab` frequently pin incompatible versions of low-level packages (physics/runtime/toolchain), so installing both into one environment is intentionally unsupported.
+- We also support multiple Isaac tracks with different Python and `warp-lang` requirements, so each track needs its own locked environment.
+- The root project should stay backend-agnostic for shared training/code utilities; backend-specific dependencies live in dedicated backend projects.
+
+### Recommended layout
+- Root environment: `active-adaptation/pyproject.toml` for shared dependencies and core tooling.
+- Isaac 5.1 environment: `active-adaptation/venv/isaac51/pyproject.toml` + `uv.lock`.
+- Isaac 6.0 environment: `active-adaptation/venv/isaac60/pyproject.toml` + `uv.lock`.
+- Mjlab environment: `active-adaptation/venv/mjlab/pyproject.toml` + `uv.lock`.
+- Legacy `venv/isaac` can be kept temporarily for migration, but new work should target `isaac51` or `isaac60`.
+
+### Environment matrix (single source of truth)
+| Env | Path | Python | Backend scope | warp-lang policy |
+|-----|------|--------|---------------|------------------|
+| Root/shared | `.` | `>=3.11,<3.13` | Common tooling + backend-agnostic code | Avoid pinning backend-specific warp |
+| Isaac 5.1 | `venv/isaac51` | `==3.11.*` | Isaac 5.1 tasks | Pin exact Isaac-5.1-compatible warp version |
+| Isaac 6.0 | `venv/isaac60` | `==3.12.*` | Isaac 6.0 tasks | Pin exact Isaac-6.0-compatible warp version |
+| Mjlab | `venv/mjlab` | `>=3.11` | Mujoco/mjlab tasks | Pin mjlab-compatible warp (or omit if unused) |
+
+Keep `warp-lang` pins in backend env `pyproject.toml` files, not in root, so solves stay independent.
+
+### Standard uv workflow
+- Create/sync the shared root env:
+  - `uv sync`
+- Create/sync backend envs independently:
+  - `uv sync --project venv/isaac51`
+  - `uv sync --project venv/isaac60`
+  - `uv sync --project venv/mjlab`
+- Run commands against an explicit environment:
+  - `uv run python scripts/train_ppo.py ...` (root/shared)
+  - `uv run --project venv/isaac51 python scripts/train_ppo.py ...` (isaac 5.1)
+  - `uv run --project venv/isaac60 python scripts/train_ppo.py ...` (isaac 6.0)
+  - `uv run --project venv/mjlab python scripts/train_ppo.py ...` (mjlab)
+
+### `--project` vs `--with`
+- Use `uv run --project <env-dir>` as the default for all backend work. This ensures Python version and lockfile consistency.
+- Use `uv run --with <extra>` only for one-off temporary tooling layered on top of a selected project env (for example, debugging or profiling extras).
+- Do not use `--with` to switch backend stacks or manage core backend dependencies.
+
+### Dependency policy
+- Add shared dependencies only to the root `pyproject.toml`.
+- Add backend-only dependencies only to that backend's project (`venv/isaac51`, `venv/isaac60`, or `venv/mjlab`), then regenerate that backend lockfile with `uv lock --project <backend-dir>`.
+- Do not install both backend stacks into a single environment.
+- Commit lockfiles for root and each backend so everyone gets reproducible solves.
+- For `warp-lang`, prefer exact pins (`==`) per backend env; update one backend at a time and re-lock only that backend.
 
 ## Coding Style & Naming Conventions
 Follow existing Python style: 4-space indentation, snake_case for modules/functions, PascalCase for classes, and concise docstrings only where behavior is not obvious. Keep Hydra config keys and task names consistent with existing patterns such as `Go2/Go2Flat` and `ppo_symaug`. There is no pinned formatter in this repo today; keep imports grouped cleanly and match surrounding file structure. `pyproject.toml` enables Pyright checks, so prefer type-safe changes and preserve annotated APIs.

@@ -1,11 +1,11 @@
 [project]
-name = "aa-mjlab-env"
+name = "aa-isaac60-env"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = "==3.12.*"
 dependencies = [
     "active-adaptation",
-    "mjlab>=1.4.0",
-    "mujoco>=3.7.0",
+    # Keep this pinned to the Isaac 6.0-compatible version.
+    "warp-lang",
 ]
 
 [tool.uv.sources]
@@ -13,4 +13,3 @@ active-adaptation = { path = "../..", editable = true }
 
 [tool.uv]
 package = false
-index-strategy = "unsafe-best-match"

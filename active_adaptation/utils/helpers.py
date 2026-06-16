@@ -2,17 +2,6 @@ import torch
 from functools import wraps
 from typing import Sequence, Dict, Any
 from tensordict import TensorDictBase, TensorDict
-from prettytable import PrettyTable
-
-
-def table_print(info: Dict[str, Any]):
-    pt = PrettyTable()
-    nrow = max(len(v) for v in info.values())
-    for k, v in info.items():
-        data = [f"{kk}:{vv:.3f}" for kk, vv in v.items()]
-        data += [" "] * (nrow - len(data))
-        pt.add_column(k, data)
-    print(pt)
 
 
 def batchify(func, broadcast=True):
