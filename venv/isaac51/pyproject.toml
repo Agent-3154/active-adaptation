@@ -11,12 +11,27 @@ dependencies = [
 
 [tool.uv.sources]
 active-adaptation = { path = "../..", editable = true }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
 
 [[tool.uv.index]]
 url = "https://pypi.nvidia.com/"
 
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv]
 package = false
+override-dependencies = [
+    # Keep this torch triplet aligned with venv/mjlab to maximize uv wheel cache reuse.
+    # Isaac Sim 5.1 metadata pins torch 2.7, but runtime is compatible with 2.11 in our setup.
+    "torch==2.11",
+    "torchaudio==2.11",
+    "torchvision==0.26.0",
+]
 required-environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'"
 ]

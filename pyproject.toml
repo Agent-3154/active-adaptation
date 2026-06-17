@@ -25,7 +25,8 @@ dependencies = [
     "jaxtyping",
     "tensordict",
     "torchrl",
-    "torch",
+    "torch==2.11",
+    "torchvision==0.26.0",
     "imageio",
     "linuxfd",
     "pdbpp",
@@ -61,3 +62,14 @@ find = { where = ["."], include = [
 [tool.pyright]
 # typeCheckingMode = "strict"
 reportIncompatibleMethodOverride = "error"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+# Force CUDA 12.8-compatible PyTorch wheels instead of default cu13x builds.
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
