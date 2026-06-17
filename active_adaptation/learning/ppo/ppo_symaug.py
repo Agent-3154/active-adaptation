@@ -136,7 +136,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.gae = GAE(0.99, 0.95)  
 
         fake_input = observation_spec.zero().to(self.device)
-        self.cmd_transform = cmd_transform.to(self.device)
+        self.cmd_transform = cmd_transform.to(self.device) if cmd_transform is not None else None
         self.obs_transform = obs_transform.to(self.device)
         self.act_transform = act_transform.to(self.device)
         
@@ -145,15 +145,15 @@ class PPOPolicy(TensorDictModuleBase):
         if CMD_KEY in observation_spec.keys(True, True):
             self.training_keys += [CMD_KEY, OBS_KEY, ACTION_KEY]
             inp_dim = fake_input[CMD_KEY].shape[-1] + fake_input[OBS_KEY].shape[-1]
+            self.vecnorm = Seq(
+                CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False),
+                Mod(VecNorm((inp_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
+            ).to(self.device)
         else:
             self.training_keys += [OBS_KEY, ACTION_KEY]
             inp_dim = fake_input[OBS_KEY].shape[-1]
+            self.vecnorm = Mod(VecNorm((inp_dim,), decay=1.0), [OBS_KEY], ["_obs_normed"]).to(self.device)
         self.action_dim = action_spec.shape[-1]
-
-        self.vecnorm = Seq(
-            CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False),
-            Mod(VecNorm((inp_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
-        ).to(self.device)
 
         Activation = getattr(nn, self.cfg.activation)
         actor_mlp = MLP(
