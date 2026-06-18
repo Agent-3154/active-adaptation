@@ -27,9 +27,9 @@ input:
     actions:
       - _target_: JointPosition
         action_scaling:
-          .*_hip_joint: 0.4
-          .*_thigh_joint: 0.4
-          .*_calf_joint: 0.4
+          .*_hip_joint: 0.5
+          .*_thigh_joint: 0.5
+          .*_calf_joint: 0.5
           z1_wrist_angle: 0.35
           z1_forearm_roll: 0.35
           z1_wrist_rotate: 0.35
@@ -89,18 +89,18 @@ reward:
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 1.0, target_height: 0.5, sigma: 0.5}
   manip:
-    eef_pos_forward_tracking: {weight: 1.5}
+    # eef_pos_forward_tracking: {weight: 1.5}
     eef_grasp:          {weight: 1.0}
     eef_angvel_penalty: {weight: 0.005}
   regularization:
-    energy_l1:          {weight: 0.0005}
+    energy_l1:          {weight: 0.0002}
     joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(z1_jointGripper)).*" }
-    joint_torques_l2:   {weight: 1.0e-4, joint_names: "(?!(z1_jointGripper)).*" }
+    joint_torques_l2:   {weight: 2.0e-5, joint_names: "(?!(z1_jointGripper)).*" }
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
     feet_air_time:      {weight: 0.4, body_names: .*_foot, thres: 0.5}
-    feet_sliding:       {weight: 0.2, body_names: .*_foot}
+    # feet_sliding:       {weight: 0.2, body_names: .*_foot}
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:
     _enabled_: false
@@ -112,7 +112,7 @@ termination:
   max_episode_length: {}
   crash: {
     body_names_expr: [base_link, .*hip, .*thigh],
-    t_thres: 0.06,
+    t_thres: 0.01,
     prob: 0.4,
   }
   fall_over: {xy_thres: 0.9}
@@ -121,11 +121,12 @@ termination:
 randomization:
   perturb_body_mass:
     .*: [0.8, 1.2]
-  perturb_body_materials:
+  randomize_materials_isaac:
     body_names: .*_foot
     static_friction_range:  [0.5, 3.0]
     dynamic_friction_range: [0.5, 3.0]
     restitution_range:      [0.0, 0.5]
+    homogeneous: true
   actuator_pd_gains:
     stiffness_range:
       .*: [0.8, 1.1]

@@ -95,15 +95,12 @@ randomization:
   perturb_body_mass:
     (?!(payload|base_link)).*: [0.8, 1.2]
     base_link: [0.8, 1.2]
-  perturb_body_materials:
+  randomize_materials_isaac:
     body_names: .*_foot
-    # isaac only
     static_friction_range:  [0.5, 3.0]
     dynamic_friction_range: [0.5, 3.0]
     restitution_range:      [0.0, 0.5]
-    # mujoco and mjlab only
-    solref_time_constant_range: [0.015, 0.03]
-    solref_dampratio_range: [0.5, 2.0]
+    homogeneous: true
   actuator_pd_gains:
     stiffness_range:
       .*: [0.8, 1.1]

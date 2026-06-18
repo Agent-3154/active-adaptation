@@ -466,6 +466,7 @@ class perturb_body_materials(RandomizationV2):
         # common
         homogeneous: bool=False
     ):
+        raise ValueError("perturb_body_materials is deprecated. Use randomize_materials_isaac or randomize_materials_mjlab instead.")
         self.body_names = body_names
         self.static_friction_range = static_friction_range
         self.dynamic_friction_range = dynamic_friction_range
@@ -473,6 +474,7 @@ class perturb_body_materials(RandomizationV2):
         self.solref_time_constant_range = solref_time_constant_range
         self.solref_dampratio_range = solref_dampratio_range
         self.homogeneous = homogeneous
+
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)

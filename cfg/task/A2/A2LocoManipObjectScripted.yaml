@@ -114,11 +114,12 @@ termination:
 randomization:
   perturb_body_mass:
     .*: [0.8, 1.2]
-  perturb_body_materials:
+  randomize_materials_isaac:
     body_names: .*_foot
     static_friction_range:  [0.5, 3.0]
     dynamic_friction_range: [0.5, 3.0]
     restitution_range:      [0.0, 0.5]
+    homogeneous: true
   actuator_pd_gains:
     stiffness_range:
       .*: [0.8, 1.1]
