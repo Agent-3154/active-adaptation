@@ -51,18 +51,32 @@ B2_JOINTS = (
 
 B2_BODIES = (
     "base_link",
+    "imu_link",
+    "lidar_link",
     "FL_hip",
+    "FL_hip_rotor",
     "FR_hip",
+    "FR_hip_rotor",
     "RL_hip",
+    "RL_hip_rotor",
     "RR_hip",
+    "RR_hip_rotor",
     "FL_thigh",
+    "FL_thigh_rotor",
     "FR_thigh",
+    "FR_thigh_rotor",
     "RL_thigh",
+    "RL_thigh_rotor",
     "RR_thigh",
+    "RR_thigh_rotor",
     "FL_calf",
+    "FL_calf_rotor",
     "FR_calf",
+    "FR_calf_rotor",
     "RL_calf",
+    "RL_calf_rotor",
     "RR_calf",
+    "RR_calf_rotor",
     "FL_foot",
     "FR_foot",
     "RL_foot",
@@ -81,13 +95,14 @@ Z1_ARM_JOINTS = (
 
 Z1_ARM_BODIES = (
     "arm_plat_link",
-    "link00",
-    "link01",
-    "link02",
-    "link03",
-    "link04",
-    "link05",
-    "link06",
+    "arm_base_link",
+    "arm_link_0",
+    "arm_link_1",
+    "arm_link_2",
+    "arm_link_3",
+    "arm_link_4",
+    "arm_link_5",
+    "arm_link_6",
     "gripperStator",
     "gripperMover",
     "ee_gripper_link",
@@ -107,36 +122,68 @@ _B2_JOINT_SYMMETRY = mirrored(
 _B2_SPATIAL_SYMMETRY = mirrored(
     {
         "FL_hip": "FR_hip",
+        "FL_hip_rotor": "FR_hip_rotor",
         "RL_hip": "RR_hip",
+        "RL_hip_rotor": "RR_hip_rotor",
         "FL_thigh": "FR_thigh",
+        "FL_thigh_rotor": "FR_thigh_rotor",
         "RL_thigh": "RR_thigh",
+        "RL_thigh_rotor": "RR_thigh_rotor",
         "FL_calf": "FR_calf",
+        "FL_calf_rotor": "FR_calf_rotor",
         "RL_calf": "RR_calf",
+        "RL_calf_rotor": "RR_calf_rotor",
         "FL_foot": "FR_foot",
         "RL_foot": "RR_foot",
         "base_link": "base_link",
+        "imu_link": "imu_link",
+        "lidar_link": "lidar_link",
     }
 )
 
 _Z1_JOINT_SYMMETRY = {
-    "z1_waist": (-1, "z1_waist"),
-    "z1_shoulder": (1, "z1_shoulder"),
-    "z1_elbow": (1, "z1_elbow"),
-    "z1_wrist_angle": (-1, "z1_wrist_angle"),
-    "z1_forearm_roll": (-1, "z1_forearm_roll"),
-    "z1_wrist_rotate": (-1, "z1_wrist_rotate"),
+    "z1_waist": (-1, "z1_waist"), # yaw
+    "z1_shoulder": (1, "z1_shoulder"), # pitch
+    "z1_elbow": (1, "z1_elbow"), # also pitch
+    "z1_wrist_angle": (1, "z1_wrist_angle"), # pitch
+    "z1_forearm_roll": (-1, "z1_forearm_roll"), # actually yaw
+    "z1_wrist_rotate": (-1, "z1_wrist_rotate"), # roll
     "z1_jointGripper": (1, "z1_jointGripper"),
 }
+
+_Z1_SPATIAL_SYMMETRY = {body: body for body in Z1_ARM_BODIES}
 
 JOINT_SYMMETRY_MAPPING = {**_B2_JOINT_SYMMETRY, **_Z1_JOINT_SYMMETRY}
 
 SPATIAL_SYMMETRY_MAPPING = {
     **_B2_SPATIAL_SYMMETRY,
-    **{body: body for body in Z1_ARM_BODIES},
+    **_Z1_SPATIAL_SYMMETRY,
 }
 
 JOINT_NAMES_SIMULATION = [*B2_JOINTS, *Z1_ARM_JOINTS]
 BODY_NAMES_SIMULATION = [*B2_BODIES, *Z1_ARM_BODIES]
+
+# Keep symmetry specs complete for all simulated DOFs/bodies.
+if not set(JOINT_NAMES_SIMULATION) == set(JOINT_SYMMETRY_MAPPING):
+    raise ValueError(
+        "Incomplete joint symmetry mapping: "
+        f"Difference: {set(JOINT_NAMES_SIMULATION) - set(JOINT_SYMMETRY_MAPPING)}"
+    )
+if not set(BODY_NAMES_SIMULATION) == set(SPATIAL_SYMMETRY_MAPPING):
+    raise ValueError(
+        "Incomplete spatial symmetry mapping: "
+        f"Difference: {set(BODY_NAMES_SIMULATION) - set(SPATIAL_SYMMETRY_MAPPING)}"
+    )
+
+# Simplified contact sensing: include base, legs, and arm links only (exclude sensor bodies).
+_CONTACT_BODY_PATTERN = (
+    r"(?:base_link|"
+    r"[FR][LR]_(?:hip|thigh|calf|foot)|"
+    r"arm_plat_link|"
+    r"arm_link_[0-6]|"
+    r"gripper(?:Stator|Mover)|"
+    r"ee_gripper_link)"
+)
 
 LEG_HIP_THIGH_EFFORT = 200.0
 LEG_CALF_EFFORT = 320.0
@@ -161,7 +208,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
         sim_utils,
     )
 
-    USD_PATH = ROBOT_MODEL_DIR / "b2z1" / "b2z1_flattened.usd"  # do not change
+    USD_PATH = ROBOT_MODEL_DIR / "b2z1" / "b2z1_simplified.usd"  # do not change
 
     asset_cfg = ArticulationCfg(
         spawn=sim_utils.UsdFileCfg(
@@ -251,7 +298,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
     )
     sensors = {
         "contact_forces": ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/.*",
+            prim_path=f"{{ENV_REGEX_NS}}/Robot/{_CONTACT_BODY_PATTERN}",
             track_air_time=True,
             history_length=3,
         )
@@ -288,6 +335,7 @@ def make_mjlab_cfg(self_collisions: bool = False):
                     damping=LEGS_DAMPING,
                     armature=0.01,
                     frictionloss=0.01,
+                    viscous_damping=0.01,
                 ),
                 BuiltinPositionActuatorCfg(
                     target_names_expr=(".*_calf_joint",),
@@ -296,6 +344,7 @@ def make_mjlab_cfg(self_collisions: bool = False):
                     damping=LEGS_DAMPING,
                     armature=0.01,
                     frictionloss=0.01,
+                    viscous_damping=0.01,
                 ),
                 BuiltinPositionActuatorCfg(
                     target_names_expr=(
@@ -352,7 +401,7 @@ def make_mjlab_cfg(self_collisions: bool = False):
             name="contact_forces",
             primary=ContactMatch(
                 mode="body",
-                pattern=".*",
+                pattern=f"^{_CONTACT_BODY_PATTERN}$",
                 entity="robot",
             ),
             secondary=ContactMatch(
