@@ -403,9 +403,11 @@ class SingleEEFLocoManip(CommandV2):
     @override
     def pre_step(self, substep: int) -> None:
         if self.env.backend == "isaac":
-            self.asset._external_force_b[:, self.eef_body_idx] = quat_rotate_inverse(
-                self.asset.data.body_link_quat_w[:, self.eef_body_idx],
-                self.payload_force_w,
+            self.asset.permanent_wrench_composer.set_forces_and_torques(
+                forces=self.payload_force_w.reshape(self.num_envs, 1, 3),
+                torques=torch.zeros(self.num_envs, 1, 3, device=self.device),
+                body_ids=[self.eef_body_idx],
+                is_global=True,
             )
             self.asset.has_external_wrench = True
         elif self.env.backend == "mjlab":

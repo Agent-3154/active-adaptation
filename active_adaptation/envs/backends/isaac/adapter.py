@@ -45,7 +45,7 @@ class IsaacSceneAdapter(SceneAdapter):
                 asset.instantaneous_wrench_composer.reset()
             if hasattr(asset, "permanent_wrench_composer"):
                 asset.permanent_wrench_composer.reset()
-            if getattr(asset, "has_external_wrench", False):
+            if hasattr(asset, "_external_force_b") and hasattr(asset, "_external_torque_b"):
                 asset._external_force_b.zero_()
                 asset._external_torque_b.zero_()
                 asset.has_external_wrench = False

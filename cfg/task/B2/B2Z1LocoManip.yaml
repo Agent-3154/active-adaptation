@@ -100,7 +100,7 @@ reward:
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
     feet_air_time:      {weight: 0.4, body_names: .*_foot, thres: 0.5}
-    # feet_sliding:       {weight: 0.2, body_names: .*_foot}
+    feet_sliding:       {weight: 0.2, body_names: .*_foot}
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:
     _enabled_: false
