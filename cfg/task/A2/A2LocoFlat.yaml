@@ -37,11 +37,6 @@ command:
   use_stiffness_ratio: 0.99
   resample_prob: 0.5
   stand_prob: 0.08
-  target_yaw_range: 
-    - [-0.3927,  0.3927]
-    - [ 1.1781,  1.9635]
-    - [ 2.7489,  3.5343]
-    - [ 4.3197,  5.1051]
 
 observation:
   policy:
