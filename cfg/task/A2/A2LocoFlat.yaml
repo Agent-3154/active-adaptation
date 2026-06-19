@@ -71,7 +71,8 @@ reward:
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
-    feet_air_time:      {weight: 0.4, body_names: .*_foot, thres: 0.5}
+    feet_air_time:      {weight: 1.0, body_names: .*_foot, thres: 0.5}
+    max_swing_height:   {weight: 4.0, body_names: .*_foot, target_height: 0.15}
     feet_sliding:       {weight: 0.2, body_names: .*_foot}
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:

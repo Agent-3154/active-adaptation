@@ -50,9 +50,9 @@ command:
   gripper_joint_names: z1_jointGripper
   # Heading-frame (x,y) offsets from root + z above terrain; tuned for Z1 on B2.
   workspace_range:
-    - [0.3, 0.85]
+    - [0.4, 0.9]
     - [-0.3, 0.3]
-    - [0.3, 1.2]
+    - [0.5, 1.2]
   world_goal_prob: 0.25
   standoff_distance_range: [1.0, 3.0]
   standoff_linvel_gain_range: [1.0, 2.0]
@@ -89,17 +89,18 @@ reward:
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 1.0, target_height: 0.5, sigma: 0.5}
   manip:
-    # eef_pos_forward_tracking: {weight: 1.5}
+    eef_pos_forward_tracking: {weight: 1.5}
     eef_grasp:          {weight: 1.0}
     eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0002}
-    joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(z1_jointGripper)).*" }
+    joint_acc_l2:       {weight: 2.0e-7, joint_names: "(?!(z1_jointGripper)).*" }
     joint_torques_l2:   {weight: 2.0e-5, joint_names: "(?!(z1_jointGripper)).*" }
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
-    feet_air_time:      {weight: 0.4, body_names: .*_foot, thres: 0.5}
+    feet_air_time:      {weight: 1.0, body_names: .*_foot, thres: 0.5}
+    max_swing_height:   {weight: 4.0, body_names: .*_foot, target_height: 0.15}
     feet_sliding:       {weight: 0.2, body_names: .*_foot}
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:

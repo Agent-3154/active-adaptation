@@ -12,7 +12,7 @@ from .base import RewardV2
 from active_adaptation.envs.utils import find_bodies, find_sensor_bodies
 
 
-class max_feet_height(RewardV2):
+class max_swing_height(RewardV2):
     def __init__(self, weight: float, body_names: str, target_height: float):
         super().__init__(weight)
         self.body_names_pattern = body_names
@@ -39,21 +39,17 @@ class max_feet_height(RewardV2):
     @override
     def update(self):
         feet_height = self.asset.data.body_link_pos_w[:, self.body_ids, 2]
-        in_contact = (
-            self.contact_sensor.data.current_contact_time[:, self.body_contact_ids]
-            > 0.0
-        )
-        self.max_height = torch.maximum(self.max_height, feet_height)
-        self.rew = self.max_height.clamp_max(self.target_height)
-        self.max_height = torch.where(in_contact, 0.0, self.max_height)
-
-    @override
-    def _compute(self) -> torch.Tensor:
+        self.max_height = torch.maximum(self.max_height, feet_height).clamp_max(self.target_height)
         first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[
             :, self.body_contact_ids
         ]
-        rew = self.rew * first_contact
-        return rew.sum(1, keepdim=True)
+        self.rew = (first_contact * self.max_height).sum(1, keepdim=True)
+        self.max_height = torch.where(first_contact, 0.0, self.max_height)
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        active = ~self.command_manager.is_standing_env
+        return self.rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
 class feet_sliding(RewardV2):
