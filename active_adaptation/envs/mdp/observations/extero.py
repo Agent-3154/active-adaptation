@@ -18,6 +18,9 @@ if active_adaptation.get_backend() == "isaac":
     from isaaclab.utils.warp import raycast_mesh
 
 
+from simple_raycaster import MultiMeshRaycaster
+
+
 def raymap(width: int, height: int, fov: float) -> Float[torch.Tensor, "height width 3"]:
     """
     Generate a raymap for a given width, height, and field of view.
@@ -175,13 +178,6 @@ class height_scan(ObservationV2):
             self.ground_mesh_quat_w = torch.tensor([1.0, 0.0, 0.0, 0.0]).expand(self.num_envs, 1, 4)
             self.ray_dirs_w = torch.tensor([0.0, 0.0, -1.0]).expand(self.num_envs, self.n_rays, 3)
 
-        try:
-            from simple_raycaster import MultiMeshRaycaster
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError(
-                "height_scan requires the optional `simple-raycaster` package. "
-                "Install it separately before using height_scan."
-            ) from exc
         self.raycaster = MultiMeshRaycaster([self.env.ground_mesh], device=self.device)
         self.target_assets = []
 

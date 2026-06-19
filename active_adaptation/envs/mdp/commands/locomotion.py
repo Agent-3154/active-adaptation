@@ -5,6 +5,7 @@ import torch.distributions as D
 import warp as wp
 from typing import Sequence, Tuple
 from typing_extensions import override
+from tensordict import TensorDict
 
 from active_adaptation.utils.math import (
     quat_from_euler_xyz,
@@ -426,6 +427,15 @@ class Twist(Command):
         # left-right symmetry: flip y velocity and yaw velocity
         transform = symmetry_utils.SymmetryTransform(perm=torch.arange(4), signs=[1, -1, -1, 1])
         return transform
+
+    @override
+    def get_state(self) -> TensorDict:
+        d = {
+            "cmd_linvel_b": self.cmd_linvel_b,
+            "cmd_yawvel_b": self.cmd_yawvel_b,
+            "cmd_base_height": self.cmd_base_height,
+        }
+        return TensorDict(d, [self.num_envs], device=self.device)
 
 
 class PositionVelocityTracking(Command):
