@@ -738,25 +738,17 @@ class SingleEEFLocoManip(CommandV2):
             #     self.payload_force_w / 9.81,
             #     color=(0.0, 0.0, 1.0, 1.0),
             # )
-            self.env.debug_draw.vector(
-                self.eef_pos_w,
-                self.cmd_eef_forward_w,
-                color=(1.0, 0.0, 0.0, 1.0),
-            )
-            self.env.debug_draw.vector(
-                self.eef_pos_w,
-                self.cmd_eef_upward_w,
-                color=(0.0, 0.0, 1.0, 1.0),
-            )
             world_env_ids = self.world_env_ids
             
             if self.standoff_marker is not None and world_env_ids.numel() > 0:
                 self.standoff_marker.visualize(self.standoff_pos_w[world_env_ids])
                 self.marker.visualize(self.world_eef_pos_w[world_env_ids])
             
+            translations = torch.cat([self.cmd_eef_pos_w, self.eef_pos_w])
+            orientations = torch.cat([self.cmd_eef_rot_w, self.eef_quat_w])
             self.eef_pose_marker.visualize(
-                translations=self.cmd_eef_pos_w,
-                orientations=self.cmd_eef_rot_w,
+                translations=translations.reshape(-1, 3),
+                orientations=orientations.reshape(-1, 4),
             )
     
     def get_state(self) -> TensorDict:

@@ -80,6 +80,7 @@ class PlayConfig:
     """Drop observation groups not listed in ``algo.in_keys``."""
     task: PlayTaskOverride = field(default_factory=PlayTaskOverride)
     """Task overrides applied on top of the selected task config."""
+    exploration_type: ExplorationType = ExplorationType.MODE
 
 
 cs = ConfigStore.instance()
@@ -154,9 +155,10 @@ def main(cfg: PlayConfig):
     video_dir = FILE_PATH / "videos"
     time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
     video_path = video_dir / f"{cfg.task.name}-{time_str}.mp4"
+    exploration_type = ExplorationType(cfg.get("exploration_type", "MODE"))
 
     with env.get_recorder(video_path, enabled=record_enabled)as rec, \
-        torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
+        torch.inference_mode(), set_exploration_type(exploration_type):
         try:
             for i in itertools.count():
                 carry = rollout_policy(carry)
