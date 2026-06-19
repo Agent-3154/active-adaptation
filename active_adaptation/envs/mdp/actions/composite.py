@@ -2,24 +2,38 @@ from __future__ import annotations
 
 import torch
 
-from typing import List
+from typing import TYPE_CHECKING, List
 from typing_extensions import override
 
 from active_adaptation.utils.symmetry import SymmetryTransform
 
-from .base import Action
+from .base import Action, ActionV2
 
 
-class ConcatenatedAction(Action):
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import _EnvBase
+
+
+class ConcatenatedAction(ActionV2):
     """Concatenate multiple action managers into a single action space."""
 
-    def __init__(self, env, actions: List):
-        super().__init__(env)
-        self.action_managers: List[Action] = []
+    def __init__(self, actions: List):
+        super().__init__()
+        self._action_specs = [dict(spec) for spec in actions]
 
-        for spec in actions:
-            cls = Action.registry[spec.pop("_target_")]
-            self.action_managers.append(cls(self.env, **spec))
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.action_managers: List[Action | ActionV2] = []
+
+        for spec in self._action_specs:
+            cls_name = spec.pop("_target_")
+            try:
+                action_manager = Action.make(cls_name, self.env, **spec)
+            except ValueError:
+                action_manager = ActionV2.make(cls_name, **spec)
+                action_manager._initialize(self.env)
+            self.action_managers.append(action_manager)
         self.action_dims = [
             action_manager.action_dim for action_manager in self.action_managers
         ]

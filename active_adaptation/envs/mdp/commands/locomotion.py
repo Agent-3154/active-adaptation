@@ -1,11 +1,11 @@
-from math import pi
+import math
 import torch
 import torch.nn.functional as F
 import torch.distributions as D
-import math
 import warp as wp
 from typing import Sequence, Tuple
 from typing_extensions import override
+from tensordict import TensorDict
 
 from active_adaptation.utils.math import (
     quat_from_euler_xyz,
@@ -16,11 +16,69 @@ from active_adaptation.utils.math import (
     yaw_rotate,
     wrap_to_pi,
     MultiUniform,
-    sample_quat_yaw
 )
 import active_adaptation.utils.symmetry as symmetry_utils
 from .base import Command
 
+
+@wp.kernel(enable_backward=False)
+def resample_vel_command_kernel(
+    resample_linvel: wp.array(dtype=wp.bool),
+    seed: wp.int32,
+    linvel_x_min: wp.float32,
+    linvel_x_max: wp.float32,
+    linvel_y_min: wp.float32,
+    linvel_y_max: wp.float32,
+    stand_prob: wp.float32,
+    base_height_min: wp.float32,
+    base_height_max: wp.float32,
+    next_command_linvel: wp.array(dtype=wp.vec3),
+    cmd_base_height: wp.array(dtype=wp.float32),
+):
+    tid = wp.tid()
+    if not resample_linvel[tid]:
+        return
+
+    seed_ = wp.rand_init(seed, tid)
+    vx = wp.randf(seed_, linvel_x_min, linvel_x_max)
+    vy = wp.randf(seed_, linvel_y_min, linvel_y_max)
+    speed = wp.sqrt(vx * vx + vy * vy)
+    stand = wp.randf(seed_, 0.0, 1.0) < stand_prob
+
+    if (speed < 0.1) or stand:
+        next_command_linvel[tid] = wp.vec3(0.0, 0.0, 0.0)
+    else:
+        next_command_linvel[tid] = wp.vec3(vx, vy, 0.0)
+
+    cmd_base_height[tid] = wp.randf(seed_, base_height_min, base_height_max)
+
+
+@wp.kernel(enable_backward=False)
+def resample_yaw_command_uniform_kernel(
+    resample_yawvel: wp.array(dtype=wp.bool),
+    seed: wp.int32,
+    target_yaw_min: wp.float32,
+    target_yaw_max: wp.float32,
+    yaw_stiffness_min: wp.float32,
+    yaw_stiffness_max: wp.float32,
+    use_stiffness_ratio: wp.float32,
+    angvel_min: wp.float32,
+    angvel_max: wp.float32,
+    target_yaw: wp.array(dtype=wp.float32),
+    yaw_stiffness: wp.array(dtype=wp.float32),
+    use_stiffness: wp.array(dtype=wp.bool),
+    fixed_yaw_speed: wp.array(dtype=wp.float32),
+):
+    tid = wp.tid()
+    if not resample_yawvel[tid]:
+        return
+
+    seed_ = wp.rand_init(seed, tid)
+    target_yaw[tid] = wp.randf(seed_, target_yaw_min, target_yaw_max)
+    yaw_stiffness[tid] = wp.randf(seed_, yaw_stiffness_min, yaw_stiffness_max)
+    use_stiffness[tid] = wp.randf(seed_, 0.0, 1.0) < use_stiffness_ratio
+    fixed_yaw_speed[tid] = wp.randf(seed_, angvel_min, angvel_max)
+    
 
 class Twist(Command):
 
@@ -39,6 +97,7 @@ class Twist(Command):
         target_yaw_range=(0, torch.pi * 2),
         curriculum: bool = False,
         teleop: bool = False,
+        use_warp_kernel: bool = True,
     ):
         super().__init__(env, teleop)
         self.linvel_x_range = linvel_x_range
@@ -51,6 +110,7 @@ class Twist(Command):
         self.resample_prob = resample_prob
         self.stand_prob = stand_prob
         self.curriculum = curriculum and self.env.backend == "isaac"
+        self.use_warp_kernel = use_warp_kernel
 
         if self.curriculum:
             self.terrain = self.env.scene.terrain
@@ -58,7 +118,8 @@ class Twist(Command):
             assert self.terrain.cfg.terrain_generator.curriculum, "Curriculum is not enabled for the terrain"
 
         with torch.device(self.device):
-            if all(isinstance(r, Sequence) for r in target_yaw_range):
+            self._target_yaw_is_multi_range = all(isinstance(r, Sequence) for r in target_yaw_range)
+            if self._target_yaw_is_multi_range:
                 self.target_yaw_dist = MultiUniform(torch.tensor(target_yaw_range))
             else:
                 self.target_yaw_dist = D.Uniform(*torch.tensor(target_yaw_range))
@@ -83,6 +144,10 @@ class Twist(Command):
             self.cum_error = torch.zeros(self.num_envs, 2)
             self._cum_linvel_error = self.cum_error[:, 0].unsqueeze(1)
             self._cum_angvel_error = self.cum_error[:, 1].unsqueeze(1)
+
+        self._wp_device = wp.get_device(str(self.device))
+        # Keep host seed as a Python int; kernels derive per-thread RNG via wp.rand_init(seed, tid).
+        self._warp_seed = 0
 
         if self.teleop and self.env.backend == "isaac":
             self.key_mappings_pos = {
@@ -159,23 +224,8 @@ class Twist(Command):
         self.is_standing_env[env_ids] = True
 
     @override
-    def update(self) -> None:
-        # Tracking error and curriculum integrals use the command that was active during sim
-        # (last step's output). Rewards and terminations run after this.
-        self._update_twist_tracking()
-
-    @override
-    def step(self) -> None:
-        # Advance commands for the next physics step; observations read this state.
-        if self.teleop:
-            if self.env.backend != "isaac":
-                self._step_twist_command()
-            else:
-                self._step_teleop()
-        else:
-            self._step_twist_command()
-
-    def _update_twist_tracking(self) -> None:
+    def sync_state(self) -> None:
+        # Tracking error and curriculum integrals use the command that was active during sim.
         self.body_heading_w = self.asset.data.heading_w.unsqueeze(1)
         self.lin_vel_w = self.asset.data.root_com_lin_vel_w
         self.ang_vel_w = self.asset.data.root_com_ang_vel_w
@@ -195,23 +245,39 @@ class Twist(Command):
         self.distance_commanded = self.distance_commanded + self.command_speed * self.env.step_dt
         self.distance_traveled = self.distance_traveled + self.current_speed * self.env.step_dt
 
+    @override
+    def update(self) -> None:
+        # Advance commands for the next physics step; observations read this state.
+        if self.teleop:
+            if self.env.backend != "isaac":
+                self._step_twist_command()
+            else:
+                self._step_teleop()
+        else:
+            self._step_twist_command()
+
     def _step_twist_command(self) -> None:
+
+        interval_reached = (self.env.episode_length_buf - 20) % self.resample_interval == 0
+        resample_vel = interval_reached & (
+            (torch.rand(self.num_envs, device=self.device) < self.resample_prob)
+            | self.is_standing_env.squeeze(1)
+        )
+        resample_yaw = interval_reached & (
+            (torch.rand(self.num_envs, device=self.device) < self.resample_prob)
+            | self.is_standing_env.squeeze(1)
+        )
+        if self.use_warp_kernel:
+            self.sample_vel_command_warp(resample_vel)
+            self.sample_yaw_command_warp(resample_yaw)
+        else:
+            self.sample_vel_command_torch(resample_vel.nonzero().squeeze(-1))
+            self.sample_yaw_command_torch(resample_yaw.nonzero().squeeze(-1))
+
         max_command_speed = (2.5 - self.cmd_yawvel_b.abs()).clamp(0.0)
         self.cmd_linvel_b.lerp_(self.next_command_linvel, 0.1)
         self.cmd_linvel_b = clamp_norm(self.cmd_linvel_b, max=max_command_speed)
         self.command_speed = self.cmd_linvel_b.norm(dim=-1, keepdim=True)
-
-        interval_reached = (self.env.episode_length_buf - 20) % self.resample_interval == 0
-        resample_vel = interval_reached & (
-            self.with_prob(self.num_envs, self.resample_prob)
-            | self.is_standing_env.squeeze(1)
-        )
-        resample_yaw = interval_reached & (
-            self.with_prob(self.num_envs, self.resample_prob)
-            | self.is_standing_env.squeeze(1)
-        )
-        self.sample_vel_command(resample_vel.nonzero().squeeze(-1))
-        self.sample_yaw_command(resample_yaw.nonzero().squeeze(-1))
 
         yaw_diff = wrap_to_pi(self.target_yaw - self.body_heading_w).reshape(self.num_envs, 1)
         cmd_yawvel_b = torch.clamp(
@@ -259,7 +325,55 @@ class Twist(Command):
         self.command_speed = self.cmd_linvel_b.norm(dim=-1, keepdim=True)
         self.is_standing_env = (self.command_speed < 0.1) & (self.cmd_yawvel_b.abs() < 0.1)
 
-    def sample_vel_command(self, env_ids: torch.Tensor):
+    def sample_vel_command_warp(self, resample_mask: torch.Tensor):
+        self._warp_seed = (self._warp_seed + 1) % (2**31 - 1)
+        wp.launch(
+            kernel=resample_vel_command_kernel,
+            dim=[self.num_envs],
+            inputs=[
+                wp.from_torch(resample_mask, dtype=wp.bool, return_ctype=True),
+                self._warp_seed,
+                self.linvel_x_range[0],
+                self.linvel_x_range[1],
+                self.linvel_y_range[0],
+                self.linvel_y_range[1],
+                self.stand_prob,
+                self.base_height_range[0],
+                self.base_height_range[1],
+            ],
+            outputs=[
+                wp.from_torch(self.next_command_linvel, dtype=wp.vec3, return_ctype=True),
+                wp.from_torch(self.cmd_base_height[:, 0], dtype=wp.float32, return_ctype=True),
+            ],
+            device=self._wp_device,
+        )
+
+    def sample_yaw_command_warp(self, resample_mask: torch.Tensor):
+        self._warp_seed = (self._warp_seed + 1) % (2**31 - 1)
+        wp.launch(
+            kernel=resample_yaw_command_uniform_kernel,
+            dim=[self.num_envs],
+            inputs=[
+                wp.from_torch(resample_mask, dtype=wp.bool, return_ctype=True),
+                self._warp_seed,
+                0.0,
+                torch.pi * 2.0,
+                self.yaw_stiffness_range[0],
+                self.yaw_stiffness_range[1],
+                self.use_stiffness_ratio,
+                self.angvel_range[0],
+                self.angvel_range[1],
+            ],
+            outputs=[
+                wp.from_torch(self.target_yaw[:, 0], dtype=wp.float32, return_ctype=True),
+                wp.from_torch(self.yaw_stiffness[:, 0], dtype=wp.float32, return_ctype=True),
+                wp.from_torch(self.use_stiffness[:, 0], dtype=wp.bool, return_ctype=True),
+                wp.from_torch(self.fixed_yaw_speed[:, 0], dtype=wp.float32, return_ctype=True),
+            ],
+            device=self._wp_device,
+        )
+
+    def sample_vel_command_torch(self, env_ids: torch.Tensor):
         next_command_linvel = torch.zeros(len(env_ids), 3, device=self.device)
         next_command_linvel[:, 0].uniform_(*self.linvel_x_range)
         next_command_linvel[:, 1].uniform_(*self.linvel_y_range)
@@ -270,7 +384,7 @@ class Twist(Command):
         self.next_command_linvel[env_ids] = next_command_linvel * valid
         self.cmd_base_height[env_ids] = sample_uniform((len(env_ids), 1), *self.base_height_range, self.device)
 
-    def sample_yaw_command(self, env_ids: torch.Tensor):
+    def sample_yaw_command_torch(self, env_ids: torch.Tensor):
         self.target_yaw[env_ids] = self.target_yaw_dist.sample(env_ids.shape).unsqueeze(1)
         shape = (len(env_ids), 1)
         self.yaw_stiffness[env_ids] = sample_uniform(shape, *self.yaw_stiffness_range, self.device)
@@ -313,6 +427,15 @@ class Twist(Command):
         # left-right symmetry: flip y velocity and yaw velocity
         transform = symmetry_utils.SymmetryTransform(perm=torch.arange(4), signs=[1, -1, -1, 1])
         return transform
+
+    @override
+    def get_state(self) -> TensorDict:
+        d = {
+            "cmd_linvel_b": self.cmd_linvel_b,
+            "cmd_yawvel_b": self.cmd_yawvel_b,
+            "cmd_base_height": self.cmd_base_height,
+        }
+        return TensorDict(d, [self.num_envs], device=self.device)
 
 
 class PositionVelocityTracking(Command):
@@ -416,15 +539,7 @@ class PositionVelocityTracking(Command):
         self.is_standing_env[env_ids] = False
     
     @override
-    def update(self):
-        self.ref_linvel_b = (
-            self.ref_linvel_b 
-            + clamp_norm((self.ref_linvel_b_next - self.ref_linvel_b) * 0.1, max=0.1)
-        )
-        self.ref_linvel_w = yaw_rotate(self.ref_yaw_w, self.ref_linvel_b)
-        self.ref_pos_w = self.ref_pos_w + self.ref_linvel_w * self.env.step_dt
-        self.ref_yaw_w = self.ref_yaw_w + self.ref_yawvel_w * self.env.step_dt
-
+    def sync_state(self) -> None:
         self.cmd_linvel_w = (
             (self.ref_pos_w - self.asset.data.root_link_pos_w)
             + self.ref_linvel_w
@@ -441,6 +556,16 @@ class PositionVelocityTracking(Command):
         self.cmd_pos_w = self.ref_pos_w.clone()
         self.cmd_yawvel_b = self.cmd_yawvel_w.clone()
 
+    @override
+    def update(self) -> None:
+        self.ref_linvel_b = (
+            self.ref_linvel_b
+            + clamp_norm((self.ref_linvel_b_next - self.ref_linvel_b) * 0.1, max=0.1)
+        )
+        self.ref_linvel_w = yaw_rotate(self.ref_yaw_w, self.ref_linvel_b)
+        self.ref_pos_w = self.ref_pos_w + self.ref_linvel_w * self.env.step_dt
+        self.ref_yaw_w = self.ref_yaw_w + self.ref_yawvel_w * self.env.step_dt
+
         resample_lin_vel = (
             ((self.env.episode_length_buf - 20) % self.resample_interval == 0)
             & (torch.rand(self.num_envs, device=self.device) < self.resample_prob)
@@ -456,7 +581,7 @@ class PositionVelocityTracking(Command):
                 ref_lin_vel_b,
             )
             self.ref_linvel_b_next[resample_ids] = ref_lin_vel_b
-        
+
         resample_yaw_vel = (
             ((self.env.episode_length_buf - 20) % self.resample_interval == 0)
             & (torch.rand(self.num_envs, device=self.device) < self.resample_prob)

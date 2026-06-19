@@ -65,15 +65,20 @@ class SplineCommand(Command):
             signs=torch.tensor([1, -1, 1, 1, -1, 1]),
         )
 
-    def update(self):
+    def sync_state(self):
         x, v = spline.cubic_bezier(self.spline_t, self.spline_ps)
         v = v * self.spline_time_scale.reshape(self.num_envs, 1, 1)
 
         self.target_pos_w = x
         self.target_lin_vel_w = v
-
         self._cum_error = (self.target_pos_w - self.asset.data.root_pos_w)[:, :2].norm(dim=-1, keepdim=True)
+
+    def update(self):
         self.spline_t += self.env.step_dt * self.spline_time_scale
+        x, v = spline.cubic_bezier(self.spline_t, self.spline_ps)
+        v = v * self.spline_time_scale.reshape(self.num_envs, 1, 1)
+        self.target_pos_w = x
+        self.target_lin_vel_w = v
     
     def debug_draw(self):
         if self.env.backend == "isaac" and self.env.sim.has_gui():

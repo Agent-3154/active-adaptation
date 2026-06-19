@@ -45,7 +45,7 @@ class IsaacSceneAdapter(SceneAdapter):
                 asset.instantaneous_wrench_composer.reset()
             if hasattr(asset, "permanent_wrench_composer"):
                 asset.permanent_wrench_composer.reset()
-            if getattr(asset, "has_external_wrench", False):
+            if hasattr(asset, "_external_force_b") and hasattr(asset, "_external_torque_b"):
                 asset._external_force_b.zero_()
                 asset._external_torque_b.zero_()
                 asset.has_external_wrench = False
@@ -158,6 +158,32 @@ class IsaacSceneAdapter(SceneAdapter):
                         usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
                         scale=scale,
                         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+                    )
+                },
+            )
+        )
+        marker.set_visibility(True)
+        return marker
+
+    def create_frame_marker(
+        self,
+        prim_path: str,
+        scale: tuple[float, float, float] = (0.5, 0.5, 0.5),
+    ):
+        """Create an Isaac Lab VisualizationMarkers with a single frame (for GUI debug).
+
+        Returns a VisualizationMarkers instance. Call .set_visibility(True) and
+        .visualize(positions_tensor) to use it.
+        """
+        from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, ISAAC_NUCLEUS_DIR
+        import isaaclab.sim as sim_utils
+        marker = VisualizationMarkers(
+            VisualizationMarkersCfg(
+                prim_path=prim_path,
+                markers={
+                    "frame": sim_utils.UsdFileCfg(
+                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
+                        scale=scale,
                     )
                 },
             )

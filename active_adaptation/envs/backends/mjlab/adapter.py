@@ -111,6 +111,9 @@ class MjlabSceneAdapter(SceneAdapter):
 
     def __getattr__(self, name):
         return getattr(self._scene, name)
+    
+    def __getitem__(self, key):
+        return self._scene.entities[key]
 
     @property
     def ground_mesh(self):

@@ -3,9 +3,12 @@ from __future__ import annotations
 import abc
 import torch
 
-from typing import Generic, TypeVar, Tuple
+from typing import Generic, TypeVar, Tuple, TYPE_CHECKING
+from tensordict import TensorDictBase
 
 from active_adaptation.registry import RegistryMixin
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import EnvBase
 
 from ..base import MDPComponent
 from ..commands.base import Command
@@ -36,18 +39,26 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
         track_var: bool = False
     ):
         super().__init__(env)
+        raise NotImplementedError("Reward is deprecated. Use RewardV2 instead.")
         self.command_manager: CT = env.command_manager
         self.weight = weight
         self.enabled = enabled
         self.track_var = track_var
-        d = self.device
-        self._ema_sum = torch.zeros(1, device=d)
-        self._ema_cnt = torch.zeros(1, device=d)
+        
+        # modifier allows flexible coupling of reward terms
+        self._modifier = torch.ones(self.num_envs, 1, device=self.device)
+
+        self._ema_sum = torch.zeros(1, device=self.device)
+        self._ema_cnt = torch.zeros(1, device=self.device)
         if track_var:
             # EMA of sum(x^2) so variance can be computed as E[x^2] - E[x]^2
-            self._ema_sum_sq = torch.zeros(1, device=d)
+            self._ema_sum_sq = torch.zeros(1, device=self.device)
         else:
             self._ema_sum_sq = None
+    
+    @property
+    def modifier(self) -> torch.Tensor:
+        return self._modifier
 
     def _update_ema(self, rew: torch.Tensor, count: torch.Tensor | float) -> None:
         dec = self._ema_decay
@@ -70,7 +81,9 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
             count = is_active.sum()
         else:
             raise TypeError(result)
-        rew = self.weight * rew
+        rew = self.weight * rew * self.modifier
+        # reset modifier
+        self._modifier = torch.ones(self.num_envs, 1, device=self.device)
         self._update_ema(rew, count)
         return rew
 
@@ -87,6 +100,113 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
     @abc.abstractmethod
     def _compute(self) -> torch.Tensor:
         raise NotImplementedError
+    
+    def _initialize(self, env: "EnvBase"):
+        pass # unused for the old Reward API (RewardV2 is the new API)
 
 
-__all__ = ["Reward"]
+class RewardV2(Generic[CT], MDPComponent, RegistryMixin):
+    """Environment-deferred scalar reward term.
+
+    Like :class:`Reward`, subclasses implement ``_compute``; :meth:`compute`
+    applies ``weight``, an optional per-env :attr:`modifier`, and updates EMA
+    stats for logging.
+
+    Unlike :class:`Reward`, instances are constructed **without** an environment
+    (``__init__`` only takes ``weight`` and flags). Environment-bound state
+    (``env``, ``command_manager``, EMA buffers, ``modifier``) is created in
+    :meth:`_initialize`, which the environment calls once at startup. This
+    allows reward logic to be reused for **reward relabeling** on stored
+    trajectories without instantiating a simulator.
+
+    Subclasses that need ``num_envs``/``device`` or sim handles should override
+    :meth:`_initialize` and call ``super()._initialize(env)`` first.
+
+    Args:
+        weight: Scalar multiplier applied to the raw term in :meth:`compute`.
+        enabled: If ``False``, the term can be skipped by the env.
+        track_var: If ``True``, maintain an EMA of element variance for logging.
+    """
+
+    _ema_decay: float = 0.99
+
+    def __init__(self, weight: float, enabled: bool = True, track_var: bool = False):
+        self.weight = weight
+        self.enabled = enabled
+        self.track_var = track_var
+        self._initialized = False
+
+    def _initialize(self, env: "EnvBase") -> None:
+        """Bind to ``env`` and allocate per-env buffers. Called once at startup."""
+        self.env = env
+        self.command_manager: CT = env.command_manager
+
+        # modifier allows flexible coupling of reward terms
+        self._modifier = torch.ones(self.num_envs, 1, device=self.device)
+
+        self._ema_sum = torch.zeros(1, device=self.device)
+        self._ema_cnt = torch.zeros(1, device=self.device)
+        if self.track_var:
+            # EMA of sum(x^2) so variance can be computed as E[x^2] - E[x]^2
+            self._ema_sum_sq = torch.zeros(1, device=self.device)
+        else:
+            self._ema_sum_sq = None
+        self._initialized = True
+
+    @property
+    def initialized(self) -> bool:
+        """``True`` after :meth:`_initialize` has been called."""
+        return self._initialized
+
+    @property
+    def modifier(self) -> torch.Tensor:
+        """Per-env multiplier consumed by :meth:`compute` (reset each step)."""
+        return self._modifier
+
+    def _update_ema(self, rew: torch.Tensor, count: torch.Tensor | float) -> None:
+        dec = self._ema_decay
+        s = rew.sum()
+        self._ema_sum.mul_(dec).add_(s)
+        self._ema_cnt.mul_(dec).add_(count)
+
+        if self._ema_sum_sq is not None:
+            s2 = rew.square().sum()
+            self._ema_sum_sq.mul_(dec).add_(s2)
+
+    def compute(self) -> torch.Tensor:
+        result = self._compute()
+        if isinstance(result, torch.Tensor):
+            rew = result
+            count = float(result.numel())
+        elif isinstance(result, tuple):
+            rew, is_active = result
+            rew = rew * is_active.float()
+            count = is_active.sum()
+        else:
+            raise TypeError(result)
+        rew = self.weight * rew * self.modifier
+        # reset modifier
+        self._modifier = torch.ones(self.num_envs, 1, device=self.device)
+        self._update_ema(rew, count)
+        return rew
+
+    def get_ema_stats(self) -> Tuple[torch.Tensor, torch.Tensor | None]:
+        """Return EMA mean (E[x]) and EMA element-variance (E[x^2] - E[x]^2)."""
+        cnt = self._ema_cnt.clamp(min=1e-8)
+        mean = (self._ema_sum / cnt).reshape(())
+        if self._ema_sum_sq is None:
+            return mean, None
+        e_x2 = (self._ema_sum_sq / cnt).reshape(())
+        var = (e_x2 - mean * mean).clamp(min=0.0).reshape(())
+        return mean, var
+
+    @abc.abstractmethod
+    def _compute(self) -> torch.Tensor:
+        raise NotImplementedError
+    
+    def relabel(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """Relabel the reward."""
+        raise NotImplementedError
+
+
+__all__ = ["Reward", "RewardV2"]

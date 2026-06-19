@@ -72,6 +72,8 @@ BODY_NAMES_SIMULATION = [
 
 EFFORT_LIMIT = 120.0
 VELOCITY_LIMIT = 30.0
+LEGS_STIFFNESS = 50.0
+LEGS_DAMPING = 1.0
 
 def make_isaaclab_cfg(self_collisions: bool = False):
     from isaaclab.sensors import ContactSensorCfg
@@ -113,8 +115,8 @@ def make_isaaclab_cfg(self_collisions: bool = False):
                 joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
                 effort_limit_sim=120.0,
                 velocity_limit_sim=30.0,
-                stiffness=50.0,
-                damping=2.0,
+                stiffness=LEGS_STIFFNESS,
+                damping=LEGS_DAMPING,
                 friction=0.01,
                 armature=0.01,
             ),
@@ -171,7 +173,12 @@ def make_mjlab_cfg(motrix: bool = False):
                 geom_names_expr=(".*_collision.*",),
                 contype=0,
                 conaffinity=1,
-                condim=3,
+                # Harden all collision geoms.
+                solref=(0.01, 1),
+                # Configure feet colliders. Other colliders are frictionless (condim=1).
+                condim={".*_foot_collision$": 6, ".*_collision.*": 1},
+                priority={".*_foot_collision$": 1},
+                friction={".*_foot_collision$": (1, 5e-3, 5e-4)}
             ),
         ),
         joint_symmetry_mapping=JOINT_SYMMETRY_MAPPING,

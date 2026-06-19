@@ -14,6 +14,8 @@ import active_adaptation as aa
 from active_adaptation.utils.wandb import parse_checkpoint_path
 from active_adaptation.learning.mimic.discriminator import Discriminator, DiscriminatorCfg
 
+import train_ppo  # noqa: F401  # register structured train config
+
 
 @hydra.main(config_path="../cfg", config_name="train", version_base=None)
 def main(cfg: DictConfig):

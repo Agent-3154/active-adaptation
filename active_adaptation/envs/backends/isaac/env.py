@@ -6,7 +6,7 @@ from active_adaptation.envs.backends.isaac.adapter import (
 )
 from active_adaptation.envs.env_base import _EnvBase
 from active_adaptation.registry import Registry
-
+from tqdm import tqdm
 
 class IsaacBackendEnv(_EnvBase):
     """Isaac backend env: scene/sim construction and viewer glue."""
@@ -99,6 +99,10 @@ class IsaacBackendEnv(_EnvBase):
             attach_stage_to_usd_context()
         with use_stage(sim.get_initial_stage()):
             sim.reset()
+        
+        # warm up the simulation
+        for _ in tqdm(range(10), desc="Warming up the simulation"):
+            sim.step(render=False)
 
         sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat)
         try:

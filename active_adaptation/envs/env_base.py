@@ -1,7 +1,7 @@
 import os
 import warnings
 from collections import OrderedDict
-from typing import Dict, Mapping, cast
+from typing import Callable, Dict, Mapping, cast
 
 import numpy as np
 import torch
@@ -81,6 +81,21 @@ class ObsGroup:
         return torch.cat([func.compute() for func in self.funcs.values()], dim=-1)
 
     def symmetry_transform(self):
+        """Return the mirror transform for the concatenated observation group.
+
+        Each observation component defines a local
+        :class:`~active_adaptation.utils.symmetry.SymmetryTransform` matching
+        the tensor slice produced by that component's ``compute()`` method.
+        ``ObsGroup`` concatenates observations in ``self.funcs`` order, so the
+        full group transform is the concatenation of the same per-component
+        transforms in the same order.
+
+        This is used by symmetry augmentation/equivariance losses to mirror a
+        complete policy observation without each learner needing to know how the
+        observation was assembled. When adding a new observation term, implement
+        its ``symmetry_transform()`` with the same dimension, permutation, and
+        sign convention as its output tensor.
+        """
         transforms = [
             func.symmetry_transform().to(func.device) for func in self.funcs.values()
         ]
@@ -92,24 +107,27 @@ class RewardGroup:
 
     def __init__(
         self,
-        env: "_EnvBase",
         name: str,
-        funcs: OrderedDict[str, mdp.Reward],
+        funcs: OrderedDict[str, mdp.RewardV2],
         enabled: bool = True,
         compile: bool = False,
     ):
-        self.env = env
         self.name = name
         self.funcs = funcs
         self.enabled = enabled
         self.compile = compile
-
         self.enabled_rewards = sum(func.enabled for func in funcs.values())
-        self.rew_buf = torch.zeros(
-            env.num_envs, self.enabled_rewards, device=env.device
-        )
-        if compile:
+    
+    def _initialize(self, env: "_EnvBase"):
+        self.env = env
+        for func in self.funcs.values():
+            if isinstance(func, mdp.RewardV2):
+                func._initialize(env)
+        if self.compile:
             self.compute = torch.compile(self.compute, fullgraph=True)
+    
+    def __getitem__(self, key: str) -> mdp.RewardV2:
+        return self.funcs[key]
 
     def compute(self) -> torch.Tensor:
         rewards = []
@@ -136,6 +154,41 @@ class RewardGroup:
             if var is not None:
                 result[f"{key}_var"] = var.item()
         return result
+    
+    def relabel(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """Relabel the reward group."""
+        T, N = tensordict.shape[:2]
+        rew = torch.zeros(T, N, 1, device=tensordict.device)
+        for name, func in self.funcs.items():
+            rew = rew + func.weight * func.relabel(tensordict)
+        return rew.reshape(T, N, 1)
+    
+    @classmethod
+    def create_from(
+        cls,
+        group_name: str,
+        group_cfg: dict,
+        *,
+        register_component: Callable[[mdp.MDPComponent], None] | None = None,
+    ) -> "RewardGroup":
+        print(f"Reward group: {group_name}")
+        funcs: OrderedDict[str, mdp.Reward] = OrderedDict()
+
+        group_cfg = dict(group_cfg)
+        enabled = group_cfg.pop("_enabled_", True)
+        compile = group_cfg.pop("_compile_", False)
+
+        for rew_name, rew_cfg in group_cfg.items():
+            rew_name, cls_name, rew_kwargs = parse_component_spec(rew_name, rew_cfg)
+            reward = mdp.RewardV2.make(cls_name, **rew_kwargs)
+            if not reward:
+                continue
+            funcs[rew_name] = reward
+            if register_component is not None:
+                register_component(reward)
+            print(f"\t{rew_name}: \t{reward.weight:.2f}")
+
+        return cls(group_name, funcs, enabled, compile)
 
 
 class _EnvBase(EnvBase, RegistryMixin):
@@ -219,12 +272,15 @@ class _EnvBase(EnvBase, RegistryMixin):
         # MDP: command manager
         command_cfg = dict(self.cfg.command)
         class_name = command_cfg.pop("_target_", None)
-        if class_name is None:
-            raise ValueError("Command config must provide `_target_`.")
-        command = mdp.Command.make(class_name, self, **command_cfg)
+        try:
+            command = mdp.Command.make(class_name, self, **command_cfg)
+        except ValueError:
+            command = mdp.CommandV2.make(class_name, **command_cfg)
         if not command:
             raise ValueError(f"Command class '{class_name}' not found")
-        self.command_manager = cast(mdp.Command, command)
+        if isinstance(command, mdp.CommandV2):
+            command._initialize(self)
+        self.command_manager = command
         self._pre_step_callbacks.append(self.command_manager.pre_step)
         self._reset_callbacks.append(self.command_manager.reset)
         self._debug_draw_callbacks.append(self.command_manager.debug_draw)
@@ -234,8 +290,14 @@ class _EnvBase(EnvBase, RegistryMixin):
             _, input_cls_name, input_kwargs = parse_component_spec(
                 input_name, input_cfg
             )
-            input_cls = mdp.Action.registry[input_cls_name]
-            input_manager = cast(mdp.Action, input_cls(self, **input_kwargs))
+            try:
+                input_manager = mdp.Action.make(input_cls_name, self, **input_kwargs)
+            except ValueError:
+                input_manager = mdp.ActionV2.make(input_cls_name, **input_kwargs)
+            if not input_manager:
+                continue
+            if isinstance(input_manager, mdp.ActionV2):
+                input_manager._initialize(self)
             self.input_managers[input_name] = input_manager
             self._reset_callbacks.append(input_manager.reset)
             self._debug_draw_callbacks.append(input_manager.debug_draw)
@@ -243,10 +305,14 @@ class _EnvBase(EnvBase, RegistryMixin):
         # MDP: randomizations
         for rand_name, rand_cfg in self.cfg.get("randomization", {}).items():
             rand_name, cls_name, rand_kwargs = parse_component_spec(rand_name, rand_cfg)
-            rand = mdp.Randomization.make(cls_name, self, **rand_kwargs)
+            try:
+                rand = mdp.Randomization.make(cls_name, self, **rand_kwargs)
+            except ValueError:
+                rand = mdp.RandomizationV2.make(cls_name, **rand_kwargs)
             if not rand:
                 continue
-            rand = cast(mdp.Randomization, rand)
+            if isinstance(rand, mdp.RandomizationV2):
+                rand._initialize(self)
             self.randomizations[rand_name] = rand
             self._add_mdp_component(rand)
 
@@ -257,48 +323,41 @@ class _EnvBase(EnvBase, RegistryMixin):
                 obs_name, obs_cls_name, obs_kwargs = parse_component_spec(
                     obs_name, obs_cfg
                 )
-                obs = mdp.Observation.make(obs_cls_name, self, **obs_kwargs)
+                try:
+                    obs = mdp.Observation.make(obs_cls_name, self, **obs_kwargs)
+                except ValueError:
+                    obs = mdp.ObservationV2.make(obs_cls_name, **obs_kwargs)
                 if not obs:
                     continue
-                obs = cast(mdp.Observation, obs)
+                if isinstance(obs, mdp.ObservationV2):
+                    obs._initialize(self)
                 funcs[obs_name] = obs
                 self._add_mdp_component(obs)
             self.observation_funcs[group_name] = ObsGroup(group_name, funcs)
 
         # MDP: rewards
         reward_cfg = dict(self.cfg.reward)
-        self.mult_dt = reward_cfg.pop("_mult_dt_", True)
         for group_name, group_cfg in reward_cfg.items():
-            print(f"Reward group: {group_name}")
-            funcs = OrderedDict()
-
-            group_cfg = dict(group_cfg)
-            enabled = group_cfg.pop("_enabled_", True)
-            compile = group_cfg.pop("_compile_", False)
-            self._enabled_reward_groups += int(enabled)
-
-            for rew_name, rew_cfg in group_cfg.items():
-                rew_name, cls_name, rew_kwargs = parse_component_spec(rew_name, rew_cfg)
-                reward = mdp.Reward.make(cls_name, self, **rew_kwargs)
-                if not reward:
-                    continue
-                reward = cast(mdp.Reward, reward)
-                funcs[rew_name] = reward
-                self._add_mdp_component(reward)
-                print(f"\t{rew_name}: \t{reward.weight:.2f}")
-
-            self.reward_groups[group_name] = RewardGroup(
-                self, group_name, funcs, enabled, compile
+            rg = RewardGroup.create_from(
+                group_name,
+                group_cfg,
+                register_component=self._add_mdp_component,
             )
+            self._enabled_reward_groups += int(rg.enabled)
+            self.reward_groups[group_name] = rg
 
         # MDP: terminations
         print("Termination functions:")
         for term_name, term_cfg in self.cfg.get("termination", {}).items():
             term_name, cls_name, term_kwargs = parse_component_spec(term_name, term_cfg)
-            term = mdp.Termination.make(cls_name, self, **term_kwargs)
+            try:
+                term = mdp.Termination.make(cls_name, self, **term_kwargs)
+            except ValueError:
+                term = mdp.TerminationV2.make(cls_name, **term_kwargs)
             if not term:
                 continue
-            term = cast(mdp.Termination, term)
+            if isinstance(term, mdp.TerminationV2):
+                term._initialize(self)
             print(f"\t{term_name}: \t{'timeout' if term.is_timeout else 'termination'}")
             self.termination_funcs[term_name] = term
             self._add_mdp_component(term)
@@ -334,37 +393,23 @@ class _EnvBase(EnvBase, RegistryMixin):
             [self.num_envs], dtype=torch.long, device=self.device
         )
 
-        reward_spec = Composite(
-            {
-                "stats": {
-                    "episode_len": Unbounded([self.num_envs, 1]),
-                    "success": Unbounded([self.num_envs, 1]),
-                }
-            },
-            shape=[self.num_envs],
-        ).to(self.device)
-        reward_spec_extensions = Composite({})
+        reward_spec = Composite({})
 
+        scalar = Unbounded(1, device=self.device)
         for group_name, reward_group in self.reward_groups.items():
+            if reward_group.enabled:
+                reward_spec["reward", group_name] = scalar.clone()
             for rew_name in reward_group.funcs.keys():
-                reward_spec_extensions["stats", group_name, rew_name] = Unbounded(
-                    1, device=self.device
-                )
-            reward_spec_extensions["stats", group_name, "return"] = Unbounded(
-                1, device=self.device
-            )
+                reward_spec["stats", group_name, rew_name] = scalar.clone()
+            reward_spec["stats", group_name, "return"] = scalar.clone()
 
         for term_name in self.termination_funcs.keys():
-            reward_spec_extensions["stats", "termination", term_name] = Unbounded(
-                1, device=self.device
-            )
+            reward_spec["stats", "termination", term_name] = scalar.clone()
 
-        reward_spec_extensions["reward"] = Unbounded(
-            self._enabled_reward_groups, device=self.device
-        )
-        reward_spec_extensions["discount"] = Unbounded(1, device=self.device)
-        reward_spec.update(reward_spec_extensions.expand(self.num_envs).to(self.device))
-        self.reward_spec = reward_spec
+        reward_spec["discount"] = Unbounded(1, device=self.device)
+        reward_spec["stats", "success"] = scalar.clone()
+        reward_spec["stats", "episode_len"] = scalar.clone()
+        self.reward_spec = reward_spec.expand(self.num_envs).to(self.device)
 
     def _add_mdp_component(self, component: mdp.MDPComponent):
         if mdp.is_method_implemented(component, mdp.MDPComponent, "startup"):
@@ -414,12 +459,14 @@ class _EnvBase(EnvBase, RegistryMixin):
                 result[f"reward.{group_key}/{rew_key}"] = value
         return result
 
-    @ScopedTimer("_reset", sync=True)
+    @ScopedTimer("env._reset", sync=PROFILE_SYNC_TIMERS)
     def _reset(
         self, tensordict: TensorDictBase | None = None, **kwargs
     ) -> TensorDictBase:
         if not self._startup_done:
             [callback() for callback in self._startup_callbacks]
+            for reward_group in self.reward_groups.values():
+                reward_group._initialize(self)
             self._startup_done = True
             
         if tensordict is not None:
@@ -454,7 +501,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             entity.write_root_state_to_sim(value, env_ids=env_ids)
         self.stats[env_ids] = 0.0
 
-    @ScopedTimer("_step", sync=True)
+    @ScopedTimer("env._step", sync=PROFILE_SYNC_TIMERS)
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
         with ScopedTimer("simulation", sync=False):
             with ScopedTimer("process_action", sync=False):
@@ -487,21 +534,16 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
 
-        with ScopedTimer("command_update", sync=False):
-            self.command_manager.update()
+        with ScopedTimer("command.sync_state", sync=False):
+            self.command_manager.sync_state()
         with ScopedTimer("update_callbacks", sync=False):
             [callback() for callback in self._update_callbacks]
-            # for callback in self._update_callbacks:
-            #     with ScopedTimer(f"{callback.__self__.__class__.__name__}", sync=False):
-            #         callback()
-        with ScopedTimer("reward", sync=False):
-            tensordict = self._compute_reward(tensordict)
-        with ScopedTimer("termination", sync=False):
-            tensordict = self._compute_termination(tensordict)
-        with ScopedTimer("command_step", sync=False):
-            self.command_manager.step()
-        with ScopedTimer("observation", sync=False):
-            tensordict = self._compute_observation(tensordict)
+
+        tensordict = self._compute_reward(tensordict)
+        tensordict = self._compute_termination(tensordict)
+        with ScopedTimer("command.update", sync=False):
+            self.command_manager.update()
+        tensordict = self._compute_observation(tensordict)
 
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()
@@ -523,29 +565,26 @@ class _EnvBase(EnvBase, RegistryMixin):
             for input_manager in self.input_managers.values()
         ]
 
+    @ScopedTimer("env.compute_reward", sync=PROFILE_SYNC_TIMERS)
     def _compute_reward(self, tensordict: TensorDictBase) -> TensorDictBase:
         if not self.reward_groups:
             tensordict.set("reward", torch.ones((self.num_envs, 1), device=self.device))
             return tensordict
 
-        all_rewards = []
         for group, reward_group in self.reward_groups.items():
             reward = reward_group.compute()
             self.stats[group, "return"].add_(reward)
             if reward_group.enabled:
-                all_rewards.append(reward)
-        rewards = torch.cat(all_rewards, dim=1)
-        if self.mult_dt:
-            rewards *= self.step_dt
+                tensordict["reward", group] = reward
 
         self.stats["episode_len"][:] = self.episode_length_buf.reshape(self.num_envs, 1)
         self.stats["success"][:] = (
             (self.episode_length_buf.reshape(self.num_envs, 1) >= self.max_episode_length * 0.9)
             .float()
         )
-        tensordict.set("reward", rewards)
         return tensordict
 
+    @ScopedTimer("env.compute_termination", sync=PROFILE_SYNC_TIMERS)
     def _compute_termination(self, tensordict: TensorDictBase) -> TensorDictBase:
         truncated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
         terminated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
@@ -570,6 +609,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict.set("discount", discount)
         return tensordict
 
+    @ScopedTimer("env.compute_observation", sync=PROFILE_SYNC_TIMERS)
     def _compute_observation(self, tensordict: TensorDictBase) -> TensorDictBase:
         [
             group.compute(tensordict, self.timestamp)

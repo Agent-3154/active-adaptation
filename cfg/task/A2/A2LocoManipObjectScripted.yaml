@@ -1,5 +1,5 @@
 # @package task
-name: A2LocoManip
+name: A2LocoManipObjectScripted
 
 viewer:
   resolution: [1280, 720]
@@ -8,7 +8,9 @@ viewer:
 
 robot:
   name: unitree_a2_piper
-# terrain: slopes_boxes
+objects:
+  object:
+    _target_: dummy_stand
 terrain: plane
 
 
@@ -45,27 +47,19 @@ input:
         alpha_range: [0.8, 0.9]
 
 command:
-  _target_: SingleEEFLocoManip
+  _target_: LocoManipObjectScripted
   eef_body_name: grasp_point
   gripper_joint_names: "arm_joint[7,8]"
-  # Heading-frame (x,y) offsets from root + z above terrain; tune for Piper workspace.
-  workspace_range:
-    - [0.25, 0.75]
-    - [-0.2, 0.2]
-    - [0.2, 0.8]
-  # Half of resampled envs keep independent local loco/manip commands.
-  # The other half sample a world-frame EEF target and base standoff pose,
-  # then convert them back into the same 6D local command interface.
-  world_goal_prob: 0.25
-  standoff_distance_range: [1.0, 3.0]
-  standoff_linvel_gain_range: [1.0, 2.0]
-  standoff_yaw_gain_range: [1.0, 2.0]
+  gripper_body_names: [gripper_left, gripper_right]
+  object_name: object
+  grasp_height_range: [0.3, 0.6]
+  standoff_distance: 0.6
+  standoff_linvel_gain: 1.5
+  standoff_yaw_gain: 1.0
 
 observation:
   command:
-    command:  {key: dense}
-  command_sparse:
-    command:  {key: sparse}
+    command:  {key: "dense"}
   policy:
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {steps: 4, noise_std: 0.05}
@@ -75,26 +69,19 @@ observation:
     body_vel_b: {body_names: grasp_point}
     root_linvel_b:    {yaw_only: true}
     root_angvel_b:    {}
-  # extero:
-  #   height_scan: {
-  #     x_range: [-1.2, 1.2],
-  #     y_range: [-1.0, 1.0],
-  #     resolution: [0.1, 0.1],
-  #     flatten: false,
-  #   }
+  extero:
+    height_scan: {
+      x_range: [-1.2, 1.2],
+      y_range: [-1.0, 1.0],
+      resolution: [0.1, 0.1],
+      flatten: false,
+    }
 
 reward:
   loco:
-    linvel_exp:         {weight: 1.5, dim: 2}
-    linvel_projection:  {weight: 0.5}
-    angvel_z_exp:       {weight: 0.8}
     angvel_xy_l2:       {weight: 0.01}
     linvel_z_l2:        {weight: 2.0}
-    base_height_exp:    {weight: 1.0, target_height: 0.37, sigma: 0.5}
-  manip:
-    eef_pos_forward_tracking: {weight: 1.5}
-    eef_grasp:          {weight: 1.0}
-    eef_angvel_penalty: {weight: 0.005}
+    base_height_exp:    {weight: 1.0, target_height: 0.4, sigma: 0.4}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
@@ -107,19 +94,21 @@ reward:
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:
     _enabled_: false
-    linvel_projection:  {weight: 0.5}
     feet_contact_count: {weight: 1.0, body_names: .*_foot}
-    eef_pos_error_l1:   {weight: 1.0}
-    # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
   max_episode_length: {}
-  crash: {
-    body_names_expr: [base_link, .*hip, .*thigh],
-    t_thres: 0.06,
-    prob: 0.4,
+  crash: {body_names_expr: [base_link, .*hip, .*thigh], t_thres: 0.06}
+  robot_fall_over: {
+    _target_: fall_over,
+    entity_name: robot,
+    xy_thres: 0.9,
   }
-  fall_over: {xy_thres: 0.9}
+  object_fall_over: {
+    _target_: fall_over,
+    entity_name: object,
+    xy_thres: 0.9,
+  }
   undesired_contact: {body_names: [.*_calf]}
 
 randomization:

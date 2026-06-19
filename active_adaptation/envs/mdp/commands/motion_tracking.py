@@ -126,7 +126,7 @@ class MotionTrackingCommand(Command):
     #     error = diff.square().sum(-1)
     #     return - (error * first_contact).sum(1, True)
 
-    def update(self):
+    def _load_motion_targets(self):
         self._motion = self.dataset.get_slice(self.motion_ids, self.t, steps=self.future_steps)
         self.target_pos_w = self._motion.root_pos_w.to(self.device) \
             + self.env.scene.env_origins.reshape(self.num_envs, 1, 3)
@@ -146,8 +146,13 @@ class MotionTrackingCommand(Command):
         self.target_feet_pos_w = self._motion.body_link_pos_w[:, 0, self.feet_ids_motion].to(self.device) \
             + self.env.scene.env_origins.reshape(self.num_envs, 1, 3)
         self.target_joint_pos = self._motion.joint_pos[:, 0, self.joint_idx_motion].to(self.device)
-        
+
+    def sync_state(self):
+        self._load_motion_targets()
+
+    def update(self):
         self.t = torch.clamp_max(self.t + 1, self.dataset.lengths[self.motion_ids]-self.future_steps[-1])
+        self._load_motion_targets()
 
     def debug_draw(self):
         target_keypoints_w = self._motion.body_link_pos_w[:, 0] + self.env.scene.env_origins.cpu().unsqueeze(1)

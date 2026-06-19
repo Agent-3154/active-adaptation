@@ -97,10 +97,12 @@ randomization:
     (?!(payload|base|Head.*)).*: [0.8, 1.2]
     base: [0.8, 1.4]
     # Head.*: [25.0, 250.0]
-  # rand_body_materials:
-  #   static_friction_range:  {".*_foot": [0.5, 4.0]}
-  #   dynamic_friction_range: {".*_foot": [0.5, 4.0]}
-  #   restitution_range:      {".*_foot": [0.0, 0.5]}
+  randomize_materials_isaac:
+    body_names: .*_foot
+    static_friction_range:  [0.5, 4.0]
+    dynamic_friction_range: [0.5, 4.0]
+    restitution_range:      [0.0, 0.5]
+    homogeneous: true
   actuator_pd_gains:
     stiffness_range:
       .*: [0.8, 1.1]

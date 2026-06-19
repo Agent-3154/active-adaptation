@@ -25,6 +25,8 @@ def is_method_implemented(obj, base_class, method_name: str):
 class MDPComponent:
     """Shared lifecycle hooks and environment access for MDP components."""
 
+    markovian: bool # whether the component is markovian, i.e, dependent only on the current state
+
     def __init__(self, env: _EnvBase):
         self.env: _EnvBase = env
 

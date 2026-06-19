@@ -1,24 +1,24 @@
 import torch
-import abc
 
 from typing import TYPE_CHECKING, Union
+from typing_extensions import override
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation, RigidObject
     from isaaclab.sensors import ContactSensor
+    from active_adaptation.envs.env_base import _EnvBase
+
     IsaacEntity = Union[Articulation, RigidObject]
 
-from .base import Termination
+from .base import TerminationV2
 from active_adaptation.envs.utils import find_sensor_bodies, find_bodies
 
 
-class max_episode_length(Termination):
-    """
-    Termination when episode length exceeds the specified maximum episode length.
-    """
+class max_episode_length(TerminationV2):
+    """Termination when episode length exceeds the specified maximum episode length."""
 
-    def __init__(self, env):
-        super().__init__(env, is_timeout=True)
+    def __init__(self):
+        super().__init__(is_timeout=True)
 
     def compute(self, termination: torch.Tensor):
         cur_length = self.env.episode_length_buf.reshape(self.num_envs, 1)
@@ -26,42 +26,31 @@ class max_episode_length(Termination):
         return cur_length >= max_length
 
 
-class crash(Termination):
+class crash(TerminationV2):
     """
     Terminate when a monitored link has been in **contact** long enough, optionally with random gating.
-
-    Uses the scene ``contact_forces`` sensor.  For each link resolved from
-    ``body_names_expr`` (see :func:`~active_adaptation.envs.utils.find_sensor_bodies`),
-    ``current_contact_time`` is read.  If *any* such value exceeds ``t_thres`` for an
-    environment, that environment is a **candidate** to terminate on this step.
-
-    Candidates are then filtered by an i.i.d. per-environment draw:
-    ``rand < prob``.  The episode only terminates when both the time condition and
-    that draw are true, so for ``prob < 1`` not every contact-over-threshold step
-    ends the episode.
-
-    The returned per-environment ``discount`` is ``1.0 - prob`` where
-    ``terminated`` is true, and ``1.0`` elsewhere (a multiplicative return factor
-    paired with this stochastic rule).
     """
 
     def __init__(
         self,
-        env,
         body_names_expr: str,
         t_thres: float = 0.0,
-        prob: float = 1.0
+        prob: float = 1.0,
     ):
-        super().__init__(env)
+        super().__init__()
         self.body_names_expr = body_names_expr
         self.t_thres = t_thres
         self.prob = min(max(prob, 0.0), 1.0)
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.body_indices, self.body_names = find_sensor_bodies(
-            self.asset, self.contact_sensor, body_names_expr
+            self.asset, self.contact_sensor, self.body_names_expr
         )
-        self.body_indices = torch.tensor(self.body_indices, device=self.env.device)
+        self.body_indices = torch.tensor(self.body_indices, device=self.device)
         self.data = self.contact_sensor.data
 
     def __repr__(self) -> str:
@@ -75,65 +64,68 @@ class crash(Termination):
         contact_time = self.data.current_contact_time[:, self.body_indices]
         terminated = (contact_time > self.t_thres).any(1, True)
         if self.prob < 1.0:
-            terminated = terminated & (torch.rand(self.num_envs, 1, device=self.env.device) <= self.prob)
+            terminated = terminated & (torch.rand(self.num_envs, 1, device=self.device) <= self.prob)
             discount = torch.where(terminated, 1.0 - self.prob, 1.0)
             return terminated, discount
-        else:
-            return terminated
+        return terminated
 
 
-class undesired_contact(Termination):
-    """
-    Soft termination based on the contact forces on the specified body names.
-    """
+class undesired_contact(TerminationV2):
+    """Soft termination based on the contact forces on the specified body names."""
 
     supported_backends = ("isaac", "mjlab", "motrix")
 
     def __init__(
         self,
-        env,
         body_names: str,
         thres: float = 1.0,
         lateral_only: bool = False,
     ):
-        super().__init__(env)
+        super().__init__()
+        self.body_names_pattern = body_names
         self.thres = thres
-        if lateral_only:
-            self.dim = 2
-        else:
-            self.dim = 3
+        self.lateral_only = lateral_only
+        self.dim = 2 if lateral_only else 3
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.body_indices, self.body_names = find_sensor_bodies(
-            self.asset, self.contact_sensor, body_names
+            self.asset, self.contact_sensor, self.body_names_pattern
         )
-        self.body_indices = torch.tensor(self.body_indices, device=self.env.device)
+        self.body_indices = torch.tensor(self.body_indices, device=self.device)
 
     def __repr__(self) -> str:
-        return f"undesired_contact(body_names={self.body_names}, body_indices={self.body_indices.tolist()}, thres={self.thres}, lateral_only={self.lateral_only})"
+        return (
+            f"undesired_contact(body_names={self.body_names}, "
+            f"body_indices={self.body_indices.tolist()}, thres={self.thres}, "
+            f"lateral_only={self.lateral_only})"
+        )
 
     def compute(self, termination: torch.Tensor):
-        terminated = torch.zeros(self.num_envs, 1, device=self.env.device, dtype=bool)
-        # forces = self.contact_sensor.data.net_forces_w[
-        #     :, self.body_indices, : self.dim
-        # ].norm(dim=-1, keepdim=True)
-        # in_contact = (forces > self.thres).sum(dim=1)
+        terminated = torch.zeros(self.num_envs, 1, device=self.device, dtype=bool)
         contact_time = self.contact_sensor.data.current_contact_time[:, self.body_indices]
         in_contact = (contact_time > 0.0).sum(dim=1, keepdim=True)
         discount = 0.8**in_contact
         return terminated, discount.reshape(self.num_envs, 1)
 
 
-class fall_over(Termination):
+class fall_over(TerminationV2):
     def __init__(
         self,
-        env,
         xy_thres: float = 0.8,
         entity_name: str = "robot",
     ):
-        super().__init__(env)
-        self.asset: IsaacEntity = self.env.scene[entity_name]
+        super().__init__()
         self.xy_thres = xy_thres
+        self.entity_name = entity_name
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.asset: IsaacEntity = self.env.scene[self.entity_name]
 
     def compute(self, termination: torch.Tensor):
         gravity_xy: torch.Tensor = self.asset.data.projected_gravity_b[:, :2]
@@ -141,12 +133,16 @@ class fall_over(Termination):
         return fall_over
 
 
-class root_pos_error(Termination):
-    def __init__(self, env, threshold: float = 2.0, dim: int = 2):
-        super().__init__(env)
+class root_pos_error(TerminationV2):
+    def __init__(self, threshold: float = 2.0, dim: int = 2):
+        super().__init__()
         self.threshold = threshold
-        self.asset: Articulation = self.env.scene.articulations["robot"]
         self.dim = dim
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.asset: Articulation = self.env.scene.articulations["robot"]
 
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
         valid = (self.env.episode_length_buf > 10).unsqueeze(-1)
@@ -159,11 +155,16 @@ class root_pos_error(Termination):
         return (valid & (pos_error > self.threshold)).reshape(self.num_envs, 1)
 
 
-class cum_error(Termination):
-    def __init__(self, env, thres: float = 0.85, min_steps: int = 50):
-        super().__init__(env)
-        self.thres = torch.tensor(thres, device=self.env.device)
-        self.command_manager = self.env.command_manager
+class cum_error(TerminationV2):
+    def __init__(self, thres: float = 0.85, min_steps: int = 50):
+        super().__init__()
+        self.thres = thres
+        self.min_steps = min_steps
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.thres = torch.tensor(self.thres, device=self.device)
         if not hasattr(self.command_manager, "cum_error"):
             raise ValueError("`cum_error` attribute not found in command manager")
 
@@ -171,10 +172,14 @@ class cum_error(Termination):
         return (self.command_manager.cum_error > self.thres).any(-1, True)
 
 
-class joint_acc_exceeds(Termination):
-    def __init__(self, env, thres: float):
-        super().__init__(env)
+class joint_acc_exceeds(TerminationV2):
+    def __init__(self, thres: float):
+        super().__init__()
         self.thres = thres
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
 
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
@@ -182,10 +187,14 @@ class joint_acc_exceeds(Termination):
         return valid & (self.asset.data.joint_acc.abs() > self.thres).any(1, True)
 
 
-class root_height_below(Termination):
-    def __init__(self, env, thres: float):
-        super().__init__(env)
+class root_height_below(TerminationV2):
+    def __init__(self, thres: float):
+        super().__init__()
         self.thres = thres
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
 
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
@@ -194,36 +203,47 @@ class root_height_below(Termination):
         return (height < self.thres).reshape(self.num_envs, 1)
 
 
-class force_contact(Termination):
-    def __init__(self, env, body_names: str, threshold: float):
-        super().__init__(env)
+class force_contact(TerminationV2):
+    def __init__(self, body_names: str, threshold: float):
+        super().__init__()
+        self.body_names_pattern = body_names
+        self.threshold = threshold
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
         self.body_indices, self.body_names = find_sensor_bodies(
-            self.asset, self.contact_sensor, body_names
+            self.asset, self.contact_sensor, self.body_names_pattern
         )
-        self.threshold = threshold
-    
+
     def __repr__(self) -> str:
-        return f"force_contact(body_names={self.body_names}, body_indices={self.body_indices.tolist()}, threshold={self.threshold})"
+        return (
+            f"force_contact(body_names={self.body_names}, "
+            f"body_indices={self.body_indices.tolist()}, threshold={self.threshold})"
+        )
 
     def compute(self, termination: torch.Tensor):
-        forces = self.contact_sensor.data.net_forces_w[:, self.body_indices].norm(
-            dim=-1
-        )
+        forces = self.contact_sensor.data.net_forces_w[:, self.body_indices].norm(dim=-1)
         in_contact = forces.sum(dim=1, keepdim=True) > self.threshold
         return in_contact
 
 
-class bodies_too_close(Termination):
+class bodies_too_close(TerminationV2):
     """Terminate when any two of the specified bodies are closer than ``threshold`` (meters)."""
 
-    def __init__(self, env, body_names: str, threshold: float = 0.05):
-        super().__init__(env)
+    def __init__(self, body_names: str, threshold: float = 0.05):
+        super().__init__()
+        self.body_names_pattern = body_names
         self.threshold = threshold
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.body_indices, self.body_names = find_bodies(self.asset, body_names)
-        self.body_indices = torch.tensor(self.body_indices, device=self.env.device)
+        self.body_indices, self.body_names = find_bodies(self.asset, self.body_names_pattern)
+        self.body_indices = torch.tensor(self.body_indices, device=self.device)
         if len(self.body_indices) < 2:
             raise ValueError("At least two bodies are required")
         n = len(self.body_indices)
@@ -251,8 +271,11 @@ def _point_segment_dist_sq(p: torch.Tensor, a: torch.Tensor, b: torch.Tensor) ->
     closest = a + t.unsqueeze(-1) * ab
     return (p - closest).square().sum(dim=-1)
 
+
 @torch.compile
-def _segment_segment_dist_sq(p1: torch.Tensor, p2: torch.Tensor, q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+def _segment_segment_dist_sq(
+    p1: torch.Tensor, p2: torch.Tensor, q1: torch.Tensor, q2: torch.Tensor
+) -> torch.Tensor:
     """Batched shortest distance squared between segments ``p1``–``p2`` and ``q1``–``q2`` in R^3."""
     u = p2 - p1
     v = q2 - q1
@@ -276,29 +299,33 @@ def _segment_segment_dist_sq(p1: torch.Tensor, p2: torch.Tensor, q1: torch.Tenso
     return torch.where(interior, d_unc_sq, d_edge_sq)
 
 
-class segments_cross(Termination):
-    """Terminate when the shortest distance between the two segments is below ``threshold``.
-
-    Each segment is the line between two body origins (first/second resolved name order).
-    Uses 3D segment–segment closest distance (not only coplanar intersection).
-    Useful when self-collision is disabled for efficiency.
-    """
+class segments_cross(TerminationV2):
+    """Terminate when the shortest distance between the two segments is below ``threshold``."""
 
     def __init__(
         self,
-        env,
         segment1_names: str,
         segment2_names: str,
         threshold: float = 0.07,
     ):
-        super().__init__(env)
+        super().__init__()
+        self.segment1_names_pattern = segment1_names
+        self.segment2_names_pattern = segment2_names
         self.threshold = threshold
         self._threshold_sq = threshold * threshold
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.segment1_indices, self.segment1_names = find_bodies(self.asset, segment1_names)
-        self.segment1_indices = torch.tensor(self.segment1_indices, device=self.env.device)
-        self.segment2_indices, self.segment2_names = find_bodies(self.asset, segment2_names)
-        self.segment2_indices = torch.tensor(self.segment2_indices, device=self.env.device)
+        self.segment1_indices, self.segment1_names = find_bodies(
+            self.asset, self.segment1_names_pattern
+        )
+        self.segment1_indices = torch.tensor(self.segment1_indices, device=self.device)
+        self.segment2_indices, self.segment2_names = find_bodies(
+            self.asset, self.segment2_names_pattern
+        )
+        self.segment2_indices = torch.tensor(self.segment2_indices, device=self.device)
         if len(self.segment1_indices) != 2 or len(self.segment2_indices) != 2:
             raise ValueError("segments_cross requires exactly two bodies per segment (endpoints).")
 
@@ -315,4 +342,3 @@ class segments_cross(Termination):
         q1, q2 = pos2[:, 0], pos2[:, 1]
         d_sq = _segment_segment_dist_sq(p1, p2, q1, q2)
         return (d_sq < self._threshold_sq).reshape(self.num_envs, 1)
-

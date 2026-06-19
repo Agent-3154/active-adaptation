@@ -42,7 +42,7 @@ input:
         action_scaling: 0.035
       - _target_: JointPositionDelta
         action_scaling:
-          arm_joint[1-3]: 0.5
+          arm_joint[1-3]: 0.4
         max_delay: 1
         alpha_range: [0.8, 0.9]
 
@@ -50,17 +50,16 @@ command:
   _target_: LocoManipObject
   eef_body_name: grasp_point
   gripper_joint_names: "arm_joint[7,8]"
+  gripper_body_names: [gripper_left, gripper_right]
   object_name: object
-  object_distance_range: [1.0, 2.0]
-  grasp_height_range: [0.1, 0.6]
-  standoff_distance_range: [0.6, 0.7]
-  standoff_angle_range: [-1.0471975512, 1.0471975512]
-  standoff_linvel_gain: 2.0
-  standoff_yaw_gain: 1.0
+  target_offset_range: [-2.0, 2.0]
+  object_vel_gain: 1.0
+  object_vel_limit: 0.5
+  grasp_height_range: [0.3, 0.6]
 
 observation:
   command:
-    command:  {key: "dense"}
+    command:  {key: "object"}
   policy:
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {steps: 4, noise_std: 0.05}
@@ -80,22 +79,20 @@ observation:
 
 reward:
   loco:
-    # linvel_exp:         {weight: 1.5, dim: 2}
-    # linvel_projection:  {weight: 0.5}
-    # angvel_z_exp:       {weight: 0.8}
     angvel_xy_l2:       {weight: 0.01}
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 1.0, target_height: 0.4, sigma: 0.4}
-  # manip:
-  #   eef_pos_tracking:   {weight: 1.2}
-  #   eef_forward_tracking: {weight: 0.6}
-  #   eef_up_tracking: {weight: 0.6}
-  #   eef_angvel_penalty: {weight: 0.005}
-  #   eef_grasp: {weight: 1.0, gripper_joint_names: "arm_joint[7,8]"}
+  manip_object:
+    object_pos_tracking: {weight: 1.0}
+    object_vel_tracking: {weight: 1.0}
+  manip_eef:
+    object_grasp_pos:   {weight: 1.0, grasp_sigma: 0.25}
+    # eef_grasp:          {weight: 1.0}
+    eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
-    joint_torques_l2:   {weight: 2.0e-4, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
+    joint_torques_l2:   {weight: 1.0e-4, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
@@ -104,9 +101,7 @@ reward:
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:
     _enabled_: false
-    linvel_projection:  {weight: 0.5}
     feet_contact_count: {weight: 1.0, body_names: .*_foot}
-    # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
   max_episode_length: {}
@@ -126,12 +121,13 @@ termination:
 randomization:
   perturb_body_mass:
     .*: [0.8, 1.2]
-  perturb_body_materials:
+  randomize_materials_isaac:
     body_names: .*_foot
     static_friction_range:  [0.5, 3.0]
     dynamic_friction_range: [0.5, 3.0]
     restitution_range:      [0.0, 0.5]
-  motor_params:
+    homogeneous: true
+  actuator_pd_gains:
     stiffness_range:
       .*: [0.8, 1.1]
     damping_range:

@@ -1,7 +1,11 @@
 import inspect
 import warnings
-import active_adaptation as aa
 from collections import defaultdict
+from typing import Any, TypeVar
+
+import active_adaptation as aa
+
+T = TypeVar("T", bound="RegistryMixin")
 
 
 class Registry:
@@ -187,12 +191,19 @@ class RegistryMixin:
 
 
     @classmethod
-    def make(cls, class_name, *args,**kwargs):
+    def make(
+        cls: type[T],
+        class_name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> T | None:
         if class_name not in cls.registry:
             raise ValueError(f"Class '{class_name}' not found in {cls.__name__}.registry")
         instance_cls = cls.registry[class_name]
-        if aa.get_backend() not in instance_cls.supported_backends:
-            warnings.warn(f"Class '{class_name}' does not support backend '{aa.get_backend()}'. "
+        backend = aa.get_backend()
+        # it is allowed to have backend == None if a simulation instance is not actually required
+        if backend is not None and backend not in instance_cls.supported_backends:
+            warnings.warn(f"Class '{class_name}' does not support backend '{backend}'. "
                           f"Supported backends: {instance_cls.supported_backends}")
             return None
         return instance_cls(*args, **kwargs)

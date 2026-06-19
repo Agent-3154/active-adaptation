@@ -171,6 +171,10 @@ cython_debug/
 
 # hydra and wandb
 outputs/
+outputs_train/
+outputs_rollout/
+outputs_eval/
+outputs_play/
 wandb/
 artifacts/
 

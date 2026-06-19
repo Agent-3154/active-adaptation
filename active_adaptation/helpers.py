@@ -4,15 +4,21 @@ import numpy as np
 import time
 import os
 import datetime
+import importlib
 import imageio.v2 as imageio
 
+from typing import Union
 from termcolor import colored
 from omegaconf import OmegaConf, DictConfig
+
+from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
 from tensordict import TensorDictBase
-from active_adaptation.utils.wandb import parse_checkpoint, CheckpointBase
-from active_adaptation.utils.profiling import ScopedTimer
 
 import active_adaptation
+from active_adaptation.utils.wandb import parse_checkpoint, CheckpointBase
+from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.envs import _EnvBase
+
 
 class Every:
     def __init__(self, func, steps):
@@ -26,18 +32,29 @@ class Every:
         self.i += 1
 
 
+def _ensure_backend_env_imported(backend: str):
+    backend_modules = {
+        "isaac": "active_adaptation.envs.backends.isaac",
+        "mujoco": "active_adaptation.envs.backends.mujoco",
+        "mjlab": "active_adaptation.envs.backends.mjlab",
+        "motrix": "active_adaptation.envs.backends.motrix",
+    }
+    module_name = backend_modules.get(backend)
+    if module_name is None:
+        raise ValueError(f"Unknown backend: {backend}")
+    importlib.import_module(module_name)
+
+
 def make_env_policy(
     cfg: DictConfig,
     checkpoint: CheckpointBase | None = None
-):
+) -> tuple[Union[TransformedEnv, _EnvBase], torch.nn.Module]:
     OmegaConf.set_struct(cfg, False)
     cfg.seed = cfg.seed + active_adaptation.get_local_rank()
     
-    from active_adaptation.envs import _EnvBase
-    from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
-    
     # Select the appropriate backend-specific environment class
     backend = active_adaptation.get_backend()
+    _ensure_backend_env_imported(backend)
     if backend == "isaac":
         env_cls = _EnvBase.registry[cfg.task.get("env_class", "IsaacBackendEnv")]
         env_device = str(cfg.device)
@@ -91,14 +108,7 @@ def make_env_policy(
     # setup policy
     policy_cls = hydra.utils.get_class(cfg.algo._target_)
     print(f"Creating policy {policy_cls} on device {cfg.device}")
-    policy = policy_cls(
-        cfg.algo,
-        env.observation_spec, 
-        env.action_spec, 
-        env.reward_spec,
-        device=cfg.device,
-        env=env
-    )
+    policy = policy_cls.from_env(cfg.algo, env, device=cfg.device)
     
     if "policy" in state_dict.keys():
         print(colored("[Info]: Load policy from checkpoint.", "green"))

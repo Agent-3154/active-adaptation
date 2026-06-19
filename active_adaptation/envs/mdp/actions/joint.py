@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from typing import Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 from typing_extensions import override
 
 try:
@@ -13,7 +13,11 @@ except ModuleNotFoundError:
 
 from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
 
-from .base import Action
+from .base import ActionV2
+
+
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import _EnvBase
 
 
 class SoftBoundTracker(nn.Module):
@@ -74,25 +78,31 @@ class SoftBoundTracker(nn.Module):
         return self.lower, self.upper
 
 
-class _DelayedJointAction(Action):
+class _DelayedJointAction(ActionV2):
     def __init__(
         self,
-        env,
-        action_scaling: Dict[str, float] = 0.5,
+        action_scaling: Dict[str, float] | float = 0.5,
         max_delay: int = 2,
         alpha_range: Tuple[float, float] = (0.5, 1.0),
         track_pos_target_bounds: bool = False,
         track_vel_target_bounds: bool = False,
     ):
-        super().__init__(env)
+        super().__init__()
         self.track_pos_target_bounds = track_pos_target_bounds
         self.track_vel_target_bounds = track_vel_target_bounds
 
         if isinstance(action_scaling, float):
             action_scaling = {".*": float(action_scaling)}
-        
+        self._action_scaling = dict(action_scaling)
+        self.max_delay = max_delay
+        self.alpha_range = tuple(alpha_range)
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+
         _, self.joint_names, scaling = string_utils.resolve_matching_names_values(
-            dict(action_scaling), self.asset.cfg.joint_names_simulation
+            self._action_scaling, self.asset.cfg.joint_names_simulation
         )
         self.joint_ids = torch.tensor(
             [self.asset.joint_names.index(name) for name in self.joint_names],
@@ -100,8 +110,6 @@ class _DelayedJointAction(Action):
         )
 
         self.action_scaling = torch.tensor(scaling, device=self.device)
-        self.max_delay = max_delay
-        self.alpha_range = tuple(alpha_range)
         self.decimation = int(self.env.step_dt / self.env.physics_dt)
 
         with torch.device(self.device):
@@ -114,7 +122,7 @@ class _DelayedJointAction(Action):
             self.applied_action = torch.zeros(self.num_envs, self.action_dim)
             self.alpha = torch.ones(self.num_envs, 1)
             self.delay = torch.zeros(self.num_envs, 1, dtype=torch.int64)
-        
+
         if self.track_pos_target_bounds:
             self.pos_target_bound_tracker = SoftBoundTracker(
                 shape=(self.action_dim,), tau=0.9
@@ -135,7 +143,7 @@ class _DelayedJointAction(Action):
                 d[f"diagnostics/vel_target_bound/{jname}_upper"] = self.vel_target_bound_tracker.upper[i]
                 d[f"diagnostics/vel_target_bound/{jname}_lower"] = self.vel_target_bound_tracker.lower[i]
         return d
-    
+
     @property
     def action_dim(self):
         return len(self.joint_ids)
@@ -179,25 +187,28 @@ class JointPosition(_DelayedJointAction):
     Use this when you want the policy to command pose offsets directly around the
     nominal/default posture, without integrating action over time.
     """
+
     def __init__(
         self,
-        env,
-        action_scaling: Dict[str, float] = 0.5,
+        action_scaling: Dict[str, float] | float = 0.5,
         max_delay: int = 2,
         alpha_range: Tuple[float, float] = (0.5, 1.0),
         track_pos_target_bounds: bool = False,
     ):
         super().__init__(
-            env,
             action_scaling=action_scaling,
             max_delay=max_delay,
             alpha_range=alpha_range,
             track_pos_target_bounds=track_pos_target_bounds,
-            track_vel_target_bounds=False
+            track_vel_target_bounds=False,
         )
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
         self.offset = torch.zeros_like(self.default_joint_pos)
-    
+
     def __repr__(self) -> str:
         return f"JointPosition(joint_names={self.joint_names}, joint_ids={self.joint_ids.tolist()})"
 
@@ -226,34 +237,36 @@ class JointPositionWithVelocityForward(_DelayedJointAction):
 
     def __init__(
         self,
-        env,
-        action_scaling: Dict[str, float] = 0.5,
+        action_scaling: Dict[str, float] | float = 0.5,
         velocity_ff: float = 0.5,
         max_delay: int = 2,
         alpha_range: Tuple[float, float] = (0.5, 1.0),
         track_pos_target_bounds: bool = False,
     ):
         super().__init__(
-            env,
             action_scaling=action_scaling,
             max_delay=max_delay,
             alpha_range=alpha_range,
             track_pos_target_bounds=track_pos_target_bounds,
-            track_vel_target_bounds=False
+            track_vel_target_bounds=False,
         )
         self.velocity_ff = velocity_ff
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
         self.offset = torch.zeros_like(self.default_joint_pos)
         # previous joint position target
         self._jpos_target = self.default_joint_pos.clone()
-    
+
     @override
     def reset(self, env_ids: torch.Tensor):
         super().reset(env_ids)
         default_joint_pos = self.asset.data.default_joint_pos[env_ids.unsqueeze(1), self.joint_ids]
         self.default_joint_pos[env_ids] = default_joint_pos + self.offset[env_ids]
         self._jpos_target[env_ids] = self.default_joint_pos[env_ids]
-    
+
     @override
     def apply_action(self, substep: int):
         self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
@@ -281,32 +294,35 @@ class JointPositionDelta(_DelayedJointAction):
     Use this when you want rate-like behavior and smoother, trajectory-style
     evolution of joint targets instead of direct pose-offset commands.
     """
+
     def __init__(
         self,
-        env,
-        action_scaling: Dict[str, float] = 0.5,
+        action_scaling: Dict[str, float] | float = 0.5,
         clamp_range: Tuple[float, float] = (-0.5 * torch.pi, 0.5 * torch.pi),
         max_delay: int = 2,
         alpha_range: Tuple[float, float] = (0.5, 1.0),
-        track_pos_target_bounds: bool = False
+        track_pos_target_bounds: bool = False,
     ):
         super().__init__(
-            env,
             action_scaling,
             max_delay,
             alpha_range,
             track_pos_target_bounds=track_pos_target_bounds,
-            track_vel_target_bounds=False
+            track_vel_target_bounds=False,
         )
-        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
         self.clamp_range = tuple(clamp_range)
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
         self.jpos_target = self.default_joint_pos.clone()
-    
+
     @override
     def reset(self, env_ids: torch.Tensor):
         super().reset(env_ids)
         self.jpos_target[env_ids] = self.default_joint_pos[env_ids]
-    
+
     @override
     def apply_action(self, substep: int):
         self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
@@ -324,21 +340,19 @@ class JointVelocity(_DelayedJointAction):
 
     def __init__(
         self,
-        env,
-        action_scaling: Dict[str, float] = 0.5,
+        action_scaling: Dict[str, float] | float = 0.5,
         max_delay: int = 2,
         alpha_range: Tuple[float, float] = (0.5, 1.0),
-        track_vel_target_bounds: bool = False
+        track_vel_target_bounds: bool = False,
     ):
         super().__init__(
-            env,
             action_scaling,
             max_delay,
             alpha_range,
             track_pos_target_bounds=False,
-            track_vel_target_bounds=track_vel_target_bounds
+            track_vel_target_bounds=track_vel_target_bounds,
         )
-    
+
     @override
     def apply_action(self, substep: int):
         self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
@@ -346,12 +360,12 @@ class JointVelocity(_DelayedJointAction):
 
         jvel_target = self.applied_action * self.action_scaling
         self.asset.set_joint_velocity_target(jvel_target, joint_ids=self.joint_ids)
-        
+
         if self.track_vel_target_bounds:
             self.vel_target_bound_tracker.update(jvel_target)
 
 
-class CorrelatedJointPosition(Action):
+class CorrelatedJointPosition(ActionV2):
     """Map a low-dimensional action to correlated joint position targets.
 
     Each controlled joint receives ``default_joint_pos + action_scaling * (action @ matrix.T)``,
@@ -361,16 +375,22 @@ class CorrelatedJointPosition(Action):
 
     def __init__(
         self,
-        env,
         joint_names: str | list[str],
         matrix: list[float] | list[list[float]],
         action_scaling: float = 1.0,
     ) -> None:
-        super().__init__(env)
-        joint_ids, self.joint_names = self.asset.find_joints(joint_names)
+        super().__init__()
+        self.joint_names_expr = joint_names
+        self._matrix = matrix
+        self.action_scaling = action_scaling
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        joint_ids, self.joint_names = self.asset.find_joints(self.joint_names_expr)
         self.joint_ids = torch.tensor(joint_ids, device=self.device)
 
-        coeffs = torch.tensor(matrix, dtype=torch.float32, device=self.device)
+        coeffs = torch.tensor(self._matrix, dtype=torch.float32, device=self.device)
         if coeffs.ndim == 1:
             coeffs = coeffs.unsqueeze(-1)
         if coeffs.shape[0] != len(self.joint_names):
@@ -380,7 +400,6 @@ class CorrelatedJointPosition(Action):
             )
         self.matrix = coeffs
         self.action_dim = int(self.matrix.shape[1])
-        self.action_scaling = action_scaling
 
         with torch.device(self.device):
             self.default_joint_pos = self.asset.data.default_joint_pos[

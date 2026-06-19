@@ -1,0 +1,47 @@
+[project]
+name = "aa-isaac51-env"
+version = "0.1.0"
+requires-python = "==3.11.*"
+dependencies = [
+    "active-adaptation",
+    # Keep this pinned to the Isaac 5.1-compatible version.
+    "isaacsim[all,extscache]==5.1.0",
+    "warp-lang < 1.13",
+]
+
+[tool.uv.sources]
+active-adaptation = { path = "../..", editable = true }
+isaacsim = { index = "nvidia" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "aliyun"
+url = "http://mirrors.aliyun.com/pypi/simple/"
+default = true
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com/"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv]
+package = false
+override-dependencies = [
+    # isaacsim-core metadata may pull pywin32 unconditionally; gate it to Windows only.
+    "pywin32==306 ; sys_platform == 'win32'",
+    # Keep this torch triplet aligned with venv/mjlab to maximize uv wheel cache reuse.
+    # Isaac Sim 5.1 metadata pins torch 2.7, but runtime is compatible with 2.11 in our setup.
+    "torch==2.11",
+    "torchaudio==2.11",
+    "torchvision==0.26.0",
+]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'"
+]

@@ -12,9 +12,6 @@ Meanwhile, the code for the live demo (runinng Mujoco in browsers) is here [http
 * Easy symmetry augmentation.
 * Seamless Mujoco sim2sim.
 
-## Current Limitations
-* TorchRL stores redundant information and therefore the rollout buffer consumes more GPU memory.
-
 ## Installation
 
 ### Workspace layout
@@ -31,70 +28,127 @@ ${workspaceFolder}/
     _isaac_sim/
 ```
 
-### Single Python environment
+### Recommended: uv multi-environment workflow
 
-Use one Python 3.11 environment for this repo.
+Use `uv` as the default environment manager. Keep backend stacks isolated:
 
-- Isaac Sim / IsaacLab requires Python 3.11.
-- MJLab also works on Python 3.11.
-- The repo root is the only `uv` project you need.
+- `venv/isaac51`: Python `==3.11.*`
+- `venv/isaac60`: Python `==3.12.*`
+- `venv/mjlab`: Python `>=3.11`
 
 Setup:
 
 ```bash
 git clone git@github.com:btx0424/active-adaptation.git
 cd active-adaptation
+
+# shared tooling / backend-agnostic environment
 uv sync
+
+# backend-specific environments
+uv sync --project venv/isaac51
+uv sync --project venv/isaac60
+uv sync --project venv/mjlab
 ```
 
-For common development commands:
+### IsaacLab Installation
+
+We will install [IsaacLab](https://github.com/isaac-sim/IsaacLab) from source, not from pip.
+
+> `isaac51` is currently the only tested Isaac track. `isaac60` setup is planned but not validated yet.
+
+Manual installation steps (`isaac51`):
 
 ```bash
+# from active-adaptation repo
+cd /path/to/active-adaptation
+uv sync --project venv/isaac51
+source venv/isaac51/.venv/bin/activate
+
+# install IsaacLab extensions from source repo
+cd /path/to/IsaacLab
+./isaaclab.sh -i none
+
+# optional: verify IsaacLab import in this env
+python -c "import isaaclab; print(isaaclab.__file__)"
+```
+
+Common commands:
+
+```bash
+# shared
 uv run aa-discover-projects
 uv run aa-list-tasks
 uv run pyright active_adaptation
-```
 
-### IsaacLab / Isaac Sim setup
-
-Install [Isaac Sim 5.1.0](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/download.html) and [IsaacLab](https://github.com/isaac-sim/IsaacLab) into the same Python 3.11 environment you use for this repo.
-
-After that, run training / eval / play from the repo root:
-
-```bash
-uv run python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
-uv run python scripts/eval.py task=Go2/Go2Flat algo=ppo eval_render=true
-uv run python scripts/play.py task=Go2/Go2Flat algo=ppo checkpoint_path=/path/to/checkpoint.pt
+# backend-specific runs
+uv run --project venv/isaac51 python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
+uv run --project venv/isaac60 python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
+uv run --project venv/mjlab python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
 ```
 
 Notes:
 
-- `uv sync` manages this repo's dependencies in `.venv`.
+- Prefer `uv run --project <env-dir>` for reproducible backend runs.
+- Use `uv run --with <extra> ...` only for temporary one-off tools, not core backend dependencies.
+- Keep backend-specific `warp-lang` pins in each backend env (`venv/isaac51`, `venv/isaac60`, `venv/mjlab`), not in the root project.
+
+### Conda workflow (supported, legacy recommendation)
+
+Conda remains supported if you prefer it for Python/runtime management. The same split-env principle applies (do not combine incompatible backends in one env).
+
+```bash
+git clone git@github.com:btx0424/active-adaptation.git
+cd active-adaptation
+
+# isaac51 (Python 3.11)
+conda create -n aa-isaac51 python=3.11 -y
+conda activate aa-isaac51
+pip install -e .
+# install isaac51-specific deps (including its warp-lang pin)
+
+# isaac60 (Python 3.12)
+conda create -n aa-isaac60 python=3.12 -y
+conda activate aa-isaac60
+pip install -e .
+# install isaac60-specific deps (including its warp-lang pin)
+
+# mjlab (Python >=3.11, example with 3.11)
+conda create -n aa-mjlab python=3.11 -y
+conda activate aa-mjlab
+pip install -e .
+pip install mjlab
+```
+
+If you use conda, prefer one env per backend track and document exact backend package pins in your team setup docs.
+
+After that, run training / eval / play from the repo root:
+
+```bash
+uv run --project venv/isaac51 python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
+uv run --project venv/isaac51 python scripts/eval.py task=Go2/Go2Flat algo=ppo eval_render=true
+uv run --project venv/isaac51 python scripts/play.py task=Go2/Go2Flat algo=ppo checkpoint_path=/path/to/checkpoint.pt
+```
+
+Notes:
+
+- `uv sync --project venv/isaac51` manages the tested Isaac track dependencies.
 - IsaacLab itself may still require its own setup for `PYTHONPATH`, Isaac Sim linking, and extension discovery.
-- The important constraint is that IsaacLab and this repo must use the same Python 3.11 environment.
+- The important constraint is that IsaacLab and this repo must use the same `venv/isaac51` environment.
 
 ### MJLab setup
 
-If you want to use the `mjlab` backend, install the optional extra in the same root environment:
+If you want to use the `mjlab` backend, use the dedicated `venv/mjlab` environment:
 
 ```bash
-uv sync --extra mjlab
+uv sync --project venv/mjlab
 ```
 
 Then run MJLab commands from the repo root:
 
 ```bash
-uv run python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
-uv run python scripts/play.py task=Go2/Go2Flat algo=ppo backend=mjlab checkpoint_path=/path/to/checkpoint.pt
-```
-
-### Optional: direct `pip` install
-
-If you are not using `uv`, the root package can still be installed directly:
-
-```bash
-pip install -e .
-pip install mjlab==1.2.0  # only if you need the mjlab backend
+uv run --project venv/mjlab python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
+uv run --project venv/mjlab python scripts/play.py task=Go2/Go2Flat algo=ppo backend=mjlab checkpoint_path=/path/to/checkpoint.pt
 ```
 
 ### Optional VSCode setup

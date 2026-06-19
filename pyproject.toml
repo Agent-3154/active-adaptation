@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "active_adaptation"
-version = "0.5.0"
+version = "0.7.0"
 authors = [
     {name = "btx0424@SUSTech"}
 ]
 keywords = ["robotics", "rl"]
-requires-python = "==3.11.*"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "setproctitle",
     "hydra-core",
@@ -25,23 +25,14 @@ dependencies = [
     "jaxtyping",
     "tensordict",
     "torchrl",
-    "torch",
+    "torch==2.11",
+    "torchvision==0.26.0",
     "imageio",
-    "mujoco",
-    "huggingface_hub>=0.30",
     "linuxfd",
     "pdbpp",
     "scipy",
     "trimesh",
-    "warp-lang",
-]
-
-[project.optional-dependencies]
-rollout = [
-    "nicegui",
-]
-mjlab = [
-    "mjlab==1.2.0",
+    "mujoco<3.9.0",
 ]
 
 [project.scripts]
@@ -72,3 +63,14 @@ find = { where = ["."], include = [
 [tool.pyright]
 # typeCheckingMode = "strict"
 reportIncompatibleMethodOverride = "error"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+# Force CUDA 12.8-compatible PyTorch wheels instead of default cu13x builds.
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
