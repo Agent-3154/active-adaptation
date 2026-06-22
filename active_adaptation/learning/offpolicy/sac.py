@@ -105,7 +105,6 @@ class SACConfig:
     # target smoothing: this should help Q(s_t, a_t) to generalize locally around a_t
     target_action_noise: float = 0.01
     # AR(1) pre-tanh exploration noise on rollout only: eps_t = rho * eps_{t-1} + sqrt(1-rho^2) * N(0,I).
-    # 0 disables correlation (standard :meth:`ScaledTanhNormal.sample`-equivalent path). Critic/actor still use iid.
     use_correlated: bool = True
     # sac specific
     entropy_bonus: float = 1.0
@@ -124,9 +123,6 @@ class SACConfig:
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = True
-    # Prioritized replay (same API as off-policy ReplayBuffer): None disables PER.
-    per_alpha: float | None = None
-    per_beta: float = 0.6
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
     normalized_G_max: float = 5.0
@@ -328,7 +324,6 @@ class SAC(TensorDictModuleBase):
     train_keys = (
         CMD_KEY, OBS_KEY, ("next", OBS_KEY), ("next", CMD_KEY), ACTION_KEY,
         REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
-        "priority_weight", "replay_flat_index"
     )
 
     def __init__(
@@ -656,13 +651,7 @@ class SAC(TensorDictModuleBase):
             # .exclude(("next", OBS_KEY))
         )
         fake_rb["loc"] = torch.zeros(fake_rb.shape[0], self.actor.act_dim)
-        per_kw: dict[str, Any] = {}
-        if self.cfg.per_alpha is not None:
-            per_kw.update(
-                per_alpha=self.cfg.per_alpha,
-                per_beta=self.cfg.per_beta,
-            )
-        self.rb = ReplayBuffer.from_fake(self.cfg.buffer_size, fake_rb, **per_kw)
+        self.rb = ReplayBuffer.from_fake(self.cfg.buffer_size, fake_rb)
         print("Primary buffer:")
         print(self.rb)
         if self.cfg.prior_data is not None:
@@ -777,16 +766,11 @@ class SAC(TensorDictModuleBase):
         diagnostics: bool = False,
     ):
         self.Q.train()
-        batch = batch.select(*self.train_keys, inplace=True)
+        batch = batch.select(*self.train_keys, inplace=True, strict=False)
         B_online = batch.shape[1]
-        # Capture prior ground-truth Q (in raw return units, recorded at rollout
-        # time) before .select() drops keys not present in the primary buffer
-        # schema, then concatenate the prior data into the training batch.
-        # prior_q_gt: torch.Tensor | None = None
+
         if batch_prior is not None:
-            prior_ret = batch_prior["ret"]
-            # ret_valid = batch_prior["ret_valid"] # unused for now
-            batch_prior = batch_prior.select(*self.train_keys, inplace=True)
+            batch_prior = batch_prior.select(*self.train_keys, inplace=True, strict=False)
             # if "Q_value" in batch_prior.keys(True, True):
             #     gt = batch_prior["Q_value"]
             #     prior_q_gt = gt[0] if gt.ndim > 1 else gt
@@ -853,17 +837,6 @@ class SAC(TensorDictModuleBase):
             )
             is_init = batch["is_init"][0]
 
-        weight = batch["priority_weight"]
-        replay_flat_idx = batch["replay_flat_index"].long()
-        if weight.ndim == 2:
-            weight = weight[0].contiguous()
-            replay_flat_idx = replay_flat_idx[0].contiguous()
-        weight = weight.to(device=self.device, dtype=torch.float32)
-        ri_base_cpu = replay_flat_idx.cpu() if self.rb.prioritized else None
-
-        importance_weights_base = weight
-        importance_weights = weight.clone()
-
         with self._autocast():
             with ScopedTimer("compute_target"):
                 q_target = self.compute_target(next_obs, reward, discount)
@@ -880,15 +853,12 @@ class SAC(TensorDictModuleBase):
                 q_target = torch.cat([q_target, q_target], dim=0)
                 terminated = torch.cat([terminated, terminated], dim=0)
                 is_init = torch.cat([is_init, is_init], dim=0)
-                importance_weights = torch.cat(
-                    [importance_weights_base, importance_weights_base], dim=0
-                )
 
             pred = self.Q(obs, act)
             per_sample_q_loss = self.Q.compute_loss(pred, q_target)
             valid = (1.0 - is_init.float()).reshape_as(per_sample_q_loss)
-            denom = (importance_weights * valid).sum().clamp_min(1e-8)
-            q_loss = (per_sample_q_loss * importance_weights * valid).sum() / denom
+            denom = valid.sum().clamp_min(1e-8)
+            q_loss = (per_sample_q_loss * valid).sum() / denom
 
         self.opt_Q.zero_grad(set_to_none=True)
         if self._amp_enabled:
@@ -913,22 +883,6 @@ class SAC(TensorDictModuleBase):
 
         soft_copy_(self.Q, self.Q_target, tau=self.cfg.tau_Q)
 
-        if self.rb.prioritized:
-            with torch.no_grad():
-                if self.cfg.distributional:
-                    prio_src = per_sample_q_loss[:B_eff].float().cpu()
-                else:
-                    prio_src = (
-                        (
-                            pred[:B_eff] - q_target[:B_eff]
-                        )
-                        .abs()
-                        .mean(dim=-1)
-                        .float()
-                        .cpu()
-                    )
-                self.rb.update_priority(ri_base_cpu, prio_src)
-
         if not diagnostics:
             return
 
@@ -937,6 +891,17 @@ class SAC(TensorDictModuleBase):
             "critic/grad_norm": critic_grad_norm.item(),
         }
         with torch.no_grad():
+            if self.cfg.n_steps > 1:
+                # Online-only policy/action mismatch at t+1 (exclude prior data).
+                obs_t1 = batch["_input_normed"][1, :B_online]
+                act_t1 = batch[ACTION_KEY][1, :B_online]
+                done_t0 = batch[DONE_KEY][0, :B_online].reshape(B_online)
+                alive_t1 = ~done_t0.bool()
+                if alive_t1.any():
+                    policy_act_t1 = self.actor(obs_t1)[0]
+                    l2_t1 = torch.linalg.vector_norm(policy_act_t1 - act_t1, dim=-1)
+                    infos["critic/action_mismatch_t1"] = l2_t1[alive_t1].mean().item()
+
             if self.cfg.distributional:
                 logits = self.Q(obs, act)
                 q = self.Q.expected_values(logits)
@@ -969,29 +934,11 @@ class SAC(TensorDictModuleBase):
             q_prior = q[B_online: B_eff]
             infos["critic/prior_q_mean"] = q_prior.mean().item()
             infos["critic/prior_q_max"] = q_prior.max().item()
-            infos["critic/prior_q_std"] = q_prior.std(dim=-1).mean().item()
-            underestimated = (q_prior < prior_ret).float().mean().item()
-            infos["critic/prior_q_underestimated"] = underestimated
         
         if terminated.any():
             q_val_terminated = q[terminated.reshape(q.shape[0])]
             infos["critic/q_value_terminated"] = q_val_terminated.mean().item()
             infos["critic/q_loss_terminated"] = per_sample_q_loss[terminated.reshape(q.shape[0])].mean().item()
-        
-        # Gap between current critic and the prior-data ground-truth Q
-        # (recorded at rollout time, stored in raw return units).
-        # if prior_q_gt is not None:
-        #     B_prior = int(prior_q_gt.shape[0])
-        #     # q is already denormalized above when reward_normalizer is active.
-        #     # Under sym_aug, q has shape (2*B_eff,); take the unaugmented head.
-        #     q_unaug = q[:B_eff]
-        #     q_prior_pred = q_unaug[B_eff - B_prior :].reshape(B_prior)
-        #     gt = prior_q_gt.to(device=q_prior_pred.device, dtype=q_prior_pred.dtype).reshape(B_prior)
-        #     gap = q_prior_pred - gt
-        #     infos["critic/prior_q_gt"] = gt.mean().item()
-        #     infos["critic/prior_q_pred"] = q_prior_pred.mean().item()
-        #     infos["critic/prior_q_gap_mean"] = gap.mean().item()
-        #     infos["critic/prior_q_gap_abs"] = gap.abs().mean().item()
 
         return infos
 
@@ -1020,25 +967,26 @@ class SAC(TensorDictModuleBase):
     def train_actor(self, diagnostics: bool = False):
         batch = self.rb.sample(batch_size=self.cfg.actor_batch_size, steps=1).to(
             self.device
-        ).select(*self.train_keys) # [N,]
+        ).select(*self.train_keys, strict=False) # [N,]
         if self.rb_prior is not None:
             batch_prior = self.rb_prior.sample(
                 batch_size=int(self.cfg.actor_batch_size * self.cfg.prior_data_ratio),
                 steps=1,
-            ).select(*self.train_keys).to(self.device)
+            ).select(*self.train_keys, strict=False).to(self.device)
             batch = torch.cat([batch, batch_prior], dim=0)
-
-        weight = batch["priority_weight"]
-        if weight.ndim == 2:
-            weight = weight[0].contiguous()
-        weight = weight.to(device=self.device, dtype=torch.float32)
-        importance_weights_base = weight
-        importance_weights = weight.clone()
+            # we will see if the prior action gives larger Q(s, a)
+            prior_action = batch_prior[ACTION_KEY]
 
         self.preproc(batch)
         obs = batch["_input_normed"]
         act = batch[ACTION_KEY]
         is_init = batch["is_init"]
+        n_unaug = obs.shape[0]
+        prior_obs = None
+        prior_count = 0
+        if self.rb_prior is not None:
+            prior_count = batch_prior.shape[0]
+            prior_obs = obs[-prior_count:]
 
         if self.cfg.sym_aug:
             obs_mirror = self.obs_transform(obs)
@@ -1046,9 +994,6 @@ class SAC(TensorDictModuleBase):
             obs = torch.cat([obs, obs_mirror], dim=0)
             act = torch.cat([act, act_mirror], dim=0)
             is_init = torch.cat([is_init, is_init], dim=0)
-            importance_weights = torch.cat(
-                [importance_weights_base, importance_weights_base], dim=0
-            )
 
         with hold_out_net(self.Q), self._autocast():
             loc, scale = self.actor(obs)
@@ -1068,8 +1013,8 @@ class SAC(TensorDictModuleBase):
             + 0.01 * ((loc/self.cfg.soft_bound)**6).sum(-1).reshape_as(policy_term)
         )
         valid = (1.0 - is_init.float()).reshape_as(actor_loss)
-        denom = (importance_weights * valid).sum().clamp_min(1e-8)
-        actor_loss = (actor_loss * importance_weights * valid).sum() / denom
+        denom = valid.sum().clamp_min(1e-8)
+        actor_loss = (actor_loss * valid).sum() / denom
 
         q_action_grad_norm: torch.Tensor | None = None
         if diagnostics:
@@ -1130,6 +1075,16 @@ class SAC(TensorDictModuleBase):
                 "actor/mean_loc": loc.abs().mean().item(),
                 "actor/mean_scale": scale.mean().item(),
             }
+            if self.rb_prior is not None:
+                # compare Q(s, a_prior) with mean_k Q(s, a_k)
+                q_prior = self.Q.get_values(
+                    prior_obs,
+                    prior_action,
+                ).mean(dim=-1)
+                q_policy_prior = q[:n_unaug][-prior_count:].mean(dim=1)
+                advantage = q_policy_prior - q_prior
+                # whether the online policy is better than the offline policy
+                infos["actor/online_advantage"] = advantage.mean().item()
 
         if self.has_symmetry:
             with torch.no_grad():
