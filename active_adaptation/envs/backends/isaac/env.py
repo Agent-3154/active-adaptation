@@ -1,5 +1,4 @@
 from active_adaptation import ROBOT_MODEL_DIR
-from active_adaptation.assets import AssetCfg
 from active_adaptation.envs.backends.isaac.adapter import (
     IsaacSceneAdapter,
     IsaacSimAdapter,
@@ -58,20 +57,10 @@ class IsaacBackendEnv(_EnvBase):
         )
 
         asset_cfg = registry.get("asset", self.cfg.robot.name)
-        if callable(asset_cfg):
-            asset_cfg, sensors = asset_cfg(backend="isaaclab")
-            scene_cfg.robot = asset_cfg
-            for name, sensor_cfg in sensors.items():
-                setattr(scene_cfg, name, sensor_cfg)
-        elif isinstance(asset_cfg, AssetCfg):
-            scene_cfg.robot = asset_cfg.isaaclab()
-            for sensor_cfg in asset_cfg.sensors_isaaclab:
-                setattr(scene_cfg, sensor_cfg.name, sensor_cfg.isaaclab())
-        else:
-            raise ValueError(
-                "Asset configuration must be an instance of AssetCfg or callable, "
-                f"got {type(asset_cfg)}"
-            )
+        asset_cfg, sensors = asset_cfg(backend="isaaclab")
+        scene_cfg.robot = asset_cfg
+        for name, sensor_cfg in sensors.items():
+            setattr(scene_cfg, name, sensor_cfg)
 
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
         terrain_name = self.cfg.get("terrain", "plane")

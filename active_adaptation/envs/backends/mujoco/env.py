@@ -1,12 +1,6 @@
 from typing import cast
+from dataclasses import dataclass
 
-try:
-    from isaaclab.utils import configclass
-except ModuleNotFoundError:
-    def configclass(cls):
-        return cls
-
-from active_adaptation.assets import AssetCfg
 from active_adaptation.envs.backends.mujoco.adapter import (
     MujocoSceneAdapter,
     MujocoSimAdapter,
@@ -27,11 +21,12 @@ class MujocoBackendEnv(_EnvBase):
         from active_adaptation.envs.terrain import TERRAINS_MUJOCO
 
         registry = Registry.instance()
-        asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
+        asset_cfg = registry.get("asset", self.cfg.robot.name)
+        asset_cfg, _ = asset_cfg(backend="mujoco")
 
-        @configclass
+        @dataclass
         class SceneCfg:
-            robot = asset_cfg.mujoco()
+            robot = asset_cfg
             contact_forces = "robot"
             terrain = TERRAINS_MUJOCO.get(self.cfg.terrain, TERRAINS_MUJOCO["plane"])
 

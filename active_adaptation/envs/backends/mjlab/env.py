@@ -2,7 +2,6 @@ import math
 import mujoco
 from typing import cast
 
-from active_adaptation.assets import AssetCfg
 from active_adaptation.envs.backends.mjlab.adapter import (
     MjlabSceneAdapter,
     MjlabSimAdapter,
@@ -81,44 +80,15 @@ class MjlabBackendEnv(_EnvBase):
         from active_adaptation.envs.backends.mjlab.viewer import MjLabViewer
 
         registry = Registry.instance()
-        asset_cfg = cast(AssetCfg, registry.get("asset", self.cfg.robot.name))
-        if callable(asset_cfg):
-            asset_cfg, sensors = asset_cfg(backend="mjlab")
-        elif isinstance(asset_cfg, AssetCfg):
-            sensors = tuple(sensor.mjlab() for sensor in asset_cfg.sensors_mjlab)
-            asset_cfg = asset_cfg.mjlab()
-        else:
-            raise ValueError(
-                "Asset configuration must be an instance of AssetCfg or callable, "
-                f"got {type(asset_cfg)}"
-            )
+        asset_cfg = registry.get("asset", self.cfg.robot.name)
+        asset_cfg, sensors = asset_cfg(backend="mjlab")
         terrain = self.cfg.get("terrain", "plane")
+        
         self.terrain_type = terrain
 
         env_spacing = 2.5
         if terrain == "plane":
             terrain_cfg = TerrainEntityCfg(terrain_type="plane")
-        elif terrain == "rough":
-            terrain_cfg = TerrainEntityCfg(
-                terrain_type="generator",
-                terrain_generator=TerrainGeneratorCfg(
-                    size=(5.0, 5.0),
-                    border_width=20.0,
-                    num_rows=8,
-                    num_cols=8,
-                    sub_terrains={
-                        "boxes": terrain_gen.BoxRandomGridTerrainCfg(
-                            proportion=1.0,
-                            grid_width=0.5,
-                            grid_height_range=(0.001, 0.005),
-                            platform_width=0.5,
-                        )
-                    },
-                    add_lights=False,
-                ),
-                env_spacing=env_spacing,
-                num_envs=self.cfg.num_envs,
-            )
         else:
             raise ValueError(
                 f"Unsupported terrain `{terrain}`. Expected one of: `plane`, `rough`."

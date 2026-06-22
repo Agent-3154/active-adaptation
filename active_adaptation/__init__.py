@@ -4,8 +4,6 @@ import json
 import datetime
 import builtins
 import inspect
-import importlib
-import warp as wp
 
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
@@ -124,8 +122,6 @@ def init(cfg: DictConfig, auto_rank: bool):
         auto_rank: Whether to automatically modify `cfg.device` according to the local rank.
     """
 
-    wp.init()
-
     # Store sys.argv to a local file
     if is_main_process():
         argv_file = CACHE_DIR / "command_history.json"
@@ -167,6 +163,7 @@ def init(cfg: DictConfig, auto_rank: bool):
         app_config = _apply_default_isaaclab_kit_args(app_config)
         AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
 
+    import active_adaptation.assets # register assets
     import_environment_projects()
 
     return cfg
