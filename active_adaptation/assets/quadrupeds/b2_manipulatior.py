@@ -1,6 +1,6 @@
 """Unitree B2 + Z1 arm — asset config.
 
-MJCF/USD source: ``<repo>/.cache/aa-robot-models/b2z1/`` (``b2z1.xml``, ``b2z1_flattened.usd``).
+MJCF/USD source: ``<repo>/.cache/aa-robot-models/b2z1/``.
 """
 
 from __future__ import annotations
@@ -314,7 +314,7 @@ def make_mjlab_cfg(self_collisions: bool = False):
     from mjlab.sensor import ContactMatch, ContactSensorCfg
     from mjlab.utils.spec_config import CollisionCfg
 
-    XML_PATH = ROBOT_MODEL_DIR / "b2z1" / "b2z1.xml"  # do not change
+    XML_PATH = ROBOT_MODEL_DIR / "b2z1" / "b2z1_simplified.xml"  # do not change
 
     def spec_fn():
         return mujoco.MjSpec.from_file(str(XML_PATH))
