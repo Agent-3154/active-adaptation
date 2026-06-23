@@ -17,6 +17,12 @@ def _policy_dist(actor: nn.Module, obs: torch.Tensor) -> Any:
 
 
 class MultiStepReturn(nn.Module):
+    """Compute n-step return and fixed-horizon action stacks.
+
+    Always consumes ``actions`` with shape ``[T, N, act_dim]`` and returns
+    stacked actions with shape ``[N, T, act_dim]`` where steps beyond episode
+    end are filled by repeating the terminal action.
+    """
     def __init__(self, gamma: float, n_steps: int):
         super().__init__()
         self.n_steps = n_steps
@@ -25,12 +31,14 @@ class MultiStepReturn(nn.Module):
 
     def forward(
         self,
+        actions: Float[torch.Tensor, "T N act_dim"],
         next_observations: Float[torch.Tensor, "T N obs_dim"],
         rewards: Float[torch.Tensor, "T N 1"],
         terminated: Float[torch.Tensor, "T N 1"],
         done: Float[torch.Tensor, "T N 1"],
         env_discount: Optional[Float[torch.Tensor, "T N 1"]] = None,
     ) -> tuple[
+        Float[torch.Tensor, "N T act_dim"],
         Float[torch.Tensor, "N obs_dim"],
         Float[torch.Tensor, "N 1"],
         Float[torch.Tensor, "N 1"],
@@ -43,7 +51,8 @@ class MultiStepReturn(nn.Module):
         dtype = rewards.dtype
         gamma = self.gamma.to(device=device, dtype=dtype)
 
-        cum_not_done = (~done).cumprod(dim=0)
+        done_bool = done.bool()
+        cum_not_done = (~done_bool).cumprod(dim=0)
 
         step_discount = torch.full((T, N), gamma, device=device, dtype=dtype)
         if env_discount is not None:
@@ -73,7 +82,15 @@ class MultiStepReturn(nn.Module):
             * (1.0 - terminated.float())
         )
 
-        return next_observations, rewards_out, discount, terminated
+        assert actions.shape[0] == T and actions.shape[1] == N
+        actions_out = einops.rearrange(actions, "t n d -> n t d").contiguous()
+        last_actions = actions[last_indices, batch_indices]
+        t_idx = torch.arange(T, device=device).unsqueeze(0)  # [1, T]
+        repeat_mask = t_idx > last_indices.unsqueeze(1)  # [N, T]
+        actions_out = torch.where(
+            repeat_mask.unsqueeze(-1), last_actions.unsqueeze(1), actions_out
+        )
+        return actions_out, next_observations, rewards_out, discount, terminated
 
 
 def _actor_q_per_sample(critic: nn.Module, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:

@@ -824,17 +824,19 @@ class SAC(TensorDictModuleBase):
                     batch[OBS_KEY][1:self.msr.n_steps+1],
                 )
             obs = batch["_input_normed"][0]
-            act = batch[ACTION_KEY][0]
+            act_n = batch[ACTION_KEY]
             env_disc_ms = batch.get(("next", "discount"))
             if env_disc_ms is not None:
                 env_disc_ms = env_disc_ms[: self.msr.n_steps]
-            next_obs, reward, discount, terminated = self.msr(
-                next_obs,
-                reward[:self.msr.n_steps],
-                batch_term,
-                batch_done,
+            act_n, next_obs, reward, discount, terminated = self.msr(
+                actions=act_n,
+                next_observations=next_obs,
+                rewards=reward[:self.msr.n_steps],
+                terminated=batch_term,
+                done=batch_done,
                 env_discount=env_disc_ms,
             )
+            act = act_n[:, 0]
             is_init = batch["is_init"][0]
 
         with self._autocast():

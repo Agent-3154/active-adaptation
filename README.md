@@ -85,6 +85,9 @@ uv run pyright active_adaptation
 uv run --project venv/isaac51 python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
 uv run --project venv/isaac60 python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
 uv run --project venv/mjlab python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
+
+# multi-GPU helper (DDP via torchrun)
+uv run --project venv/isaac51 ./scripts/launch_ddp.sh 0,1 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
 ```
 
 Notes:
