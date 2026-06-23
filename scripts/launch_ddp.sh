@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# Usage: ./launch_ddp.sh <gpu_ids> <script.py> [additional args...]
-# Example: ./launch_ddp.sh 0,1 train.py --epochs 10
+# Usage (recommended with uv):
+#   uv run --project <env-dir> ./scripts/launch_ddp.sh <gpu_ids> <script.py> [additional args...]
+# Example:
+#   uv run --project venv/isaac51 ./scripts/launch_ddp.sh 0,1 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
 
 if [ "$#" -lt 2 ]; then
     echo "Usage: $0 <gpu_ids> <script.py> [additional args...]"
@@ -27,8 +29,8 @@ if [ -z "${OMP_NUM_THREADS:-}" ]; then
     export OMP_NUM_THREADS
 fi
 
-# Find a free port
-FREE_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+# Find a free port using the active Python environment.
+FREE_PORT=$(python -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
 
 # set CUDA_VISIBLE_DEVICES
 # and launch torchrun
