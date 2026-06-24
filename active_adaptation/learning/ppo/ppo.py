@@ -98,6 +98,11 @@ cs = ConfigStore.instance()
 cs.store("ppo", node=PPOConfig, group="algo")
 
 
+def vecnorm_sync_(module: nn.Module):
+    if isinstance(module, VecNorm):
+        module.synchronize(mode="broadcast")
+
+
 class PPOPolicy(PPOBase):
 
     def __init__(
@@ -318,13 +323,8 @@ class PPOPolicy(PPOBase):
                 infos[f"dormancy/{module_name}"] = value
             self._rollout_dormancy_tracker.reset()
 
-        if aa.is_distributed() and aa.is_main_process():
-            loc_diffs, scale_diffs = check_vecnorm_divergence(self.vecnorm[0].module)
-            infos["vecnorm/loc_diff_max"] = max(loc_diffs)
-            infos["vecnorm/scale_diff_max"] = max(scale_diffs)
-            infos["vecnorm/loc_diff_mean"] = sum(loc_diffs) / len(loc_diffs)
-            infos["vecnorm/scale_diff_mean"] = sum(scale_diffs) / len(scale_diffs)
-            self.vecnorm[0].module.synchronize(mode="broadcast")
+        if aa.is_distributed():
+            self.vecnorm.apply(vecnorm_sync_)
             if self.cfg.debug:
                 actor_diff = check_parameters(self.actor)
                 critic_diff = check_parameters(self.critic)
