@@ -121,9 +121,9 @@ class MjlabBackendEnv(_EnvBase):
         scene.initialize(sim.mj_model, sim.model, sim.data)
         sim.create_graph()
 
-        self.scene = MjlabSceneAdapter(scene, sim)
         viewer_cfg = self._make_viewer_cfg(ViewerConfig)
         viewer = MjLabViewer(self, sim) if not self.headless else None
+        self.scene = MjlabSceneAdapter(scene, sim, viewer=viewer)
         self.sim = MjlabSimAdapter(sim, viewer, viewer_cfg=viewer_cfg, scene=scene)
 
     def _make_viewer_cfg(self, viewer_config_cls):

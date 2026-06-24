@@ -76,7 +76,7 @@ def make_env_policy(
     if policy_in_keys is None:
         raise ValueError("Specify `in_keys` (e.g., `policy`, `priv`) in `cfg.algo`.")
 
-    if cfg.discard_unused_obs:
+    if cfg.get("discard_unused_obs", True):
         def should_discard(key: str) -> bool:
             return (
                 key not in policy_in_keys
