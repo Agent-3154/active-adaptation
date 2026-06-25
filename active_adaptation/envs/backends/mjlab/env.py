@@ -105,8 +105,8 @@ class MjlabBackendEnv(_EnvBase):
         sim = Simulation(
             num_envs=scene.num_envs,
             cfg=SimulationCfg(
-                nconmax=200,
-                njmax=500,
+                nconmax=self.cfg.sim.get("nconmax", 200),
+                njmax=self.cfg.sim.get("njmax", 500),
                 contact_sensor_maxmatch=80,
                 mujoco=MujocoCfg(
                     timestep=0.005,
