@@ -101,6 +101,10 @@ class IsaacSceneAdapter(SceneAdapter):
     @property
     def rigid_objects(self):
         return self._scene.rigid_objects
+    
+    @property
+    def entities(self):
+        return {**self._scene.articulations, **self._scene.rigid_objects}
 
     def __getattr__(self, name):
         return getattr(self._scene, name)

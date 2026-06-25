@@ -1,4 +1,5 @@
 """Common adapter protocols shared by all environment backends."""
+from __future__ import annotations
 
 from typing import Dict, Protocol, TYPE_CHECKING, Union
 
@@ -51,6 +52,9 @@ class SceneAdapter(Protocol):
 
     @property
     def articulations(self) -> Dict[str, Union["Articulation", "Entity"]]: ...
+
+    @property
+    def entities(self) -> Dict[str, Union["Articulation", "Entity"]]: ...
 
     @property
     def sensors(self) -> dict:
