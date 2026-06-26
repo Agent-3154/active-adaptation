@@ -253,7 +253,15 @@ def main(cfg: TrainConfig):
     from active_adaptation.helpers import make_env_policy, evaluate
     from active_adaptation.utils.helpers import EpisodeStats
 
-    env, policy = make_env_policy(cfg)
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
     policy: PPOBase
 
     frames_per_batch = env.num_envs * cfg.algo.train_every
