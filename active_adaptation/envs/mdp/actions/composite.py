@@ -7,7 +7,7 @@ from typing_extensions import override
 
 from active_adaptation.utils.symmetry import SymmetryTransform
 
-from .base import Action, ActionV2
+from .base import ActionV2
 
 
 if TYPE_CHECKING:
@@ -24,15 +24,14 @@ class ConcatenatedAction(ActionV2):
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
-        self.action_managers: List[Action | ActionV2] = []
+        self.action_managers: List[ActionV2] = []
 
         for spec in self._action_specs:
             cls_name = spec.pop("_target_")
-            try:
-                action_manager = Action.make(cls_name, self.env, **spec)
-            except ValueError:
-                action_manager = ActionV2.make(cls_name, **spec)
-                action_manager._initialize(self.env)
+            action_manager = ActionV2.make(cls_name, **spec)
+            if not action_manager:
+                raise ValueError(f"Action class '{cls_name}' not found")
+            action_manager._initialize(self.env)
             self.action_managers.append(action_manager)
         self.action_dims = [
             action_manager.action_dim for action_manager in self.action_managers
