@@ -13,6 +13,7 @@ from active_adaptation.utils.math import (
     clamp_norm,
     euler_rotate,
     quat_conjugate,
+    quat_angle_magnitude,
     quat_mul,
     quat_rotate,
     quat_rotate_inverse,
@@ -776,6 +777,80 @@ class eef_pos_error_l1(RewardV2[SingleEEFLocoManip]):
     @override
     def _compute(self) -> torch.Tensor:
         return self.command_manager.pos_error_norm.reshape(self.num_envs, 1)
+
+
+def _eef_orient_error(command_manager: SingleEEFLocoManip) -> torch.Tensor:
+    quat_error = quat_mul(
+        command_manager.cmd_eef_rot_w,
+        quat_conjugate(command_manager.eef_quat_w),
+    )
+    return quat_angle_magnitude(quat_error).reshape(command_manager.num_envs, 1)
+
+
+class eef_orient_error(RewardV2[SingleEEFLocoManip]):
+    """Geodesic end-effector orientation error in radians."""
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        return _eef_orient_error(self.command_manager)
+
+
+class eef_orient_tracking(RewardV2[SingleEEFLocoManip]):
+    """Exponential tracking reward from geodesic EEF orientation error."""
+
+    def __init__(
+        self,
+        weight: float,
+        enabled: bool = True,
+        track_var: bool = False,
+        sigma: float = 0.4,
+    ):
+        super().__init__(weight, enabled=enabled, track_var=track_var)
+        self.sigma = sigma
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        error = _eef_orient_error(self.command_manager)
+        return torch.exp(-error.square() / self.sigma)
+
+
+class eef_pos_orient_tracking(RewardV2[SingleEEFLocoManip]):
+    """Multiplicative reward of position and geodesic orientation tracking."""
+
+    def __init__(
+        self,
+        weight: float,
+        enabled: bool = True,
+        track_var: bool = False,
+        base_pos_error_threshold: float = 1.0,
+    ):
+        super().__init__(weight, enabled=enabled, track_var=track_var)
+        self.pos_sigma = 0.1
+        self.orient_sigma = 0.4
+        self.base_pos_error_threshold = base_pos_error_threshold
+
+    @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
+        self._base_height_rew = self.env.reward_groups["loco"]["base_height_exp"]
+        self.update()
+
+    @override
+    def update(self) -> None:
+        self.rew_pos_exp = torch.exp(
+            -self.command_manager.pos_error_norm2 / self.pos_sigma
+        )
+        self.rew_pos_l1 = -0.2 * self.command_manager.pos_error_norm
+        orient_error = _eef_orient_error(self.command_manager)
+        self.rew_orient = torch.exp(-orient_error.square() / self.orient_sigma)
+
+        self._base_height_rew.modifier.mul_(self.rew_pos_exp)
+
+    @override
+    def _compute(self) -> torch.Tensor:
+        active = self.command_manager.base_pos_error < self.base_pos_error_threshold
+        rew = self.rew_pos_exp * self.rew_orient + self.rew_pos_l1
+        return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
 class eef_pos_forward_tracking(RewardV2[SingleEEFLocoManip]):

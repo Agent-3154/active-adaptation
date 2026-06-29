@@ -18,7 +18,7 @@ if active_adaptation.get_backend() == "isaac":
     from isaaclab.utils.warp import raycast_mesh
 
 
-from simple_raycaster import MultiMeshRaycaster
+# from simple_raycaster import MultiMeshRaycaster
 
 
 def raymap(width: int, height: int, fov: float) -> Float[torch.Tensor, "height width 3"]:
