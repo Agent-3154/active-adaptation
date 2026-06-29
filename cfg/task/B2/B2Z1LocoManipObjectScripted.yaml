@@ -1,5 +1,5 @@
 # @package task
-name: B2Z1LocoManip
+name: B2Z1LocoManipObjectScripted
 
 viewer:
   resolution: [1280, 720]
@@ -8,6 +8,11 @@ viewer:
 
 robot:
   name: unitree_b2_z1
+objects:
+  object:
+    _target_: dummy_basket
+  platform:
+    _target_: dummy_basket_platform
 # terrain: slopes_boxes
 terrain: plane
 
@@ -41,18 +46,22 @@ input:
         alpha_range: [0.8, 0.9]
 
 command:
-  _target_: SingleEEFLocoManip
+  _target_: LocoManipBusketScripted
   eef_body_name: ee_gripper_link
   gripper_joint_names: z1_jointGripper
-  # Heading-frame (x,y) offsets from root + z above terrain; tuned for Z1 on B2.
-  workspace_range:
-    - [0.4, 0.9]
-    - [-0.3, 0.3]
-    - [0.5, 1.2]
-  world_goal_prob: 0.25
-  standoff_distance_range: [1.0, 3.0]
-  standoff_linvel_gain_range: [1.0, 2.0]
-  standoff_yaw_gain_range: [1.0, 2.0]
+  gripper_body_names: [gripperStator, gripperMover]
+  object_name: object
+  platform_name: platform
+  platform_height: 0.2
+  # Fixed basket-local handle point in dummy_basket.usda.
+  grasp_offset_obj: [0.0, 0.0, 0.1]
+  standoff_distance: 0.6
+  standoff_linvel_gain: 1.5
+  standoff_yaw_gain: 1.0
+  approach_reach_limit: 0.75
+  grasp_close_radius: 0.09
+  contact_transition_time: 0.3
+  lift_height_range: [0.05, 0.15]
 
 observation:
   command:
@@ -84,10 +93,6 @@ reward:
     angvel_xy_l2:       {weight: 0.01}
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 1.0, target_height: 0.5, sigma: 0.5}
-  manip:
-    eef_pos_orient_tracking: {weight: 1.5}
-    eef_grasp:          {weight: 1.0}
-    eef_angvel_penalty: {weight: 0.005}
   regularization:
     energy_l1:          {weight: 0.0002}
     joint_acc_l2:       {weight: 2.0e-7, joint_names: "(?!(z1_jointGripper)).*" }
@@ -103,7 +108,6 @@ reward:
     _enabled_: false
     linvel_projection:  {weight: 0.5}
     feet_contact_count: {weight: 1.0, body_names: .*_foot}
-    eef_pos_error_l1:   {weight: 1.0}
     eef_orient_error:   {weight: 1.0}
     eef_orient_tracking: {weight: 1.0, sigma: 0.4}
 
@@ -115,6 +119,11 @@ termination:
     prob: 0.4,
   }
   fall_over: {xy_thres: 0.9}
+  object_fall_over: {
+    _target_: fall_over,
+    entity_name: object,
+    xy_thres: 0.9,
+  }
   undesired_contact: {body_names: [.*_calf]}
 
 randomization:
