@@ -265,7 +265,7 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     def _create_mdp_terms(self):
         self.randomizations: Mapping[str, mdp.RandomizationV2] = OrderedDict()
-        self.observation_funcs: Mapping[str, ObsGroup] = OrderedDict()
+        self.observation_groups: Mapping[str, ObsGroup] = OrderedDict()
         self.reward_groups: Mapping[str, RewardGroup] = OrderedDict()
         self.input_managers: Mapping[str, mdp.ActionV2] = OrderedDict()
         self.termination_funcs: Mapping[str, mdp.TerminationV2] = OrderedDict()
@@ -323,7 +323,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                     continue
                 funcs[obs_name] = obs
                 self._add_mdp_component(obs)
-            self.observation_funcs[group_name] = ObsGroup(group_name, funcs)
+            self.observation_groups[group_name] = ObsGroup(group_name, funcs)
 
         # MDP: rewards
         reward_cfg = dict(self.cfg.reward)
@@ -352,7 +352,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             input_manager._initialize(self)
         for rand in self.randomizations.values():
             rand._initialize(self)
-        for group in self.observation_funcs.values():
+        for group in self.observation_groups.values():
             group._initialize(self)
         for reward_group in self.reward_groups.values():
             reward_group._initialize(self)
@@ -381,7 +381,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         observation_spec = {}
         [
             observation_spec.update(group.spec)
-            for group in self.observation_funcs.values()
+            for group in self.observation_groups.values()
         ]
         self.observation_spec = Composite(
             observation_spec, shape=[self.num_envs], device=self.device
@@ -607,7 +607,7 @@ class _EnvBase(EnvBase, RegistryMixin):
     def _compute_observation(self, tensordict: TensorDictBase) -> TensorDictBase:
         [
             group.compute(tensordict, self.timestamp)
-            for group in self.observation_funcs.values()
+            for group in self.observation_groups.values()
         ]
         return tensordict
 
