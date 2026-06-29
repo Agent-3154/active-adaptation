@@ -35,6 +35,33 @@ def _make_rigid(name: str):
     )
 
 
+def _make_static_platform(size: tuple[float, float, float] = (0.2, 0.2, 0.2)):
+    from isaaclab.assets import RigidObjectCfg
+    import isaaclab.sim as sim_utils
+
+    return RigidObjectCfg(
+        spawn=sim_utils.CuboidCfg(
+            size=size,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+                max_depenetration_velocity=1.0,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.02,
+                rest_offset=0.0,
+            ),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.32, 0.32, 0.32),
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.0, 0.0, size[2] * 0.5),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+    )
+
+
 def make_dummy_stand(backend: Literal["isaaclab", "mjlab"]):
     if backend != "isaaclab":
         raise NotImplementedError
@@ -47,5 +74,12 @@ def make_dummy_basket(backend: Literal["isaaclab", "mjlab"]):
     return _make_rigid("dummy_basket")
 
 
+def make_dummy_basket_platform(backend: Literal["isaaclab", "mjlab"]):
+    if backend != "isaaclab":
+        raise NotImplementedError
+    return _make_static_platform()
+
+
 registry.register("asset", "dummy_stand", make_dummy_stand)
 registry.register("asset", "dummy_basket", make_dummy_basket)
+registry.register("asset", "dummy_basket_platform", make_dummy_basket_platform)
