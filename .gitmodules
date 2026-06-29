@@ -1,0 +1,4 @@
+[submodule "projects/mimic-lite"]
+	path = projects/mimic-lite
+	url = git@github.com:EGalahad/mimic-lite.git
+	branch = main
