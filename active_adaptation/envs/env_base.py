@@ -46,13 +46,22 @@ class ObsGroup:
     def __init__(
         self,
         name: str,
-        funcs: Dict[str, mdp.Observation],
+        funcs: Dict[str, mdp.ObservationV2],
         max_delay: int = 0,
     ):
         self.name = name
         self.funcs = funcs
         self.max_delay = max_delay
         self.timestamp = -1
+    
+    def _initialize(self, env: "_EnvBase"):
+        self.env = env
+        for func in self.funcs.values():
+            if isinstance(func, mdp.ObservationV2):
+                func._initialize(env)
+    
+    def __getitem__(self, key: str) -> mdp.ObservationV2:
+        return self.funcs[key]
 
     @property
     def keys(self):
@@ -202,8 +211,9 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.cfg = cfg
         self.headless = headless
 
+        self._create_mdp_terms()
         self._setup_simulation()
-        self._setup_mdp_managers()
+        self._initialize_mdp_terms()
         self._build_tensor_specs()
 
         self.timestamp: int = 0
@@ -253,12 +263,12 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.episode_count = 0
         self.current_iter = 0
 
-    def _setup_mdp_managers(self):
-        self.randomizations: Mapping[str, mdp.Randomization] = OrderedDict()
+    def _create_mdp_terms(self):
+        self.randomizations: Mapping[str, mdp.RandomizationV2] = OrderedDict()
         self.observation_funcs: Mapping[str, ObsGroup] = OrderedDict()
         self.reward_groups: Mapping[str, RewardGroup] = OrderedDict()
-        self.input_managers: Mapping[str, mdp.Action] = OrderedDict()
-        self.termination_funcs: Mapping[str, mdp.Termination] = OrderedDict()
+        self.input_managers: Mapping[str, mdp.ActionV2] = OrderedDict()
+        self.termination_funcs: Mapping[str, mdp.TerminationV2] = OrderedDict()
 
         self._enabled_reward_groups = 0
 
@@ -272,14 +282,9 @@ class _EnvBase(EnvBase, RegistryMixin):
         # MDP: command manager
         command_cfg = dict(self.cfg.command)
         class_name = command_cfg.pop("_target_", None)
-        try:
-            command = mdp.Command.make(class_name, self, **command_cfg)
-        except ValueError:
-            command = mdp.CommandV2.make(class_name, **command_cfg)
+        command = mdp.CommandV2.make(class_name, **command_cfg)
         if not command:
             raise ValueError(f"Command class '{class_name}' not found")
-        if isinstance(command, mdp.CommandV2):
-            command._initialize(self)
         self.command_manager = command
         self._pre_step_callbacks.append(self.command_manager.pre_step)
         self._reset_callbacks.append(self.command_manager.reset)
@@ -290,14 +295,9 @@ class _EnvBase(EnvBase, RegistryMixin):
             _, input_cls_name, input_kwargs = parse_component_spec(
                 input_name, input_cfg
             )
-            try:
-                input_manager = mdp.Action.make(input_cls_name, self, **input_kwargs)
-            except ValueError:
-                input_manager = mdp.ActionV2.make(input_cls_name, **input_kwargs)
+            input_manager = mdp.ActionV2.make(input_cls_name, **input_kwargs)
             if not input_manager:
                 continue
-            if isinstance(input_manager, mdp.ActionV2):
-                input_manager._initialize(self)
             self.input_managers[input_name] = input_manager
             self._reset_callbacks.append(input_manager.reset)
             self._debug_draw_callbacks.append(input_manager.debug_draw)
@@ -305,14 +305,9 @@ class _EnvBase(EnvBase, RegistryMixin):
         # MDP: randomizations
         for rand_name, rand_cfg in self.cfg.get("randomization", {}).items():
             rand_name, cls_name, rand_kwargs = parse_component_spec(rand_name, rand_cfg)
-            try:
-                rand = mdp.Randomization.make(cls_name, self, **rand_kwargs)
-            except ValueError:
-                rand = mdp.RandomizationV2.make(cls_name, **rand_kwargs)
+            rand = mdp.RandomizationV2.make(cls_name, **rand_kwargs)
             if not rand:
                 continue
-            if isinstance(rand, mdp.RandomizationV2):
-                rand._initialize(self)
             self.randomizations[rand_name] = rand
             self._add_mdp_component(rand)
 
@@ -323,14 +318,9 @@ class _EnvBase(EnvBase, RegistryMixin):
                 obs_name, obs_cls_name, obs_kwargs = parse_component_spec(
                     obs_name, obs_cfg
                 )
-                try:
-                    obs = mdp.Observation.make(obs_cls_name, self, **obs_kwargs)
-                except ValueError:
-                    obs = mdp.ObservationV2.make(obs_cls_name, **obs_kwargs)
+                obs = mdp.ObservationV2.make(obs_cls_name, **obs_kwargs)
                 if not obs:
                     continue
-                if isinstance(obs, mdp.ObservationV2):
-                    obs._initialize(self)
                 funcs[obs_name] = obs
                 self._add_mdp_component(obs)
             self.observation_funcs[group_name] = ObsGroup(group_name, funcs)
@@ -347,20 +337,27 @@ class _EnvBase(EnvBase, RegistryMixin):
             self.reward_groups[group_name] = rg
 
         # MDP: terminations
-        print("Termination functions:")
-        for term_name, term_cfg in self.cfg.get("termination", {}).items():
+        termination_cfg = dict(self.cfg.get("termination", {}))
+        for term_name, term_cfg in termination_cfg.items():
             term_name, cls_name, term_kwargs = parse_component_spec(term_name, term_cfg)
-            try:
-                term = mdp.Termination.make(cls_name, self, **term_kwargs)
-            except ValueError:
-                term = mdp.TerminationV2.make(cls_name, **term_kwargs)
+            term = mdp.TerminationV2.make(cls_name, **term_kwargs)
             if not term:
                 continue
-            if isinstance(term, mdp.TerminationV2):
-                term._initialize(self)
-            print(f"\t{term_name}: \t{'timeout' if term.is_timeout else 'termination'}")
             self.termination_funcs[term_name] = term
             self._add_mdp_component(term)
+
+    def _initialize_mdp_terms(self):
+        self.command_manager._initialize(self)
+        for input_manager in self.input_managers.values():
+            input_manager._initialize(self)
+        for rand in self.randomizations.values():
+            rand._initialize(self)
+        for group in self.observation_funcs.values():
+            group._initialize(self)
+        for reward_group in self.reward_groups.values():
+            reward_group._initialize(self)
+        for term in self.termination_funcs.values():
+            term._initialize(self)
 
     def _build_tensor_specs(self):
         self.done_spec = Composite(
@@ -465,8 +462,6 @@ class _EnvBase(EnvBase, RegistryMixin):
     ) -> TensorDictBase:
         if not self._startup_done:
             [callback() for callback in self._startup_callbacks]
-            for reward_group in self.reward_groups.values():
-                reward_group._initialize(self)
             self._startup_done = True
             
         if tensordict is not None:
@@ -506,8 +501,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         with ScopedTimer("simulation", sync=False):
             with ScopedTimer("process_action", sync=False):
                 for input_key, input_manager in self.input_managers.items():
-                    if (action := tensordict.get(input_key)) is not None:
-                        input_manager.process_action(action)
+                    input_manager.process_action(tensordict.get(input_key))
 
             for substep in range(self.decimation):
                 with ScopedTimer("pre_step_callbacks", sync=False):
