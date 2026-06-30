@@ -80,6 +80,8 @@ class PPOConfig:
     clip_param: float = 0.2
     entropy_coef: float = 0.002
 
+    clamp_reward: bool = False
+
     activation: str = "Mish"
     muon: bool = False # use Muon optimizer
     
@@ -277,7 +279,7 @@ class PPOPolicy(PPOBase):
         with ScopedTimer("compute_advantage"):
             self.vecnorm(tensordict)
             self.vecnorm(tensordict["next"])
-            self.compute_advantage(tensordict, self.critic, "adv", "ret")
+            self.compute_advantage(tensordict, self.critic, "adv", "ret", self.cfg.clamp_reward)
         
             action = tensordict[ACTION_KEY]
             adv_unnormalized = tensordict["adv"]

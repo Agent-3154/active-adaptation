@@ -77,6 +77,7 @@ reward:
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:
     _enabled_: false
+    joint_vel_l2:       {weight: 1.0, joint_names: .*}
     linvel_projection:  {weight: 0.5}
     feet_contact_count: {weight: 1.0, body_names: .*_foot}
     # feet_swing_height:  {weight: 0.1, target_height: 0.1}

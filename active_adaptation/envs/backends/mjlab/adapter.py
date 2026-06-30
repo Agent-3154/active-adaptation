@@ -314,6 +314,10 @@ class MjlabSceneAdapter(SceneAdapter):
     @property
     def articulations(self):
         return self._scene.entities
+    
+    @property
+    def entities(self):
+        return self._scene.entities
 
     def __getattr__(self, name):
         return getattr(self._scene, name)
