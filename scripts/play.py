@@ -24,7 +24,6 @@ from active_adaptation.utils.export import export_onnx
 from active_adaptation.utils.timerfd import Timer
 from active_adaptation.utils.helpers import EpisodeStats
 from active_adaptation.learning.modules.vecnorm import VecNorm
-from active_adaptation.utils.wandb import parse_checkpoint
 
 
 DEFAULTS = [
@@ -122,8 +121,15 @@ def main(cfg: PlayConfig):
     aa.init(cfg, auto_rank=True)
     
     from active_adaptation.helpers import make_env_policy
-    checkpoint = parse_checkpoint(cfg.checkpoint_path)
-    env, policy = make_env_policy(cfg, checkpoint)
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
     
     if cfg.export_policy:
         export_dir = FILE_PATH / "exports" / str(cfg.task.name)
@@ -142,11 +148,6 @@ def main(cfg: PlayConfig):
     assert not env.base_env.training
 
     timer = Timer(env.step_dt)
-
-    # Optional: refresh from URL/wandb in background so play loop never blocks on updates
-    if checkpoint is not None and checkpoint.remote:
-        print("Starting background checkpoint refresh")
-        checkpoint.start_background_refresh(interval_sec=60)
 
     # Optional video recording (Isaac backend only). This remains safe under
     # KeyboardInterrupt because the recorder is a context manager that flushes
