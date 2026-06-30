@@ -245,6 +245,9 @@ class MjlabSimAdapter(SimAdapter):
     def step(self, render: bool = False) -> None:
         self._sim.step()
 
+    def sense(self) -> None:
+        self._sim.sense()
+
     def render(self) -> None:
         if self.viewer is not None:
             self.viewer.update()

@@ -211,10 +211,10 @@ class PPOPolicy(TensorDictModuleBase):
         action_spec = env.action_spec
         reward_spec = env.reward_spec
         if CMD_KEY in observation_spec.keys(True, True):
-            cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transform()
+            cmd_transform = env.observation_groups[CMD_KEY].symmetry_transform()
         else:
             cmd_transform = None
-        obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform()
+        obs_transform = env.observation_groups[OBS_KEY].symmetry_transform()
         act_transform = env.action_manager.symmetry_transform()
         policy = cls(
             cfg=cfg,
