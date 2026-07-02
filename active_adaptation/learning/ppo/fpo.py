@@ -38,6 +38,7 @@ from active_adaptation.learning.utils.dormancy import DormancyTracker
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.symmetry import SymmetryTransform
+from tensordict.nn.probabilistic import interaction_type, InteractionType
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -118,168 +119,89 @@ class FlowMatchingActor(nn.Module):
         )
         self.velocity_head = nn.LazyLinear(action_dim)
         self.velocity_head.weight._non_muon = True
-        self._rollout_training_mode = True
-
-    def set_rollout_mode(self, mode: str):
-        self._rollout_training_mode = mode == "train"
-
-    def forward(self, obs: torch.Tensor):
-        """Run flow rollout.
-
-        Args:
-            obs: Observation features with shape `(*B, obs_dim)`.
-
-        Returns:
-            Tuple of:
-            - action: `(*B, action_dim)`
-            - initial_cfm_loss: `(*B, n_samples_per_action)`
-            - cfm_loss_eps: `(*B, n_samples_per_action, action_dim)`
-            - cfm_loss_t: `(*B, n_samples_per_action, 1)`
-            - x1_pred: `(*B, n_samples_per_action, action_dim)`
-        """
-        action, initial_cfm_loss, cfm_loss_eps, cfm_loss_t, x1_pred = self.sample_rollout(
-            obs
-        )
-        return action, initial_cfm_loss, cfm_loss_eps, cfm_loss_t, x1_pred
-
-    def sample_rollout(self, obs: torch.Tensor):
-        """Sample action via flow integration and emit CFM bookkeeping tensors.
-
-        Args:
-            obs: Observation features with shape `(*B, obs_dim)`.
-
-        Returns:
-            Same tuple and shapes as `forward`.
-        """
-        original_shape = obs.shape[:-1]
-        obs = obs.reshape(-1, obs.shape[-1])
-        batch_size = obs.shape[0]
-        device = obs.device
-
-        if self._rollout_training_mode:
-            x_t = torch.randn((batch_size, self.action_dim), device=device)
-        else:
-            x_t = torch.zeros((batch_size, self.action_dim), device=device)
-
-        full_t_path = torch.linspace(1.0, 0.0, self.sampling_steps + 1, device=device)
-        t_current = full_t_path[:-1]
-        dt = full_t_path[1:] - full_t_path[:-1]
-        for i in range(self.sampling_steps):
-            t_i = t_current[i].expand(batch_size, 1)
-            velocity = self._velocity(obs, x_t, t_i)
-            x_t = x_t + velocity * dt[i]
-        action = x_t
-
-        if self._rollout_training_mode and self.action_perturb_std > 0.0:
-            action = action + self.action_perturb_std * torch.randn_like(action)
-
-        cfm_loss_eps = torch.randn(
-            (batch_size, self.n_samples_per_action, self.action_dim), device=device
-        )
-        uniform_t = torch.rand((batch_size, self.n_samples_per_action, 1), device=device)
-        beta = self.cfm_loss_t_inverse_cdf_beta
-        cfm_loss_t = 0.005 + 0.99 * (1.0 - (1.0 - uniform_t) ** (1.0 / beta))
-        initial_cfm_loss, x1_pred, _ = self.get_cfm_loss(
-            obs, action, cfm_loss_eps, cfm_loss_t
-        )
-
-        action = action.reshape(*original_shape, self.action_dim)
-        initial_cfm_loss = initial_cfm_loss.reshape(*original_shape, self.n_samples_per_action)
-        cfm_loss_eps = cfm_loss_eps.reshape(
-            *original_shape, self.n_samples_per_action, self.action_dim
-        )
-        cfm_loss_t = cfm_loss_t.reshape(*original_shape, self.n_samples_per_action, 1)
-        x1_pred = x1_pred.reshape(*original_shape, self.n_samples_per_action, self.action_dim)
-        return action, initial_cfm_loss, cfm_loss_eps, cfm_loss_t, x1_pred
-
-    def get_cfm_loss(
+        # self.integrate_flow = torch.compile(self.integrate_flow, mode="reduce-overhead")
+    
+    def forward(
         self,
-        obs: torch.Tensor,
-        actions: torch.Tensor,
-        eps: torch.Tensor,
-        t: torch.Tensor,
+        obs: torch.Tensor, # [*, obs_dim]
+        x_t: torch.Tensor, # [*, action_dim]
+        t: torch.Tensor, # [*, 1]
     ):
-        """Compute CFM loss and derived x1/x0 predictions.
-
-        Args:
-            obs: Observation features, shape `(B, obs_dim)`.
-            actions: Actions, shape `(B, action_dim)`.
-            eps: Gaussian noise samples, shape `(B, n_samples, action_dim)`.
-            t: Flow timesteps, shape `(B, n_samples, 1)`.
-
-        Returns:
-            Tuple of:
-            - loss: `(B, n_samples)`
-            - x1_pred: `(B, n_samples, action_dim)`
-            - x0_pred: `(B, n_samples, action_dim)`
-        """
-        batch_size = actions.shape[0]
-        x_t = t * eps + (1.0 - t) * actions.unsqueeze(1)
-
-        obs_expanded = obs.unsqueeze(1).expand(batch_size, eps.shape[1], -1)
-        velocity = self._velocity_batched(obs_expanded, x_t, t)
-        x0_pred = x_t - t * velocity
-        x1_pred = x0_pred + velocity
-        target_velocity = eps - actions.unsqueeze(1)
-
-        sq_err = (velocity - target_velocity).square()
-        if self.cfm_loss_reduction == "mean":
-            loss = sq_err.mean(dim=-1)
-        elif self.cfm_loss_reduction == "sum":
-            loss = sq_err.sum(dim=-1)
-        else:
-            loss = sq_err.sum(dim=-1) / (sq_err.shape[-1] ** 0.5)
-        return loss, x1_pred, x0_pred
-
-    def _embed_timestep(self, t: torch.Tensor) -> torch.Tensor:
-        """Embed scalar timesteps.
-
-        Args:
-            t: Timesteps with shape `(..., 1)`.
-
-        Returns:
-            Embedded timesteps with shape `(..., timestep_embed_dim)`.
-        """
-        freqs = 2 ** torch.arange(self.timestep_embed_dim // 2, device=t.device)
-        scaled_t = t * freqs
-        return torch.cat([torch.cos(scaled_t), torch.sin(scaled_t)], dim=-1)
-
-    def _velocity(self, obs: torch.Tensor, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        """Predict flow velocity.
-
-        Args:
-            obs: Observation features `(N, obs_dim)`.
-            x_t: Current flow state `(N, action_dim)`.
-            t: Timesteps `(N, 1)`.
-
-        Returns:
-            Velocity `(N, action_dim)`.
-        """
-        embedded_t = self._embed_timestep(t)
+        freqs = 2 ** torch.arange(self.timestep_embed_dim // 2, device=obs.device)
+        scaled_t = t * freqs 
+        embedded_t = torch.cat([torch.cos(scaled_t), torch.sin(scaled_t)], dim=-1)
         inp = torch.cat([obs, embedded_t, x_t], dim=-1)
         features = self.backbone(inp)
         velocity = self.velocity_head(features)
         return velocity
+    
+    def act(
+        self,
+        obs: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        N = obs.shape[0]
+        device = obs.device
+        if interaction_type() in (InteractionType.MODE, InteractionType.DETERMINISTIC):
+            x_0 = torch.zeros(N, self.action_dim, device=obs.device)
+            perturb = torch.zeros_like(x_0)
+        else:
+            x_0 = torch.randn(N, self.action_dim, device=obs.device)
+            perturb = torch.randn_like(x_0) * self.action_perturb_std
+        x_1 = self.integrate_flow(obs, x_0)
 
-    def _velocity_batched(
-        self, obs: torch.Tensor, x_t: torch.Tensor, t: torch.Tensor
-    ) -> torch.Tensor:
-        """Batched velocity helper.
+        eps = torch.randn(N, self.n_samples_per_action, self.action_dim, device=device)
+        t = torch.rand(N, self.n_samples_per_action, 1, device=device)
+        cfm_loss = self.compute_cfm_loss(obs, x_1, eps, t)
 
-        Args:
-            obs: Observation features `(..., obs_dim)`.
-            x_t: Current flow state `(..., action_dim)`.
-            t: Timesteps `(..., 1)`.
-
-        Returns:
-            Velocity `(..., action_dim)`.
+        action = x_1 + perturb
+        # cfm_loss has shape [N, self.n_samples_per_action]
+        # eps has shape [N, self.n_samples_per_action, self.action_dim]
+        # t has shape [N, self.n_samples_per_action, 1]
+        return action, cfm_loss, eps, t
+    
+    def integrate_flow(
+        self,
+        obs: torch.Tensor, # [N, obs_dim]
+        x_0: torch.Tensor, # [N, action_dim]
+    ) -> torch.Tensor: # [N, action_dim]
+        """Following common flow matching literature, x_0 is noise and x_1 is the target.
+        We integrate the flow from x_0 to x_1 using the velocity field.
+        Note that this is different from the original FPO++ paper. TODO: is this correct?
         """
-        flat_shape = obs.shape[:-1]
-        obs_flat = obs.reshape(-1, obs.shape[-1])
-        x_flat = x_t.reshape(-1, x_t.shape[-1])
-        t_flat = t.reshape(-1, 1)
-        vel_flat = self._velocity(obs_flat, x_flat, t_flat)
-        return vel_flat.reshape(*flat_shape, self.action_dim)
+        dt = 1.0 / self.sampling_steps
+        x_t = x_0
+        for i in range(self.sampling_steps):
+            t = torch.full((obs.shape[0], 1), i * dt, device=obs.device)
+            velocity = self(obs, x_t, t)
+            x_t = x_t + velocity * dt
+        return x_t
+    
+    def compute_cfm_loss(
+        self,
+        obs: torch.Tensor,
+        act: torch.Tensor,
+        eps: torch.Tensor,
+        t: torch.Tensor,
+    ) -> torch.Tensor: # [B, n_samples_per_action]
+        """Following common flow matching literature, x_0 is noise and x_1 is the target.
+        We integrate the flow from x_0 to x_1 using the velocity field.
+        Note that this is different from the original FPO++ paper. TODO: is this correct?
+        """
+        N = act.shape[0]
+        obs = obs.reshape(N, 1, -1).expand(N, self.n_samples_per_action, -1)
+        x_t = t * act.reshape(N, 1, self.action_dim) + (1 - t) * eps
+        velocity = self(obs, x_t, t)
+        target_velocity = act.reshape(N, 1, self.action_dim) - eps
+        
+        if self.cfm_loss_reduction == "mean":
+            loss = torch.mean((velocity - target_velocity) ** 2, dim=-1)
+        elif self.cfm_loss_reduction == "sum":
+            loss = torch.sum((velocity - target_velocity) ** 2, dim=-1)
+        else:  # "sqrt"
+            squared_errors = (velocity - target_velocity) ** 2
+            denom = squared_errors.shape[-1] ** 0.5
+            loss = torch.sum(squared_errors, dim=-1) / denom
+        return loss
 
 
 @dataclass
@@ -289,7 +211,7 @@ class FPOConfig:
     train_every: int = 32
     ppo_epochs: int = 4
     num_minibatches: int = 4
-    lr: float = 1e-4
+    lr: float = 3e-4
     desired_kl: Union[float, None] = 1e-4
     clip_param: float = 0.05
     value_loss_coef: float = 1.0
@@ -374,10 +296,9 @@ class FPOPolicy(TensorDictModuleBase):
         )
 
         self.training_keys = [
-            "initial_cfm_loss",
+            "cfm_loss",
             "cfm_loss_eps",
             "cfm_loss_t",
-            "x1_pred",
             "adv",
             "ret",
             "is_init",
@@ -398,6 +319,7 @@ class FPOPolicy(TensorDictModuleBase):
 
         self.action_dim = action_spec.shape[-1]
         activation = getattr(nn, self.cfg.activation)
+        
         self.flow_actor_impl = FlowMatchingActor(
             obs_dim=inp_dim,
             action_dim=self.action_dim,
@@ -409,12 +331,13 @@ class FPOPolicy(TensorDictModuleBase):
             action_perturb_std=self.cfg.action_perturb_std,
             cfm_loss_t_inverse_cdf_beta=self.cfg.cfm_loss_t_inverse_cdf_beta,
             cfm_loss_reduction=self.cfg.cfm_loss_reduction,
-        )
-        self.actor = Mod(
-            self.flow_actor_impl,
-            ["_obs_normed"],
-            [ACTION_KEY, "initial_cfm_loss", "cfm_loss_eps", "cfm_loss_t", "x1_pred"],
         ).to(self.device)
+
+        self.actor_rollout = Mod(
+            self.flow_actor_impl.act,
+            ["_obs_normed"],
+            [ACTION_KEY, "cfm_loss", "cfm_loss_eps", "cfm_loss_t"],
+        )
 
         critic_mlp = MLP(
             num_units=[inp_dim, *self.cfg.critic_hidden_dims],
@@ -427,7 +350,7 @@ class FPOPolicy(TensorDictModuleBase):
         ).to(self.device)
 
         self.vecnorm(fake_input)
-        self.actor(fake_input)
+        self.actor_rollout(fake_input)
         self.critic(fake_input)
 
         def init_(module):
@@ -435,7 +358,7 @@ class FPOPolicy(TensorDictModuleBase):
                 nn.init.orthogonal_(module.weight, 0.1)
                 nn.init.constant_(module.bias, 0.0)
 
-        self.actor.apply(init_)
+        self.flow_actor_impl.apply(init_)
         self.critic.apply(init_)
         self._rollout_dormancy_tracker: Union[DormancyTracker, None] = None
 
@@ -475,7 +398,7 @@ class FPOPolicy(TensorDictModuleBase):
                 self.actor = DDP(self.actor, device_ids=[aa.get_local_rank()])
                 self.critic = DDP(self.critic, device_ids=[aa.get_local_rank()])
             else:
-                for param in self.actor.parameters():
+                for param in self.flow_actor_impl.parameters():
                     distr.broadcast(param, src=0)
                 for param in self.critic.parameters():
                     distr.broadcast(param, src=0)
@@ -484,18 +407,18 @@ class FPOPolicy(TensorDictModuleBase):
 
         if self.cfg.muon:
             self.opt = MuonAdamWWrapper(
-                [self.actor, self.critic],
+                [self.flow_actor_impl, self.critic],
                 lr=self.cfg.lr,
-                weight_decay=1e-4,
+                weight_decay=0.01,
             )
         else:
             self.opt = torch.optim.AdamW(
                 [
-                    {"params": self.actor.parameters()},
+                    {"params": self.flow_actor_impl.parameters()},
                     {"params": self.critic.parameters()},
                 ],
                 lr=self.cfg.lr,
-                weight_decay=1e-4,
+                weight_decay=0.01,
             )
 
         self.update = self._update
@@ -503,17 +426,14 @@ class FPOPolicy(TensorDictModuleBase):
             self.update = torch.compile(self.update)
 
     def get_rollout_policy(self, mode: str = "train", critic: bool = False):
-        actor_mod = self.actor.module if isinstance(self.actor, DDP) else self.actor
-        actor_impl = actor_mod.module if isinstance(actor_mod, Mod) else actor_mod
-        if isinstance(actor_impl, FlowMatchingActor):
-            actor_impl.set_rollout_mode(mode)
-
         if self._rollout_dormancy_tracker is not None:
             self._rollout_dormancy_tracker.close()
             self._rollout_dormancy_tracker = None
-        policy = Seq(self.vecnorm, self.actor, self.critic) if critic else Seq(
-            self.vecnorm, self.actor
-        )
+        modules = [self.vecnorm, self.actor_rollout]
+        if critic:
+            modules.append(self.critic)
+        policy = Seq(*modules)
+
         if self.cfg.compile:
             policy = torch.compile(policy)
         if self.cfg.debug:
@@ -529,7 +449,7 @@ class FPOPolicy(TensorDictModuleBase):
         infos = []
 
         self.vecnorm.to(self.device, non_blocking=True)
-        self.actor.to(self.device)
+        self.flow_actor_impl.to(self.device)
         self.critic.to(self.device)
 
         with ScopedTimer("compute_advantage"):
@@ -552,14 +472,14 @@ class FPOPolicy(TensorDictModuleBase):
                     minibatch = self._augment_symmetry(minibatch)
                 infos.append(self.update(minibatch))
 
-                if self.desired_kl is not None:
-                    kl = infos[-1]["actor/kl_x1"]
-                    actor_lr = self.opt.param_groups[0]["lr"]
-                    if kl > self.desired_kl * 2.0:
-                        actor_lr = max(1e-5, actor_lr / 1.5)
-                    elif kl < self.desired_kl / 2.0 and kl > 0.0:
-                        actor_lr = min(1e-2, actor_lr * 1.5)
-                    self.opt.param_groups[0]["lr"] = actor_lr
+                # if self.desired_kl is not None:
+                #     kl = infos[-1]["actor/kl_x1"]
+                #     actor_lr = self.opt.param_groups[0]["lr"]
+                #     if kl > self.desired_kl * 2.0:
+                #         actor_lr = max(1e-5, actor_lr / 1.5)
+                #     elif kl < self.desired_kl / 2.0 and kl > 0.0:
+                #         actor_lr = min(1e-2, actor_lr * 1.5)
+                #     self.opt.param_groups[0]["lr"] = actor_lr
 
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
         infos["actor/lr"] = self.opt.param_groups[0]["lr"]
@@ -584,7 +504,7 @@ class FPOPolicy(TensorDictModuleBase):
         if aa.is_distributed():
             self.vecnorm.apply(vecnorm_sync_)
             if self.cfg.debug:
-                infos["actor/diff"] = check_parameters(self.actor)
+                infos["actor/diff"] = check_parameters(self.flow_actor_impl)
                 infos["critic/diff"] = check_parameters(self.critic)
         return dict(sorted(infos.items()))
 
@@ -632,9 +552,8 @@ class FPOPolicy(TensorDictModuleBase):
         symmetry = tensordict.empty()
         symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
         symmetry["cfm_loss_eps"] = self.act_transform(tensordict["cfm_loss_eps"])
-        symmetry["x1_pred"] = self.act_transform(tensordict["x1_pred"])
         symmetry["cfm_loss_t"] = tensordict["cfm_loss_t"]
-        symmetry["initial_cfm_loss"] = tensordict["initial_cfm_loss"]
+        symmetry["cfm_loss"] = tensordict["cfm_loss"]
         if self.cmd_transform is not None and CMD_KEY in tensordict.keys(True, True):
             symmetry[CMD_KEY] = self.cmd_transform(tensordict[CMD_KEY])
         symmetry[OBS_KEY] = self.obs_transform(tensordict[OBS_KEY])
@@ -650,18 +569,16 @@ class FPOPolicy(TensorDictModuleBase):
         valid_cnt = valid.sum().clamp_min(1.0)
 
         action_data = tensordict[ACTION_KEY]
-        old_cfm_loss = tensordict["initial_cfm_loss"]
-        old_cfm_eps = tensordict["cfm_loss_eps"]
-        old_cfm_t = tensordict["cfm_loss_t"]
-        old_x1 = tensordict["x1_pred"]
+        old_cfm_loss = tensordict["cfm_loss"] # [B, n_samples_per_action]
+        old_cfm_eps = tensordict["cfm_loss_eps"] # [B, n_samples_per_action, action_dim]
+        old_cfm_t = tensordict["cfm_loss_t"] # [B, n_samples_per_action, 1]
 
-        actor_mod = self.actor.module if isinstance(self.actor, DDP) else self.actor
-        flow_actor = actor_mod.module if isinstance(actor_mod, Mod) else actor_mod
-        if not isinstance(flow_actor, FlowMatchingActor):
-            raise TypeError("Expected FlowMatchingActor backend for FPO")
-        cfm_loss, x1_pred, x0_pred = flow_actor.get_cfm_loss(
-            tensordict["_obs_normed"], action_data, old_cfm_eps, old_cfm_t
-        )
+        cfm_loss = self.flow_actor_impl.compute_cfm_loss(
+            tensordict["_obs_normed"],
+            action_data,
+            old_cfm_eps,
+            old_cfm_t,
+        ) # [B, n_samples_per_action]
 
         if self.cfg.cfm_loss_clamp > 0.0:
             old_cfm_loss = old_cfm_loss.clamp(max=self.cfg.cfm_loss_clamp)
@@ -682,6 +599,7 @@ class FPOPolicy(TensorDictModuleBase):
             )
 
         # old_cfm_loss, cfm_loss, log_ratio, ratio: [B, n_samples_per_action]
+        assert old_cfm_loss.shape == cfm_loss.shape
         log_ratio = old_cfm_loss - cfm_loss
         log_ratio = clamp_ste(log_ratio, max_value=self.cfg.cfm_diff_clamp_max)
         ratio = torch.exp(log_ratio)
@@ -703,7 +621,7 @@ class FPOPolicy(TensorDictModuleBase):
         loss.backward()
 
         if self.should_reduce_grads:
-            for param in self.actor.parameters():
+            for param in self.flow_actor_impl.parameters():
                 if param.grad is not None:
                     distr.all_reduce(param.grad, op=distr.ReduceOp.SUM)
                     param.grad /= self.world_size
@@ -712,7 +630,8 @@ class FPOPolicy(TensorDictModuleBase):
                     distr.all_reduce(param.grad, op=distr.ReduceOp.SUM)
                     param.grad /= self.world_size
 
-        actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+        actor_grad_norm = nn.utils.clip_grad_norm_(
+            self.flow_actor_impl.parameters(), self.max_grad_norm)
         critic_grad_norm = nn.utils.clip_grad_norm_(
             self.critic.parameters(), self.max_grad_norm
         )
@@ -724,12 +643,8 @@ class FPOPolicy(TensorDictModuleBase):
             clipfrac = ((ratio - 1.0).abs() > self.cfg.clip_param).float().mean()
             # First-order KL proxy based on r-1-log r.
             approx_kl = ((ratio - 1.0) - log_ratio).mean()
-            # FPO-specific drift proxy: distance between current and rollout-time x1 predictions.
-            kl_x1 = (x1_pred.detach() - old_x1).square().mean()
             # Importance-weighted advantage mass under CFM-derived ratio.
             weighted_ratio = (ratio * adv.expand_as(ratio)).mean()
-            # Diversity proxy of inferred clean actions across noise samples.
-            x0_std = x0_pred.std(dim=1).mean()
 
         return {
             "actor/policy_loss": policy_loss.detach(),
@@ -737,9 +652,7 @@ class FPOPolicy(TensorDictModuleBase):
             "actor/grad_norm": actor_grad_norm,
             "actor/clamp_ratio": clipfrac,
             "actor/approx_kl": approx_kl,
-            "actor/kl_x1": kl_x1,
             "actor/cfm_loss": cfm_loss.mean().detach(),
-            "actor/x0_std": x0_std.detach(),
             "critic/value_loss": value_loss.detach(),
             "critic/grad_norm": critic_grad_norm,
             "critic/explained_var": explained_var,
