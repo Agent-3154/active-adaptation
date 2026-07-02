@@ -25,3 +25,7 @@ This doc is WIP. Let's try implementing a new algorithm step-by-step and refine 
 - Add stabilization knobs to config with safe defaults (e.g., advantage clamp, log-ratio clamp); keep them optional and easy to disable.
 - Add diagnostics tied to new behaviors (e.g., `actor/approx_kl`, `actor/clamp_ratio`, `critic/explained_var`, feature effective rank) so new algorithm behavior is visible in logs.
 - If symmetry augmentation is used, keep it a config flag and ensure metrics still work when it is disabled.
+
+## New:
+- `TensorDictModule` can take not only a `nn.Module` as input, but also a callable.
+- We use torchrl's `interaction_type` to control exploration behavior.
