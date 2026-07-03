@@ -216,7 +216,7 @@ class FPOConfig:
     num_minibatches: int = 4
     lr: float = 3e-4
     desired_kl: Union[float, None] = 1e-4
-    clip_param: float = 0.05
+    clip_param: float = 0.2
     value_loss_coef: float = 1.0
 
     clamp_reward: bool = False
@@ -311,12 +311,12 @@ class FPOPolicy(TensorDictModuleBase):
             inp_dim = fake_input[CMD_KEY].shape[-1] + fake_input[OBS_KEY].shape[-1]
             self.vecnorm = Seq(
                 CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False),
-                Mod(VecNorm((inp_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
+                Mod(VecNorm((inp_dim,)), ["_input"], ["_obs_normed"]),
             ).to(self.device)
         else:
             self.training_keys += [OBS_KEY, ACTION_KEY]
             inp_dim = fake_input[OBS_KEY].shape[-1]
-            self.vecnorm = Mod(VecNorm((inp_dim,), decay=1.0), [OBS_KEY], ["_obs_normed"]).to(
+            self.vecnorm = Mod(VecNorm((inp_dim,)), [OBS_KEY], ["_obs_normed"]).to(
                 self.device
             )
 

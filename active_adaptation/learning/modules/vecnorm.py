@@ -15,6 +15,25 @@ class VecNorm(nn.Module):
     This class allows you to normalize an observation of shape [*, C, H, W]
     with statistics of shape [C, 1, 1] instead of [C, H, W].
 
+    Decay behavior:
+    - decay < 1.0:
+      Uses exponentially decayed running moments. Recent batches are weighted
+      more heavily than old batches, so the normalizer can track non-stationary
+      observation distributions (e.g., curriculum, domain randomization, or
+      changing policies during RL training). This is usually the safest default
+      for online training.
+    - decay = 1.0:
+      Uses cumulative (non-decayed) moments over all seen samples. Every sample
+      has equal weight in the long run, giving a stable global estimate when
+      the observation distribution is approximately stationary. This is useful
+      for fixed datasets or stable environments where you want long-horizon
+      statistics without forgetting.
+
+    Practical guidance:
+    - Prefer decay < 1.0 for online RL where state distributions shift over time.
+    - Prefer decay = 1.0 when data is stationary and you want exact cumulative
+      normalization across all samples.
+
     Examples:
 
     Normalize an observation of shape [*, C, H, W] with statistics of shape [C, 1, 1]:
@@ -35,7 +54,7 @@ class VecNorm(nn.Module):
         self,
         input_shape: Union[torch.Size, tuple, int],
         stats_shape: Union[torch.Size, tuple, int]=None,
-        decay: float=0.999,
+        decay: float=0.995,
     ):
         super().__init__()
         if isinstance(input_shape, int):
@@ -60,7 +79,7 @@ class VecNorm(nn.Module):
 
         self.register_buffer("sum", torch.zeros(self.stats_shape))
         self.register_buffer("ssq", torch.zeros(self.stats_shape))
-        self.register_buffer("count", torch.tensor(1.0))
+        self.register_buffer("count", torch.tensor(0.0))
         # self.register_buffer("decay", torch.tensor(decay))
         self.register_buffer("count_factor", torch.tensor(count_factor))
         self.sum: torch.Tensor
@@ -112,8 +131,9 @@ class VecNorm(nn.Module):
         
     def _compute(self):
         if self.decay < 1.0:
-            mean = self.sum / self.count
-            var = (self.ssq / self.count - mean.pow(2)).clamp_min(self.eps)
+            denom = self.count.clamp_min(1.0)
+            mean = self.sum / denom
+            var = (self.ssq / denom - mean.pow(2)).clamp_min(self.eps)
         else:
             mean = self.sum
             var = (self.ssq - mean.pow(2)).clamp_min(self.eps)
@@ -145,17 +165,23 @@ class VecNorm(nn.Module):
                     dist.all_reduce(self.ssq, op=dist.ReduceOp.SUM)
                     dist.all_reduce(self.count, op=dist.ReduceOp.SUM)
                 else:
-                    # Non-EMA: buffers store means; with equal per-rank counts, average across ranks.
-                    world_size = dist.get_world_size()
-                    # Use float64 accumulators to reduce risk of overflow/precision loss
+                    # Non-EMA: buffers store means; aggregate using per-rank counts.
+                    # Use float64 accumulators to reduce overflow/precision loss.
                     mean_buf = self.sum.to(dtype=torch.float64)
-                    m2_buf = self.ssq.to(dtype=torch.float64)
-                    dist.all_reduce(mean_buf, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(m2_buf, op=dist.ReduceOp.SUM)
-                    mean_global = (mean_buf / world_size).to(dtype=self.sum.dtype)
-                    m2_global = (m2_buf / world_size).to(dtype=self.ssq.dtype)
+                    sqmean_buf = self.ssq.to(dtype=torch.float64)
+                    count_buf = self.count.to(dtype=torch.float64)
+                    weighted_mean = mean_buf * count_buf
+                    weighted_sqmean = sqmean_buf * count_buf
+                    dist.all_reduce(weighted_mean, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(weighted_sqmean, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(count_buf, op=dist.ReduceOp.SUM)
+
+                    count_global = count_buf.clamp_min(1.0)
+                    mean_global = (weighted_mean / count_global).to(dtype=self.sum.dtype)
+                    sqmean_global = (weighted_sqmean / count_global).to(dtype=self.ssq.dtype)
                     self.sum.copy_(mean_global)
-                    self.ssq.copy_(m2_global)
+                    self.ssq.copy_(sqmean_global)
+                    self.count.copy_(count_buf.to(dtype=self.count.dtype))
             else:
                 raise ValueError(f"Invalid mode: {mode}")
     
