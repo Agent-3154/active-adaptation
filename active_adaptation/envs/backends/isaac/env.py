@@ -89,21 +89,43 @@ class IsaacBackendEnv(_EnvBase):
         with use_stage(sim.get_initial_stage()):
             sim.reset()
         
+        # Try to fix headless record
+        # --------------------------
+        from pxr import UsdGeom, Gf
+
+        stage = sim.get_initial_stage()
+
+        camera_path = "/World/RecordCamera"
+
+        camera = UsdGeom.Camera.Define(stage, camera_path)
+
+        xform = UsdGeom.Xformable(camera)
+        xform.AddTranslateOp().Set(
+            Gf.Vec3d(
+                self.cfg.viewer.eye[0],
+                self.cfg.viewer.eye[1],
+                self.cfg.viewer.eye[2],
+            )
+        )
+        # --------------------------
+        
         # warm up the simulation
         for _ in tqdm(range(10), desc="Warming up the simulation"):
             sim.step(render=False)
 
-        sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat)
+        sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat, camera_prim_path=camera_path)
         try:
             import omni.replicator.core as rep
 
             self._render_product = rep.create.render_product(
-                "/OmniverseKit_Persp", tuple(self.cfg.viewer.resolution)
+                camera_path, tuple(self.cfg.viewer.resolution)
             )
             self._rgb_annotator = rep.AnnotatorRegistry.get_annotator(
                 "rgb", device="cpu"
             )
             self._rgb_annotator.attach([self._render_product])
+            for _ in range(5):
+                sim.step(render=True)
         except ModuleNotFoundError:
             print("Set enable_cameras=true to use cameras.")
 
