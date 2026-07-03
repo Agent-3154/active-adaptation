@@ -50,7 +50,7 @@ class PlayTaskOverride:
 
     num_envs: int = 4
     """Number of parallel environments (kept small for interactive playback)."""
-
+    record_video: bool = "${..record_video}"
 
 @dataclass
 class PlayConfig:
@@ -66,7 +66,7 @@ class PlayConfig:
     """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
     device: str = "cuda"
     """Torch device for policy inference (e.g. ``cuda``, ``cpu``)."""
-    record_video: bool = False
+    record_video: bool = True
     """Record an MP4 of the rollout (Isaac backend only)."""
     app: IsaacAppConfig = field(default_factory=IsaacAppConfig)
     """Backend-specific application launcher config."""
