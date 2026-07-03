@@ -151,6 +151,9 @@ class FlowMatchingActor(nn.Module):
 
         eps = torch.randn(N, self.n_samples_per_action, self.action_dim, device=device)
         t = torch.rand(N, self.n_samples_per_action, 1, device=device)
+        beta = self.cfm_loss_t_inverse_cdf_beta
+        # Scale to [0.005, 0.995] to avoid boundary instabilities at t=0 and t=1
+        t = 0.005 + 0.995 * (1.0 - (1.0 - t) ** (1.0 / beta))
         cfm_loss = self.compute_cfm_loss(obs, x_1, eps, t)
 
         action = x_1 + perturb
@@ -457,11 +460,11 @@ class FPOPolicy(TensorDictModuleBase):
                 tensordict, self.critic, "adv", "ret", self.cfg.clamp_reward
             )
             adv_unnormalized = tensordict["adv"]
-            if self.cfg.normalize_advantage and not self.cfg.normalize_advantage_per_minibatch:
-                adv = tensordict["adv"]
-                adv = (adv - adv.mean()) / adv.std().clamp_min(1e-7)
-                tensordict["adv"] = adv
-
+            adv_mean = adv_unnormalized.mean()
+            adv_std = adv_unnormalized.std()
+            adv = tensordict["adv"]
+            adv = (adv - adv_mean) / adv_std.clamp_min(1e-7)
+            tensordict["adv"] = adv
             pos_clamp, neg_clamp = self.cfg.advantage_clamp
             tensordict["adv"] = tensordict["adv"].clamp(-neg_clamp, pos_clamp)
 
@@ -490,7 +493,9 @@ class FPOPolicy(TensorDictModuleBase):
         infos["critic/value_std"] = tensordict["ret"].std().item()
         infos["critic/value_max"] = tensordict["ret"].max().item()
         # Raw (pre-normalization) advantage spread helps detect noisy reward/critic regimes.
-        infos["critic/adv_std"] = adv_unnormalized.std().item()
+        infos["critic/adv_std"] = adv_std.item()
+        infos["critic/adv_mean"] = adv_mean.item()
+        infos["critic/adv_pos"] = (adv >= 0.0).float().mean().item()
         reward_aggregated = tensordict["next", "reward_aggregated"]
         # Fraction of non-positive rewards; useful for sparse/penalty-heavy tasks.
         infos["critic/neg_rew_ratio"] = (reward_aggregated <= 0.0).float().mean().item()
@@ -645,6 +650,9 @@ class FPOPolicy(TensorDictModuleBase):
             approx_kl = ((ratio - 1.0) - log_ratio).mean()
             # Importance-weighted advantage mass under CFM-derived ratio.
             weighted_ratio = (ratio * adv.expand_as(ratio)).mean()
+            is_positive_adv = (adv >= 0.0).expand_as(cfm_loss)
+            cfm_loss_pos = cfm_loss[is_positive_adv].mean()
+            cfm_loss_neg = cfm_loss[~is_positive_adv].mean()
 
         return {
             "actor/policy_loss": policy_loss.detach(),
@@ -653,6 +661,8 @@ class FPOPolicy(TensorDictModuleBase):
             "actor/clamp_ratio": clipfrac,
             "actor/approx_kl": approx_kl,
             "actor/cfm_loss": cfm_loss.mean().detach(),
+            "actor/cfm_loss_pos": cfm_loss_pos.detach(),
+            "actor/cfm_loss_neg": cfm_loss_neg.detach(),
             "critic/value_loss": value_loss.detach(),
             "critic/grad_norm": critic_grad_norm,
             "critic/explained_var": explained_var,
