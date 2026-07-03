@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+from tensordict import TensorDictBase
 
 from typing import TYPE_CHECKING
 
@@ -48,7 +49,9 @@ class Command(MDPComponent, RegistryMixin):
         """
         pass
 
-    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor | None:
+    def sample_init(
+        self, env_ids: torch.Tensor, reset_td: TensorDictBase | None = None
+    ) -> torch.Tensor | None:
         init_root_state = self.init_root_state[env_ids]
         origins = self.env.scene.get_spawn_origins(env_ids)
         init_root_state[:, :3] += origins

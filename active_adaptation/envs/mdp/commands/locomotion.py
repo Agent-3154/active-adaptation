@@ -131,7 +131,7 @@ class Twist(Command):
         ], dim=-1)
 
     @override
-    def sample_init(self, env_ids):
+    def sample_init(self, env_ids, reset_td=None):
         if self.curriculum and self.env.episode_count > 1: # and self.env.training:
             distance_traveled = self.distance_traveled[env_ids]
             distance_commanded = self.distance_commanded[env_ids].clamp_min(1.0)
@@ -145,7 +145,7 @@ class Twist(Command):
         self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
         self.distance_commanded[env_ids] = 0.0
         self.distance_traveled[env_ids] = 0.0
-        return super().sample_init(env_ids)
+        return super().sample_init(env_ids, reset_td)
 
     @override
     def reset(self, env_ids):
@@ -391,7 +391,7 @@ class PositionVelocityTracking(Command):
         return transform
     
     @override
-    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> torch.Tensor:
         if self.curriculum and self.env.episode_count > 1: # and self.env.training:
             distance_traveled = self.distance_traveled[env_ids]
             distance_commanded = self.distance_commanded[env_ids].clamp_min(1.0)
@@ -405,7 +405,7 @@ class PositionVelocityTracking(Command):
         self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
         self.distance_commanded[env_ids] = 0.0
         self.distance_traveled[env_ids] = 0.0
-        return super().sample_init(env_ids)
+        return super().sample_init(env_ids, reset_td)
 
     @override
     def reset(self, env_ids):

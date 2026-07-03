@@ -51,7 +51,7 @@ class Game(Command):
             signs=torch.tensor([1, -1, 1, 1, -1, 1, 1, 1]),
         )
 
-    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> torch.Tensor:
         chase = env_ids % 2 == 0
         init_root_state = self.init_root_state[env_ids]
         origins = self.env.scene.get_spawn_origins(env_ids)

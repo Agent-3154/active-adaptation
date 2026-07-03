@@ -285,7 +285,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                 reward = cast(mdp.Reward, reward)
                 funcs[rew_name] = reward
                 self._add_mdp_component(reward)
-                print(f"\t{rew_name}: \t{reward.weight:.2f}")
+                print(f"\t{rew_name}: \t{reward.weight:.2f} \t enabled={reward.enabled}")
 
             self.reward_groups[group_name] = RewardGroup(
                 self, group_name, funcs, enabled, compile
@@ -414,6 +414,38 @@ class _EnvBase(EnvBase, RegistryMixin):
                 result[f"reward.{group_key}/{rew_key}"] = value
         return result
 
+    def reset(
+        self,
+        tensordict: TensorDictBase | None = None,
+        **kwargs,
+    ) -> TensorDictBase:
+        if tensordict is not None:
+            self._assert_tensordict_shape(tensordict)
+
+        select_reset_only = kwargs.pop("select_reset_only", False)
+        if select_reset_only and tensordict is not None:
+            reset_input = tensordict.select(
+                *self.reset_keys,
+                "terminated",
+                "truncated",
+                strict=False,
+            )
+            tensordict_reset = self._reset(reset_input, **kwargs)
+        else:
+            tensordict_reset = self._reset(tensordict, **kwargs)
+
+        if tensordict_reset is tensordict:
+            raise RuntimeError(
+                "EnvBase._reset should return outplace changes to the input "
+                "tensordict. Consider emptying the TensorDict first (e.g. tensordict.empty()) "
+                "inside _reset before writing new tensors onto this new instance."
+            )
+        if not isinstance(tensordict_reset, TensorDictBase):
+            raise RuntimeError(
+                f"env._reset returned an object of type {type(tensordict_reset)} but a TensorDict was expected."
+            )
+        return self._reset_proc_data(tensordict, tensordict_reset)
+
     def _reset(
         self, tensordict: TensorDictBase | None = None, **kwargs
     ) -> TensorDictBase:
@@ -422,10 +454,17 @@ class _EnvBase(EnvBase, RegistryMixin):
             self._startup_done = True
             
         if tensordict is not None:
-            env_mask = tensordict.get("_reset").reshape(self.num_envs)
-            env_ids = env_mask.nonzero().squeeze(-1)
+            env_mask = tensordict.get("_reset", None)
+            if env_mask is None:
+                env_ids = torch.arange(self.num_envs, device=self.device)
+                reset_td = None
+            else:
+                env_mask = env_mask.reshape(self.num_envs)
+                env_ids = env_mask.nonzero().squeeze(-1)
+                reset_td = tensordict[env_ids]
         else:
             env_ids = torch.arange(self.num_envs, device=self.device)
+            reset_td = None
 
         if len(env_ids):
             num_envs = env_ids.numel()
@@ -435,7 +474,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             )
             self.episode_count += num_envs
 
-            self._reset_idx(env_ids)
+            self._reset_idx(env_ids, reset_td)
             self.scene.reset(env_ids)
             [callback(env_ids) for callback in self._reset_callbacks]
 
@@ -444,8 +483,10 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict.set("episode_id", self.episode_id.clone())
         return tensordict
 
-    def _reset_idx(self, env_ids: torch.Tensor):
-        init_state = self.command_manager.sample_init(env_ids)
+    def _reset_idx(
+        self, env_ids: torch.Tensor, reset_td: TensorDictBase | None = None
+    ):
+        init_state = self.command_manager.sample_init(env_ids, reset_td)
         if not isinstance(init_state, dict):
             init_state = {"robot": init_state}
         for key, value in init_state.items():

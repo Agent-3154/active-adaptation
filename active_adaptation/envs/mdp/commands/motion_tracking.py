@@ -77,7 +77,7 @@ class MotionTrackingCommand(Command):
         self.future_steps = torch.tensor([0, 12, 24, 36])
         self.update()
     
-    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> torch.Tensor:
         init_root_state = self.init_root_state[env_ids]
         origins = self.env.scene.env_origins[env_ids]
         motion = self.dataset.get_slice(self.motion_ids[env_ids.cpu()], 0, 1)
