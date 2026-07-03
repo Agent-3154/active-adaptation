@@ -319,13 +319,6 @@ class NormalActor(nn.Module):
 
 
 class SAC(TensorDictModuleBase):
-
-    # keys to select from the batch for training
-    train_keys = (
-        CMD_KEY, OBS_KEY, ("next", OBS_KEY), ("next", CMD_KEY), ACTION_KEY,
-        REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
-    )
-
     def __init__(
         self,
         cfg: SACConfig,
@@ -361,9 +354,20 @@ class SAC(TensorDictModuleBase):
         fake = observation_spec.zero()
         preproc = []
         if CMD_KEY in observation_spec.keys(True, True):
+            self.train_keys = (
+                CMD_KEY, OBS_KEY, ("next", OBS_KEY), ("next", CMD_KEY), ACTION_KEY,
+                REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
+                "priority_weight", "replay_flat_index"
+            )
+
             obs_dim = fake[OBS_KEY].shape[-1] + fake[CMD_KEY].shape[-1]
             preproc.append(CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False))
         else:
+            self.train_keys = (
+                OBS_KEY, ("next", OBS_KEY), ACTION_KEY,
+                REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
+                "priority_weight", "replay_flat_index"
+            )
             obs_dim = fake[OBS_KEY].shape[-1]
             preproc.append(Mod(nn.Identity(), [OBS_KEY], ["_input"]))
         act_dim = action_spec.shape[-1]
