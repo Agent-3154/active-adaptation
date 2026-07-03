@@ -1,12 +1,9 @@
 import torch
 import torch.nn as nn
-import math
 import torch.distributed as dist
-import active_adaptation
 
 from typing import Union
 from torch.utils._contextlib import _DecoratorContextManager
-from torchrl.envs.transforms import VecNorm
 
 
 class VecNorm(nn.Module):
@@ -192,6 +189,45 @@ class VecNorm(nn.Module):
         
         def __exit__(self, exc_type, exc_value, traceback):
             VecNorm.FROZEN = False
+
+
+class VecNormRMS(VecNorm):
+    """
+    RMS-only variant of `VecNorm`.
+
+    Difference from `VecNorm`:
+    - `VecNorm` performs mean-centered z-score normalization:
+      `(x - mean) / std`, where `std = sqrt(E[x^2] - E[x]^2)`.
+    - `VecNormRMS` performs scale-only RMS normalization:
+      `x / rms`, where `rms = sqrt(E[x^2])`.
+
+    Because it does not subtract the running mean, `VecNormRMS` preserves
+    input sign for non-zero values and is often preferred when the sign carries
+    semantic meaning (e.g., directional signals).
+    """
+
+    def __repr__(self):
+        return (
+            f"VecNormRMS(input_shape={self.input_shape}, stats_shape={self.stats_shape}, "
+            f"decay={self.decay}, reduction_dims={self.reduction_dims}, "
+            f"count_factor={self.count_factor})"
+        )
+
+    def _compute_rms(self):
+        if self.decay < 1.0:
+            denom = self.count.clamp_min(1.0)
+            mean_sq = self.ssq / denom
+        else:
+            mean_sq = self.ssq
+        return mean_sq.clamp_min(self.eps).sqrt()
+
+    def _normalize(self, input_vector: torch.Tensor):
+        rms = self._compute_rms()
+        return input_vector / rms
+
+    def denormalize(self, input_vector: torch.Tensor):
+        rms = self._compute_rms()
+        return input_vector * rms
 
 
 if __name__ == "__main__":
