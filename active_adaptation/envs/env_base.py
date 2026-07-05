@@ -59,6 +59,17 @@ class ObsGroup:
         for func in self.funcs.values():
             if isinstance(func, mdp.ObservationV2):
                 func._initialize(env)
+        tensors = [func.compute() for func in self.funcs.values()]
+        shapes = OrderedDict([(key, tensor.shape) for key, tensor in zip(self.funcs.keys(), tensors)])
+        obs = torch.cat(tensors, dim=-1)
+        spec = {
+            self.name: Unbounded(
+                obs.shape,
+                dtype=obs.dtype,
+            )
+        }
+        self._spec = Composite(spec, shape=[obs.shape[0]]).to(self.env.device)
+        self._shapes = shapes
     
     def __getitem__(self, key: str) -> mdp.ObservationV2:
         return self.funcs[key]
@@ -69,25 +80,16 @@ class ObsGroup:
 
     @property
     def spec(self):
-        if not hasattr(self, "_spec"):
-            sample = self.compute({}, 0)
-            spec = {
-                self.name: Unbounded(
-                    sample[self.name].shape,
-                    dtype=sample[self.name].dtype,
-                )
-            }
-            self._spec = Composite(spec, shape=[sample[self.name].shape[0]]).to(
-                sample[self.name].device
-            )
         return self._spec
+    
+    @property
+    def shapes(self):
+        return self._shapes
 
     def compute(self, tensordict: TensorDictBase, timestamp: int) -> TensorDictBase:
-        tensordict[self.name] = self._compute()
+        tensors = [func.compute() for func in self.funcs.values()]
+        tensordict[self.name] = torch.cat(tensors, dim=-1)
         return tensordict
-
-    def _compute(self) -> torch.Tensor:
-        return torch.cat([func.compute() for func in self.funcs.values()], dim=-1)
 
     def symmetry_transform(self):
         """Return the mirror transform for the concatenated observation group.
