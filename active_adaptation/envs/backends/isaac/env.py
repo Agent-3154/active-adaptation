@@ -74,6 +74,10 @@ class IsaacBackendEnv(_EnvBase):
             assert isinstance(cfg, (ArticulationCfg, RigidObjectCfg)), f"Asset configuration must be an instance of ArticulationCfg or RigidObjectCfg, got {type(cfg)}"
             cfg.prim_path = "{ENV_REGEX_NS}/" + obj_name
             setattr(scene_cfg, obj_name, cfg)
+        
+        for observation in self.observation_groups.values():
+            for func in observation.funcs.values():
+                func.edit_spec(scene_cfg)
 
         sim_cfg = sim_utils.SimulationCfg(
             dt=self.cfg.sim.isaac_physics_dt,

@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import colorsys
 import torch
+import einops
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from typing_extensions import override
@@ -7,11 +10,18 @@ from typing_extensions import override
 import active_adaptation
 from jaxtyping import Float
 from .base import ObservationV2
-from active_adaptation.utils.math import quat_rotate, yaw_quat, quat_from_euler_xyz
+from active_adaptation.utils.math import (
+    quat_rotate,
+    yaw_quat,
+    quat_from_euler_xyz,
+    root_pose_from_view_z_up,
+)
 from active_adaptation.utils.symmetry import SymmetryTransform, cartesian_space_symmetry
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation
+    from isaaclab.assets import Articulation, RigidObject
+    from isaaclab.sensors import TiledCamera
+    from isaaclab.scene import InteractiveSceneCfg
     from active_adaptation.envs.env_base import _EnvBase
 
 if active_adaptation.get_backend() == "isaac":
@@ -543,3 +553,172 @@ class feet_height_map(ObservationV2):
             assert torch.all(y.reshape(1, -1) == x.reshape(1, -1)[..., perm])
             return SymmetryTransform(perm=perm, signs=signs)
         return None
+
+
+class camera_isaac(ObservationV2):
+    """Isaac Lab tiled camera observation for the Isaac backend.
+
+    Registers a :class:`~isaaclab.sensors.TiledCameraCfg` on the scene during
+    :meth:`edit_spec` (called from :meth:`IsaacBackendEnv.setup_scene` before
+    the scene is built). After simulation startup, :meth:`compute` reads
+    ``camera.data.output[data_type]``, optionally normalizes it, and returns a
+    ``(num_envs, C, H, W)`` tensor.
+
+    Args:
+        resolution: ``(width, height)`` in pixels.
+        data_type: Camera output key, e.g. ``"rgb"`` or ``"depth"``.
+        focal_length: Pinhole focal length in mm.
+        focus_distance: Pinhole focus distance in m.
+        horizontal_aperture: Pinhole horizontal aperture in mm.
+        clipping_range: Near/far clipping planes in m.
+        body_name: If set, attach the camera to ``Robot/{body_name}``; otherwise
+            spawn a standalone camera under each env namespace.
+        sensor_name: Scene sensor attribute name. Defaults to a unique
+            ``tiled_camera_{id}`` per instance so multiple cameras can coexist.
+        offset_pos: Camera offset translation w.r.t. its parent frame.
+        offset_rot: Camera offset rotation ``(w, x, y, z)`` w.r.t. parent frame.
+        offset_convention: Offset frame convention (``"ros"``, ``"world"``, or
+            ``"opengl"``).
+    """
+
+    supported_backends = ("isaac",)
+    _instance_count = 0
+
+    def __init__(
+        self,
+        resolution: Tuple[int, int],
+        data_type: str = "rgb",
+        focal_length: float = 24.0,
+        focus_distance: float = 400.0,
+        horizontal_aperture: float = 20.955,
+        clipping_range: Tuple[float, float] = (0.1, 20.0),
+        body_name: Optional[str] = None,
+        sensor_name: Optional[str] = None,
+        offset_pos: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        offset_rot: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
+        offset_convention: str = "world",
+    ):
+        super().__init__()
+        self.resolution = resolution
+        self.data_type = data_type
+        self.focal_length = focal_length
+        self.focus_distance = focus_distance
+        self.horizontal_aperture = horizontal_aperture
+        self.clipping_range = tuple(clipping_range)
+        self.body_name = body_name
+        self.offset_pos = tuple(offset_pos)
+        self.offset_rot = tuple(offset_rot)
+        self.offset_convention = offset_convention
+
+        if sensor_name is None:
+            camera_isaac._instance_count += 1
+            self.sensor_name = f"tiled_camera_{camera_isaac._instance_count}"
+        else:
+            self.sensor_name = sensor_name
+
+    @override
+    def edit_spec(self, scene_config: InteractiveSceneCfg) -> None:
+        import isaaclab.sim as sim_utils
+        from isaaclab.assets import RigidObjectCfg
+        from isaaclab.sensors import TiledCameraCfg
+
+        if hasattr(scene_config, self.sensor_name):
+            raise ValueError(
+                f"Scene config already has sensor '{self.sensor_name}'. "
+                "Choose a distinct sensor_name for each camera_isaac instance."
+            )
+
+        if self.body_name is not None:
+            camera_mount_cfg = None
+            prim_path = f"{{ENV_REGEX_NS}}/Robot/{self.body_name}/{self.sensor_name}"
+        else:
+            # As of Isaac Sim 5.1.0, there is a bug that prevents setting the pose
+            # of TiledCamera dynamically during simulation using `set_world_poses`
+            # Therefore we attach it to a dummy body
+            # TODO@btx0424: check if this is still needed after Isaac Sim 6.0.0
+            camera_mount_cfg = RigidObjectCfg(
+                prim_path=f"{{ENV_REGEX_NS}}/{self.sensor_name}_mount",
+                spawn=sim_utils.SphereCfg(
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                        rigid_body_enabled=True,
+                        kinematic_enabled=True,
+                    ),
+                    radius=0.02,
+                )
+            )
+            prim_path = f"{{ENV_REGEX_NS}}/{self.sensor_name}_mount/{self.sensor_name}"
+
+        cfg = TiledCameraCfg(
+            prim_path=prim_path,
+            offset=TiledCameraCfg.OffsetCfg(
+                pos=self.offset_pos,
+                rot=self.offset_rot,
+                convention=self.offset_convention,
+            ),
+            data_types=[self.data_type],
+            spawn=sim_utils.PinholeCameraCfg(
+                focal_length=self.focal_length,
+                focus_distance=self.focus_distance,
+                horizontal_aperture=self.horizontal_aperture,
+                clipping_range=self.clipping_range,
+            ),
+            width=self.resolution[0],
+            height=self.resolution[1],
+            update_latest_camera_pose=True,
+        )
+        if camera_mount_cfg is not None:
+            setattr(scene_config, self.sensor_name + "_mount", camera_mount_cfg)
+        setattr(scene_config, self.sensor_name, cfg)
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        if self.body_name is None:
+            self.camera_mount: RigidObject = self.env.scene.entities[self.sensor_name + "_mount"]
+        self.camera: TiledCamera = self.env.scene.sensors[self.sensor_name]
+
+    @override
+    def update(self) -> None:
+        if self.body_name is None:
+            robot_root_pos_w = self.env.scene.entities["robot"].data.root_link_pos_w
+            eye = robot_root_pos_w + torch.tensor([2.0, 2.0, 2.0], device=self.device)
+            target = robot_root_pos_w
+            self.camera_mount.write_root_link_pose_to_sim(
+                root_pose_from_view_z_up(eye, target)
+            )
+
+    @override
+    def compute(self) -> torch.Tensor:
+        # for rgb, isaac sim returns uint8, which we leave as is
+        data = self.camera.data.output[self.data_type]  # NHWC        
+        # Temporary in-line code to save some images for sanity check
+        # from pathlib import Path
+        # from torchvision.utils import make_grid, save_image
+        # if not hasattr(self, "_cam_dbg_step"):
+        #     self._cam_dbg_step = 0
+        # if self._cam_dbg_step < 100:
+        #     raw = self.camera.data.output[self.data_type][:16].detach()
+        #     if self.data_type == "rgb":
+        #         imgs = raw.permute(0, 3, 1, 2).float() / 255.0
+        #     else:
+        #         imgs = raw.permute(0, 3, 1, 2).clone()
+        #         imgs[torch.isinf(imgs)] = 0.0
+        #         imgs = imgs / imgs.max().clamp_min(1e-6)
+        #         if imgs.shape[1] == 1:
+        #             imgs = imgs.expand(-1, 3, -1, -1)
+        #     out_dir = Path("test_images")
+        #     out_dir.mkdir(parents=True, exist_ok=True)
+        #     save_image(
+        #         make_grid(imgs, nrow=max(1, round(imgs.shape[0] ** 0.5))),
+        #         out_dir / f"{self.sensor_name}_{self._cam_dbg_step:04d}.png",
+        #     )
+        # self._cam_dbg_step += 1
+        return einops.rearrange(data, "n h w c -> n c h w")
+
+    @override
+    def symmetry_transform(self) -> SymmetryTransform:
+        if self.body_name is None:
+            raise NotImplementedError("Symmetry transform is only available when the camera is attached to a body")
+        width = self.resolution[0]
+        perm = torch.arange(width - 1, -1, -1, dtype=torch.long)
+        return SymmetryTransform(perm, torch.ones(width))
