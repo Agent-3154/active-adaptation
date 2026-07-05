@@ -37,9 +37,9 @@ DEFAULTS = [
 class IsaacAppConfig:
     """Isaac Lab AppLauncher settings (resolved from parent config)."""
 
-    headless: str = "${..headless}"
+    headless: bool = "${..headless}"
     """Mirror ``headless``; passed to Isaac Lab's AppLauncher."""
-    enable_cameras: str = "${..record_video}"
+    enable_cameras: bool = "${..record_video}"
     """Mirror ``record_video``; enables camera sensors when recording."""
 
 
@@ -158,7 +158,11 @@ def main(cfg: PlayConfig):
     video_path = video_dir / f"{cfg.task.name}-{time_str}.mp4"
     exploration_type = ExplorationType(cfg.get("exploration_type", "MODE"))
 
-    with env.get_recorder(video_path, enabled=record_enabled)as rec, \
+    print_interval_s = 2.0
+    last_print_time = time.perf_counter()
+    last_print_step = -1
+
+    with env.get_recorder(video_path, enabled=record_enabled) as rec, \
         torch.inference_mode(), set_exploration_type(exploration_type):
         try:
             for i in itertools.count():
@@ -173,6 +177,15 @@ def main(cfg: PlayConfig):
                     print("Step", i)
                     for k, v in sorted(episode_stats.pop().items(True, True)):
                         print(k, torch.mean(v).item())
+
+                now = time.perf_counter()
+                elapsed = now - last_print_time
+                if elapsed >= print_interval_s:
+                    n_steps = i - last_print_step
+                    sps = n_steps / elapsed
+                    print(f"step {i} | {sps:.1f}x{env.num_envs}={sps*env.num_envs:.1f} env steps/s")
+                    last_print_time = now
+                    last_print_step = i
 
                 timer.sleep()
         except KeyboardInterrupt:
