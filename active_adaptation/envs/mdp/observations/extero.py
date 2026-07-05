@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import colorsys
+import math
 import torch
 import einops
 from typing import TYPE_CHECKING, List, Optional, Tuple
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     from isaaclab.assets import Articulation, RigidObject
     from isaaclab.sensors import TiledCamera
     from isaaclab.scene import InteractiveSceneCfg
+    from mjlab.sensor import CameraSensor
+    from mjlab.scene import SceneCfg
     from active_adaptation.envs.env_base import _EnvBase
 
 if active_adaptation.get_backend() == "isaac":
@@ -719,6 +722,140 @@ class camera_isaac(ObservationV2):
     def symmetry_transform(self) -> SymmetryTransform:
         if self.body_name is None:
             raise NotImplementedError("Symmetry transform is only available when the camera is attached to a body")
+        width = self.resolution[0]
+        perm = torch.arange(width - 1, -1, -1, dtype=torch.long)
+        return SymmetryTransform(perm, torch.ones(width))
+
+
+class camera_mjlab(ObservationV2):
+    """MjLab camera observation using :class:`~mjlab.sensor.CameraSensor`.
+
+    Registers a :class:`~mjlab.sensor.CameraSensorCfg` during scene construction
+    (``edit_spec`` appends to the mjlab sensor list). Rendering runs via
+    ``sim.sense()`` each env step; :meth:`compute` returns ``(N, C, H, W)``.
+
+    MuJoCo cameras use **fixed** mode: ``pos``/``quat`` are set in the spec at
+    build time. Attach via ``body_name`` (``robot/{name}``) or spawn on the
+    worldbody with ``offset_pos`` / ``offset_rot``. Dynamic tracking (e.g. via a
+    dummy mocap body) is not implemented yet.
+
+    Args:
+        resolution: ``(width, height)`` in pixels.
+        data_type: ``"rgb"``, ``"depth"``, or ``"segmentation"``.
+        fovy: Vertical field of view in degrees. If ``None``, derived from
+            ``focal_length`` and ``horizontal_aperture``.
+        focal_length: Pinhole focal length in mm (used when ``fovy`` is None).
+        horizontal_aperture: Pinhole horizontal aperture in mm.
+        body_name: Robot body to attach the camera to (``robot/{name}``).
+        sensor_name: Scene sensor key. Defaults to ``mjlab_camera_{id}``.
+        offset_pos: Camera position w.r.t. parent body or world frame.
+        offset_rot: Camera orientation ``(w, x, y, z)`` w.r.t. parent frame.
+    """
+
+    supported_backends = ("mjlab",)
+    _instance_count = 0
+
+    def __init__(
+        self,
+        resolution: Tuple[int, int],
+        data_type: str = "rgb",
+        fovy: Optional[float] = None,
+        focal_length: float = 24.0,
+        horizontal_aperture: float = 20.955,
+        body_name: Optional[str] = None,
+        sensor_name: Optional[str] = None,
+        offset_pos: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        offset_rot: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
+    ):
+        super().__init__()
+        self.resolution = resolution
+        self.data_type = data_type
+        self.fovy = fovy
+        self.focal_length = focal_length
+        self.horizontal_aperture = horizontal_aperture
+        self.body_name = body_name
+        self.offset_pos = tuple(offset_pos)
+        self.offset_rot = tuple(offset_rot)
+
+        if sensor_name is None:
+            camera_mjlab._instance_count += 1
+            self.sensor_name = f"mjlab_camera_{camera_mjlab._instance_count}"
+        else:
+            self.sensor_name = sensor_name
+
+    def _resolved_fovy(self) -> float:
+        if self.fovy is not None:
+            return self.fovy
+        width, height = self.resolution
+        h_fov = 2.0 * math.atan(self.horizontal_aperture / (2.0 * self.focal_length))
+        v_fov = 2.0 * math.atan(math.tan(h_fov / 2.0) * height / width)
+        return math.degrees(v_fov)
+
+    @override
+    def edit_spec(self, scene_config: SceneCfg) -> None:
+        from mjlab.sensor import CameraSensorCfg
+        parent_body = f"robot/{self.body_name}" if self.body_name is not None else None
+        scene_config.sensors += (
+            CameraSensorCfg(
+                name=self.sensor_name,
+                parent_body=parent_body,
+                pos=self.offset_pos,
+                quat=self.offset_rot,
+                fovy=self._resolved_fovy(),
+                width=self.resolution[0],
+                height=self.resolution[1],
+                data_types=(self.data_type,),
+            ),
+        )
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.camera: CameraSensor = self.env.scene.sensors[self.sensor_name]
+
+    @override
+    def compute(self) -> torch.Tensor:
+        data = self.camera.data
+        if self.data_type == "rgb":
+            output = data.rgb
+        elif self.data_type == "depth":
+            output = data.depth.clone()
+            output[torch.isinf(output)] = 0.0
+        elif self.data_type == "segmentation":
+            output = data.segmentation
+        else:
+            raise ValueError(f"Unsupported camera data_type: {self.data_type!r}")
+
+        # Temporary in-line code to save some images for sanity check
+        # from pathlib import Path
+        # from torchvision.utils import make_grid, save_image
+        # if not hasattr(self, "_cam_dbg_step"):
+        #     self._cam_dbg_step = 0
+        # if self._cam_dbg_step < 100:
+        #     raw = output[:16].detach()
+        #     if self.data_type == "rgb":
+        #         imgs = raw.permute(0, 3, 1, 2).float() / 255.0
+        #     else:
+        #         imgs = raw.permute(0, 3, 1, 2).clone()
+        #         imgs[torch.isinf(imgs)] = 0.0
+        #         imgs = imgs / imgs.max().clamp_min(1e-6)
+        #         if imgs.shape[1] == 1:
+        #             imgs = imgs.expand(-1, 3, -1, -1)
+        #     out_dir = Path("test_images")
+        #     out_dir.mkdir(parents=True, exist_ok=True)
+        #     save_image(
+        #         make_grid(imgs, nrow=max(1, round(imgs.shape[0] ** 0.5))),
+        #         out_dir / f"{self.sensor_name}_{self._cam_dbg_step:04d}.png",
+        #     )
+        # self._cam_dbg_step += 1
+        return einops.rearrange(output, "n h w c -> n c h w")
+
+    @override
+    def symmetry_transform(self) -> SymmetryTransform:
+        if self.body_name is None:
+            raise NotImplementedError(
+                "camera_mjlab symmetry is only defined for body-mounted cameras"
+            )
         width = self.resolution[0]
         perm = torch.arange(width - 1, -1, -1, dtype=torch.long)
         return SymmetryTransform(perm, torch.ones(width))

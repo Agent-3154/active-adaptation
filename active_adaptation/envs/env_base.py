@@ -522,8 +522,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             #     with ScopedTimer("simulation_forward", sync=PROFILE_SYNC_TIMERS):
             #         self.sim._sim.forward()
 
-        if self.sim.has_gui() and self.backend != "mjlab":
-            self.sim.render()
 
         self.episode_length_buf.add_(1)
         self.timestamp += 1
@@ -539,6 +537,13 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict = self._compute_termination(tensordict)
         with ScopedTimer("command.update", sync=False):
             self.command_manager.update()
+
+        # TODO: make this backend agnostic
+        if self.sim.has_gui() and self.backend != "mjlab":
+            self.sim.render()
+        if self.backend == "mjlab":
+            self.sim.sense()
+    
         tensordict = self._compute_observation(tensordict)
 
         tensordict.set("episode_id", self.episode_id.clone())
