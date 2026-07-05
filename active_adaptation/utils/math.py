@@ -231,13 +231,6 @@ def euler_from_quat(quat: torch.Tensor):
     return torch.stack([roll, pitch, yaw], dim=-1)
 
 
-# def quat_from_view(eyes: torch.Tensor, lookat: torch.Tensor):
-#     matrix = create_rotation_matrix_from_view(eyes, lookat, up_axis="Z", device=eyes.device)
-#     quat = quat_from_matrix(matrix)
-#     quat = convert_camera_frame_orientation_convention(quat, "opengl", "world")
-#     return quat
-
-
 def axis_angle_from_quat(quat: torch.Tensor, eps: float = 1.0e-6) -> torch.Tensor:
     """Convert rotations given as quaternions to axis/angle.
 
@@ -328,6 +321,81 @@ def matrix_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
         -1,
     )
     return o.reshape(quaternions.shape[:-1] + (3, 3))
+
+
+def _sqrt_positive_part(x: torch.Tensor) -> torch.Tensor:
+    return torch.sqrt(torch.clamp(x, min=0.0))
+
+
+def quat_from_matrix(matrix: torch.Tensor) -> torch.Tensor:
+    """Convert rotation matrices to quaternions ``(w, x, y, z)``."""
+    if matrix.size(-1) != 3 or matrix.size(-2) != 3:
+        raise ValueError(f"Invalid rotation matrix shape {matrix.shape}.")
+
+    batch_dim = matrix.shape[:-2]
+    m00, m01, m02, m10, m11, m12, m20, m21, m22 = torch.unbind(
+        matrix.reshape(batch_dim + (9,)), dim=-1
+    )
+
+    q_abs = _sqrt_positive_part(
+        torch.stack(
+            [
+                1.0 + m00 + m11 + m22,
+                1.0 + m00 - m11 - m22,
+                1.0 - m00 + m11 - m22,
+                1.0 - m00 - m11 + m22,
+            ],
+            dim=-1,
+        )
+    )
+    quat_by_rijk = torch.stack(
+        [
+            torch.stack([q_abs[..., 0] ** 2, m21 - m12, m02 - m20, m10 - m01], dim=-1),
+            torch.stack([m21 - m12, q_abs[..., 1] ** 2, m10 + m01, m02 + m20], dim=-1),
+            torch.stack([m02 - m20, m10 + m01, q_abs[..., 2] ** 2, m12 + m21], dim=-1),
+            torch.stack([m10 - m01, m20 + m02, m21 + m12, q_abs[..., 3] ** 2], dim=-1),
+        ],
+        dim=-2,
+    )
+    flr = torch.tensor(0.1, dtype=q_abs.dtype, device=q_abs.device)
+    quat_candidates = quat_by_rijk / (2.0 * q_abs[..., None].max(flr))
+    return quat_candidates[
+        torch.nn.functional.one_hot(q_abs.argmax(dim=-1), num_classes=4) > 0.5, :
+    ].reshape(batch_dim + (4,))
+
+
+def quat_from_view_z_up(eye: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Look-at orientation with world +X forward, +Z up (Z-up stage).
+
+    Args:
+        eye: Camera positions, shape ``(..., 3)``.
+        target: Look-at points, shape ``(..., 3)``.
+
+    Returns:
+        Quaternion ``(w, x, y, z)`` with the same batch shape as ``eye``.
+    """
+    forward = target - eye
+    forward = forward / forward.norm(dim=-1, keepdim=True).clamp_min(1e-5)
+
+    world_up = torch.zeros_like(forward)
+    world_up[..., 2] = 1.0
+    aux_up = torch.zeros_like(forward)
+    aux_up[..., 1] = 1.0
+
+    x_axis = forward
+    y_axis = torch.cross(world_up, x_axis, dim=-1)
+    parallel = y_axis.norm(dim=-1, keepdim=True) < 1e-5
+    y_axis = torch.where(parallel, torch.cross(aux_up, x_axis, dim=-1), y_axis)
+    y_axis = y_axis / y_axis.norm(dim=-1, keepdim=True).clamp_min(1e-5)
+    z_axis = torch.cross(x_axis, y_axis, dim=-1)
+
+    rot = torch.stack([x_axis, y_axis, z_axis], dim=-1)
+    return quat_from_matrix(rot)
+
+
+def root_pose_from_view_z_up(eye: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Root link pose ``[pos(3), quat(4)]`` from eye/target, Z-up world convention."""
+    return torch.cat([eye, quat_from_view_z_up(eye, target)], dim=-1)
 
 
 def normal_noise(x: torch.Tensor, std: float):
