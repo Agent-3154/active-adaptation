@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
@@ -37,6 +37,12 @@ class MDPComponent:
     @property
     def device(self) -> torch.device:
         return self.env.device
+    
+    def edit_spec(self, scene_config: Any) -> None:
+        "The MDP term may optionally edit the scene config to, for example, add its own sensors."
+
+    def startup(self) -> None:
+        pass
 
     def reset(self, env_ids: torch.Tensor) -> None:
         pass
@@ -48,9 +54,6 @@ class MDPComponent:
         pass
 
     def post_step(self, substep: int) -> None:
-        pass
-
-    def startup(self) -> None:
         pass
 
     def debug_draw(self) -> None:
