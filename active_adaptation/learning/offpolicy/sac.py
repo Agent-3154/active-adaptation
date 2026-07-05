@@ -47,7 +47,6 @@ from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
 from active_adaptation.learning.offpolicy.distribution import FasterTransformedDistribution
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
-from active_adaptation.learning.utils.dormancy import DormancyTracker
 from active_adaptation.learning.utils.distributed import (
     check_parameters,
     unwrap_ddp,
@@ -131,15 +130,6 @@ class SACConfig:
     # path to prior data for RLPD
     prior_data: str | None = None
     prior_data_ratio: float = 0.4
-
-    # Distributed training. ``"manual"`` keeps ``self.actor`` / ``self.Q`` as
-    # plain modules and all-reduces gradients explicitly after backward (mirrors
-    # TD3 / FlashSAC reference impls; robust to per-rank reward normalizer
-    # drift). ``"ddp"`` wraps both submodules in :class:`DistributedDataParallel`
-    # so the all-reduce happens in the backward hook (slightly faster overlap,
-    # but requires every parameter to receive a gradient on every step).
-    # ``None`` disables synchronization entirely (single rank only).
-    grad_sync_mode: str | None = "ddp"
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
@@ -258,19 +248,6 @@ def TwinC51Critic(
     )
 
 
-class _SACDormancyScope(nn.Module):
-    """Modules exercised during SAC rollout + learner forwards (:class:`DormancyTracker` hooks)."""
-
-    def __init__(
-        self,
-        actor: nn.Module,
-        q_online: nn.Module,
-    ):
-        super().__init__()
-        self.actor = actor
-        self.Q = q_online
-
-
 class NormalActor(nn.Module):
 
     def __init__(
@@ -347,11 +324,6 @@ class SAC(TensorDictModuleBase):
         self.obs_transform = obs_transform.to(device) if obs_transform is not None else None
         self.act_transform = act_transform.to(device) if act_transform is not None else None
 
-        self.grad_sync_mode = self.cfg.grad_sync_mode
-        if self.grad_sync_mode not in {"manual", "ddp", None}:
-            raise ValueError(f"Invalid grad_sync_mode: {self.grad_sync_mode}")
-
-        self.world_size = aa.get_world_size()
         self._distributed = aa.is_distributed()
         if self._distributed and not (dist.is_available() and dist.is_initialized()):
             raise RuntimeError(
@@ -463,12 +435,8 @@ class SAC(TensorDictModuleBase):
         # parameter tensors with the wrapped module, so optimizers built from
         # ``self.actor.parameters()`` keep pointing at the same params.
         if self._distributed:
-            if self.grad_sync_mode == "ddp":
-                self._wrap_ddp(local_rank=aa.get_local_rank())
+            self._wrap_ddp(local_rank=aa.get_local_rank())
             self._broadcast_parameters()
-
-        scope = _SACDormancyScope(self.actor, self.Q)
-        self._dormancy_tracker = DormancyTracker(scope)
 
         _dev = torch.device(device) if not isinstance(device, torch.device) else device
         self._amp_device_type = _dev.type
@@ -525,21 +493,11 @@ class SAC(TensorDictModuleBase):
         dist.broadcast(self.log_alpha.data, src=0)
 
     @torch.no_grad()
-    def _all_reduce_grads(self, *modules: nn.Module) -> None:
-        """Average gradients across ranks (manual sync path)."""
-        if not self._distributed or self.grad_sync_mode != "manual":
-            return
-        for module in modules:
-            for param in module.parameters():
-                if param.grad is not None:
-                    dist.all_reduce(param.grad.data, op=dist.ReduceOp.AVG)
-
-    @torch.no_grad()
     def _all_reduce_param_grad(self, param: nn.Parameter) -> None:
         """Average the gradient on a single parameter (e.g. :attr:`log_alpha`).
 
-        Independent of :attr:`grad_sync_mode`: :attr:`log_alpha` lives on the
-        SAC module itself, not on the actor / Q, so DDP never sees it.
+        :attr:`log_alpha` lives on the SAC module itself, not on the actor / Q,
+        so DDP never sees it.
         """
         if not self._distributed or param.grad is None:
             return
@@ -584,12 +542,6 @@ class SAC(TensorDictModuleBase):
         infos["sync/actor_target_diff"] = check_parameters(self.actor_target)
         infos["sync/Q_target_diff"] = check_parameters(self.Q_target)
         infos["sync/log_alpha_diff"] = check_parameters(self.log_alpha)
-
-    def _flush_dormancy(self, infos: dict) -> None:
-        dormancy = self._dormancy_tracker.compute_dormancy(0.02)
-        for module_name, value in dormancy.items():
-            infos[f"dormancy/{module_name}"] = value
-        self._dormancy_tracker.reset()
 
     def make_tensordict_primer(self):
         """Register correlated-noise state **before** constructing :class:`SAC` so replay ``fake_tensordict`` matches rollouts."""
@@ -676,6 +628,9 @@ class SAC(TensorDictModuleBase):
         self.Q_target.load_state_dict(unwrap_ddp(self.Q).state_dict())
         self.actor_target.load_state_dict(unwrap_ddp(self.actor).state_dict())
 
+    def step(self, tensordict: TensorDict):
+        pass
+
     @VecNorm.freeze()
     def train_op(self, tensordict: TensorDict):
         self.global_step += self.cfg.train_every
@@ -718,10 +673,8 @@ class SAC(TensorDictModuleBase):
 
         infos: dict = {"rb_size": len(self.rb), "critic/neg_rew_ratio": neg_rew_ratio}
         if self.global_step < self.cfg.warm_up_steps:
-            self._flush_dormancy(infos)
             return infos
 
-        # with self._dormancy_tracker.track():
         last_indices = None
         iters = self.cfg.train_every * self.cfg.utd_ratio
         for i in range(iters):
@@ -753,9 +706,7 @@ class SAC(TensorDictModuleBase):
                 info = self.train_actor(diagnostics=d)
             infos.update(info)
 
-        # if self.cfg.debug:
         self._log_param_sync(infos)
-        self._flush_dormancy(infos)
         return dict(sorted(infos.items()))
 
     @ScopedTimer("train_critic")
@@ -869,9 +820,6 @@ class SAC(TensorDictModuleBase):
             # meaningful on the physical (unscaled) gradients; grad_scaler.step
             # still runs Inf/NaN checks afterwards.
             self.grad_scaler.unscale_(self.opt_Q)
-            # In ``ddp`` mode DDP already averaged grads in its backward hook;
-            # only the ``manual`` path needs an explicit reduction here.
-            self._all_reduce_grads(self.Q)
             critic_grad_norm = clip_grad_norm_(
                 self.Q.parameters(), max_norm=self.cfg.max_grad_norm
             )
@@ -879,7 +827,6 @@ class SAC(TensorDictModuleBase):
             self.grad_scaler.update()
         else:
             q_loss.backward()
-            self._all_reduce_grads(self.Q)
             critic_grad_norm = clip_grad_norm_(self.Q.parameters(), max_norm=self.cfg.max_grad_norm)
             self.opt_Q.step()
 
@@ -1031,9 +978,7 @@ class SAC(TensorDictModuleBase):
         self.opt_alpha.zero_grad(set_to_none=True)
         alpha_loss = -(alpha * (-entropy_est.detach() + self.target_entropy)).mean()
         alpha_loss.backward()
-        # ``log_alpha`` is not inside a DDP-wrapped submodule (it lives on
-        # ``self`` directly); always all-reduce its grad so ``alpha`` stays
-        # bit-identical across ranks regardless of ``grad_sync_mode``.
+        # ``log_alpha`` is not inside a DDP-wrapped submodule; all-reduce its grad.
         self._all_reduce_param_grad(self.log_alpha)
         self.opt_alpha.step()
 
@@ -1041,7 +986,6 @@ class SAC(TensorDictModuleBase):
         if self._amp_enabled:
             self.grad_scaler.scale(actor_loss).backward()
             self.grad_scaler.unscale_(self.opt_actor)
-            self._all_reduce_grads(self.actor)
             actor_grad_norm = nn.utils.clip_grad_norm_(
                 self.actor.parameters(), max_norm=self.cfg.max_grad_norm
             )
@@ -1049,7 +993,6 @@ class SAC(TensorDictModuleBase):
             self.grad_scaler.update()
         else:
             actor_loss.backward()
-            self._all_reduce_grads(self.actor)
             actor_grad_norm = nn.utils.clip_grad_norm_(
                 self.actor.parameters(), max_norm=self.cfg.max_grad_norm
             )
