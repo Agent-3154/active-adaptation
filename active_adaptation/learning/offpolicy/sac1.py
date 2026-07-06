@@ -567,10 +567,12 @@ class SAC(TensorDictModuleBase):
             .exclude(("next", "stats"), "collector")
         )
         fake_rb["loc"] = torch.zeros(fake_rb.shape[0], self.actor.act_dim)
+        observation_keys = set(env.observation_spec.keys(True, True))
+        observation_keys = observation_keys - {"prev_noise", "rho"}
         self.rb = ReplayBuffer.from_fake(
             self.cfg.buffer_size, fake_rb,
             fake_bootstrap=True,
-            observation_keys=list(env.observation_spec.keys(True, True)),
+            observation_keys=list(observation_keys),
         )
         print("Primary buffer:")
         print(self.rb)
@@ -578,7 +580,7 @@ class SAC(TensorDictModuleBase):
             self.rb_prior = ReplayBuffer.from_rollout(
                 self.cfg.prior_data,
                 fake_bootstrap=True,
-                observation_keys=list(env.observation_spec.keys(True, True)),
+                observation_keys=list(observation_keys),
             )
             print("Prior data buffer:")
             print(self.rb_prior)
@@ -608,11 +610,12 @@ class SAC(TensorDictModuleBase):
             )
         self.rb.push(td)
 
-        if self.global_step % self.cfg.train_every == 0:
+        if self.global_step > self.cfg.warm_up_steps and self.global_step % self.cfg.train_every == 0:
             return self.train_op()
         else:
             return {}
 
+    @ScopedTimer("sac_train")
     @VecNorm.freeze()
     def train_op(self):
         # Sync per-rank running stats *before* any consumer (UTD loop /
@@ -626,8 +629,6 @@ class SAC(TensorDictModuleBase):
                 self.reward_normalizer.synchronize(mode="broadcast")
 
         infos: dict = {"rb_size": len(self.rb)}
-        if self.global_step < self.cfg.warm_up_steps:
-            return infos
 
         last_indices = None
         critic_iters = self.cfg.train_every * self.cfg.utd_ratio

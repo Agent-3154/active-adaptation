@@ -173,7 +173,7 @@ def main(cfg: TrainConfig):
         checkpoint_path=cfg.checkpoint_path,
     )
 
-    total_frames = cfg.total_frames // aa.get_world_size()
+    total_iters = cfg.total_frames // (aa.get_world_size() * env.num_envs)
     
     checkpoint_interval = cfg.checkpoint_interval
     upload_interval = cfg.upload_interval
@@ -212,6 +212,7 @@ def main(cfg: TrainConfig):
     ckpt_path = None
     carry = env.reset()
     env_frames = 0
+    private_keys = None
     observation_keys = list(env.observation_spec.keys(True, True))
 
     if hasattr(policy.cfg, "stages"):
@@ -224,26 +225,27 @@ def main(cfg: TrainConfig):
         rollout_policy = policy.get_rollout_policy(mode="train")
 
         if aa.is_main_process():
-            progress = tqdm(range(total_frames), desc=stage)
+            progress = tqdm(range(total_iters), desc=stage)
         else:
-            progress = range(total_frames)
+            progress = range(total_iters)
 
         last_log_episode_stats = 0
 
         for i in progress:
             if hasattr(policy, "step_schedule"):
-                policy.step_schedule(i / total_frames)
+                policy.step_schedule(i / total_iters)
 
             with torch.no_grad(), ScopedTimer("rollout_policy"):
                 carry = rollout_policy(carry)
 
             with ScopedTimer("env_step") as timer:
                 td, carry = env.step_and_maybe_reset(carry)
-                private_keys = [
-                    key
-                    for key in td.keys(True, True)
-                    if isinstance(key, str) and key.startswith("_")
-                ]
+                if not private_keys:
+                    private_keys = [
+                        key
+                        for key in td.keys(True, True)
+                        if isinstance(key, str) and key.startswith("_")
+                    ]
                 td = td.exclude(*private_keys)
                 td["next"] = td["next"].exclude(*observation_keys)
             episode_stats.add(td)
