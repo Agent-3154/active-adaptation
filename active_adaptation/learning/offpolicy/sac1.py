@@ -444,7 +444,6 @@ class SAC(TensorDictModuleBase):
         self.compute_target = torch.compile(
             self._compute_target,
             mode="reduce-overhead",
-            disable=True,
         )
 
         def fn(rew: torch.Tensor | TensorDict) -> torch.Tensor:
@@ -566,14 +565,21 @@ class SAC(TensorDictModuleBase):
         fake_rb = (
             env.fake_tensordict()
             .exclude(("next", "stats"), "collector")
-            # .exclude(("next", OBS_KEY))
         )
         fake_rb["loc"] = torch.zeros(fake_rb.shape[0], self.actor.act_dim)
-        self.rb = ReplayBuffer.from_fake(self.cfg.buffer_size, fake_rb)
+        self.rb = ReplayBuffer.from_fake(
+            self.cfg.buffer_size, fake_rb,
+            fake_bootstrap=True,
+            observation_keys=list(env.observation_spec.keys(True, True)),
+        )
         print("Primary buffer:")
         print(self.rb)
         if self.cfg.prior_data is not None:
-            self.rb_prior = ReplayBuffer.from_rollout(self.cfg.prior_data)
+            self.rb_prior = ReplayBuffer.from_rollout(
+                self.cfg.prior_data,
+                fake_bootstrap=True,
+                observation_keys=list(env.observation_spec.keys(True, True)),
+            )
             print("Prior data buffer:")
             print(self.rb_prior)
         else:
@@ -636,12 +642,14 @@ class SAC(TensorDictModuleBase):
             batch = self.rb.sample(
                 batch_size=self.cfg.critic_batch_size,
                 steps=self.cfg.n_steps,
-            ).to(self.device)
+                next_obs=True,
+            ).to(self.device, non_blocking=True)
             if self.rb_prior is not None:
                 batch_prior = self.rb_prior.sample(
                     batch_size=int(self.cfg.critic_batch_size * self.cfg.prior_data_ratio),
                     steps=self.cfg.n_steps,
-                ).to(self.device)
+                    next_obs=True,
+                ).to(self.device, non_blocking=True)
             else:
                 batch_prior = None
             d = i == critic_iters - 1
@@ -664,7 +672,6 @@ class SAC(TensorDictModuleBase):
         batch_prior: TensorDict | None = None,
         diagnostics: bool = False,
     ):
-        torch.autograd.set_detect_anomaly(True)
         self.Q.train()
         batch = batch.select(*self.train_keys, inplace=True, strict=False)
         B_online = batch.shape[1]
@@ -708,15 +715,6 @@ class SAC(TensorDictModuleBase):
             terminated = term_flat.bool()
         else:
             assert self.msr is not None
-            batch_done = batch[DONE_KEY][:self.msr.n_steps]
-            batch_term = batch[TERM_KEY][:self.msr.n_steps]
-            if (next_obs := batch.get(("next", "_input_normed"))) is None:
-                assert batch.shape[0] == self.msr.n_steps + 1
-                next_obs = torch.where(
-                    batch_done,
-                    batch[OBS_KEY][:self.msr.n_steps], # repeat the last obs as the terminal obs
-                    batch[OBS_KEY][1:self.msr.n_steps+1],
-                )
             obs = batch["_input_normed"][0]
             act_n = batch[ACTION_KEY]
             env_disc_ms = batch.get(("next", "discount"))
@@ -724,10 +722,10 @@ class SAC(TensorDictModuleBase):
                 env_disc_ms = env_disc_ms[: self.msr.n_steps]
             act_n, next_obs, reward, discount, terminated = self.msr(
                 actions=act_n,
-                next_observations=next_obs,
+                next_observations=batch["next", "_input_normed"],
                 rewards=reward[:self.msr.n_steps],
-                terminated=batch_term,
-                done=batch_done,
+                terminated=batch[TERM_KEY],
+                done=batch[DONE_KEY],
                 env_discount=env_disc_ms,
             )
             act = act_n[:, 0]
@@ -857,9 +855,12 @@ class SAC(TensorDictModuleBase):
 
     @ScopedTimer("train_actor")
     def train_actor(self, diagnostics: bool = False):
-        batch = self.rb.sample(batch_size=self.cfg.actor_batch_size, steps=1).to(
-            self.device
-        ).select(*self.train_keys, strict=False) # [N,]
+        # actor training does not need next observations
+        batch = (
+            self.rb.sample(batch_size=self.cfg.actor_batch_size, steps=1, next_obs=False)
+            .to(self.device)
+            .select(*self.train_keys, strict=False) # [N,]
+        )
         if self.rb_prior is not None:
             batch_prior = self.rb_prior.sample(
                 batch_size=int(self.cfg.actor_batch_size * self.cfg.prior_data_ratio),

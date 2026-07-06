@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from tensordict import TensorDict
-from typing import Any, Dict, Optional, Tuple, Union, Callable
+from typing import Any, Dict, Optional, Tuple, Union, Callable, Sequence
 from pathlib import Path
 
 from torchrl.data.replay_buffers.samplers import PrioritizedSampler
@@ -30,6 +30,8 @@ class ReplayBuffer:
         per_beta: float = 1.0,
         per_eps: float = 1e-8,
         per_generator: Optional[torch.Generator] = None,
+        fake_bootstrap: bool = False,
+        observation_keys: Sequence[str] | None = None,
     ):
         if len(buffer_tensordict.batch_size) != 2:
             raise ValueError(
@@ -41,6 +43,12 @@ class ReplayBuffer:
         self.device = self._td.device
         self._current_size = current_size
         self._ptr = write_ptr
+
+        self.fake_bootstrap = fake_bootstrap
+        self.observation_keys = observation_keys
+        if self.fake_bootstrap:
+            assert self.observation_keys is not None, "observation_keys must be provided when fake_bootstrap is True"
+            self._td["next"] = self._td["next"].exclude(*self.observation_keys)
 
         self._per: Optional[PrioritizedSampler] = None
         self._init_prioritized_sampler(
@@ -114,6 +122,8 @@ class ReplayBuffer:
         per_beta: float = 1.0,
         per_eps: float = 1e-8,
         per_generator: Optional[torch.Generator] = None,
+        fake_bootstrap: bool = False,
+        observation_keys: Sequence[str] | None = None,
     ) -> ReplayBuffer:
         """Build ring storage ``[max_size, num_envs]`` from a one-step template and construct the buffer."""
         td = fake_tensordict.expand(max_size, *fake_tensordict.shape).clone()
@@ -125,6 +135,8 @@ class ReplayBuffer:
             per_beta=per_beta,
             per_eps=per_eps,
             per_generator=per_generator,
+            fake_bootstrap=fake_bootstrap,
+            observation_keys=observation_keys,
         )
 
     @classmethod
@@ -138,6 +150,8 @@ class ReplayBuffer:
         per_eps: float = 1e-8,
         per_generator: Optional[torch.Generator] = None,
         map_location: Union[str, torch.device] = "cpu",
+        fake_bootstrap: bool = False,
+        observation_keys: Sequence[str] | None = None,
     ) -> ReplayBuffer:
         """Load from a rollout archive produced by :mod:`active_adaptation.scripts.rollout`.
 
@@ -188,6 +202,8 @@ class ReplayBuffer:
             per_beta=per_beta,
             per_eps=per_eps,
             per_generator=per_generator,
+            fake_bootstrap=fake_bootstrap,
+            observation_keys=observation_keys,
         )
         if out._per is not None:
             for wrow in range(take):
@@ -311,7 +327,7 @@ class ReplayBuffer:
             importance.to(device=self._td.device, dtype=torch.float32),
         )
 
-    def sample(self, batch_size: int, steps: int = 1) -> TensorDict:
+    def sample(self, batch_size: int, steps: int = 1, next_obs: bool = False) -> TensorDict:
         """Draw a batch (optionally n-step segments along ring time per env).
 
         Every batch includes ``replay_flat_index`` (flattened ``t * num_envs + env`` for
@@ -335,12 +351,30 @@ class ReplayBuffer:
             )
 
         t, e = torch.unravel_index(idx_flat, (len(self), self._td.shape[1]))
-        if steps == 1:
-            samples = self._td[t, e]#.rename("env")
+        
+        if self.fake_bootstrap and next_obs:
+            # repeat the last observation for terminated/truncated states
+            ts = (t.unsqueeze(0) + torch.arange(steps + 1, device=self._td.device).unsqueeze(1)) % len(self)
+            samples = self._td[ts, e]
+            observations = samples.select(*self.observation_keys)
+            observations_t = observations[:steps]
+            observations_t1 = observations[1:]
+            # tensordict supports `torch.where`
+            tensordict_next = torch.where(
+                samples[:steps]["next", "done"].squeeze(-1), # [steps, batch_size, 1] -> [steps, batch_size]
+                observations_t, # [steps, batch_size]
+                observations_t1, # [steps, batch_size]
+            )
+            samples = samples[:steps]
+            samples["next"].update(tensordict_next)
         else:
-            ts = (t.unsqueeze(0) + torch.arange(steps, device=self._td.device).unsqueeze(1)) % len(self)
-            samples = self._td[ts, e]#.rename("time", "env")
-            assert samples.shape[:2] == (steps, batch_size)
+            if steps == 1:
+                samples = self._td[t, e]#.rename("env")
+            else:
+                ts = (t.unsqueeze(0) + torch.arange(steps, device=self._td.device).unsqueeze(1)) % len(self)
+                samples = self._td[ts, e]#.rename("time", "env")
+                assert samples.shape[:2] == (steps, batch_size)
+
         samples = self._annotate_sampling_meta(samples, idx_flat, steps, weight)
         return samples
 
