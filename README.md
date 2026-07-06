@@ -238,6 +238,44 @@ Scans entry points `active_adaptation.projects` and `active_adaptation.learning`
 aa-discover-projects
 ```
 
+### WandB defaults in projects.json
+
+You can set default WandB settings in `.cache/projects.json` so training scripts pick them up automatically during `aa.init(...)`.
+
+Supported keys:
+
+- `WANDB_API_KEY`
+- `WANDB_ENTITY`
+- `WANDB_PROJECT`
+
+You can define these either:
+
+1. In a top-level `wandb` block (global defaults), or
+2. Inside enabled `environment` project entries (project-scoped defaults).
+
+Example:
+
+```json
+{
+  "environment": {
+    "hoi1": {
+      "enabled": true,
+      "WANDB_ENTITY": "G1_Hoi",
+      "WANDB_PROJECT": "object-hoi"
+    }
+  }
+}
+```
+
+Resolution behavior:
+
+- `WANDB_API_KEY` and `WANDB_ENTITY` are applied as environment defaults only when those env vars are not already set.
+- `WANDB_PROJECT` overrides `cfg.wandb.project` when configured in `projects.json`.
+- If no manifest defaults are configured, WandB initializes normally:
+  - entity comes from env vars or your global WandB settings
+  - project comes from Hydra config (`cfg.wandb.project`)
+- If multiple enabled projects define conflicting values for the same key, that key is ignored and a warning is logged.
+
 ### aa-list-tasks
 
 Prints task IDs from YAML files under `cfg/task` for active-adaptation and for each enabled project in `projects.json`. Task names keep the directory prefix (e.g. `G1/G1LocoFlat`). Useful to see which tasks are available for `task=...` in training/eval.
