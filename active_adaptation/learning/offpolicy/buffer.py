@@ -57,6 +57,7 @@ class ReplayBuffer:
             per_eps=per_eps,
             per_generator=per_generator,
         )
+        self.mem_bytes = self.estimate_memory_nbytes()
 
     def __repr__(self) -> str:
         keys = list(self.keys())
@@ -74,12 +75,21 @@ class ReplayBuffer:
             alpha = getattr(self._per, "alpha", None)
             beta = getattr(self._per, "beta", None)
             sampling = f"PER(α={alpha}, β={beta})"
+        mem = format_nbytes(self.mem_bytes)
         return (
             f"{self.__class__.__name__}("
             f"ring={len(self)}/{self.max_size}×{self.num_envs}, "
-            f"write_ptr={self._ptr}, {sampling}, device={self.device}, "
+            f"write_ptr={self._ptr}, {sampling}, mem≈{mem}, device={self.device}, "
             f"keys={key_desc})"
         )
+
+    def estimate_memory_nbytes(self) -> int:
+        """Approximate bytes held by tensor entries in replay storage."""
+        nbytes = 0
+        for _, value in self._td.items(True, True):
+            if torch.is_tensor(value):
+                nbytes += value.numel() * value.element_size()
+        return nbytes
     
     def keys(self):
         return self._td.keys(True, True)
@@ -126,6 +136,9 @@ class ReplayBuffer:
         observation_keys: Sequence[str] | None = None,
     ) -> ReplayBuffer:
         """Build ring storage ``[max_size, num_envs]`` from a one-step template and construct the buffer."""
+        if fake_bootstrap:
+            assert observation_keys is not None, "observation_keys must be provided when fake_bootstrap is True"
+            fake_tensordict["next"] = fake_tensordict["next"].exclude(*observation_keys)
         td = fake_tensordict.expand(max_size, *fake_tensordict.shape).clone()
         return cls(
             td,
@@ -440,77 +453,15 @@ class ReplayBuffer:
     def __len__(self):
         return self._current_size
 
-    def compute_return(
-        self,
-        reward_key: str | Tuple[str, ...],
-        gamma: float,
-        fn: Callable[[torch.Tensor], torch.Tensor],
-        *,
-        done_key: str | Tuple[str, ...] = ("next", "done"),
-        discount_key: str | Tuple[str, ...] = ("next", "discount"),
-        is_init_key: str = "is_init",
-    ) -> None:
-        """Compute Monte Carlo discounted returns and store them under ``ret``.
 
-        Also stores ``ret_valid`` (bool, shape ``[max_size, N, 1]``): a step's
-        return is valid only if its episode terminates (``done``) within the
-        filled buffer rows ``[:T]``. Truncated episodes that reach the buffer
-        end without ``done`` get ``ret_valid=False`` for all their steps.
-
-        Args:
-            reward_key: Buffer key for rewards, e.g. ``("next", "reward")``.
-            gamma: Discount factor.
-            fn: Maps raw reward tensor to scalar reward, e.g.
-                ``lambda x: x.sum(-1, keepdim=True).clamp_min(0.)``.
-            done_key: Key marking episode termination after the transition.
-            discount_key: Per-step discount multiplier with shape ``[T, N, 1]``
-                (defaults to ones if absent).
-            is_init_key: Key marking the first step of an episode (shape ``[T, N, 1]``).
-        
-        TODO: handle bootstraping. the current return is incomplete.
-        """
-        if "ret" in self._td.keys(True, True) or "ret_valid" in self._td.keys(True, True):
-            raise ValueError("Return keys already exist in buffer.")
-
-        T, N = len(self), self.num_envs
-        if T == 0:
-            raise RuntimeError("Cannot compute returns on an empty ReplayBuffer.")
-
-        rew = fn(self._td.get(reward_key)[:T]).float()
-        assert rew.ndim == 3, f"Expected reward tensor with shape [T, N, *], got {rew.shape}"
-
-        done = self._td.get(done_key)[:T]
-        assert done.shape == (T, N, 1), f"Expected done tensor with shape [T, N, 1], got {done.shape}"
-
-        discount = self._td.get(discount_key, default=None)
-        if discount is None:
-            discount = torch.ones(T, N, 1, device=rew.device, dtype=rew.dtype)
-        else:
-            discount = discount[:T].float()
-            assert discount.shape == (T, N, 1), (
-                f"Expected discount tensor with shape [T, N, 1], got {discount.shape}"
-            )
-
-        is_init = self._td.get(is_init_key)[:T].bool()
-        assert is_init.shape == (T, N, 1), (
-            f"Expected is_init tensor with shape [T, N, 1], got {is_init.shape}"
-        )
-
-        ret = torch.zeros_like(rew)
-        ret_valid = torch.zeros(T, N, 1, dtype=torch.bool, device=rew.device)
-        running = torch.zeros(N, rew.shape[-1], device=rew.device, dtype=rew.dtype)
-        running_valid = torch.zeros(N, 1, dtype=torch.bool, device=rew.device)
-        nonterminal = 1.0 - done.float()
-
-        for t in reversed(range(T)):
-            running = rew[t] + gamma * discount[t] * nonterminal[t] * running
-            ret[t] = running
-            running = running * (~is_init[t]).float()
-
-            # valid turns true when seeing an episode end
-            running_valid = running_valid | done[t]
-            ret_valid[t] = running_valid
-
-        self._td.set("ret", ret)
-        self._td.set("ret_valid", ret_valid)
+def format_nbytes(nbytes: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    size = float(nbytes)
+    unit = units[0]
+    for next_unit in units[1:]:
+        if size < 1024.0:
+            break
+        size /= 1024.0
+        unit = next_unit
+    return f"{size:.2f}{unit}"
 
