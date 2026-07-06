@@ -212,6 +212,7 @@ def main(cfg: TrainConfig):
     ckpt_path = None
     carry = env.reset()
     env_frames = 0
+    observation_keys = list(env.observation_spec.keys(True, True))
 
     if hasattr(policy.cfg, "stages"):
         stages = policy.cfg.stages
@@ -238,8 +239,16 @@ def main(cfg: TrainConfig):
 
             with ScopedTimer("env_step") as timer:
                 td, carry = env.step_and_maybe_reset(carry)
+                private_keys = [
+                    key
+                    for key in td.keys(True, True)
+                    if isinstance(key, str) and key.startswith("_")
+                ]
+                td = td.exclude(*private_keys)
+                td["next"] = td["next"].exclude(*observation_keys)
             episode_stats.add(td)
-            env_frames += td.numel()
+            new_frames = td.numel()
+            env_frames += new_frames
             train_info: dict = policy.step(td)
 
             if aa.is_main_process() and (i % checkpoint_interval == 0):
@@ -250,7 +259,7 @@ def main(cfg: TrainConfig):
             if aa.is_main_process() and (i % log_interval == 0 or len(train_info) > 0):
                 info = {**train_info}
                 info["env_frames"] = env_frames * aa.get_world_size()
-                info["performance/rollout_fps"] = (1 / timer.last_time) * td.numel() * aa.get_world_size()
+                info["performance/rollout_fps"] = (1 / timer.last_time) * new_frames * aa.get_world_size()
 
                 if i - last_log_episode_stats >= max_episode_length and len(episode_stats) > 0:
                     for k, v in sorted(episode_stats.pop().items(True, True)):
