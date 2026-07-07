@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 import copy
 import einops
 import torch
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
     from active_adaptation.envs import _EnvBase
 from active_adaptation.utils.profiling import ScopedTimer
 
-from .distributional import ScalarCritic
+from .distributional import ScalarCritic, C51Critic
 
 from dataclasses import dataclass
 from collections import OrderedDict
@@ -56,6 +57,7 @@ class TD3Config:
     name: str = "td3"
     train_every: int = 4
     delayed: int = 2
+    soft_bound: float = math.pi
     buffer_size: int = 800
     warm_up_steps: int = 200
     lr: float = 5e-4
@@ -71,6 +73,8 @@ class TD3Config:
     utd_ratio: int = 4
     # architecture
     distributional: bool = False
+    v_min: float = -1.0 # used if no reward normalizer
+    v_max: float = 9.0 # used if no reward normalizer
     # batch sizes
     critic_batch_size: int = 2048
     actor_batch_size: int = 2048
@@ -84,7 +88,7 @@ class TD3Config:
     tau_Q: float = 0.1 # 更大 0.05 ～ 0.2
     max_grad_norm: float = 1.0
 
-    debug: bool = True
+    debug: bool = False
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = False
@@ -229,6 +233,29 @@ def Critic(
     )
     return ScalarCritic(module)
 
+def DistC51Critic(
+    obs_dim: int,
+    act_dim: int,
+    num_atoms: int,
+    v_max: float,
+    v_min:float,
+    activation: type[nn.Module] = nn.SiLU
+):
+    critic_input_dim = obs_dim + act_dim
+    module = SimpleDoubleCritic(
+        fn=lambda: CriticTrunk(
+            input_dim=critic_input_dim,
+            output_dim=num_atoms,
+            activation=activation
+        )
+    )
+    return C51Critic(
+        module=module,
+        v_min=v_min,
+        v_max=v_max,
+        num_atoms=num_atoms
+    )
+
 class TD3(TensorDictModuleBase):
     """
     Twin Delayed DDPG.
@@ -260,7 +287,7 @@ class TD3(TensorDictModuleBase):
 
         # What are not supported:
         # 1. distributional training.
-        assert not aa.is_distributed() and not cfg.distributional, "This TD3 Implementation does not support distributed training."
+        assert not aa.is_distributed(), "This TD3 Implementation does not support distributed training."
         # 2. data symmetry augmentation.
         assert not cfg.sym_aug, "This TD3 implementation does not support symmetry augmentation."
         # 3. AMP.
@@ -269,7 +296,7 @@ class TD3(TensorDictModuleBase):
         fake_obs = observation_spec.zero()
         preproc = []
         
-        # TODO: How does this works? preproc
+        # TODO: How does this works? `preproc`
         # ====================================================================================
         if CMD_KEY in observation_spec.keys(True, True):
             self.train_keys = (
@@ -301,8 +328,25 @@ class TD3(TensorDictModuleBase):
         preproc.append(TensorDictModule(self.vecnorm_obs, ["_input"], ["_input_normed"]))
         self.preproc = TensorDictSequential(*preproc).to(device)
         # ====================================================================================
+        
+        if not self.cfg.distributional:
+            self.Q = Critic(obs_dim, act_dim).to(device)
+        else:
+            if self.cfg.normalize_reward:
+                v_min = -0.5
+                v_max = float(self.cfg.normalized_G_max)
+                num_atoms = 101
+            else:
+                v_min, v_max = self.cfg.v_min, self.cfg.v_max
+                num_atoms = int((v_max - v_min) / 0.05) + 1
+            self.Q = DistC51Critic(
+                obs_dim=obs_dim,
+                act_dim=act_dim,
+                num_atoms=num_atoms,
+                v_max=v_max,
+                v_min=v_min
+            ).to(device)
 
-        self.Q = Critic(obs_dim, act_dim).to(device)
         self.Q_target = copy.deepcopy(self.Q).to(device)
         self.Q_target.requires_grad_(False)
 
@@ -709,7 +753,9 @@ class TD3(TensorDictModuleBase):
             update_act = self.actor(obs) # obs shape: [bs, do]; act shape: [bs, da]
             q = self.Q.get_values(obs, update_act).mean(dim=-1) # q shape: [bs, 1]
 
-            actor_loss = -q # actor loss shape: [bs, 1]
+            policy_term = -q # actor loss shape: [bs, 1]
+            soft_term = 0.01 * ((update_act/self.cfg.soft_bound)**6).sum(-1).reshape_as(policy_term)
+            actor_loss = policy_term + soft_term
             # valid shape: [bs, 1]
             valid = (1.0 - is_init.float()).reshape_as(actor_loss)
             denom = valid.sum().clamp_min(1e-8)

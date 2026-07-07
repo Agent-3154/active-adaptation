@@ -60,7 +60,7 @@ class PlayConfig:
     """Hydra defaults list: task config, algo config, then this config."""
     hydra: HydraConf = field(default_factory=HydraConf)
     """Hydra runtime settings (output directory, etc.)."""
-    headless: bool = False
+    headless: bool = True
     """Run with a visible GUI window (``false``) or headless (``true``)."""
     backend: str = "isaac"
     """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
