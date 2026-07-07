@@ -93,11 +93,13 @@ class joint_pos_multistep(joint_observation):
         steps: int = 4,
         interval: int = 1,
         noise_std: float = 0.0,
+        subtract_default: bool = False,
     ):
         super().__init__(joint_names)
         self.steps = steps
         self.interval = interval
         self.noise_std_max = max(noise_std, 0.0)
+        self.subtract_default = subtract_default
 
     @override
     def _initialize(self, env: "_EnvBase"):
@@ -108,6 +110,7 @@ class joint_pos_multistep(joint_observation):
         shape = (self.num_envs, self.steps * self.interval, self.num_joints)
         self.joint_pos_multistep = torch.zeros(shape, device=self.device)
         self.joint_pos_substep = torch.zeros(self.num_envs, 2, self.num_joints, device=self.device)
+        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
 
     @override
     def post_step(self, substep):
@@ -123,6 +126,8 @@ class joint_pos_multistep(joint_observation):
     @override
     def compute(self):
         joint_pos = self.joint_pos_multistep[:, :: self.interval]
+        if self.subtract_default:
+            joint_pos = joint_pos - self.default_joint_pos.unsqueeze(1)
         return joint_pos.reshape(self.num_envs, -1)
 
     @override

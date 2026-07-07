@@ -24,7 +24,6 @@ from tensordict.nn import TensorDictModuleBase
 
 import active_adaptation as aa
 from active_adaptation.utils.profiling import ScopedTimer
-from active_adaptation.learning.ppo.ppo_base import PPOBase
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -94,7 +93,7 @@ class TrainConfig:
     """Log statistics every N training iterations."""
     checkpoint_interval: int = 400
     """Save a local checkpoint every N training iterations."""
-    upload_interval: int = 3200
+    upload_interval: int = 1600
     """Upload a checkpoint to WandB every N training iterations."""
 
     seed: int = 42
@@ -235,19 +234,22 @@ def main(cfg: TrainConfig):
             if hasattr(policy, "step_schedule"):
                 policy.step_schedule(i / total_iters)
 
-            with torch.no_grad(), ScopedTimer("rollout_policy"):
-                carry = rollout_policy(carry)
+            with torch.no_grad():
 
-            with ScopedTimer("env_step") as timer:
-                td, carry = env.step_and_maybe_reset(carry)
-                if not private_keys:
-                    private_keys = [
-                        key
-                        for key in td.keys(True, True)
-                        if isinstance(key, str) and key.startswith("_")
-                    ]
-                td = td.exclude(*private_keys)
-                td["next"] = td["next"].exclude(*observation_keys)
+                with set_exploration_type(ExplorationType.MODE), ScopedTimer("rollout_policy"):
+                    carry = rollout_policy(carry)
+
+                with ScopedTimer("env_step") as timer:
+                    td, carry = env.step_and_maybe_reset(carry)
+                    if not private_keys:
+                        private_keys = [
+                            key
+                            for key in td.keys(True, True)
+                            if isinstance(key, str) and key.startswith("_")
+                        ]
+                    td = td.exclude(*private_keys)
+                    td["next"] = td["next"].exclude(*observation_keys)
+
             episode_stats.add(td)
             new_frames = td.numel()
             env_frames += new_frames
