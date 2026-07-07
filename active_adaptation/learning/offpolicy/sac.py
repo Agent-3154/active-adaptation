@@ -84,8 +84,8 @@ def _init_sac_linear(m: nn.Module, gain: float = 1.0):
 class SACConfig:
     _target_: str = "active_adaptation.learning.offpolicy.sac.SAC"
     name: str = "sac"
-    train_every: int = 4
-    buffer_size: int = 2000
+    train_every: int = 4 # perform network updating per `train_every` env step(s).
+    buffer_size: int = 500
     warm_up_steps: int = 200
     lr: float = 5e-4
     # If True, actor/Q use :class:`~active_adaptation.learning.utils.opt.MuonAdamWWrapper` (see ``ppo_symaug``).
@@ -94,7 +94,7 @@ class SACConfig:
     # TD learning
     n_steps: int = 3
     gamma: float = 0.99
-    utd_ratio: int = 4
+    utd_ratio: int = 4 # update-to-data ratio: network udpating times for every env step.
     # architecture
     actor_init: str = "zeros"
     distributional: bool = True
@@ -142,7 +142,6 @@ class SACConfig:
     grad_sync_mode: str | None = "ddp"
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
-
 
 cs.store(name="sac", node=SACConfig, group="algo")
 # cs.store(name="dsac", node=SACConfig, group="algo") # distributional SAC
@@ -612,7 +611,6 @@ class SAC(TensorDictModuleBase):
             reset_key="done",
             expand_specs=False,
         )
-    
     @classmethod
     def from_env(cls, cfg: SACConfig, env: _EnvBase, device: torch.device):
         if cfg.sym_aug:
