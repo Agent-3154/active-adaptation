@@ -236,7 +236,10 @@ def main(cfg: TrainConfig):
 
             with torch.no_grad():
 
-                with set_exploration_type(ExplorationType.MODE), ScopedTimer("rollout_policy"):
+                with (
+                    set_exploration_type(ExplorationType.RANDOM),
+                    ScopedTimer("policy_inference")
+                ):
                     carry = rollout_policy(carry)
 
                 with ScopedTimer("env_step") as timer:
