@@ -84,7 +84,7 @@ class TD3Config:
     tau_Q: float = 0.1 # 更大 0.05 ～ 0.2
     max_grad_norm: float = 1.0
 
-    debug: bool = False
+    debug: bool = True
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = False
@@ -438,12 +438,14 @@ class TD3(TensorDictModuleBase):
         td = tensordict.exclude(("next", "stats"), "collector")
 
         reward = td[REWARD_KEY]
+
+        if isinstance(reward, TensorDict):
+            reward = torch.cat(list(reward.values()), dim=-1)
+
         if self.cfg.debug:
             reward = torch.ones_like(reward) * (1.0 - self.cfg.gamma)
             neg_rew_ratio = 0.0
         else:
-            if isinstance(reward, TensorDict):
-                reward = torch.cat(list(reward.values()), dim=-1)
             reward = reward.sum(-1, keepdim=True)
             neg_rew_ratio = (reward <= 0.).float().mean().item()
         
@@ -487,7 +489,7 @@ class TD3(TensorDictModuleBase):
             infos.update({"critic/step": self.critic_step})
 
             if self.enable_actor: # train actor every `delayed` critic updates.
-                if self.critic_step % self.cfg.delayed:
+                if self.critic_step % self.cfg.delayed == 0:
                     self.actor_step += 1
                     info = self.train_actor(diagnostics=True)
                     infos.update(info)
@@ -527,8 +529,10 @@ class TD3(TensorDictModuleBase):
         B_eff = B_online + B_prior
 
         reward = batch[REWARD_KEY]
+
         if isinstance(reward, TensorDict):
             reward = torch.cat(list(reward.values()), dim=-1)
+
         reward = reward.sum(-1, keepdim=True).clamp_min(0.)
 
 
