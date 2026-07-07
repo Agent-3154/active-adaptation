@@ -119,7 +119,7 @@ class SACConfig:
     lr_alpha: float = 5e-4
     max_grad_norm: float = 1.0
 
-    debug: bool = False
+    debug: bool = True
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = True
@@ -686,6 +686,10 @@ class SAC(TensorDictModuleBase):
         # td = td.exclude(("next", OBS_KEY))
 
         reward = td[REWARD_KEY]
+        
+        if isinstance(reward, TensorDict):
+            reward = torch.cat(list(reward.values()), dim=-1)
+
         # KEEP THIS FOR DEBUGGING
         if self.cfg.debug:
             # debug: constant reward scaled by effective horizon
@@ -694,8 +698,6 @@ class SAC(TensorDictModuleBase):
             reward = torch.ones_like(reward) * (1.0 - self.cfg.gamma)
             neg_rew_ratio = 0.0
         else:
-            if isinstance(reward, TensorDict):
-                reward = torch.cat(list(reward.values()), dim=-1)
             reward = reward.sum(-1, keepdim=True)
             neg_rew_ratio = (reward <= 0.).float().mean().item()
 
