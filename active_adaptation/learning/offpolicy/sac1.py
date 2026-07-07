@@ -111,7 +111,7 @@ class SACConfig:
     # If set: H_target = (d/2)*log(2*pi*e*sigma^2) for N(0,sigma^2)^d (FlashSAC).
     # If None: use -dim(A) (common heuristic for tanh-squashed SAC).
     target_entropy_sigma: float | None = 0.15
-    soft_bound: float = math.pi
+    soft_bound: float = 2.0 * math.pi
 
     tau_actor: float = 0.1 # a relatively large value for faster convergence
     tau_Q: float = 0.02  # a relatively large value for faster convergence
@@ -123,7 +123,7 @@ class SACConfig:
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = True
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
-    normalize_reward: bool = True
+    normalize_reward: bool = False
     normalized_G_max: float = 5.0
     reward_norm_epsilon: float = 1e-8
 
@@ -337,7 +337,9 @@ class SAC(TensorDictModuleBase):
         else:
             obs_dim = fake[OBS_KEY].shape[-1]
             preproc.append(Mod(nn.Identity(), [OBS_KEY], ["_input"]))
-        act_dim = action_spec.shape[-1]
+        self.act_dim = action_spec.shape[-1]
+        # since entropy grows linearly with the action dimension, we need to scale it down
+        self.entropy_scale = 1.0 / math.sqrt(self.act_dim)
 
         if self.cfg.vecnorm:
             self.vecnorm_obs = VecNorm(obs_dim, decay=1.0).to(device)
@@ -364,18 +366,18 @@ class SAC(TensorDictModuleBase):
                 num_atoms = int((v_max - v_min) / 0.05) + 1
             self.Q = TwinC51Critic(
                 obs_dim,
-                act_dim,
+                self.act_dim,
                 num_atoms=num_atoms,
                 v_min=v_min, # we actually do not have negative values, but it is a good idea to have a small margin
                 v_max=v_max,
             ).to(device)
         else:
-            self.Q = TwinScalarCritic(obs_dim, act_dim).to(device)
+            self.Q = TwinScalarCritic(obs_dim, self.act_dim).to(device)
 
         self.DistClass = IndependentNormal
         self.actor = NormalActor(
             obs_dim,
-            act_dim,
+            self.act_dim,
             std_max=1.0,
             std_min=0.001,
             action_init=self.cfg.actor_init,
@@ -388,11 +390,10 @@ class SAC(TensorDictModuleBase):
 
         if self.cfg.target_entropy_sigma is not None:
             self.target_entropy = gaussian_target_entropy(
-                act_dim, self.cfg.target_entropy_sigma
+                self.act_dim, self.cfg.target_entropy_sigma
             )
         else:
-            self.target_entropy = -float(act_dim)
-        self.target_entropy = 0.0
+            self.target_entropy = - 0.5 * float(self.act_dim)
         self.log_alpha = nn.Parameter(torch.tensor(math.log(self.cfg.alpha_init), device=device))
         self.opt_alpha = torch.optim.Adam([self.log_alpha], lr=self.cfg.lr_alpha)
         if self.cfg.muon:
@@ -844,7 +845,7 @@ class SAC(TensorDictModuleBase):
         alpha = self.log_alpha.exp()
         lp = next_log_prob.reshape_as(reward)
 
-        entropy_bonus = (-alpha * lp).reshape_as(reward)
+        entropy_bonus = (-alpha * lp).reshape_as(reward) * self.entropy_scale
         adjusted_reward = reward + discount * self.cfg.entropy_bonus * entropy_bonus
         q_target = self.Q_target.compute_target(
             next_obs,
@@ -903,7 +904,7 @@ class SAC(TensorDictModuleBase):
         alpha = self.log_alpha.exp()
         actor_loss = (
             policy_term
-            + alpha.detach() * (-entropy_est.reshape_as(policy_term))
+            + alpha.detach() * (-entropy_est.reshape_as(policy_term) * self.entropy_scale)
             + 0.01 * ((loc/self.cfg.soft_bound)**6).sum(-1).reshape_as(policy_term)
         )
         valid = (1.0 - is_init.float()).reshape_as(actor_loss)
