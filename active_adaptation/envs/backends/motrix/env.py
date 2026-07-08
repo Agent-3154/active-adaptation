@@ -16,10 +16,10 @@ class MotrixBackendEnv(_EnvBase):
 
     def setup_scene(self):
         registry = Registry.instance()
-        asset_cfg = registry.get("asset", self.cfg.robot.name)
-        sensors = []
-        asset_cfg, _sensors = asset_cfg(backend="motrix")
-        sensors.extend(_sensors)
+        asset_factory = registry.get("asset", self.cfg.robot.name)
+        asset_spec = asset_factory(backend="motrix")
+        asset_cfg = asset_spec.config
+        sensors = list(asset_spec.sensors)
 
         self.terrain_type = self.cfg.get("terrain", "plane")
         scene_cfg = MotrixSceneCfg(

@@ -21,8 +21,9 @@ class MujocoBackendEnv(_EnvBase):
         from active_adaptation.envs.terrain import TERRAINS_MUJOCO
 
         registry = Registry.instance()
-        asset_cfg = registry.get("asset", self.cfg.robot.name)
-        asset_cfg, _ = asset_cfg(backend="mujoco")
+        asset_factory = registry.get("asset", self.cfg.robot.name)
+        asset_spec = asset_factory(backend="mujoco")
+        asset_cfg = asset_spec.config
 
         @dataclass
         class SceneCfg:

@@ -10,6 +10,23 @@ from tqdm import tqdm
 class IsaacBackendEnv(_EnvBase):
     """Isaac backend env: scene/sim construction and viewer glue."""
 
+    def _register_wrapper_callbacks(self, wrapper) -> None:
+        if wrapper is None:
+            return
+        if callable(getattr(wrapper, "startup", None)):
+            self._startup_callbacks.append(wrapper.startup)
+        if callable(getattr(wrapper, "reset", None)):
+            self._reset_callbacks.append(wrapper.reset)
+        if callable(getattr(wrapper, "pre_step", None)):
+            self._pre_step_callbacks.append(wrapper.pre_step)
+        elif callable(getattr(wrapper, "write_data_to_sim", None)):
+            # Wrapper can choose to provide only the force/wrench write path.
+            self._pre_step_callbacks.append(lambda _substep: wrapper.write_data_to_sim())
+        if callable(getattr(wrapper, "post_step", None)):
+            self._post_step_callbacks.append(wrapper.post_step)
+        if callable(getattr(wrapper, "update", None)):
+            self._update_callbacks.append(wrapper.update)
+
     def __init__(self, cfg, device: str, headless: bool = True):
         super().__init__(cfg, device, headless)
         self.robot = self.scene.articulations["robot"]
@@ -56,9 +73,10 @@ class IsaacBackendEnv(_EnvBase):
             ),
         )
 
-        asset_cfg = registry.get("asset", self.cfg.robot.name)
-        asset_cfg, sensors = asset_cfg(backend="isaaclab")
-        scene_cfg.robot = asset_cfg
+        asset_factory = registry.get("asset", self.cfg.robot.name)
+        asset_spec = asset_factory(backend="isaaclab")
+        scene_cfg.robot = asset_spec.config
+        sensors = asset_spec.sensors
         for name, sensor_cfg in sensors.items():
             setattr(scene_cfg, name, sensor_cfg)
 
@@ -114,6 +132,19 @@ class IsaacBackendEnv(_EnvBase):
         self.sim = IsaacSimAdapter(sim)
         self.scene = IsaacSceneAdapter(self.scene)
         self.terrain_type = self.scene.terrain.cfg.terrain_type
+        self.robot = self.scene.articulations["robot"]
+
+        if asset_spec.wrapper_factory is not None:
+            self.robot_wrapper = asset_spec.wrapper_factory(
+                robot=self.robot,
+                sim=self.sim,
+                scene=self.scene,
+                env=self,
+                **asset_spec.wrapper_kwargs,
+            )
+            self._register_wrapper_callbacks(self.robot_wrapper)
+        else:
+            self.robot_wrapper = None
 
 
 __all__ = ["IsaacBackendEnv"]
