@@ -30,6 +30,7 @@ from tensordict.nn.probabilistic import interaction_type, InteractionType
 from tensordict import TensorDict
 
 from hydra.core.config_store import ConfigStore
+from active_adaptation.learning.offpolicy.noise import ParallelPinkNoiseProcess
 
 from active_adaptation.learning.ppo.common import (
     ACTION_KEY,
@@ -58,7 +59,7 @@ class TD3Config:
     train_every: int = 4
     delayed: int = 2
     soft_bound: float = math.pi
-    buffer_size: int = 800
+    buffer_size: int = 1000
     warm_up_steps: int = 200
     lr: float = 5e-4
     # Network init config
@@ -68,7 +69,7 @@ class TD3Config:
     muon: bool = True
     weight_decay: float = 0.02
     # TD learning
-    n_steps: int = 3 # 3
+    n_steps: int = 3
     gamma: float = 0.99
     utd_ratio: int = 4
     # architecture
@@ -80,9 +81,9 @@ class TD3Config:
     actor_batch_size: int = 2048
     sym_aug: bool = False
     # target smoothing: this should help Q(s_t, a_t) to generalize locally around a_t
-    target_action_noise: float = 0.2
-    # AR(1) pre-tanh exploration noise on rollout only: eps_t = rho * eps_{t-1} + sqrt(1-rho^2) * N(0,I).
-    use_correlated: bool = False
+    noise_type: str = "pink"
+    rollout_action_noise: float = 0.10
+    target_action_noise: float = 0.10
 
     tau_actor: float = 0.1
     tau_Q: float = 0.1 # 更大 0.05 ～ 0.2
@@ -435,6 +436,11 @@ class TD3(TensorDictModuleBase):
             preproc=self.preproc,
             actor=self.actor,
             Q=self.Q,
+            noise_type=self.cfg.noise_type,
+            noise_scale=self.cfg.rollout_action_noise,
+            act_dim=self.action_spec.shape[-1],
+            device=self.device,
+            seq_len=1000,
             reward_normalizer=self.reward_normalizer,
             critic=critic
         )
@@ -673,10 +679,23 @@ class TD3(TensorDictModuleBase):
                     l2_t1 = torch.linalg.vector_norm(policy_act_t1 - act_t1, dim=-1)
                     infos["critic/action_mismatch_t1"] = l2_t1[alive_t1].mean().item()
 
-            q = self.Q.get_values(obs, act)
+            if self.cfg.distributional:
+                logits = self.Q(obs, act)
+                q = self.Q.expected_values(logits)
+                q_lower = self.Q.expected_values(logits, risk_alpha=0.5)
+                q_upper = self.Q.expected_values(logits, risk_alpha=-0.5)
+            else:
+                q = self.Q.get_values(obs, act)
+            
             if self.reward_normalizer is not None:
                 q = self.reward_normalizer.denormalize_return_values(q)
-            
+                if self.cfg.distributional:
+                    q_lower = self.reward_normalizer.denormalize_return_values(q_lower)
+                    q_upper = self.reward_normalizer.denormalize_return_values(q_upper)
+
+                    infos["critic/q_lower"] = q_lower.mean().item()
+                    infos["critic/q_upper"] = q_upper.mean().item()
+
             # online Q statistics
             q_val_mean = q[:B_online].mean().item()
             q_val_max = q[:B_online].max().item()
@@ -832,7 +851,12 @@ class TD3RolloutPolicy(TensorDictModuleBase):
         self,
         preproc: nn.Module,
         actor: nn.Module,
+        noise_type: str,
+        noise_scale: float,
+        act_dim: int,
+        seq_len: int,
         *,
+        device: torch.device | str = 'cuda',
         Q: nn.Module | None = None,
         reward_normalizer: RewardNormalizer | None = None,
         critic: bool = False
@@ -841,24 +865,45 @@ class TD3RolloutPolicy(TensorDictModuleBase):
         self.preproc = preproc
         self.actor = actor
         self.Q = Q
+        self.noise_type = noise_type
         self.reward_normalizer = reward_normalizer
         self.critic = critic
+        self.noise_scale = noise_scale
+        self.device = device
 
         self.in_keys = [OBS_KEY]
         self.out_keys = [ACTION_KEY]
         if self.critic is not None:
             self.out_keys = self.out_keys + ["Q_value"]
 
-    def forward(self, tensordict: TensorDict, noise_scale: float = 0.1) -> TensorDict:
+        if self.noise_type == "pink":
+            self.pink_noise = ParallelPinkNoiseProcess(
+                size=[4096, act_dim, seq_len],
+                scale=noise_scale
+            )
+            self.pink_noise.reset()
+
+    def forward(self, tensordict: TensorDict) -> TensorDict:
         self.preproc(tensordict)
         obs = tensordict["_input_normed"]
         act = self.actor(obs)
+        ter = tensordict["done"]
+        if isinstance(ter, TensorDict):
+            ter = torch.cat(list(ter.values()), dim=-1)
+            ter = torch.squeeze(ter)
 
         if interaction_type() == InteractionType.MODE:
             sample = act.clone()
-        else:
-            noise = torch.randn_like(act) * noise_scale
+        elif self.noise_type == "white":
+            noise = torch.randn_like(act) * self.noise_scale
             sample = act + noise
+        elif self.noise_type == "pink":
+            noise = self.pink_noise.sample_one()
+            noise = torch.as_tensor(noise, dtype=act.dtype, device=act.device)
+            sample = act + noise
+        
+        if ter.any():
+            self.pink_noise.reset(mask=ter.numpy())
         
         if self.critic and self.Q is not None:
             qs = self.Q.get_values(obs, sample).mean(dim=-1)
