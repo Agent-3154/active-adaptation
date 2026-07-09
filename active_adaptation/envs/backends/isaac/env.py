@@ -61,7 +61,7 @@ class IsaacBackendEnv(_EnvBase):
         registry = Registry.instance()
         scene_cfg = InteractiveSceneCfg(
             num_envs=self.cfg.num_envs,
-            env_spacing=2.5,
+            env_spacing=self.cfg.get("env_spacing", 2.5),
             replicate_physics=True,
         )
         scene_cfg.sky_light = AssetBaseCfg(
