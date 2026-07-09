@@ -102,8 +102,13 @@ class TD3Config:
     # prior_data: str | None = None
     prior_data: str | None = "/ssd/cv/rollout/G1HoiObj-ppo_symaug/2026-07-09-11-46-48/rollout_500_1024.pt"
     prior_data_ratio: float = 0.4
-    # Stop mixing prior data once episode success rate exceeds this threshold.
+    # "binary": stop mixing prior data once success rate exceeds ``prior_data_stop_success``.
+    # "linear": linearly reduce prior data ratio from ``prior_data_schedule_lower`` to
+    # ``prior_data_schedule_upper`` success rate.
+    prior_data_schedule: Literal["binary", "linear"] = "binary"
     prior_data_stop_success: float | None = 0.2
+    prior_data_schedule_lower: float = 0.0
+    prior_data_schedule_upper: float = 0.2
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
@@ -482,14 +487,33 @@ class TD3(TensorDictModuleBase):
         self.Q_target.load_state_dict(self.Q.state_dict())
         self.actor_target.load_state_dict(self.actor.state_dict())
 
+    def _prior_data_ratio(self) -> float:
+        if self.rb_prior is None:
+            return 0.0
+
+        base = self.cfg.prior_data_ratio
+        sr = self._success_rate
+
+        if self.cfg.prior_data_schedule == "binary":
+            stop_at = self.cfg.prior_data_stop_success
+            if stop_at is None or sr is None:
+                return base
+            return base if sr <= stop_at else 0.0
+
+        lower = self.cfg.prior_data_schedule_lower
+        upper = self.cfg.prior_data_schedule_upper
+        if sr is None or upper <= lower:
+            return base
+        if sr <= lower:
+            return base
+        if sr >= upper:
+            return 0.0
+        t = (sr - lower) / (upper - lower)
+        return base * (1.0 - t)
+
     @property
     def use_prior_data(self) -> bool:
-        if self.rb_prior is None:
-            return False
-        stop_at = self.cfg.prior_data_stop_success
-        if stop_at is None or self._success_rate is None:
-            return True
-        return self._success_rate <= stop_at
+        return self._prior_data_ratio() > 0.0
 
 
     @VecNorm.freeze()
@@ -528,6 +552,7 @@ class TD3(TensorDictModuleBase):
         infos: dict = {"rb_size": len(self.rb), "critic/neg_rew_ratio": neg_rew_ratio}
         if self.rb_prior is not None:
             infos["prior_data/active"] = float(self.use_prior_data)
+            infos["prior_data/ratio"] = self._prior_data_ratio()
             if self._success_rate is not None:
                 infos["prior_data/success_rate"] = self._success_rate
         if self.global_step < self.cfg.warm_up_steps:
@@ -544,9 +569,10 @@ class TD3(TensorDictModuleBase):
                 steps=self.cfg.n_steps
             ).to(self.device)
 
-            if self.use_prior_data:
+            prior_ratio = self._prior_data_ratio()
+            if prior_ratio > 0.0:
                 batch_prior = self.rb_prior.sample(
-                    batch_size=self.cfg.critic_batch_size * self.cfg.prior_data_ratio,
+                    batch_size=self.cfg.critic_batch_size * prior_ratio,
                     steps=self.cfg.n_steps
                 ).to(self.device)
             else:
@@ -766,9 +792,10 @@ class TD3(TensorDictModuleBase):
                        .select(*self.train_keys, strict=False)
         
         batch_prior = None
-        if self.use_prior_data:
+        prior_ratio = self._prior_data_ratio()
+        if prior_ratio > 0.0:
             batch_prior = self.rb_prior.sample(
-                batch_size=self.cfg.actor_batch_size * self.cfg.prior_data_ratio,
+                batch_size=self.cfg.actor_batch_size * prior_ratio,
                 steps=1
             ).select(*self.train_keys).to(self.device)
 
