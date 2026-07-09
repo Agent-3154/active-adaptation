@@ -59,7 +59,7 @@ class TD3Config:
     train_every: int = 4
     delayed: int = 2
     soft_bound: float = math.pi
-    buffer_size: int = 1000
+    buffer_size: int = 1500
     warm_up_steps: int = 200
     lr: float = 5e-4
     # Network init config
@@ -81,7 +81,7 @@ class TD3Config:
     actor_batch_size: int = 2048
     sym_aug: bool = False
     # target smoothing: this should help Q(s_t, a_t) to generalize locally around a_t
-    noise_type: str = "pink"
+    noise_type: str = "white"
     rollout_action_noise: float = 0.10
     target_action_noise: float = 0.10
 
@@ -99,8 +99,11 @@ class TD3Config:
     reward_norm_epsilon: float = 1e-8
 
     # path to prior data for RLPD
-    prior_data: str | None = None
+    # prior_data: str | None = None
+    prior_data: str | None = "/ssd/cv/rollout/G1HoiObj-ppo_symaug/2026-07-09-11-46-48/rollout_500_1024.pt"
     prior_data_ratio: float = 0.4
+    # Stop mixing prior data once episode success rate exceeds this threshold.
+    prior_data_stop_success: float | None = 0.2
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
@@ -297,7 +300,6 @@ class TD3(TensorDictModuleBase):
         fake_obs = observation_spec.zero()
         preproc = []
         
-        # TODO: How does this works? `preproc`
         # ====================================================================================
         if CMD_KEY in observation_spec.keys(True, True):
             self.train_keys = (
@@ -472,15 +474,28 @@ class TD3(TensorDictModuleBase):
             print(self.rb_prior)
         else:
             self.rb_prior = None
+
+        self._success_rate: float | None = None
         
         self.enable_actor = True
 
         self.Q_target.load_state_dict(self.Q.state_dict())
         self.actor_target.load_state_dict(self.actor.state_dict())
 
+    @property
+    def use_prior_data(self) -> bool:
+        if self.rb_prior is None:
+            return False
+        stop_at = self.cfg.prior_data_stop_success
+        if stop_at is None or self._success_rate is None:
+            return True
+        return self._success_rate <= stop_at
+
 
     @VecNorm.freeze()
-    def train_op(self, tensordict: TensorDict):
+    def train_op(self, tensordict: TensorDict, *, success_rate: float | None = None):
+        if success_rate is not None:
+            self._success_rate = success_rate
         self.global_step += self.cfg.train_every
 
         # Data processing
@@ -511,6 +526,10 @@ class TD3(TensorDictModuleBase):
             self.rb.push(sub)
 
         infos: dict = {"rb_size": len(self.rb), "critic/neg_rew_ratio": neg_rew_ratio}
+        if self.rb_prior is not None:
+            infos["prior_data/active"] = float(self.use_prior_data)
+            if self._success_rate is not None:
+                infos["prior_data/success_rate"] = self._success_rate
         if self.global_step < self.cfg.warm_up_steps:
             self._flush_dormancy(infos)
             return infos
@@ -525,7 +544,7 @@ class TD3(TensorDictModuleBase):
                 steps=self.cfg.n_steps
             ).to(self.device)
 
-            if self.rb_prior is not None:
+            if self.use_prior_data:
                 batch_prior = self.rb_prior.sample(
                     batch_size=self.cfg.critic_batch_size * self.cfg.prior_data_ratio,
                     steps=self.cfg.n_steps
@@ -746,12 +765,13 @@ class TD3(TensorDictModuleBase):
                        .to(self.device) \
                        .select(*self.train_keys, strict=False)
         
-        if self.rb_prior is not None:
+        batch_prior = None
+        if self.use_prior_data:
             batch_prior = self.rb_prior.sample(
                 batch_size=self.cfg.actor_batch_size * self.cfg.prior_data_ratio,
                 steps=1
             ).select(*self.train_keys).to(self.device)
-        
+
             batch = torch.cat([batch, batch_prior], dim=0)
             prior_action = batch_prior[ACTION_KEY]
 
@@ -763,9 +783,9 @@ class TD3(TensorDictModuleBase):
         prior_obs = None
         prior_count = 0
 
-        if self.rb_prior is not None:
+        if batch_prior is not None:
             prior_count = batch_prior.shape[0]
-            prior_obs = batch_prior["_input_normed"]        
+            prior_obs = batch_prior["policy"]        
         # ============================================================================
 
         with hold_out_net(self.Q):
@@ -817,9 +837,9 @@ class TD3(TensorDictModuleBase):
                 "actor/mean_act": update_act.abs().mean().item()
             }
 
-            if self.rb_prior is not None:
+            if batch_prior is not None:
                 q_prior = self.Q.get_values(prior_obs, prior_action).mean(dim=-1)
-                q_policy_prior = q[:n_unaug][-prior_count:].mean(dim=1)
+                q_policy_prior = q[:n_unaug][-prior_count:].mean(dim=-1)
                 advantage = q_policy_prior - q_prior
                 infos["actor/online_advantage"] = advantage.mean().item()
             
