@@ -357,7 +357,12 @@ def main(cfg: TrainConfig):
                     info[key] = torch.mean(v.float()).item()
 
             with ScopedTimer("training") as training_timer:
-                info.update(policy.train_op(data))
+                info.update(
+                    policy.train_op(
+                        data,
+                        success_rate=info.get("train/stats/success"),
+                    )
+                )
             training_time = training_timer.last_time
 
             if hasattr(policy, "step_schedule"):
