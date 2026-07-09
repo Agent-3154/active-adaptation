@@ -26,8 +26,8 @@ QUADRATIC_DAMPING = (18.18, 21.66, 36.99, 1.55, 1.55, 1.55)
 # --- rotor / T200 thruster parameters (from BlueROV.yaml) ---
 NUM_ROTORS = 6
 ROTOR_DIRECTIONS = (1.0, -1.0, 1.0, -1.0, 1.0, -1.0)
-ROTOR_TIME_CONSTANTS = (0.01, 0.01, 0.01, 0.01, 0.01, 0.01)
-ROTOR_FORCE_CONSTANTS = (4.4e-07,) * 6
+ROTOR_TIME_CONSTANTS = {f"rotor_{i}": 0.01 for i in range(NUM_ROTORS)}
+ROTOR_FORCE_CONSTANTS = {f"rotor_{i}": 4.4e-07 for i in range(NUM_ROTORS)}
 ROTOR_MAX_ROTATION_VEL_RPM = (3900.0,) * 6
 ROTOR_MOMENT_CONSTANTS = (1.3677728816219314e-09,) * 6
 ROTOR_MAX_ROTATION_VEL_RAD_S = tuple(
@@ -35,20 +35,10 @@ ROTOR_MAX_ROTATION_VEL_RAD_S = tuple(
 )
 
 INIT_POS = (0.0, 0.0, 2.0)
-INIT_JOINT_POS = {f"rotor_{i}": 0.0 for i in range(NUM_ROTORS)}
 
 JOINT_NAMES_SIMULATION = [f"rotor_{i}" for i in range(NUM_ROTORS)]
 BODY_NAMES_SIMULATION = ["base_link", *[f"rotor_{i}" for i in range(NUM_ROTORS)]]
 
-
-def make_hydrodynamics_cfg() -> HydrodynamicsCfg:
-    return HydrodynamicsCfg(
-        volume=VOLUME,
-        coBM=COBM,
-        added_mass=ADDED_MASS,
-        linear_damping=LINEAR_DAMPING,
-        quadratic_damping=QUADRATIC_DAMPING,
-    )
 
 
 def make_isaaclab_cfg(self_collisions: bool = False):
@@ -84,7 +74,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=INIT_POS,
-            joint_pos=INIT_JOINT_POS,
+            joint_pos={".*": 0.0},
             joint_vel={".*": 0.0},
         ),
         actuators={
@@ -105,8 +95,16 @@ def make_isaaclab_cfg(self_collisions: bool = False):
         sensors={},
         wrapper_factory=lambda robot, sim, **_: UnderwaterRobot(
             robot=robot,
-            cfg=make_hydrodynamics_cfg(),
+            cfg=HydrodynamicsCfg(
+                volume=VOLUME,
+                coBM=COBM,
+                added_mass=ADDED_MASS,
+                linear_damping=LINEAR_DAMPING,
+                quadratic_damping=QUADRATIC_DAMPING,
+            ),
             dt=sim.get_physics_dt(),
+            rotor_time_constants=ROTOR_TIME_CONSTANTS,
+            rotor_force_constants=ROTOR_FORCE_CONSTANTS,
         ),
     )
 

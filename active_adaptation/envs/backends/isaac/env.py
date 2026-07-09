@@ -4,6 +4,7 @@ from active_adaptation.envs.backends.isaac.adapter import (
     IsaacSimAdapter,
 )
 from active_adaptation.envs.env_base import _EnvBase
+from active_adaptation.assets.asset_cfg import AssetSpec
 from active_adaptation.registry import Registry
 from tqdm import tqdm
 
@@ -74,7 +75,7 @@ class IsaacBackendEnv(_EnvBase):
         )
 
         asset_factory = registry.get("asset", self.cfg.robot.name)
-        asset_spec = asset_factory(backend="isaaclab")
+        asset_spec: AssetSpec = asset_factory(backend="isaaclab")
         scene_cfg.robot = asset_spec.config
         sensors = asset_spec.sensors
         for name, sensor_cfg in sensors.items():

@@ -10,6 +10,7 @@ from .joint import (
     JointVelocity,
 )
 from .marker import Marker
+from .underwater import UnderwaterThrottle
 from .write import WriteJointPosition, WriteRootState
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "JointPositionDelta",
     "CorrelatedJointPosition",
     "JointVelocity",
+    "UnderwaterThrottle",
     "Marker",
     "WriteRootState",
     "WriteJointPosition",
