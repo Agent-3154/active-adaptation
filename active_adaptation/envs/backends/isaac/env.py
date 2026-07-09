@@ -27,6 +27,8 @@ class IsaacBackendEnv(_EnvBase):
             self._post_step_callbacks.append(wrapper.post_step)
         if callable(getattr(wrapper, "update", None)):
             self._update_callbacks.append(wrapper.update)
+        if callable(getattr(wrapper, "debug_draw", None)):
+            self._debug_draw_callbacks.append(wrapper.debug_draw)
 
     def __init__(self, cfg, device: str, headless: bool = True):
         super().__init__(cfg, device, headless)
@@ -135,14 +137,9 @@ class IsaacBackendEnv(_EnvBase):
         self.terrain_type = self.scene.terrain.cfg.terrain_type
         self.robot = self.scene.articulations["robot"]
 
-        if asset_spec.wrapper_factory is not None:
-            self.robot_wrapper = asset_spec.wrapper_factory(
-                robot=self.robot,
-                sim=self.sim,
-                scene=self.scene,
-                env=self,
-                **asset_spec.wrapper_kwargs,
-            )
+        if asset_spec.wrapper is not None:
+            self.robot_wrapper = asset_spec.wrapper
+            self.robot_wrapper._initialize(robot=self.robot, env=self)
             self._register_wrapper_callbacks(self.robot_wrapper)
         else:
             self.robot_wrapper = None

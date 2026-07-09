@@ -65,6 +65,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
                 enabled_self_collisions=self_collisions,
                 solver_position_iteration_count=4,
                 solver_velocity_iteration_count=1,
+                fix_root_link=False,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 contact_offset=0.02,
@@ -93,8 +94,8 @@ def make_isaaclab_cfg(self_collisions: bool = False):
     return AssetSpec(
         config=asset_cfg,
         sensors={},
-        wrapper_factory=lambda robot, sim, **_: UnderwaterRobot(
-            robot=robot,
+        # Wrapper is created as an instance and initialized by backend env.
+        wrapper=UnderwaterRobot(
             cfg=HydrodynamicsCfg(
                 volume=VOLUME,
                 coBM=COBM,
@@ -102,7 +103,6 @@ def make_isaaclab_cfg(self_collisions: bool = False):
                 linear_damping=LINEAR_DAMPING,
                 quadratic_damping=QUADRATIC_DAMPING,
             ),
-            dt=sim.get_physics_dt(),
             rotor_time_constants=ROTOR_TIME_CONSTANTS,
             rotor_force_constants=ROTOR_FORCE_CONSTANTS,
         ),

@@ -6,7 +6,7 @@ backends (Isaac Sim, MuJoCo Lab, MuJoCo).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict, Tuple, List, Optional, Sequence, Any
 from pathlib import Path
 
@@ -103,11 +103,9 @@ class AssetSpec:
 
     config: Any
     sensors: Any = ()
-    wrapper_factory: Optional[Callable[..., Any]] = None
-    wrapper_kwargs: Dict[str, Any] = field(default_factory=dict)
+    wrapper: Optional[Any] = None
 
-    def with_wrapper(self, wrapper_factory: Callable[..., Any], **wrapper_kwargs) -> "AssetSpec":
-        self.wrapper_factory = wrapper_factory
-        self.wrapper_kwargs = dict(wrapper_kwargs)
+    def with_wrapper(self, wrapper: Any) -> "AssetSpec":
+        self.wrapper = wrapper
         return self
 
