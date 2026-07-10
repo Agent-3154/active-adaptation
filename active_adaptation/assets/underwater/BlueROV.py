@@ -6,14 +6,11 @@ from typing import Literal
 
 from active_adaptation.envs.robots.underwater import HydrodynamicsCfg, UnderwaterRobot
 from active_adaptation.registry import Registry
+from active_adaptation import ROBOT_MODEL_DIR
 
 registry = Registry.instance()
 
-LAB51_ROOT = Path(__file__).resolve().parents[4]
-USD_PATH = (
-    LAB51_ROOT
-    / "lib/MarineGym/marinegym/robots/assets/usd/BlueROV/fixed_usd/BlueROV/BlueROV.usd"
-)
+USD_PATH = ROBOT_MODEL_DIR / "underwater" / "BlueROV.usd"
 
 # --- hydrodynamics (from BlueROV.yaml) ---
 DRAG_COEF = 0.3
