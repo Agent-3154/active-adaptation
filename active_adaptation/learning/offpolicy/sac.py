@@ -83,8 +83,8 @@ def _init_sac_linear(m: nn.Module, gain: float = 1.0):
 class SACConfig:
     _target_: str = "active_adaptation.learning.offpolicy.sac.SAC"
     name: str = "sac"
-    train_every: int = 4
-    buffer_size: int = 2000
+    train_every: int = 4 # perform network updating per `train_every` env step(s).
+    buffer_size: int = 500
     warm_up_steps: int = 200
     lr: float = 5e-4
     # If True, actor/Q use :class:`~active_adaptation.learning.utils.opt.MuonAdamWWrapper` (see ``ppo_symaug``).
@@ -93,7 +93,7 @@ class SACConfig:
     # TD learning
     n_steps: int = 3
     gamma: float = 0.99
-    utd_ratio: int = 4
+    utd_ratio: int = 4 # update-to-data ratio: network udpating times for every env step.
     # architecture
     actor_init: str = "zeros"
     distributional: bool = True
@@ -118,7 +118,7 @@ class SACConfig:
     lr_alpha: float = 5e-4
     max_grad_norm: float = 1.0
 
-    debug: bool = False
+    debug: bool = True
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = True
@@ -132,7 +132,6 @@ class SACConfig:
     prior_data_ratio: float = 0.4
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
-
 
 cs.store(name="sac", node=SACConfig, group="algo")
 # cs.store(name="dsac", node=SACConfig, group="algo") # distributional SAC
@@ -296,13 +295,6 @@ class NormalActor(nn.Module):
 
 
 class SAC(TensorDictModuleBase):
-
-    # keys to select from the batch for training
-    train_keys = (
-        CMD_KEY, OBS_KEY, ("next", OBS_KEY), ("next", CMD_KEY), ACTION_KEY,
-        REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
-    )
-
     def __init__(
         self,
         cfg: SACConfig,
@@ -333,9 +325,20 @@ class SAC(TensorDictModuleBase):
         fake = observation_spec.zero()
         preproc = []
         if CMD_KEY in observation_spec.keys(True, True):
+            self.train_keys = (
+                CMD_KEY, OBS_KEY, ("next", OBS_KEY), ("next", CMD_KEY), ACTION_KEY,
+                REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
+                "priority_weight", "replay_flat_index"
+            )
+
             obs_dim = fake[OBS_KEY].shape[-1] + fake[CMD_KEY].shape[-1]
             preproc.append(CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False))
         else:
+            self.train_keys = (
+                OBS_KEY, ("next", OBS_KEY), ACTION_KEY,
+                REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
+                "priority_weight", "replay_flat_index"
+            )
             obs_dim = fake[OBS_KEY].shape[-1]
             preproc.append(Mod(nn.Identity(), [OBS_KEY], ["_input"]))
         act_dim = action_spec.shape[-1]
@@ -560,7 +563,6 @@ class SAC(TensorDictModuleBase):
             reset_key="done",
             expand_specs=False,
         )
-    
     @classmethod
     def from_env(cls, cfg: SACConfig, env: _EnvBase, device: torch.device):
         if cfg.sym_aug:
@@ -603,19 +605,21 @@ class SAC(TensorDictModuleBase):
             # .exclude(("next", OBS_KEY))
         )
         fake_rb["loc"] = torch.zeros(fake_rb.shape[0], self.actor.act_dim)
-        self.rb = ReplayBuffer.from_fake(self.cfg.buffer_size, fake_rb)
+        observation_keys = set(env.observation_spec.keys(True, True))
+        observation_keys = observation_keys - {"prev_noise", "rho"}
+        self.rb = ReplayBuffer.from_fake(
+            self.cfg.buffer_size, 
+            fake_rb,
+            fake_bootstrap=True,
+            observation_keys=list(observation_keys)
+        )
         print("Primary buffer:")
         print(self.rb)
         if self.cfg.prior_data is not None:
-            self.rb_prior = ReplayBuffer.from_rollout(self.cfg.prior_data)
-            def fn(rew: torch.Tensor | TensorDict) -> torch.Tensor:
-                if isinstance(rew, TensorDict):
-                    rew = torch.cat(list(rew.values()), dim=-1)
-                return rew.sum(-1, keepdim=True).clamp_min(0.)
-            self.rb_prior.compute_return(
-                REWARD_KEY,
-                gamma=self.cfg.gamma,
-                fn=fn,
+            self.rb_prior = ReplayBuffer.from_rollout(
+                self.cfg.prior_data,
+                fake_bootstrap=True,
+                observation_keys=list(observation_keys)
             )
             print("Prior data buffer:")
             print(self.rb_prior)
@@ -639,6 +643,10 @@ class SAC(TensorDictModuleBase):
         # td = td.exclude(("next", OBS_KEY))
 
         reward = td[REWARD_KEY]
+        
+        if isinstance(reward, TensorDict):
+            reward = torch.cat(list(reward.values()), dim=-1)
+
         # KEEP THIS FOR DEBUGGING
         if self.cfg.debug:
             # debug: constant reward scaled by effective horizon
@@ -647,8 +655,6 @@ class SAC(TensorDictModuleBase):
             reward = torch.ones_like(reward) * (1.0 - self.cfg.gamma)
             neg_rew_ratio = 0.0
         else:
-            if isinstance(reward, TensorDict):
-                reward = torch.cat(list(reward.values()), dim=-1)
             reward = reward.sum(-1, keepdim=True)
             neg_rew_ratio = (reward <= 0.).float().mean().item()
 

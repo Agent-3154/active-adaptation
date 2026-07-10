@@ -103,7 +103,7 @@ class VecNorm(nn.Module):
         return input_vector * std + mean
 
     def _update(self, input_vector: torch.Tensor):
-        input_vector = input_vector.reshape(-1, *self.input_shape)
+        input_vector = input_vector.reshape(-1, *self.input_shape).float()
         if len(self.reduction_dims):
             # note that `tensor.mean(())` is not what we want
             sum_ = input_vector.mean(dim=self.reduction_dims, keepdim=True)
