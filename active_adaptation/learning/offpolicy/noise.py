@@ -19,37 +19,6 @@ class ParallelPinkNoiseProcess(PinkNoiseProcess):
             self.idx[mask] = 0
 
 
-    def sample(self, T=1):
-        """
-        Sample `T` timesteps from the colored noise process.
-
-        The buffer is automatically refilled when necessary.
-
-        Parameters
-        ----------
-        T : int, optional, by default 1
-            Number of samples to draw
-
-        Returns
-        -------
-        array_like
-            Sampled vector of shape `(*size[:-1], T)`
-        """
-        n = 0
-        ret = []
-        while n < T:
-            mask = self.idx >= self.time_steps
-            if mask.any():
-                self.reset(mask)
-
-            m = min(T - n, self.time_steps - self.idx)
-            ret.append(self.buffer[..., self.idx:(self.idx + m)])
-            n += m
-            self.idx += m
-
-        ret = self.scale * np.concatenate(ret, axis=-1)
-        return ret if n > 1 else ret[..., 0]
-
     def sample_one(self):
             """
             Sample 1 timestep from the colored noise process (Optimized for T=1 with vectorization).
