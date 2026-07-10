@@ -352,12 +352,14 @@ class ReplayBuffer:
         """
         if len(self) == 0 or self.num_samples == 0:
             raise RuntimeError("Cannot sample from an empty ReplayBuffer.")
+        
+        batch_size = int(batch_size)
 
         if self._per is not None:
             idx_flat, weight = self._sample_prioritized_flat(batch_size)
         else:
             idx_flat = torch.randint(
-                0, self.num_samples, (batch_size,), device=self._td.device
+                0, self.num_samples, ((batch_size),), device=self._td.device
             )
             weight = torch.ones(
                 batch_size, device=self._td.device, dtype=torch.float32

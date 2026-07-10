@@ -4,7 +4,7 @@ name: G1LocoFlat
 viewer:
   resolution: [1280, 720]
   lookat: [0., 0., 0.]
-  eye: [12.0, 12.0, 12.0]
+  eye: [4.0, 4.0, 4.0]
 
 robot: 
   name: g1_waist_unlocked
@@ -112,11 +112,11 @@ randomization:
 
 termination:
   max_episode_length: {}
-  crash: 
-    body_names_expr:
-    - "pelvis"
-    - "torso_link"
-    - ".*_hip_.*_link"
-    - ".*shoulder_.*_link"
-    - ".*(wrist|elbow).*"
-  fall_over: {xy_thres: 0.9}
+  # crash: 
+  #   body_names_expr:
+  #   - "pelvis"
+  #   - "torso_link"
+  #   - ".*_hip_.*_link"
+  #   - ".*shoulder_.*_link"
+  #   - ".*(wrist|elbow).*"
+  # fall_over: {xy_thres: 0.9}
