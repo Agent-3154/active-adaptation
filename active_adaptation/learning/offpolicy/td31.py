@@ -16,6 +16,11 @@ from active_adaptation.learning.utils.dormancy import DormancyTracker
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
+from active_adaptation.learning.offpolicy.noise import (
+    ApproxPinkNoise,
+    OUNoise,
+    PinkNoise,
+)
 if TYPE_CHECKING:
     from active_adaptation.envs import _EnvBase
 from active_adaptation.learning.ppo.common import (
@@ -82,10 +87,12 @@ class TD3Config:
     critic_batch_size: int = 2048
     actor_batch_size: int = 2048
     sym_aug: bool = False  # not supported
-    # target smoothing: helps Q(s_t, a_t) generalize locally around a_t
-    noise_type: str = "white"  # white (pink not wired in this revision)
+    # Exploration noise: "white" | "pink" (FFT buffer) | "approx_pink" (multi-OU) | "ou"
+    noise_type: str = "white"
     rollout_action_noise: Tuple[float, float] = (0.05, 0.2)
     target_action_noise: float = 0.05
+    # FFT buffer length for noise_type="pink" (correlation window, not episode horizon).
+    noise_seq_len: int = 1024
 
     tau_Q: float = 0.02
     tau_actor: float = 0.1
@@ -108,6 +115,7 @@ class TD3Config:
 
 
 cs.store(name="td31", node=TD3Config, group="algo")
+cs.store(name="td31_pink", node=TD3Config(noise_type="approx_pink"), group="algo")
 
 
 class DormancyScope(nn.Module):
@@ -432,6 +440,9 @@ class TD3(TensorDictModuleBase):
             Q=self.Q if critic else None,
             noise_type=self.cfg.noise_type,
             noise_scale_range=self.cfg.rollout_action_noise,
+            num_envs=int(self.action_spec.shape[0]),
+            action_dim=int(self.actor.act_dim),
+            noise_seq_len=int(self.cfg.noise_seq_len),
             reward_normalizer=self.reward_normalizer,
         )
 
@@ -512,7 +523,6 @@ class TD3(TensorDictModuleBase):
             info = self.train_critic(batch, batch_prior=batch_prior, diagnostics=d)
             if info:
                 infos.update(info)
-        infos["critic/step"] = self.critic_step
 
         # TD3: fewer actor updates than critic (policy delay).
         actor_iters = max(1, critic_iters // max(1, self.cfg.delayed))
@@ -521,7 +531,6 @@ class TD3(TensorDictModuleBase):
             info = self.train_actor(diagnostics=(j == actor_iters - 1))
             if info:
                 infos.update(info)
-        infos["actor/step"] = self.actor_step
 
         self._flush_dormancy(infos)
         return dict(sorted(infos.items()))
@@ -764,7 +773,7 @@ class TD3(TensorDictModuleBase):
 
 
 class TD3RolloutPolicy(TensorDictModuleBase):
-    """Deterministic actor + per-env white noise scale resampled on episode done."""
+    """Deterministic actor + exploration noise; per-env scale resampled on ``is_init``."""
 
     def __init__(
         self,
@@ -772,7 +781,10 @@ class TD3RolloutPolicy(TensorDictModuleBase):
         actor: nn.Module,
         noise_type: str,
         noise_scale_range: Tuple[float, float],
+        num_envs: int,
+        action_dim: int,
         *,
+        noise_seq_len: int = 1024,
         Q: nn.Module | None = None,
         reward_normalizer: RewardNormalizer | None = None,
     ):
@@ -790,6 +802,18 @@ class TD3RolloutPolicy(TensorDictModuleBase):
         if self.Q is not None:
             self.out_keys = self.out_keys + ["Q_value"]
 
+        if noise_type == "white":
+            self.noise_fn = _WhiteNoise(num_envs, action_dim)
+        elif noise_type == "pink":
+            self.noise_fn = PinkNoise(num_envs, action_dim, noise_seq_len)
+        elif noise_type == "approx_pink":
+            self.noise_fn = ApproxPinkNoise(num_envs, action_dim)
+        elif noise_type == "ou":
+            self.noise_fn = OUNoise(num_envs, action_dim)
+        else:
+            raise ValueError(f"Unsupported noise_type: {noise_type}")
+        self.noise_fn.to(next(actor.parameters()).device)
+
     def _sample_noise_scale(self, like: torch.Tensor) -> torch.Tensor:
         low, high = self.noise_scale_range
         return torch.empty_like(like).uniform_(low, high)
@@ -798,29 +822,20 @@ class TD3RolloutPolicy(TensorDictModuleBase):
         self.preproc(tensordict)
         obs = tensordict["_input_normed"]
         act = self.actor(obs)
+        is_init = tensordict["is_init"]  # [N, 1] bool
 
         if self.noise_scale is None or self.noise_scale.shape != act.shape:
             self.noise_scale = self._sample_noise_scale(act)
+        self.noise_scale = torch.where(
+            is_init,
+            self._sample_noise_scale(act),
+            self.noise_scale,
+        )
 
-        done = tensordict.get("done")
-        if done is not None and done.any():
-            done_mask = done.bool()
-            if done_mask.shape != self.noise_scale.shape:
-                done_mask = done_mask.reshape(*done_mask.shape[:1], *([1] * (self.noise_scale.ndim - 1)))
-                done_mask = done_mask.expand_as(self.noise_scale)
-            self.noise_scale = torch.where(
-                done_mask,
-                self._sample_noise_scale(act),
-                self.noise_scale,
-            )
-
-        if interaction_type() == InteractionType.MODE:
+        if interaction_type() in (InteractionType.MODE, InteractionType.DETERMINISTIC):
             sample = act
-        elif self.noise_type == "white":
-            noise = torch.randn_like(act).clamp(-3.0, 3.0)
-            sample = act + noise * self.noise_scale
         else:
-            raise ValueError(f"Unsupported noise_type: {self.noise_type}")
+            sample = act + self.noise_fn(is_init) * self.noise_scale
 
         if self.Q is not None:
             qs = self.Q.get_values(obs, sample).mean(dim=-1)
@@ -831,3 +846,15 @@ class TD3RolloutPolicy(TensorDictModuleBase):
         tensordict[ACTION_KEY] = sample
         tensordict["loc"] = act
         return tensordict
+
+
+class _WhiteNoise(nn.Module):
+    """Stateless unit Gaussian noise with the same ``forward(is_init)`` API."""
+
+    def __init__(self, num_envs: int, action_dim: int):
+        super().__init__()
+        self.register_buffer("_proto", torch.zeros(num_envs, action_dim))
+
+    @torch.no_grad()
+    def forward(self, is_init: torch.Tensor) -> torch.Tensor:
+        return torch.randn_like(self._proto).clamp(-3.0, 3.0)

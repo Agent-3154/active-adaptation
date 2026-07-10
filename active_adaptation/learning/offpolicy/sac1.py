@@ -121,7 +121,7 @@ class SACConfig:
     debug: bool = False
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
-    use_amp: bool = True
+    use_amp: bool = False
     # Clamp aggregated rewards at 0 before TD / reward-norm (avoids suicide from negative rewards).
     clamp_reward: bool = True
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
@@ -850,9 +850,10 @@ class SAC(TensorDictModuleBase):
 
         entropy_bonus = (-alpha * lp).reshape_as(reward) * self.entropy_scale
         adjusted_reward = reward + discount * self.cfg.entropy_bonus * entropy_bonus
+        noise = torch.randn_like(next_action).clamp(-3.0, 3.0)
         q_target = self.Q_target.compute_target(
             next_obs,
-            next_action + torch.randn_like(next_action) * self.cfg.target_action_noise,
+            next_action + noise * self.cfg.target_action_noise,
             adjusted_reward,
             discount,
         )
@@ -1059,7 +1060,7 @@ class SACRolloutPolicy(TensorDictModuleBase):
             rho = tensordict["rho"]
             noise = (
                 rho * prev_noise
-                + torch.sqrt((1.0 - rho.square())) * torch.randn_like(loc)
+                + torch.sqrt((1.0 - rho.square())) * torch.randn_like(loc).clamp(-3.0, 3.0)
             )
             sample = loc + noise * scale
             tensordict["next", "prev_noise"] = noise
