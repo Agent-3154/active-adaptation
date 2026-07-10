@@ -5,17 +5,18 @@ import time
 import os
 import datetime
 import importlib
+from concurrent.futures import ThreadPoolExecutor
 import imageio.v2 as imageio
 
 from typing import Union
 from termcolor import colored
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import DictConfig
 
 from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
 from tensordict import TensorDictBase
 
 import active_adaptation
-from active_adaptation.utils.wandb import parse_checkpoint, CheckpointBase
+from active_adaptation.utils.wandb import parse_checkpoint
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.envs import _EnvBase
 
@@ -46,54 +47,64 @@ def _ensure_backend_env_imported(backend: str):
 
 
 def make_env_policy(
-    cfg: DictConfig,
-    checkpoint: CheckpointBase | None = None
+    task_cfg: DictConfig,
+    algo_cfg: DictConfig,
+    seed: int,
+    headless: bool,
+    device: str,
+    discard_unused_obs: bool = True,
+    checkpoint_path: str | None = None
 ) -> tuple[Union[TransformedEnv, _EnvBase], torch.nn.Module]:
-    OmegaConf.set_struct(cfg, False)
-    cfg.seed = cfg.seed + active_adaptation.get_local_rank()
-    
+    """Build env and policy, optionally restoring from `checkpoint_path`."""
+
+    seed = seed + active_adaptation.get_local_rank()
     # Select the appropriate backend-specific environment class
     backend = active_adaptation.get_backend()
-    _ensure_backend_env_imported(backend)
-    if backend == "isaac":
-        env_cls = _EnvBase.registry[cfg.task.get("env_class", "IsaacBackendEnv")]
-        env_device = str(cfg.device)
-    elif backend == "mujoco":
-        env_cls = _EnvBase.registry[cfg.task.get("env_class", "MujocoBackendEnv")]
-        cfg.task.num_envs = 1
-        cfg.task.reward = {}
-        env_device = "cpu"
-    elif backend == "mjlab":
-        env_cls = _EnvBase.registry[cfg.task.get("env_class", "MjlabBackendEnv")]
-        env_device = str(cfg.device)
-    elif backend == "motrix":
-        env_cls = _EnvBase.registry[cfg.task.get("env_class", "MotrixBackendEnv")]
-        env_device = "cpu"
-    else:
-        raise ValueError(f"Unknown backend: {backend}")
-    
-    policy_in_keys = cfg.algo.get("in_keys", None)
-    if policy_in_keys is None:
-        raise ValueError("Specify `in_keys` (e.g., `policy`, `priv`) in `cfg.algo`.")
 
-    if cfg.get("discard_unused_obs", True):
-        def should_discard(key: str) -> bool:
-            return (
-                key not in policy_in_keys
-                and not key.endswith("_")
-            )
-        for obs_group_key in list(cfg.task.observation.keys()):
-            if should_discard(obs_group_key):
-                cfg.task.observation.pop(obs_group_key)
-                print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
+    # Parse checkpoint in parallel with environment creation.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        checkpoint_future = executor.submit(parse_checkpoint, checkpoint_path)
+        
+        _ensure_backend_env_imported(backend)
+        if backend == "isaac":
+            env_cls = _EnvBase.registry[task_cfg.get("env_class", "IsaacBackendEnv")]
+            env_device = str(device)
+        elif backend == "mujoco":
+            env_cls = _EnvBase.registry[task_cfg.get("env_class", "MujocoBackendEnv")]
+            task_cfg.num_envs = 1
+            task_cfg.reward = {}
+            env_device = "cpu"
+        elif backend == "mjlab":
+            env_cls = _EnvBase.registry[task_cfg.get("env_class", "MjlabBackendEnv")]
+            env_device = str(device)
+        elif backend == "motrix":
+            env_cls = _EnvBase.registry[task_cfg.get("env_class", "MotrixBackendEnv")]
+            env_device = "cpu"
+        else:
+            raise ValueError(f"Unknown backend: {backend}")
+        
+        policy_in_keys = algo_cfg.get("in_keys", None)
+        if policy_in_keys is None:
+            raise ValueError("Specify `in_keys` (e.g., `policy`, `priv`) in `cfg.algo`.")
 
-    base_env = env_cls(cfg.task, env_device, headless=cfg.headless)
+        if discard_unused_obs:
+            def should_discard(key: str) -> bool:
+                return (
+                    key not in policy_in_keys
+                    and not key.endswith("_")
+                )
+            for obs_group_key in list(task_cfg.observation.keys()):
+                if should_discard(obs_group_key):
+                    task_cfg.observation.pop(obs_group_key)
+                    print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
 
-    if checkpoint is None:
-        checkpoint = parse_checkpoint(cfg.checkpoint_path)
+        base_env = env_cls(task_cfg, env_device, headless=headless)
+        checkpoint = checkpoint_future.result()
+
     if checkpoint is not None:
         checkpoint.update()
     checkpoint_path = checkpoint.get_path() if checkpoint else None
+
     print(f"[Info]: Using checkpoint from: {checkpoint_path}")
     if checkpoint_path is not None:
         state_dict = torch.load(checkpoint_path, weights_only=False)
@@ -103,12 +114,12 @@ def make_env_policy(
     transform = Compose(InitTracker(), StepCounter())
 
     env = TransformedEnv(base_env, transform)
-    env.set_seed(cfg.seed)
+    env.set_seed(seed)
     
     # setup policy
-    policy_cls = hydra.utils.get_class(cfg.algo._target_)
-    print(f"Creating policy {policy_cls} on device {cfg.device}")
-    policy = policy_cls.from_env(cfg.algo, env, device=cfg.device)
+    policy_cls = hydra.utils.get_class(algo_cfg._target_)
+    print(f"Creating policy {policy_cls} on device {device}")
+    policy = policy_cls.from_env(algo_cfg, env, device=device)
     
     if "policy" in state_dict.keys():
         print(colored("[Info]: Load policy from checkpoint.", "green"))

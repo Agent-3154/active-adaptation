@@ -122,7 +122,15 @@ def main(cfg: EvalConfig):
 
     from active_adaptation.helpers import make_env_policy, evaluate
 
-    env, policy = make_env_policy(cfg)
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
     policy_eval = policy.get_rollout_policy("eval")
     info, trajs, stats = evaluate(
         env,

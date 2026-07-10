@@ -1,4 +1,4 @@
-from .vecnorm import VecNorm
+from .vecnorm import VecNorm, VecNormRMS
 from .distributions import *
 from .common import SymmetryWrapper, ConditionalBlock, CatTensors
 from .rnn import GRUCore
@@ -7,6 +7,7 @@ from .common import MLP, ResidualMLP, DtypeConversion, FlattenBatch, SimbaMLP
 
 __all__ = [
     "VecNorm",
+    "VecNormRMS",
     "IndependentNormal",
     "SymmetryWrapper",
     "GRUCore",

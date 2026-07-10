@@ -208,7 +208,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
         sim_utils,
     )
 
-    USD_PATH = ROBOT_MODEL_DIR / "b2z1" / "b2z1_simplified.usd"  # do not change
+    USD_PATH = ROBOT_MODEL_DIR / "b2z1" / "b2z1_eef_collisionv2.usd"  # do not change
 
     asset_cfg = ArticulationCfg(
         spawn=sim_utils.UsdFileCfg(

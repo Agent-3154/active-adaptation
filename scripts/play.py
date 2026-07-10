@@ -24,7 +24,6 @@ from active_adaptation.utils.export import export_onnx
 from active_adaptation.utils.timerfd import Timer
 from active_adaptation.utils.helpers import EpisodeStats
 from active_adaptation.learning.modules.vecnorm import VecNorm
-from active_adaptation.utils.wandb import parse_checkpoint
 
 
 DEFAULTS = [
@@ -38,9 +37,9 @@ DEFAULTS = [
 class IsaacAppConfig:
     """Isaac Lab AppLauncher settings (resolved from parent config)."""
 
-    headless: str = "${..headless}"
+    headless: bool = "${..headless}"
     """Mirror ``headless``; passed to Isaac Lab's AppLauncher."""
-    enable_cameras: str = "${..record_video}"
+    enable_cameras: bool = "${..record_video}"
     """Mirror ``record_video``; enables camera sensors when recording."""
 
 
@@ -122,8 +121,15 @@ def main(cfg: PlayConfig):
     aa.init(cfg, auto_rank=True)
     
     from active_adaptation.helpers import make_env_policy
-    checkpoint = parse_checkpoint(cfg.checkpoint_path)
-    env, policy = make_env_policy(cfg, checkpoint)
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
     
     if cfg.export_policy:
         export_dir = FILE_PATH / "exports" / str(cfg.task.name)
@@ -143,11 +149,6 @@ def main(cfg: PlayConfig):
 
     timer = Timer(env.step_dt)
 
-    # Optional: refresh from URL/wandb in background so play loop never blocks on updates
-    if checkpoint is not None and checkpoint.remote:
-        print("Starting background checkpoint refresh")
-        checkpoint.start_background_refresh(interval_sec=60)
-
     # Optional video recording (Isaac backend only). This remains safe under
     # KeyboardInterrupt because the recorder is a context manager that flushes
     # buffered frames on exit.
@@ -157,7 +158,11 @@ def main(cfg: PlayConfig):
     video_path = video_dir / f"{cfg.task.name}-{time_str}.mp4"
     exploration_type = ExplorationType(cfg.get("exploration_type", "MODE"))
 
-    with env.get_recorder(video_path, enabled=record_enabled)as rec, \
+    print_interval_s = 2.0
+    last_print_time = time.perf_counter()
+    last_print_step = -1
+
+    with env.get_recorder(video_path, enabled=record_enabled) as rec, \
         torch.inference_mode(), set_exploration_type(exploration_type):
         try:
             for i in itertools.count():
@@ -172,6 +177,15 @@ def main(cfg: PlayConfig):
                     print("Step", i)
                     for k, v in sorted(episode_stats.pop().items(True, True)):
                         print(k, torch.mean(v).item())
+
+                now = time.perf_counter()
+                elapsed = now - last_print_time
+                if elapsed >= print_interval_s:
+                    n_steps = i - last_print_step
+                    sps = n_steps / elapsed
+                    print(f"step {i} | {sps:.1f}x{env.num_envs}={sps*env.num_envs:.1f} env steps/s")
+                    last_print_time = now
+                    last_print_step = i
 
                 timer.sleep()
         except KeyboardInterrupt:

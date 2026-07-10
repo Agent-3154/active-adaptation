@@ -8,7 +8,6 @@ from pathlib import Path
 from active_adaptation.utils import wandb as aa_wandb_utils
 
 from omegaconf import OmegaConf
-from isaaclab.app import AppLauncher
 from play import main as play_main
 from eval import main as eval_main
 

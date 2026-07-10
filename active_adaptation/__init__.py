@@ -12,7 +12,10 @@ from hydra.core.plugins import Plugins
 
 from active_adaptation.project_loading.manifest import CACHE_DIR
 from active_adaptation.project_loading.plugin import ActiveAdaptationSearchPathPlugin
-from active_adaptation.project_loading.runtime import import_environment_projects
+from active_adaptation.project_loading.runtime import (
+    import_environment_projects,
+    resolve_wandb_defaults,
+)
 
 import active_adaptation.learning
 
@@ -164,6 +167,16 @@ def init(cfg: DictConfig, auto_rank: bool):
         AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
 
     import active_adaptation.assets # register assets
-    import_environment_projects()
+    projects = import_environment_projects()
+
+    default_wandb_api_key, default_wandb_project, default_wandb_entity = resolve_wandb_defaults(projects)
+    if default_wandb_api_key is not None and not os.getenv("WANDB_API_KEY"):
+        os.environ["WANDB_API_KEY"] = default_wandb_api_key
+    if default_wandb_entity is not None and not os.getenv("WANDB_ENTITY"):
+        os.environ["WANDB_ENTITY"] = default_wandb_entity
+    if default_wandb_project is not None:
+        wandb_cfg = cfg.get("wandb")
+        if wandb_cfg is not None and "project" in wandb_cfg:
+            wandb_cfg.project = default_wandb_project
 
     return cfg

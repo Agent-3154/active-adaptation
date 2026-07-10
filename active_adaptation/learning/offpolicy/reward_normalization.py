@@ -11,6 +11,7 @@ from collections import OrderedDict
 from typing import Any, TypeVar
 
 import torch
+import torch.distributed as dist
 
 Config = TypeVar("Config")
 
@@ -188,3 +189,55 @@ class RewardNormalizer:
 
     def load(self, path: str) -> None:
         self.load_state_dict(torch.load(path, map_location="cpu"))
+
+    def _running_stat_tensors(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self.G_r,
+            self.G_r_max,
+            self.G_rms.mean,
+            self.G_rms.var,
+            self.G_rms.count,
+        )
+
+    @torch.no_grad()
+    def synchronize(self, mode: str = "broadcast") -> None:
+        """Synchronize running stats across distributed ranks.
+
+        Args:
+            mode: ``"broadcast"`` copies rank-0 stats to every rank (used by
+                SAC after per-rank rollout updates). ``"aggregate"`` merges
+                :attr:`G_rms` with a count-weighted mean/var reduction,
+                takes the global max of :attr:`G_r_max`, and averages
+                :attr:`G_r`.
+        """
+        if not dist.is_available() or not dist.is_initialized():
+            raise RuntimeError("Distributed training is not initialized")
+
+        if mode == "broadcast":
+            for tensor in self._running_stat_tensors():
+                dist.broadcast(tensor, src=0)
+        elif mode == "aggregate":
+            dist.all_reduce(self.G_r_max, op=dist.ReduceOp.MAX)
+            dist.all_reduce(self.G_r, op=dist.ReduceOp.AVG)
+
+            mean = self.G_rms.mean.to(dtype=torch.float64)
+            var = self.G_rms.var.to(dtype=torch.float64)
+            count = self.G_rms.count.to(dtype=torch.float64)
+            sqmean = var + mean.square()
+            weighted_mean = mean * count
+            weighted_sqmean = sqmean * count
+            dist.all_reduce(weighted_mean, op=dist.ReduceOp.SUM)
+            dist.all_reduce(weighted_sqmean, op=dist.ReduceOp.SUM)
+            dist.all_reduce(count, op=dist.ReduceOp.SUM)
+
+            count_global = count.clamp_min(1.0)
+            mean_global = weighted_mean / count_global
+            sqmean_global = weighted_sqmean / count_global
+            var_global = (sqmean_global - mean_global.square()).clamp_min(
+                self.G_rms.epsilon
+            )
+            self.G_rms.mean.copy_(mean_global.to(dtype=self.G_rms.mean.dtype))
+            self.G_rms.var.copy_(var_global.to(dtype=self.G_rms.var.dtype))
+            self.G_rms.count.copy_(count.to(dtype=self.G_rms.count.dtype))
+        else:
+            raise ValueError(f"Invalid mode: {mode}")

@@ -162,7 +162,15 @@ def main(cfg: RolloutConfig):
 
     from active_adaptation.helpers import make_env_policy
 
-    env, policy = make_env_policy(cfg)
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
 
     stats_keys = [
         k for k in env.reward_spec.keys(True, True) 
