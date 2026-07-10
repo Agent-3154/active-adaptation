@@ -99,8 +99,8 @@ class TD3Config:
     reward_norm_epsilon: float = 1e-8
 
     # path to prior data for RLPD
-    # prior_data: str | None = None
-    prior_data: str | None = "/ssd/cv/rollout/G1HoiObj-ppo_symaug/2026-07-09-11-46-48/rollout_500_1024.pt"
+    prior_data: str | None = None
+    # prior_data: str | None = "/ssd/cv/rollout/G1HoiObj-ppo_symaug/2026-07-09-11-46-48/rollout_500_1024.pt"
     prior_data_ratio: float = 0.4
     # "binary": stop mixing prior data once success rate exceeds ``prior_data_stop_success``.
     # "linear": linearly reduce prior data ratio from ``prior_data_schedule_lower`` to
@@ -460,29 +460,32 @@ class TD3(TensorDictModuleBase):
         )
 
         fake_rb["loc"] = torch.zeros(fake_rb.shape[0], self.actor.act_dim)
-        self.rb = ReplayBuffer.from_fake(self.cfg.buffer_size, fake_rb)
+        observation_keys = set(env.observation_spec.keys(True, True))
+        observation_keys = observation_keys - {"prev_noise", "rho"}
+        self.rb = ReplayBuffer.from_fake(
+            self.cfg.buffer_size, 
+            fake_rb,
+            fake_bootstrap=True,
+            observation_keys=list(observation_keys)
+        )
         print("Primary Buffer:")
         print(self.rb)
 
         if self.cfg.prior_data is not None:
-            self.rb_prior = ReplayBuffer.from_rollout(self.cfg.prior_data)
-            def fn(rew: torch.Tensor | TensorDict) -> torch.Tensor:
-                if isinstance(rew, TensorDict):
-                    rew = torch.cat(list(rew.values()), dim=-1)
-                return rew.sum(-1, keepdim=True).clamp_min(0.)
-            self.rb_prior.compute_return(
-                REWARD_KEY,
-                gamma=self.cfg.gamma,
-                fn=fn
+            self.rb_prior = ReplayBuffer.from_rollout(
+                self.cfg.prior_data,
+                fake_bootstrap=True,
+                observation_keys=list(observation_keys)
             )
             print("Prior data buffer:")
             print(self.rb_prior)
         else:
             self.rb_prior = None
 
+        # used in prior data schedule
         self._success_rate: float | None = None
         
-        self.enable_actor = True
+        self.enable_actor = True # TODO: Shoud this be removed?
 
         self.Q_target.load_state_dict(self.Q.state_dict())
         self.actor_target.load_state_dict(self.actor.state_dict())
@@ -566,7 +569,8 @@ class TD3(TensorDictModuleBase):
 
             batch = self.rb.sample(
                 batch_size=self.cfg.critic_batch_size,
-                steps=self.cfg.n_steps
+                steps=self.cfg.n_steps,
+                next_obs=False
             ).to(self.device)
 
             prior_ratio = self._prior_data_ratio()
@@ -787,7 +791,7 @@ class TD3(TensorDictModuleBase):
     ):
         # Sample and process
         # ============================================================================
-        batch = self.rb.sample(batch_size=self.cfg.actor_batch_size, steps=1) \
+        batch = self.rb.sample(batch_size=self.cfg.actor_batch_size, steps=1, next_obs=False) \
                        .to(self.device) \
                        .select(*self.train_keys, strict=False)
         
