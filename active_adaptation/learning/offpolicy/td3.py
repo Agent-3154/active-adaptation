@@ -105,9 +105,9 @@ class TD3Config:
     # "binary": stop mixing prior data once success rate exceeds ``prior_data_stop_success``.
     # "linear": linearly reduce prior data ratio from ``prior_data_schedule_lower`` to
     # ``prior_data_schedule_upper`` success rate.
-    prior_data_schedule: Literal["binary", "linear"] = "binary"
+    prior_data_schedule: str = "linear" # linear or binary
     prior_data_stop_success: float | None = 0.2
-    prior_data_schedule_lower: float = 0.0
+    prior_data_schedule_lower: float = 0.1
     prior_data_schedule_upper: float = 0.2
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
