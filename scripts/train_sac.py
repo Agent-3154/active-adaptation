@@ -24,7 +24,6 @@ from tensordict.nn import TensorDictModuleBase
 
 import active_adaptation as aa
 from active_adaptation.utils.profiling import ScopedTimer
-from active_adaptation.learning.offpolicy import SAC
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
@@ -252,8 +251,15 @@ def main(cfg: TrainConfig):
     from active_adaptation.helpers import make_env_policy, evaluate
     from active_adaptation.utils.helpers import EpisodeStats
 
-    env, policy = make_env_policy(cfg)
-    policy: SAC
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
 
     frames_per_batch = env.num_envs * cfg.algo.train_every
     total_frames = cfg.total_frames // aa.get_world_size()
