@@ -245,6 +245,9 @@ class MjlabSimAdapter(SimAdapter):
     def step(self, render: bool = False) -> None:
         self._sim.step()
 
+    def sense(self) -> None:
+        self._sim.sense()
+
     def render(self) -> None:
         if self.viewer is not None:
             self.viewer.update()
@@ -313,6 +316,10 @@ class MjlabSceneAdapter(SceneAdapter):
 
     @property
     def articulations(self):
+        return self._scene.entities
+    
+    @property
+    def entities(self):
         return self._scene.entities
 
     def __getattr__(self, name):

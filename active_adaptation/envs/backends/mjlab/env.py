@@ -98,15 +98,20 @@ class MjlabBackendEnv(_EnvBase):
             num_envs=self.cfg.num_envs,
             env_spacing=env_spacing,
             entities={"robot": asset_cfg},
-            sensors=sensors,
+            sensors=tuple(sensors),
             terrain=terrain_cfg,
         )
+
+        for group in self.observation_groups.values():
+            for func in group.funcs.values():
+                func.edit_spec(scene_cfg)
+
         scene = Scene(scene_cfg, device=str(self.device))
         sim = Simulation(
             num_envs=scene.num_envs,
             cfg=SimulationCfg(
-                nconmax=200,
-                njmax=500,
+                nconmax=self.cfg.sim.get("nconmax", 200),
+                njmax=self.cfg.sim.get("njmax", 500),
                 contact_sensor_maxmatch=80,
                 mujoco=MujocoCfg(
                     timestep=0.005,
@@ -119,6 +124,8 @@ class MjlabBackendEnv(_EnvBase):
         )
 
         scene.initialize(sim.mj_model, sim.model, sim.data)
+        if scene.sensor_context is not None:
+            sim.set_sensor_context(scene.sensor_context)
         sim.create_graph()
 
         viewer_cfg = self._make_viewer_cfg(ViewerConfig)

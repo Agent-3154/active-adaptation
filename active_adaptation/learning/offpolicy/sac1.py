@@ -81,10 +81,10 @@ def _init_sac_linear(m: nn.Module, gain: float = 1.0):
 
 @dataclass
 class SACConfig:
-    _target_: str = "active_adaptation.learning.offpolicy.sac.SAC"
-    name: str = "sac"
-    train_every: int = 4 # perform network updating per `train_every` env step(s).
-    buffer_size: int = 500
+    _target_: str = "active_adaptation.learning.offpolicy.sac1.SAC"
+    name: str = "sac1"
+    train_every: int = 4
+    buffer_size: int = 2000
     warm_up_steps: int = 200
     lr: float = 5e-4
     # If True, actor/Q use :class:`~active_adaptation.learning.utils.opt.MuonAdamWWrapper` (see ``ppo_symaug``).
@@ -93,7 +93,7 @@ class SACConfig:
     # TD learning
     n_steps: int = 3
     gamma: float = 0.99
-    utd_ratio: int = 4 # update-to-data ratio: network udpating times for every env step.
+    utd_ratio: int = 4
     # architecture
     actor_init: str = "zeros"
     distributional: bool = True
@@ -111,19 +111,19 @@ class SACConfig:
     # If set: H_target = (d/2)*log(2*pi*e*sigma^2) for N(0,sigma^2)^d (FlashSAC).
     # If None: use -dim(A) (common heuristic for tanh-squashed SAC).
     target_entropy_sigma: float | None = 0.15
-    soft_bound: float = math.pi
+    soft_bound: float = 2.0 * math.pi
 
     tau_actor: float = 0.1 # a relatively large value for faster convergence
     tau_Q: float = 0.02  # a relatively large value for faster convergence
     lr_alpha: float = 5e-4
     max_grad_norm: float = 1.0
 
-    debug: bool = True
+    debug: bool = False
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = True
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
-    normalize_reward: bool = True
+    normalize_reward: bool = False
     normalized_G_max: float = 5.0
     reward_norm_epsilon: float = 1e-8
 
@@ -133,8 +133,8 @@ class SACConfig:
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
-cs.store(name="sac", node=SACConfig, group="algo")
-# cs.store(name="dsac", node=SACConfig, group="algo") # distributional SAC
+
+cs.store(name="sac1", node=SACConfig, group="algo")
 
 
 class CriticTrunk(nn.Module):
@@ -295,6 +295,13 @@ class NormalActor(nn.Module):
 
 
 class SAC(TensorDictModuleBase):
+
+    # keys to select from the batch for training
+    train_keys = (
+        CMD_KEY, OBS_KEY, ("next", OBS_KEY), ("next", CMD_KEY), ACTION_KEY,
+        REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
+    )
+
     def __init__(
         self,
         cfg: SACConfig,
@@ -325,23 +332,14 @@ class SAC(TensorDictModuleBase):
         fake = observation_spec.zero()
         preproc = []
         if CMD_KEY in observation_spec.keys(True, True):
-            self.train_keys = (
-                CMD_KEY, OBS_KEY, ("next", OBS_KEY), ("next", CMD_KEY), ACTION_KEY,
-                REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
-                "priority_weight", "replay_flat_index"
-            )
-
             obs_dim = fake[OBS_KEY].shape[-1] + fake[CMD_KEY].shape[-1]
             preproc.append(CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False))
         else:
-            self.train_keys = (
-                OBS_KEY, ("next", OBS_KEY), ACTION_KEY,
-                REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
-                "priority_weight", "replay_flat_index"
-            )
             obs_dim = fake[OBS_KEY].shape[-1]
             preproc.append(Mod(nn.Identity(), [OBS_KEY], ["_input"]))
-        act_dim = action_spec.shape[-1]
+        self.act_dim = action_spec.shape[-1]
+        # since entropy grows linearly with the action dimension, we need to scale it down
+        self.entropy_scale = 1.0 / math.sqrt(self.act_dim)
 
         if self.cfg.vecnorm:
             self.vecnorm_obs = VecNorm(obs_dim, decay=1.0).to(device)
@@ -368,18 +366,18 @@ class SAC(TensorDictModuleBase):
                 num_atoms = int((v_max - v_min) / 0.05) + 1
             self.Q = TwinC51Critic(
                 obs_dim,
-                act_dim,
+                self.act_dim,
                 num_atoms=num_atoms,
                 v_min=v_min, # we actually do not have negative values, but it is a good idea to have a small margin
                 v_max=v_max,
             ).to(device)
         else:
-            self.Q = TwinScalarCritic(obs_dim, act_dim).to(device)
+            self.Q = TwinScalarCritic(obs_dim, self.act_dim).to(device)
 
         self.DistClass = IndependentNormal
         self.actor = NormalActor(
             obs_dim,
-            act_dim,
+            self.act_dim,
             std_max=1.0,
             std_min=0.001,
             action_init=self.cfg.actor_init,
@@ -392,11 +390,10 @@ class SAC(TensorDictModuleBase):
 
         if self.cfg.target_entropy_sigma is not None:
             self.target_entropy = gaussian_target_entropy(
-                act_dim, self.cfg.target_entropy_sigma
+                self.act_dim, self.cfg.target_entropy_sigma
             )
         else:
-            self.target_entropy = -float(act_dim)
-        self.target_entropy = 0.0
+            self.target_entropy = - 0.5 * float(self.act_dim)
         self.log_alpha = nn.Parameter(torch.tensor(math.log(self.cfg.alpha_init), device=device))
         self.opt_alpha = torch.optim.Adam([self.log_alpha], lr=self.cfg.lr_alpha)
         if self.cfg.muon:
@@ -447,8 +444,14 @@ class SAC(TensorDictModuleBase):
         self.grad_scaler = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
         self.compute_target = torch.compile(
             self._compute_target,
-            mode="reduce-overhead"
+            mode="reduce-overhead",
         )
+
+        def fn(rew: torch.Tensor | TensorDict) -> torch.Tensor:
+            if isinstance(rew, TensorDict):
+                rew = torch.cat(list(rew.values()), dim=-1)
+            return rew.sum(-1, keepdim=True).clamp_min(0.)
+        self.reward_collate_fn = fn
 
     def _autocast(self):
         return autocast(
@@ -506,46 +509,6 @@ class SAC(TensorDictModuleBase):
             return
         dist.all_reduce(param.grad.data, op=dist.ReduceOp.AVG)
 
-    def _sync_vecnorm(self) -> None:
-        if not self._distributed or not self.cfg.vecnorm:
-            return
-        if isinstance(self.vecnorm_obs, VecNorm):
-            self.vecnorm_obs.synchronize(mode="broadcast")
-
-    @torch.no_grad()
-    def _sync_reward_normalizer(self) -> None:
-        """Broadcast :class:`RewardNormalizer` running stats from rank 0.
-
-        Each rank updates its local stats from its own rollouts, then we
-        broadcast so every rank uses the same reward scaling when computing
-        Q-targets and denormalizing for logging.
-        """
-        if not self._distributed or self.reward_normalizer is None:
-            return
-        rn = self.reward_normalizer
-        for tensor in (rn.G_r, rn.G_r_max, rn.G_rms.mean, rn.G_rms.var, rn.G_rms.count):
-            dist.broadcast(tensor, src=0)
-
-    @torch.no_grad()
-    def _log_param_sync(self, infos: dict) -> None:
-        """Cross-rank max-abs param diffs (correctness check; debug only).
-
-        - online ``actor`` / ``Q`` -> validates gradient sync.
-        - ``actor_target`` / ``Q_target`` -> validates :func:`soft_copy_` stays
-          coherent given identical online nets.
-        - ``log_alpha`` -> validates the scalar alpha-grad all-reduce.
-
-        VecNorm and reward-normalizer state are stored as buffers / raw
-        tensors, not parameters, so they are not covered here.
-        """
-        if not self._distributed:
-            return
-        infos["sync/actor_diff"] = check_parameters(self.actor)
-        infos["sync/Q_diff"] = check_parameters(self.Q)
-        infos["sync/actor_target_diff"] = check_parameters(self.actor_target)
-        infos["sync/Q_target_diff"] = check_parameters(self.Q_target)
-        infos["sync/log_alpha_diff"] = check_parameters(self.log_alpha)
-
     def make_tensordict_primer(self):
         """Register correlated-noise state **before** constructing :class:`SAC` so replay ``fake_tensordict`` matches rollouts."""
         from torchrl.envs import TensorDictPrimer
@@ -563,6 +526,7 @@ class SAC(TensorDictModuleBase):
             reset_key="done",
             expand_specs=False,
         )
+    
     @classmethod
     def from_env(cls, cfg: SACConfig, env: _EnvBase, device: torch.device):
         if cfg.sym_aug:
@@ -602,86 +566,74 @@ class SAC(TensorDictModuleBase):
         fake_rb = (
             env.fake_tensordict()
             .exclude(("next", "stats"), "collector")
-            # .exclude(("next", OBS_KEY))
         )
         fake_rb["loc"] = torch.zeros(fake_rb.shape[0], self.actor.act_dim)
-        self.rb = ReplayBuffer.from_fake(self.cfg.buffer_size, fake_rb)
+        observation_keys = set(env.observation_spec.keys(True, True))
+        observation_keys = observation_keys - {"prev_noise", "rho"}
+        self.rb = ReplayBuffer.from_fake(
+            self.cfg.buffer_size, fake_rb,
+            fake_bootstrap=True,
+            observation_keys=list(observation_keys),
+        )
         print("Primary buffer:")
         print(self.rb)
         if self.cfg.prior_data is not None:
-            self.rb_prior = ReplayBuffer.from_rollout(self.cfg.prior_data)
-            def fn(rew: torch.Tensor | TensorDict) -> torch.Tensor:
-                if isinstance(rew, TensorDict):
-                    rew = torch.cat(list(rew.values()), dim=-1)
-                return rew.sum(-1, keepdim=True).clamp_min(0.)
-            self.rb_prior.compute_return(
-                REWARD_KEY,
-                gamma=self.cfg.gamma,
-                fn=fn,
+            self.rb_prior = ReplayBuffer.from_rollout(
+                self.cfg.prior_data,
+                fake_bootstrap=True,
+                observation_keys=list(observation_keys),
             )
             print("Prior data buffer:")
             print(self.rb_prior)
         else:
             self.rb_prior = None
 
-        self.enable_actor = True
         # ``self.Q`` / ``self.actor`` may be DDP-wrapped; strip the wrapper so
         # the state dict's keys match the (plain) target nets.
         self.Q_target.load_state_dict(unwrap_ddp(self.Q).state_dict())
         self.actor_target.load_state_dict(unwrap_ddp(self.actor).state_dict())
 
     def step(self, tensordict: TensorDict):
-        pass
+        """For off-policy algorithms, which typically update more frequently than
+        on-policy algorithms, we do not use a collector to collect stacked transitions.
 
-    @VecNorm.freeze()
-    def train_op(self, tensordict: TensorDict):
-        self.global_step += self.cfg.train_every
+        Instead, we directly push the collected transition to the replay buffer.
+        """
 
+        self.global_step += 1
         td = tensordict.exclude(("next", "stats"), "collector")
-        # td = td.exclude(("next", OBS_KEY))
-
-        reward = td[REWARD_KEY]
         
-        if isinstance(reward, TensorDict):
-            reward = torch.cat(list(reward.values()), dim=-1)
+        if self.reward_normalizer is not None:
+            self.reward_normalizer.update_reward_stats(
+                reward=self.reward_collate_fn(td[REWARD_KEY]),
+                terminated=td[TERM_KEY],
+                truncated=td["next", "truncated"],
+            )
+        self.rb.push(td)
 
-        # KEEP THIS FOR DEBUGGING
-        if self.cfg.debug:
-            # debug: constant reward scaled by effective horizon
-            # the value should converge to 1.0 in this case
-            # multi-step return should significantly speed up convergence
-            reward = torch.ones_like(reward) * (1.0 - self.cfg.gamma)
-            neg_rew_ratio = 0.0
+        if self.global_step > self.cfg.warm_up_steps and self.global_step % self.cfg.train_every == 0:
+            return self.train_op()
         else:
-            reward = reward.sum(-1, keepdim=True)
-            neg_rew_ratio = (reward <= 0.).float().mean().item()
+            return {}
 
-        bs = td.batch_size
-        # StackingCollector stacks steps on batch dim 1: [num_envs, horizon, …].
-        for ti in range(int(bs[1])):
-            sub = td[:, ti]
-            if self.reward_normalizer is not None:
-                self.reward_normalizer.update_reward_stats(
-                    reward=reward[:, ti],
-                    terminated=sub[TERM_KEY],
-                    truncated=sub["next", "truncated"],
-                )
-            self.rb.push(sub)
-
+    @ScopedTimer("sac_train")
+    @VecNorm.freeze()
+    def train_op(self):
         # Sync per-rank running stats *before* any consumer (UTD loop /
         # actor update) reads them. VecNorm updates happen during rollouts
         # (outside ``train_op``) and the reward normalizer was just updated
         # above, so both are at the latest-but-divergent state across ranks.
-        self._sync_vecnorm()
-        self._sync_reward_normalizer()
+        with torch.no_grad():
+            if self._distributed and self.cfg.vecnorm:
+                self.vecnorm_obs.synchronize(mode="broadcast")
+            if self._distributed and self.cfg.normalize_reward:
+                self.reward_normalizer.synchronize(mode="broadcast")
 
-        infos: dict = {"rb_size": len(self.rb), "critic/neg_rew_ratio": neg_rew_ratio}
-        if self.global_step < self.cfg.warm_up_steps:
-            return infos
+        infos: dict = {"rb_size": len(self.rb)}
 
         last_indices = None
-        iters = self.cfg.train_every * self.cfg.utd_ratio
-        for i in range(iters):
+        critic_iters = self.cfg.train_every * self.cfg.utd_ratio
+        for i in range(critic_iters):
             # batch, last_indices = self.rb.sample_sequential(
             #     batch_size=self.cfg.critic_batch_size,
             #     steps=self.cfg.n_steps,
@@ -692,25 +644,27 @@ class SAC(TensorDictModuleBase):
             batch = self.rb.sample(
                 batch_size=self.cfg.critic_batch_size,
                 steps=self.cfg.n_steps,
-            ).to(self.device)
+                next_obs=True,
+            ).to(self.device, non_blocking=True)
             if self.rb_prior is not None:
                 batch_prior = self.rb_prior.sample(
                     batch_size=int(self.cfg.critic_batch_size * self.cfg.prior_data_ratio),
                     steps=self.cfg.n_steps,
-                ).to(self.device)
+                    next_obs=True,
+                ).to(self.device, non_blocking=True)
             else:
                 batch_prior = None
-            d = i == iters - 1
+            d = i == critic_iters - 1
             info = self.train_critic(batch, batch_prior=batch_prior, diagnostics=d)
         infos.update(info)
 
-        if self.enable_actor:
-            for j in range(self.cfg.train_every):
-                d = j == self.cfg.train_every - 1
-                info = self.train_actor(diagnostics=d)
-            infos.update(info)
+        # actor update is delayed and has fewer iterations
+        actor_iters = self.cfg.train_every
+        for j in range(actor_iters):
+            d = j == actor_iters - 1
+            info = self.train_actor(diagnostics=d)
+        infos.update(info)
 
-        self._log_param_sync(infos)
         return dict(sorted(infos.items()))
 
     @ScopedTimer("train_critic")
@@ -726,20 +680,14 @@ class SAC(TensorDictModuleBase):
 
         if batch_prior is not None:
             batch_prior = batch_prior.select(*self.train_keys, inplace=True, strict=False)
-            # if "Q_value" in batch_prior.keys(True, True):
-            #     gt = batch_prior["Q_value"]
-            #     prior_q_gt = gt[0] if gt.ndim > 1 else gt
             B_prior = batch_prior.shape[1]
             batch = torch.cat([batch, batch_prior], dim=1)
         else:
             B_prior = 0
         B_eff = B_online + B_prior
 
-        reward = batch[REWARD_KEY]
-        if isinstance(reward, TensorDict):
-            reward = torch.cat(list(reward.values()), dim=-1)
-        reward = reward.sum(-1, keepdim=True).clamp_min(0.)
-        
+        reward = self.reward_collate_fn(batch[REWARD_KEY])
+
         if self.cfg.debug:
             reward = torch.ones_like(reward) * (1.0 - self.cfg.gamma)
 
@@ -769,15 +717,6 @@ class SAC(TensorDictModuleBase):
             terminated = term_flat.bool()
         else:
             assert self.msr is not None
-            batch_done = batch[DONE_KEY][:self.msr.n_steps]
-            batch_term = batch[TERM_KEY][:self.msr.n_steps]
-            if (next_obs := batch.get(("next", "_input_normed"))) is None:
-                assert batch.shape[0] == self.msr.n_steps + 1
-                next_obs = torch.where(
-                    batch_done,
-                    batch[OBS_KEY][:self.msr.n_steps], # repeat the last obs as the terminal obs
-                    batch[OBS_KEY][1:self.msr.n_steps+1],
-                )
             obs = batch["_input_normed"][0]
             act_n = batch[ACTION_KEY]
             env_disc_ms = batch.get(("next", "discount"))
@@ -785,10 +724,10 @@ class SAC(TensorDictModuleBase):
                 env_disc_ms = env_disc_ms[: self.msr.n_steps]
             act_n, next_obs, reward, discount, terminated = self.msr(
                 actions=act_n,
-                next_observations=next_obs,
+                next_observations=batch["next", "_input_normed"],
                 rewards=reward[:self.msr.n_steps],
-                terminated=batch_term,
-                done=batch_done,
+                terminated=batch[TERM_KEY],
+                done=batch[DONE_KEY],
                 env_discount=env_disc_ms,
             )
             act = act_n[:, 0]
@@ -906,7 +845,7 @@ class SAC(TensorDictModuleBase):
         alpha = self.log_alpha.exp()
         lp = next_log_prob.reshape_as(reward)
 
-        entropy_bonus = (-alpha * lp).reshape_as(reward)
+        entropy_bonus = (-alpha * lp).reshape_as(reward) * self.entropy_scale
         adjusted_reward = reward + discount * self.cfg.entropy_bonus * entropy_bonus
         q_target = self.Q_target.compute_target(
             next_obs,
@@ -918,9 +857,12 @@ class SAC(TensorDictModuleBase):
 
     @ScopedTimer("train_actor")
     def train_actor(self, diagnostics: bool = False):
-        batch = self.rb.sample(batch_size=self.cfg.actor_batch_size, steps=1).to(
-            self.device
-        ).select(*self.train_keys, strict=False) # [N,]
+        # actor training does not need next observations
+        batch = (
+            self.rb.sample(batch_size=self.cfg.actor_batch_size, steps=1, next_obs=False)
+            .to(self.device)
+            .select(*self.train_keys, strict=False) # [N,]
+        )
         if self.rb_prior is not None:
             batch_prior = self.rb_prior.sample(
                 batch_size=int(self.cfg.actor_batch_size * self.cfg.prior_data_ratio),
@@ -962,7 +904,7 @@ class SAC(TensorDictModuleBase):
         alpha = self.log_alpha.exp()
         actor_loss = (
             policy_term
-            + alpha.detach() * (-entropy_est.reshape_as(policy_term))
+            + alpha.detach() * (-entropy_est.reshape_as(policy_term) * self.entropy_scale)
             + 0.01 * ((loc/self.cfg.soft_bound)**6).sum(-1).reshape_as(policy_term)
         )
         valid = (1.0 - is_init.float()).reshape_as(actor_loss)

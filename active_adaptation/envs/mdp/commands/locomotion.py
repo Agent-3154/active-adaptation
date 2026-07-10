@@ -3,9 +3,12 @@ import torch
 import torch.nn.functional as F
 import torch.distributions as D
 import warp as wp
-from typing import Sequence, Tuple
+from typing import TYPE_CHECKING, Sequence, Tuple
 from typing_extensions import override
 from tensordict import TensorDict
+
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import _EnvBase
 
 from active_adaptation.utils.math import (
     quat_from_euler_xyz,
@@ -18,7 +21,7 @@ from active_adaptation.utils.math import (
     MultiUniform,
 )
 import active_adaptation.utils.symmetry as symmetry_utils
-from .base import Command
+from .base import CommandV2
 
 
 @wp.kernel(enable_backward=False)
@@ -80,26 +83,34 @@ def resample_yaw_command_uniform_kernel(
     fixed_yaw_speed[tid] = wp.randf(seed_, angvel_min, angvel_max)
     
 
-class Twist(Command):
+class Twist(CommandV2):
+    """Body-frame linear velocity, yaw rate, and base-height commands for locomotion.
+
+    ``sync_state`` integrates tracking errors and curriculum distance metrics from the
+    command active during the physics step. ``update`` resamples and smooths targets for
+    the next step. Observation ``command`` is ``[linvel_x, linvel_y, yaw_rate, height]``.
+    """
 
     def __init__(
         self,
-        env,
-        linvel_x_range=(-1.0, 1.0),
-        linvel_y_range=(-1.0, 1.0),
-        angvel_range=(-1, 1),
-        yaw_stiffness_range=(0.5, 0.6),
+        linvel_x_range: Tuple[float, float] = (-1.0, 1.0),
+        linvel_y_range: Tuple[float, float] = (-1.0, 1.0),
+        angvel_range: Tuple[float, float] = (-1.0, 1.0),
+        yaw_stiffness_range: Tuple[float, float] = (0.5, 0.6),
         use_stiffness_ratio: float = 0.5,
-        base_height_range=(0.2, 0.4),
+        base_height_range: Tuple[float, float] = (0.2, 0.4),
         resample_interval: int = 300,
         resample_prob: float = 0.75,
-        stand_prob=0.2,
-        target_yaw_range=(0, torch.pi * 2),
+        stand_prob: float = 0.2,
+        target_yaw_range: Tuple[float, float] | Sequence[Tuple[float, float]] = (
+            0,
+            torch.pi * 2,
+        ),
         curriculum: bool = False,
         teleop: bool = False,
         use_warp_kernel: bool = True,
     ):
-        super().__init__(env, teleop)
+        super().__init__()
         self.linvel_x_range = linvel_x_range
         self.linvel_y_range = linvel_y_range
         self.angvel_range = angvel_range
@@ -109,21 +120,33 @@ class Twist(Command):
         self.resample_interval = resample_interval
         self.resample_prob = resample_prob
         self.stand_prob = stand_prob
-        self.curriculum = curriculum and self.env.backend == "isaac"
+        self._curriculum_enabled = curriculum
+        self.teleop = teleop
         self.use_warp_kernel = use_warp_kernel
+
+        self._target_yaw_is_multi_range = all(
+            isinstance(r, Sequence) for r in target_yaw_range
+        )
+        if self._target_yaw_is_multi_range:
+            self.target_yaw_dist = MultiUniform(torch.tensor(target_yaw_range))
+        else:
+            self.target_yaw_dist = D.Uniform(*torch.tensor(target_yaw_range))
+
+    @override
+    def _initialize(self, env: "_EnvBase") -> None:
+        super()._initialize(env)
+        self.curriculum = self._curriculum_enabled and self.env.backend == "isaac"
 
         if self.curriculum:
             self.terrain = self.env.scene.terrain
-            assert self.terrain.cfg.terrain_type == "generator", "Curriculum is only supported for generator terrain"
-            assert self.terrain.cfg.terrain_generator.curriculum, "Curriculum is not enabled for the terrain"
+            assert (
+                self.terrain.cfg.terrain_type == "generator"
+            ), "Curriculum is only supported for generator terrain"
+            assert (
+                self.terrain.cfg.terrain_generator.curriculum
+            ), "Curriculum is not enabled for the terrain"
 
         with torch.device(self.device):
-            self._target_yaw_is_multi_range = all(isinstance(r, Sequence) for r in target_yaw_range)
-            if self._target_yaw_is_multi_range:
-                self.target_yaw_dist = MultiUniform(torch.tensor(target_yaw_range))
-            else:
-                self.target_yaw_dist = D.Uniform(*torch.tensor(target_yaw_range))
-
             self.target_yaw = torch.zeros(self.num_envs, 1)
             self.yaw_stiffness = torch.zeros(self.num_envs, 1)
             self.use_stiffness = torch.zeros(self.num_envs, 1, dtype=bool)
@@ -177,14 +200,18 @@ class Twist(Command):
             self._fast_speed_scale = 1.6
             self._slow_speed_scale = 0.4
             from active_adaptation.utils.isaac_keyboard import IsaacKeyboardManager
+
             self.keyboard_manager = IsaacKeyboardManager()
-        
+
         if self.env.sim.has_gui():
             if self.env.backend == "mjlab":
                 from active_adaptation.envs.backends.mjlab.viewer import MjLabViewer
+
                 self.viewer: MjLabViewer = self.env.sim.viewer
                 self.axes_handle = self.viewer.add_batched_axes("target_yaw")
-                self.lines_handle = self.viewer.add_line_segments("cmd_linvel_w", (1., 0., 0.))
+                self.lines_handle = self.viewer.add_line_segments(
+                    "cmd_linvel_w", (1.0, 0.0, 0.0)
+                )
                 self.lines_handle.line_width = 2.0
     
     @property
@@ -430,18 +457,34 @@ class Twist(Command):
 
     @override
     def get_state(self) -> TensorDict:
-        d = {
-            "cmd_linvel_b": self.cmd_linvel_b,
-            "cmd_yawvel_b": self.cmd_yawvel_b,
-            "cmd_base_height": self.cmd_base_height,
-        }
-        return TensorDict(d, [self.num_envs], device=self.device)
+        return TensorDict(
+            {
+                "cmd_linvel_b": self.cmd_linvel_b,
+                "cmd_linvel_w": self.cmd_linvel_w,
+                "cmd_yawvel_b": self.cmd_yawvel_b,
+                "cmd_base_height": self.cmd_base_height,
+            },
+            [self.num_envs],
+            device=self.device,
+        )
+
+    @override
+    def relabel_command(self, tensordict: TensorDict) -> TensorDict:
+        """Rollout ``command_state`` already matches this command; nothing to relabel."""
+        return tensordict
 
 
-class PositionVelocityTracking(Command):
+class PositionVelocityTracking(CommandV2):
+    """Track a moving world-frame reference position and velocity.
+
+    Internally maintains ``ref_pos_w`` / ``ref_yaw_w`` targets that advance each step.
+    ``sync_state`` derives world-frame tracking commands for rewards; ``update`` moves
+    the reference and resamples velocities. Observation ``command`` packs relative pose
+    and velocity errors in the body yaw frame.
+    """
+
     def __init__(
         self,
-        env,
         linvel_x_range: Tuple[float, float] = (-1.0, 1.0),
         linvel_y_range: Tuple[float, float] = (-1.0, 1.0),
         angvel_range: Tuple[float, float] = (-1.0, 1.0),
@@ -449,50 +492,71 @@ class PositionVelocityTracking(Command):
         resample_prob: float = 0.75,
         curriculum: bool = False,
     ):
-        super().__init__(env)
+        super().__init__()
         self.linvel_x_range = linvel_x_range
         self.linvel_y_range = linvel_y_range
         self.angvel_range = angvel_range
         self.resample_interval = resample_interval
         self.resample_prob = resample_prob
-        self.curriculum = curriculum and self.env.backend == "isaac"
+        self._curriculum_enabled = curriculum
+
+    @override
+    def _initialize(self, env: "_EnvBase") -> None:
+        super()._initialize(env)
+        self.curriculum = self._curriculum_enabled and self.env.backend == "isaac"
 
         if self.curriculum:
             from isaaclab.terrains import TerrainImporter
+
             self.terrain: TerrainImporter = self.env.scene.terrain
-            assert self.terrain.cfg.terrain_type == "generator", "Curriculum is only supported for generator terrain"
-            assert self.terrain.cfg.terrain_generator.curriculum, "Curriculum is not enabled for the terrain"
+            assert (
+                self.terrain.cfg.terrain_type == "generator"
+            ), "Curriculum is only supported for generator terrain"
+            assert (
+                self.terrain.cfg.terrain_generator.curriculum
+            ), "Curriculum is not enabled for the terrain"
 
         with torch.device(self.device):
             self.ref_pos_w = torch.zeros(self.num_envs, 3)
             self.ref_yaw_w = torch.zeros(self.num_envs, 1)
-            self.ref_linvel_b_next = torch.zeros(self.num_envs, 3) # intermediate term for smooth transition
+            self.ref_linvel_b_next = torch.zeros(
+                self.num_envs, 3
+            )  # intermediate term for smooth transition
             self.ref_linvel_b = torch.zeros(self.num_envs, 3)
             self.ref_yawvel_w = torch.zeros(self.num_envs, 1)
-            
-            self.ref_linvel_w: torch.Tensor # derived from ref_lin_vel_b and ref_yaw_w
-            self.cmd_linvel_w: torch.Tensor
-            self.cmd_yawvel_w: torch.Tensor
-            self.command_speed: torch.Tensor # derived from cmd_linvel_w
+            self.ref_linvel_w = torch.zeros(self.num_envs, 3)
+            self.cmd_linvel_w = torch.zeros(self.num_envs, 3)
+            self.cmd_yawvel_w = torch.zeros(self.num_envs, 1)
+            self.command_speed = torch.zeros(self.num_envs, 1)
+            self.cmd_pos_w = torch.zeros(self.num_envs, 3)
+            self.cmd_yawvel_b = torch.zeros(self.num_envs, 1)
 
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=bool)
             self.distance_commanded = torch.zeros(self.num_envs, 1)
             self.distance_traveled = torch.zeros(self.num_envs, 1)
-        
+
         if self.env.sim.has_gui():
             if self.env.backend == "isaac":
-                from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, sim_utils
+                from isaaclab.markers import (
+                    VisualizationMarkers,
+                    VisualizationMarkersCfg,
+                    sim_utils,
+                )
+
                 self.marker = VisualizationMarkers(
                     VisualizationMarkersCfg(
-                        prim_path=f"/Visuals/Command/ref_pos_w",
+                        prim_path="/Visuals/Command/ref_pos_w",
                         markers={
-                            "ref_pos_w": sim_utils.SphereCfg(radius=0.04, visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.8, 1.0))),
-                        }
+                            "ref_pos_w": sim_utils.SphereCfg(
+                                radius=0.04,
+                                visual_material=sim_utils.PreviewSurfaceCfg(
+                                    diffuse_color=(0.0, 0.8, 1.0)
+                                ),
+                            ),
+                        },
                     )
                 )
                 self.marker.set_visibility(True)
-        
-        self.update()
     
     @property
     def command(self):
@@ -592,9 +656,31 @@ class PositionVelocityTracking(Command):
             ref_yaw_vel_w.uniform_(*self.angvel_range)
             self.ref_yawvel_w[resample_ids] = ref_yaw_vel_w
 
+    @override
     def debug_draw(self):
         if self.env.backend == "isaac":
             self.marker.visualize(self.ref_pos_w)
+
+    @override
+    def get_state(self) -> TensorDict:
+        return TensorDict(
+            {
+                "ref_pos_w": self.ref_pos_w,
+                "ref_yaw_w": self.ref_yaw_w,
+                "ref_linvel_b": self.ref_linvel_b,
+                "ref_yawvel_w": self.ref_yawvel_w,
+                "cmd_linvel_w": self.cmd_linvel_w,
+                "cmd_yawvel_w": self.cmd_yawvel_w,
+                "cmd_pos_w": self.cmd_pos_w,
+            },
+            [self.num_envs],
+            device=self.device,
+        )
+
+    @override
+    def relabel_command(self, tensordict: TensorDict) -> TensorDict:
+        """Rollout ``command_state`` already matches this command; nothing to relabel."""
+        return tensordict
 
 
 def sample_uniform(size, low: float, high: float, device: torch.device = "cpu"):

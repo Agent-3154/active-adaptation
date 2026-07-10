@@ -87,6 +87,8 @@ class PPOConfig:
     clip_param: float = 0.2
     entropy_coef: float = 0.002
 
+    clamp_reward: bool = False
+
     activation: str = "Mish"
     spo: bool = False # use Simple Policy Optimization Loss
     muon: bool = False # use Muon optimizer
@@ -209,10 +211,10 @@ class PPOPolicy(TensorDictModuleBase):
         action_spec = env.action_spec
         reward_spec = env.reward_spec
         if CMD_KEY in observation_spec.keys(True, True):
-            cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transform()
+            cmd_transform = env.observation_groups[CMD_KEY].symmetry_transform()
         else:
             cmd_transform = None
-        obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform()
+        obs_transform = env.observation_groups[OBS_KEY].symmetry_transform()
         act_transform = env.action_manager.symmetry_transform()
         policy = cls(
             cfg=cfg,
@@ -295,7 +297,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.critic.to(self.device)
 
         with ScopedTimer("compute_advantage"):
-            self.compute_advantage(tensordict, self.critic, "adv", "ret")
+            self.compute_advantage(tensordict, self.critic, "adv", "ret", self.cfg.clamp_reward)
             action = tensordict[ACTION_KEY]
             adv_unnormalized = tensordict["adv"]
             log_probs_before = tensordict["action_log_prob"]
