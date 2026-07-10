@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import math
 import copy
 import einops
@@ -7,31 +8,17 @@ from torch import nn
 from typing import Literal, Callable, Optional, Tuple, TYPE_CHECKING
 
 import active_adaptation as aa
-from active_adaptation.learning.modules import ConditionalBlock, CatTensors, VecNorm
 from active_adaptation.utils.symmetry import SymmetryTransform
+from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.learning.modules import ConditionalBlock, CatTensors, VecNorm
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
+from active_adaptation.learning.utils.dormancy import DormancyTracker
+from active_adaptation.learning.offpolicy.noise import ParallelPinkNoiseProcess
+from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
-from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
-from active_adaptation.learning.utils.dormancy import DormancyTracker
 if TYPE_CHECKING:
     from active_adaptation.envs import _EnvBase
-from active_adaptation.utils.profiling import ScopedTimer
-
-from .distributional import ScalarCritic, C51Critic
-
-from dataclasses import dataclass
-from collections import OrderedDict
-
-from torchrl.data import Composite
-from torchrl.objectives import hold_out_net
-from tensordict.nn import TensorDictModuleBase, TensorDictModule, TensorDictSequential
-from tensordict.nn.probabilistic import interaction_type, InteractionType
-from tensordict import TensorDict
-
-from hydra.core.config_store import ConfigStore
-from active_adaptation.learning.offpolicy.noise import ParallelPinkNoiseProcess
-
 from active_adaptation.learning.ppo.common import (
     ACTION_KEY,
     DONE_KEY,
@@ -41,6 +28,16 @@ from active_adaptation.learning.ppo.common import (
     TERM_KEY,
     soft_copy_,
 )
+from tensordict import TensorDict
+from dataclasses import dataclass
+from collections import OrderedDict
+from torchrl.data import Composite
+from tensordict.nn import TensorDictModuleBase, TensorDictModule, TensorDictSequential
+from .distributional import ScalarCritic, C51Critic
+from torchrl.objectives import hold_out_net
+from hydra.core.config_store import ConfigStore
+from tensordict.nn.probabilistic import interaction_type, InteractionType
+
 
 def _init_linear(m: nn.Module, gain: float = 1.0):
     if isinstance(m, nn.Linear):
@@ -56,8 +53,8 @@ class TD3Config:
     """
     _target_: str = "active_adaptation.learning.offpolicy.td3.TD3"
     name: str = "td3"
-    train_every: int = 4
     delayed: int = 2
+    train_every: int = 4
     soft_bound: float = math.pi
     buffer_size: int = 1500
     warm_up_steps: int = 200
@@ -79,20 +76,20 @@ class TD3Config:
     # batch sizes
     critic_batch_size: int = 2048
     actor_batch_size: int = 2048
-    sym_aug: bool = False
+    sym_aug: bool = False # not supported.
     # target smoothing: this should help Q(s_t, a_t) to generalize locally around a_t
-    noise_type: str = "white"
+    noise_type: str = "white" # white or pink(https://github.com/martius-lab/pink-noise-rl)
     rollout_action_noise: float = 0.10
     target_action_noise: float = 0.10
 
+    tau_Q: float = 0.1
     tau_actor: float = 0.1
-    tau_Q: float = 0.1 # 更大 0.05 ～ 0.2
     max_grad_norm: float = 1.0
 
     debug: bool = False
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
-    use_amp: bool = False
+    use_amp: bool = False # not supported
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
     normalized_G_max: float = 5.0
@@ -100,7 +97,6 @@ class TD3Config:
 
     # path to prior data for RLPD
     prior_data: str | None = None
-    # prior_data: str | None = "/ssd/cv/rollout/G1HoiObj-ppo_symaug/2026-07-09-11-46-48/rollout_500_1024.pt"
     prior_data_ratio: float = 0.4
     # "binary": stop mixing prior data once success rate exceeds ``prior_data_stop_success``.
     # "linear": linearly reduce prior data ratio from ``prior_data_schedule_lower`` to
@@ -120,6 +116,7 @@ class DormancyScope(nn.Module):
         super().__init__()
         self.actor = actor
         self.Q = q_online
+
 
 class CriticTrunk(nn.Module):
     def __init__(
@@ -242,6 +239,7 @@ def Critic(
     )
     return ScalarCritic(module)
 
+
 def DistC51Critic(
     obs_dim: int,
     act_dim: int,
@@ -265,10 +263,10 @@ def DistC51Critic(
         num_atoms=num_atoms
     )
 
+
 class TD3(TensorDictModuleBase):
     """
     Twin Delayed DDPG.
-    No distributed training support.
     """
     def __init__(
         self,
@@ -303,7 +301,7 @@ class TD3(TensorDictModuleBase):
         assert not self.cfg.use_amp, "TD3 do not support AMP."
 
         fake_obs = observation_spec.zero()
-        preproc = []
+        preproc  = []
         
         # ====================================================================================
         if CMD_KEY in observation_spec.keys(True, True):
@@ -341,12 +339,12 @@ class TD3(TensorDictModuleBase):
             self.Q = Critic(obs_dim, act_dim).to(device)
         else:
             if self.cfg.normalize_reward:
-                v_min = -0.5
-                v_max = float(self.cfg.normalized_G_max)
+                v_min     = -0.5
+                v_max     = float(self.cfg.normalized_G_max)
                 num_atoms = 101
             else:
                 v_min, v_max = self.cfg.v_min, self.cfg.v_max
-                num_atoms = int((v_max - v_min) / 0.05) + 1
+                num_atoms    = int((v_max - v_min) / 0.05) + 1
             self.Q = DistC51Critic(
                 obs_dim=obs_dim,
                 act_dim=act_dim,
@@ -380,11 +378,11 @@ class TD3(TensorDictModuleBase):
             )
         else:
             self.opt_actor = torch.optim.AdamW(self.actor.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
-            self.opt_Q = torch.optim.AdamW(self.Q.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
+            self.opt_Q     = torch.optim.AdamW(self.Q.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
         
         self.global_step = 0 # env steps
         self.critic_step = 0 # critic update steps
-        self.actor_step = 0
+        self.actor_step  = 0
 
         self.msr = (
             MultiStepReturn(
@@ -451,7 +449,6 @@ class TD3(TensorDictModuleBase):
             reward_normalizer=self.reward_normalizer,
             critic=critic
         )
-        
 
     def on_stage_start(self, stage: str, env: _EnvBase):
         fake_rb = (
