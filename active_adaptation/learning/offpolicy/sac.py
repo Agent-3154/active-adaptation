@@ -605,19 +605,21 @@ class SAC(TensorDictModuleBase):
             # .exclude(("next", OBS_KEY))
         )
         fake_rb["loc"] = torch.zeros(fake_rb.shape[0], self.actor.act_dim)
-        self.rb = ReplayBuffer.from_fake(self.cfg.buffer_size, fake_rb)
+        observation_keys = set(env.observation_spec.keys(True, True))
+        observation_keys = observation_keys - {"prev_noise", "rho"}
+        self.rb = ReplayBuffer.from_fake(
+            self.cfg.buffer_size, 
+            fake_rb,
+            fake_bootstrap=True,
+            observation_keys=list(observation_keys)
+        )
         print("Primary buffer:")
         print(self.rb)
         if self.cfg.prior_data is not None:
-            self.rb_prior = ReplayBuffer.from_rollout(self.cfg.prior_data)
-            def fn(rew: torch.Tensor | TensorDict) -> torch.Tensor:
-                if isinstance(rew, TensorDict):
-                    rew = torch.cat(list(rew.values()), dim=-1)
-                return rew.sum(-1, keepdim=True).clamp_min(0.)
-            self.rb_prior.compute_return(
-                REWARD_KEY,
-                gamma=self.cfg.gamma,
-                fn=fn,
+            self.rb_prior = ReplayBuffer.from_rollout(
+                self.cfg.prior_data,
+                fake_bootstrap=True,
+                observation_keys=list(observation_keys)
             )
             print("Prior data buffer:")
             print(self.rb_prior)
