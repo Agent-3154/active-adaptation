@@ -60,7 +60,7 @@ class TD3Config:
     name: str = "td31"
     delayed: int = 2
     train_every: int = 4
-    soft_bound: float = math.pi
+    soft_bound: float = 2.0 * math.pi
     buffer_size: int = 2000
     warm_up_steps: int = 200
     lr: float = 5e-4
@@ -85,7 +85,7 @@ class TD3Config:
     # target smoothing: helps Q(s_t, a_t) generalize locally around a_t
     noise_type: str = "white"  # white (pink not wired in this revision)
     rollout_action_noise: Tuple[float, float] = (0.05, 0.2)
-    target_action_noise: float = 0.10
+    target_action_noise: float = 0.05
 
     tau_Q: float = 0.02
     tau_actor: float = 0.1
@@ -94,9 +94,10 @@ class TD3Config:
     debug: bool = False
     vecnorm: bool = True
     use_amp: bool = False  # not supported
+    # Clamp aggregated rewards at 0 before TD / reward-norm (avoids suicide from negative rewards).
+    clamp_reward: bool = True
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
-    normalized_G_max: float = 5.0
     reward_norm_epsilon: float = 1e-8
 
     # path to prior data for RLPD
@@ -316,9 +317,8 @@ class TD3(TensorDictModuleBase):
             self.Q = Critic(obs_dim, self.act_dim).to(device)
         else:
             if self.cfg.normalize_reward:
-                v_min = -0.5
-                v_max = float(self.cfg.normalized_G_max)
-                num_atoms = 101
+                # Std-normalized returns are O(1); fixed atom support (not task-tuned).
+                v_min, v_max, num_atoms = -0.5, 5.0, 101
             else:
                 v_min, v_max = self.cfg.v_min, self.cfg.v_max
                 num_atoms = int((v_max - v_min) / 0.05) + 1
@@ -375,7 +375,6 @@ class TD3(TensorDictModuleBase):
         if self.cfg.normalize_reward:
             self.reward_normalizer = RewardNormalizer(
                 gamma=float(self.cfg.gamma),
-                G_max=float(self.cfg.normalized_G_max),
                 load_rms=False,
                 device=self.device if isinstance(self.device, torch.device) else torch.device(self.device),
                 epsilon=float(self.cfg.reward_norm_epsilon),
@@ -392,8 +391,10 @@ class TD3(TensorDictModuleBase):
         def fn(rew: torch.Tensor | TensorDict) -> torch.Tensor:
             if isinstance(rew, TensorDict):
                 rew = torch.cat(list(rew.values()), dim=-1)
-            return rew.sum(-1, keepdim=True).clamp_min(0.0)
-
+            rew = rew.sum(-1, keepdim=True)
+            if self.cfg.clamp_reward:
+                rew = rew.clamp_min(0.0)
+            return rew
         self.reward_collate_fn = fn
 
     def _flush_dormancy(self, infos: dict):

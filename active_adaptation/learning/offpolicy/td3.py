@@ -92,7 +92,6 @@ class TD3Config:
     use_amp: bool = False # not supported
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
-    normalized_G_max: float = 5.0
     reward_norm_epsilon: float = 1e-8
 
     # path to prior data for RLPD
@@ -339,12 +338,11 @@ class TD3(TensorDictModuleBase):
             self.Q = Critic(obs_dim, act_dim).to(device)
         else:
             if self.cfg.normalize_reward:
-                v_min     = -0.5
-                v_max     = float(self.cfg.normalized_G_max)
-                num_atoms = 101
+                # Std-normalized returns are O(1); fixed atom support (not task-tuned).
+                v_min, v_max, num_atoms = -0.5, 5.0, 101
             else:
                 v_min, v_max = self.cfg.v_min, self.cfg.v_max
-                num_atoms    = int((v_max - v_min) / 0.05) + 1
+                num_atoms = int((v_max - v_min) / 0.05) + 1
             self.Q = DistC51Critic(
                 obs_dim=obs_dim,
                 act_dim=act_dim,
@@ -394,7 +392,6 @@ class TD3(TensorDictModuleBase):
         if self.cfg.normalize_reward:
             self.reward_normalizer = RewardNormalizer(
                 gamma=float(self.cfg.gamma),
-                G_max=float(self.cfg.normalized_G_max),
                 load_rms=False,
                 device=self.device if isinstance(self.device, torch.device) else torch.device(self.device),
                 epsilon=float(self.cfg.reward_norm_epsilon)

@@ -122,9 +122,10 @@ class SACConfig:
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = True
+    # Clamp aggregated rewards at 0 before TD / reward-norm (avoids suicide from negative rewards).
+    clamp_reward: bool = True
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = False
-    normalized_G_max: float = 5.0
     reward_norm_epsilon: float = 1e-8
 
     # path to prior data for RLPD
@@ -358,9 +359,8 @@ class SAC(TensorDictModuleBase):
 
         if self.cfg.distributional:
             if self.cfg.normalize_reward:
-                v_min = -0.5 # we will not have negative values, but it is a good idea to have a small margin
-                v_max = float(self.cfg.normalized_G_max)
-                num_atoms = 101
+                # Std-normalized returns are O(1); fixed atom support (not task-tuned).
+                v_min, v_max, num_atoms = -0.5, 5.0, 101
             else:
                 v_min, v_max = -1.0, 9.0
                 num_atoms = int((v_max - v_min) / 0.05) + 1
@@ -368,7 +368,7 @@ class SAC(TensorDictModuleBase):
                 obs_dim,
                 self.act_dim,
                 num_atoms=num_atoms,
-                v_min=v_min, # we actually do not have negative values, but it is a good idea to have a small margin
+                v_min=v_min,
                 v_max=v_max,
             ).to(device)
         else:
@@ -423,7 +423,6 @@ class SAC(TensorDictModuleBase):
         if self.cfg.normalize_reward:
             self.reward_normalizer = RewardNormalizer(
                 gamma=float(self.cfg.gamma),
-                G_max=float(self.cfg.normalized_G_max),
                 load_rms=False,
                 device=self.device if isinstance(self.device, torch.device) else torch.device(self.device),
                 epsilon=float(self.cfg.reward_norm_epsilon),
@@ -450,7 +449,10 @@ class SAC(TensorDictModuleBase):
         def fn(rew: torch.Tensor | TensorDict) -> torch.Tensor:
             if isinstance(rew, TensorDict):
                 rew = torch.cat(list(rew.values()), dim=-1)
-            return rew.sum(-1, keepdim=True).clamp_min(0.)
+            rew = rew.sum(-1, keepdim=True)
+            if self.cfg.clamp_reward:
+                rew = rew.clamp_min(0.0)
+            return rew
         self.reward_collate_fn = fn
 
     def _autocast(self):
@@ -802,7 +804,8 @@ class SAC(TensorDictModuleBase):
             else:
                 q = self.Q.get_values(obs, act)
 
-            # Q is trained on normalized rewards when reward_normalizer is active; scale logs to ~raw-return units.
+            # Q is trained on normalized rewards when reward_normalizer is active;
+            # map logs to PPO effective-horizon scale (``* S * (1 - gamma)``).
             if self.reward_normalizer is not None:
                 q = self.reward_normalizer.denormalize_return_values(q)
                 if self.cfg.distributional:

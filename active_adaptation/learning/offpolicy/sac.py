@@ -124,7 +124,6 @@ class SACConfig:
     use_amp: bool = True
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
-    normalized_G_max: float = 5.0
     reward_norm_epsilon: float = 1e-8
 
     # path to prior data for RLPD
@@ -360,9 +359,8 @@ class SAC(TensorDictModuleBase):
 
         if self.cfg.distributional:
             if self.cfg.normalize_reward:
-                v_min = -0.5 # we will not have negative values, but it is a good idea to have a small margin
-                v_max = float(self.cfg.normalized_G_max)
-                num_atoms = 101
+                # Std-normalized returns are O(1); fixed atom support (not task-tuned).
+                v_min, v_max, num_atoms = -0.5, 5.0, 101
             else:
                 v_min, v_max = -1.0, 9.0
                 num_atoms = int((v_max - v_min) / 0.05) + 1
@@ -370,7 +368,7 @@ class SAC(TensorDictModuleBase):
                 obs_dim,
                 act_dim,
                 num_atoms=num_atoms,
-                v_min=v_min, # we actually do not have negative values, but it is a good idea to have a small margin
+                v_min=v_min,
                 v_max=v_max,
             ).to(device)
         else:
@@ -426,7 +424,6 @@ class SAC(TensorDictModuleBase):
         if self.cfg.normalize_reward:
             self.reward_normalizer = RewardNormalizer(
                 gamma=float(self.cfg.gamma),
-                G_max=float(self.cfg.normalized_G_max),
                 load_rms=False,
                 device=self.device if isinstance(self.device, torch.device) else torch.device(self.device),
                 epsilon=float(self.cfg.reward_norm_epsilon),
