@@ -5,7 +5,9 @@ import copy
 import einops
 import torch
 from torch import nn
+from torch.amp import GradScaler, autocast
 from typing import Literal, Callable, Optional, Tuple, TYPE_CHECKING
+from contextlib import nullcontext
 
 import active_adaptation as aa
 from active_adaptation.utils.symmetry import SymmetryTransform
@@ -89,7 +91,7 @@ class TD3Config:
     sym_aug: bool = False  # not supported
     # Exploration noise: "white" | "pink" (FFT buffer) | "approx_pink" (multi-OU) | "ou"
     noise_type: str = "white"
-    rollout_action_noise: Tuple[float, float] = (0.05, 0.2)
+    rollout_action_noise: Tuple[float, float] = (0.05, 0.4)
     target_action_noise: float = 0.05
     # FFT buffer length for noise_type="pink" (correlation window, not episode horizon).
     noise_seq_len: int = 1024
@@ -100,7 +102,8 @@ class TD3Config:
 
     debug: bool = False
     vecnorm: bool = True
-    use_amp: bool = False  # not supported
+    # FP16 AMP (CUDA only); separate GradScalers for critic and actor.
+    use_amp: bool = True
     # Clamp aggregated rewards at 0 before TD / reward-norm (avoids suicide from negative rewards).
     clamp_reward: bool = True
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
@@ -299,7 +302,6 @@ class TD3(TensorDictModuleBase):
 
         assert not aa.is_distributed(), "This TD3 implementation does not support distributed training."
         assert not cfg.sym_aug, "This TD3 implementation does not support symmetry augmentation."
-        assert not self.cfg.use_amp, "TD3 does not support AMP."
 
         fake_obs = observation_spec.zero()
         preproc = []
@@ -391,6 +393,13 @@ class TD3(TensorDictModuleBase):
         scope = DormancyScope(self.actor, self.Q)
         self._dormancy_tracker = DormancyTracker(scope)
 
+        _dev = torch.device(device) if not isinstance(device, torch.device) else device
+        self._amp_device_type = _dev.type
+        self._amp_enabled = bool(self.cfg.use_amp and _dev.type == "cuda")
+        # Separate scalers so critic/actor loss scales and Inf/NaN skips stay independent.
+        self.grad_scaler_Q = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
+        self.grad_scaler_actor = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
+
         self.compute_target = torch.compile(
             self._compute_target,
             mode="reduce-overhead",
@@ -404,6 +413,14 @@ class TD3(TensorDictModuleBase):
                 rew = rew.clamp_min(0.0)
             return rew
         self.reward_collate_fn = fn
+
+    def _autocast(self):
+        if not self._amp_enabled:
+            return nullcontext()
+        return autocast(
+            device_type=self._amp_device_type,
+            dtype=torch.float16,
+        )
 
     def _flush_dormancy(self, infos: dict):
         dormancy = self._dormancy_tracker.compute_dormancy(0.02)
@@ -599,19 +616,34 @@ class TD3(TensorDictModuleBase):
             act = act_n[:, 0]
             is_init = batch["is_init"][0]
 
-        with ScopedTimer("compute_target"):
-            q_target = self.compute_target(next_obs, reward, discount)
+        with self._autocast():
+            with ScopedTimer("compute_target"):
+                q_target = self.compute_target(next_obs, reward, discount)
 
-        pred = self.Q(obs, act)
-        per_sample_q_loss = self.Q.compute_loss(pred, q_target)
-        valid = (1.0 - is_init.float()).reshape_as(per_sample_q_loss)
-        denom = valid.sum().clamp_min(1e-8)
-        q_loss = (per_sample_q_loss * valid).sum() / denom
+            pred = self.Q(obs, act)
+            per_sample_q_loss = self.Q.compute_loss(pred, q_target)
+            valid = (1.0 - is_init.float()).reshape_as(per_sample_q_loss)
+            denom = valid.sum().clamp_min(1e-8)
+            q_loss = (per_sample_q_loss * valid).sum() / denom
 
         self.opt_Q.zero_grad(set_to_none=True)
-        q_loss.backward()
-        critic_grad_norm = clip_grad_norm_(self.Q.parameters(), max_norm=self.cfg.max_grad_norm)
-        self.opt_Q.step()
+        if self._amp_enabled:
+            self.grad_scaler_Q.scale(q_loss).backward()
+            # Must unscale before clip / grad norm: those are only meaningful
+            # on the physical (unscaled) gradients; grad_scaler.step still runs
+            # Inf/NaN checks afterwards.
+            self.grad_scaler_Q.unscale_(self.opt_Q)
+            critic_grad_norm = clip_grad_norm_(
+                self.Q.parameters(), max_norm=self.cfg.max_grad_norm
+            )
+            self.grad_scaler_Q.step(self.opt_Q)
+            self.grad_scaler_Q.update()
+        else:
+            q_loss.backward()
+            critic_grad_norm = clip_grad_norm_(
+                self.Q.parameters(), max_norm=self.cfg.max_grad_norm
+            )
+            self.opt_Q.step()
 
         soft_copy_(self.Q, self.Q_target, self.cfg.tau_Q)
 
@@ -702,7 +734,7 @@ class TD3(TensorDictModuleBase):
             prior_count = batch_prior.shape[0]
             prior_obs = obs[-prior_count:]
 
-        with hold_out_net(self.Q):
+        with hold_out_net(self.Q), self._autocast():
             update_act = self.actor(obs)
             q = self.Q.get_values(obs, update_act).mean(dim=-1)
 
@@ -713,17 +745,26 @@ class TD3(TensorDictModuleBase):
             denom = valid.sum().clamp_min(1e-8)
             actor_loss = (actor_loss * valid).sum() / denom
 
-            q_action_grad_norm: torch.Tensor | None = None
-            if diagnostics:
-                (grad_q_wrt_a,) = torch.autograd.grad(
-                    q.sum(),
-                    update_act,
-                    retain_graph=True,
-                    create_graph=False,
-                )
-                q_action_grad_norm = grad_q_wrt_a.norm(dim=-1).mean()
+        q_action_grad_norm: torch.Tensor | None = None
+        if diagnostics:
+            (grad_q_wrt_a,) = torch.autograd.grad(
+                q.sum(),
+                update_act,
+                retain_graph=True,
+                create_graph=False,
+            )
+            q_action_grad_norm = grad_q_wrt_a.norm(dim=-1).mean()
 
-            self.opt_actor.zero_grad(set_to_none=True)
+        self.opt_actor.zero_grad(set_to_none=True)
+        if self._amp_enabled:
+            self.grad_scaler_actor.scale(actor_loss).backward()
+            self.grad_scaler_actor.unscale_(self.opt_actor)
+            actor_grad_norm = clip_grad_norm_(
+                self.actor.parameters(), max_norm=self.cfg.max_grad_norm
+            )
+            self.grad_scaler_actor.step(self.opt_actor)
+            self.grad_scaler_actor.update()
+        else:
             actor_loss.backward()
             actor_grad_norm = clip_grad_norm_(
                 self.actor.parameters(), max_norm=self.cfg.max_grad_norm

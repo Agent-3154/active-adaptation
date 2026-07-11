@@ -205,6 +205,7 @@ class ConditionalBlock(nn.Module):
         condition_dim: int = 0,
         norm: str | None = None,
         activation: str | type[nn.Module] = nn.SiLU,
+        dropout: float = 0.0,
     ):
         super().__init__()
         self.hidden_dim = int(hidden_dim)
@@ -223,8 +224,10 @@ class ConditionalBlock(nn.Module):
         self.layers = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * expansion),
             ActClass(),
+            nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
             nn.Linear(hidden_dim * expansion, hidden_dim),
             ActClass(),
+            nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
         )
 
         if condition_dim > 0:

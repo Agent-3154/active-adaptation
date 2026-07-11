@@ -84,7 +84,7 @@ class SACConfig:
     _target_: str = "active_adaptation.learning.offpolicy.sac.SAC"
     name: str = "sac"
     train_every: int = 4 # perform network updating per `train_every` env step(s).
-    buffer_size: int = 500
+    buffer_size: int = 2000
     warm_up_steps: int = 200
     lr: float = 5e-4
     # If True, actor/Q use :class:`~active_adaptation.learning.utils.opt.MuonAdamWWrapper` (see ``ppo_symaug``).
@@ -118,7 +118,7 @@ class SACConfig:
     lr_alpha: float = 5e-4
     max_grad_norm: float = 1.0
 
-    debug: bool = True
+    debug: bool = False
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = True
@@ -386,7 +386,9 @@ class SAC(TensorDictModuleBase):
         self.Q_target = copy.deepcopy(self.Q).to(device)
         self.actor_target = copy.deepcopy(self.actor).to(device)
         self.Q_target.requires_grad_(False)
+        self.Q_target.eval()
         self.actor_target.requires_grad_(False)
+        self.actor_target.eval()
 
         if self.cfg.target_entropy_sigma is not None:
             self.target_entropy = gaussian_target_entropy(
@@ -442,10 +444,11 @@ class SAC(TensorDictModuleBase):
         self._amp_device_type = _dev.type
         self._amp_enabled = bool(self.cfg.use_amp and _dev.type == "cuda")
         self.grad_scaler = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
-        self.compute_target = torch.compile(
-            self._compute_target,
-            mode="reduce-overhead"
-        )
+        # self.compute_target = torch.compile(
+        #     self._compute_target,
+        #     mode="reduce-overhead"
+        # )
+        self.compute_target = self._compute_target
 
     def _autocast(self):
         return autocast(

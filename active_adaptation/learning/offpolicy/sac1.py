@@ -4,6 +4,7 @@ import copy
 import math
 import einops
 from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Tuple, TYPE_CHECKING, Optional
 
@@ -120,12 +121,12 @@ class SACConfig:
 
     debug: bool = False
     vecnorm: bool = True
-    # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
-    use_amp: bool = False
+    # FP16 AMP (CUDA only); separate GradScalers for critic and actor (alpha stays fp32).
+    use_amp: bool = True
     # Clamp aggregated rewards at 0 before TD / reward-norm (avoids suicide from negative rewards).
     clamp_reward: bool = True
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
-    normalize_reward: bool = False
+    normalize_reward: bool = True
     reward_norm_epsilon: float = 1e-8
 
     # path to prior data for RLPD
@@ -159,12 +160,14 @@ class CriticTrunk(nn.Module):
             activation=activation,
             norm=norm,
             condition_dim=condition_dim,
+            dropout=0.005,
         )
         self.block2 = ConditionalBlock(
             hidden_dim=hidden_dim,
             activation=activation,
             norm=norm,
             condition_dim=condition_dim,
+            dropout=0.005,
         )
         self.norm = nn.RMSNorm(hidden_dim)
         self.apply(_init_sac_linear)
@@ -386,7 +389,9 @@ class SAC(TensorDictModuleBase):
         self.Q_target = copy.deepcopy(self.Q).to(device)
         self.actor_target = copy.deepcopy(self.actor).to(device)
         self.Q_target.requires_grad_(False)
+        self.Q_target.eval()
         self.actor_target.requires_grad_(False)
+        self.actor_target.eval()
 
         if self.cfg.target_entropy_sigma is not None:
             self.target_entropy = gaussian_target_entropy(
@@ -440,11 +445,14 @@ class SAC(TensorDictModuleBase):
         _dev = torch.device(device) if not isinstance(device, torch.device) else device
         self._amp_device_type = _dev.type
         self._amp_enabled = bool(self.cfg.use_amp and _dev.type == "cuda")
-        self.grad_scaler = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
-        self.compute_target = torch.compile(
-            self._compute_target,
-            mode="reduce-overhead",
-        )
+        # Separate scalers so critic/actor loss scales and Inf/NaN skips stay independent.
+        self.grad_scaler_Q = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
+        self.grad_scaler_actor = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
+        # self.compute_target = torch.compile(
+        #     self._compute_target,
+        #     mode="reduce-overhead",
+        # ) # compiling sometimes give worse performance, use with caution
+        self.compute_target = self._compute_target
 
         def fn(rew: torch.Tensor | TensorDict) -> torch.Tensor:
             if isinstance(rew, TensorDict):
@@ -456,10 +464,11 @@ class SAC(TensorDictModuleBase):
         self.reward_collate_fn = fn
 
     def _autocast(self):
+        if not self._amp_enabled:
+            return nullcontext()
         return autocast(
             device_type=self._amp_device_type,
             dtype=torch.float16,
-            enabled=self._amp_enabled,
         )
 
     def _wrap_ddp(self, local_rank: int) -> None:
@@ -760,16 +769,16 @@ class SAC(TensorDictModuleBase):
 
         self.opt_Q.zero_grad(set_to_none=True)
         if self._amp_enabled:
-            self.grad_scaler.scale(q_loss).backward()
+            self.grad_scaler_Q.scale(q_loss).backward()
             # Must unscale before all-reduce / clip / grad norm: those are only
             # meaningful on the physical (unscaled) gradients; grad_scaler.step
             # still runs Inf/NaN checks afterwards.
-            self.grad_scaler.unscale_(self.opt_Q)
+            self.grad_scaler_Q.unscale_(self.opt_Q)
             critic_grad_norm = clip_grad_norm_(
                 self.Q.parameters(), max_norm=self.cfg.max_grad_norm
             )
-            self.grad_scaler.step(self.opt_Q)
-            self.grad_scaler.update()
+            self.grad_scaler_Q.step(self.opt_Q)
+            self.grad_scaler_Q.update()
         else:
             q_loss.backward()
             critic_grad_norm = clip_grad_norm_(self.Q.parameters(), max_norm=self.cfg.max_grad_norm)
@@ -934,13 +943,13 @@ class SAC(TensorDictModuleBase):
 
         self.opt_actor.zero_grad(set_to_none=True)
         if self._amp_enabled:
-            self.grad_scaler.scale(actor_loss).backward()
-            self.grad_scaler.unscale_(self.opt_actor)
+            self.grad_scaler_actor.scale(actor_loss).backward()
+            self.grad_scaler_actor.unscale_(self.opt_actor)
             actor_grad_norm = nn.utils.clip_grad_norm_(
                 self.actor.parameters(), max_norm=self.cfg.max_grad_norm
             )
-            self.grad_scaler.step(self.opt_actor)
-            self.grad_scaler.update()
+            self.grad_scaler_actor.step(self.opt_actor)
+            self.grad_scaler_actor.update()
         else:
             actor_loss.backward()
             actor_grad_norm = nn.utils.clip_grad_norm_(
