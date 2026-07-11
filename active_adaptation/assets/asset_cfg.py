@@ -6,8 +6,8 @@ backends (Isaac Sim, MuJoCo Lab, MuJoCo).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, MISSING, asdict
-from typing import Dict, Tuple, List, Optional, Literal, Sequence
+from dataclasses import dataclass
+from typing import Callable, Dict, Tuple, List, Optional, Sequence, Any
 from pathlib import Path
 
 import torch
@@ -51,43 +51,6 @@ elif aa.get_backend() == "mujoco":
     from active_adaptation.envs.backends.mujoco.mujoco import MJArticulationCfg
 
 
-@dataclass
-class MjlabCollisionCfg:
-    """Configuration to modify collision properties of geoms in the MuJoCo spec.
-
-    Supports regex pattern matching for geom names and dict-based field resolution
-    for fine-grained control over collision properties.
-    """
-
-    geom_names_expr: tuple[str, ...]
-    """Tuple of regex patterns to match geom names."""
-    contype: int | dict[str, int] = 1
-    """Collision type (int or dict mapping patterns to values). Must be non-negative."""
-    conaffinity: int | dict[str, int] = 1
-    """Collision affinity (int or dict mapping patterns to values). Must be
-    non-negative."""
-    condim: int | dict[str, int] = 3
-    """Contact dimension (int or dict mapping patterns to values). Must be one
-    of {1, 3, 4, 6}."""
-    priority: int | dict[str, int] = 0
-    """Collision priority (int or dict mapping patterns to values). Must be
-    non-negative."""
-    friction: tuple[float, ...] | dict[str, tuple[float, ...]] | None = None
-    """Friction coefficients as tuple or dict mapping patterns to tuples."""
-    solref: tuple[float, ...] | dict[str, tuple[float, ...]] | None = None
-    """Solver reference parameters as tuple or dict mapping patterns to tuples."""
-    solimp: tuple[float, ...] | dict[str, tuple[float, ...]] | None = None
-    """Solver impedance parameters as tuple or dict mapping patterns to tuples."""
-    margin: float | dict[str, float] | None = None
-    """Detection margin. Contacts are generated when geom distance < margin."""
-    gap: float | dict[str, float] | None = None
-    """Gap for solver inclusion. Contact included when dist < margin - gap."""
-    solmix: float | dict[str, float] | None = None
-    """Mixing weight for blending solver parameters between geom pairs."""
-    disable_other_geoms: bool = True
-    """Whether to disable collision for non-matching geoms."""
-
-
 def sort_names_by_preferred_order(
     matched_names: Sequence[str],
     preferred_names: Sequence[str],
@@ -111,7 +74,7 @@ def sort_names_by_preferred_order(
 
 def to_simulation_joint_order(
     joint_names: Sequence[str],
-    asset_cfg: "AssetCfg",
+    asset_cfg: Any,
 ) -> List[str]:
     preferred_joint_names = asset_cfg.joint_names_simulation
     if preferred_joint_names is None:
@@ -121,10 +84,28 @@ def to_simulation_joint_order(
 
 def to_simulation_body_order(
     body_names: Sequence[str],
-    asset_cfg: "AssetCfg",
+    asset_cfg: Any,
 ) -> List[str]:
     preferred_body_names = asset_cfg.body_names_simulation
     if preferred_body_names is None:
         return list(body_names)
     return sort_names_by_preferred_order(body_names, preferred_body_names)
+
+
+@dataclass
+class AssetSpec:
+    """Unified asset declaration returned by asset registry factories.
+
+    This keeps all robot/object declarations in one structure while allowing
+    backend envs to register runtime wrappers (e.g. underwater dynamics) into
+    existing lifecycle callbacks.
+    """
+
+    config: Any
+    sensors: Any = ()
+    wrapper: Optional[Any] = None
+
+    def with_wrapper(self, wrapper: Any) -> "AssetSpec":
+        self.wrapper = wrapper
+        return self
 

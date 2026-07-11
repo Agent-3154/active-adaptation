@@ -7,6 +7,7 @@ from active_adaptation.envs.backends.mjlab.adapter import (
     MjlabSimAdapter,
 )
 from active_adaptation.envs.env_base import _EnvBase
+from active_adaptation.assets.asset_cfg import AssetSpec
 from active_adaptation.registry import Registry
 
 
@@ -80,8 +81,10 @@ class MjlabBackendEnv(_EnvBase):
         from active_adaptation.envs.backends.mjlab.viewer import MjLabViewer
 
         registry = Registry.instance()
-        asset_cfg = registry.get("asset", self.cfg.robot.name)
-        asset_cfg, sensors = asset_cfg(backend="mjlab")
+        asset_factory = registry.get("asset", self.cfg.robot.name)
+        asset_spec: AssetSpec = asset_factory(backend="mjlab")
+        asset_cfg = asset_spec.config
+        sensors = asset_spec.sensors
         terrain = self.cfg.get("terrain", "plane")
         
         self.terrain_type = terrain
