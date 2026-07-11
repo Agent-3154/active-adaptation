@@ -1,8 +1,83 @@
+"""Long-Horizon Q-Learning (LQL) with a Soft Actor-Critic policy.
+
+References
+----------
+Abraham, Shi, Finn. *Long-Horizon Q-Learning: Accurate Value Learning via
+n-Step Inequalities*. arXiv:2605.05812.
+Code: https://github.com/armaan-abraham/lql.
+
+This module ports the single-action LQL critic into the ``train_offpolicy``
+contract used by :mod:`sac1`. Actor / temperature updates follow SAC; the
+critic backup is ordinary reward-return TD (no soft entropy term).
+
+Core idea
+---------
+Standard 1-step TD is kept, and trajectory-level *optimality inequalities*
+are enforced with asymmetric squared hinges. Any logged action sequence lower-
+bounds what the optimal policy can achieve; violations of that ordering are
+penalized without changing the bootstrap action interface.
+
+Notation for a contiguous replay segment of length ``L``
+(``trajectory_length``)::
+
+    G_{i:j}  = sum_{u=i}^{j-1} gamma^{u-i} r_u     # discounted partial return
+    a*_s     = sample from the (target) actor at s  # continuous maximizer proxy
+    Q, Qbar  = online / Polyak target twin critics
+
+One-step TD (paper Eq. 2; per transition ``k``)::
+
+    ell_TD(k) = ( Q(s_k, a_k) - [r_k + gamma * (1 - term_k) * Qbar(s_{k+1}, a*_{k+1})] )^2
+
+Lower-bound hinge (paper Eq. 6; ``ell > k``, typically skip ``ell = k+1``)::
+
+    delta_LB(k, ell) = [ G_{k:ell} + gamma^{ell-k} Qbar(s_ell, a*_ell) - Q(s_k, a_k) ]_+^2
+
+    If the observed multi-step return plus a later target bootstrap exceeds the
+    current Q at ``k``, push ``Q(s_k, a_k)`` upward.
+
+Upper-bound hinge (paper Eq. 8; ``i <= k``, including same-state ``i = k``)::
+
+    delta_UB(i, k) = [ G_{i:k} + gamma^{k-i} Q(s_k, a_k) - Qbar(s_i, a*_i) ]_+^2
+
+    If a later logged-action Q is too large relative to acting near-optimally
+    earlier, push that Q downward. The special case ``i = k`` is
+    ``[Q(s_k, a_k) - Qbar(s_k, a*_k)]_+^2``.
+
+Total critic loss (paper Eq. 10)::
+
+    ell_LQL(k) = ell_TD(k) + lambda_UB * mean_i delta_UB(i, k)
+                           + lambda_LB * mean_ell delta_LB(k, ell)
+
+    L_LQL = (1/L) sum_k ell_LQL(k)
+
+Design of this port
+-------------------
+* **Scalar twin critics** (:class:`~sac1.TwinScalarCritic`); no C51 / IQN.
+* **Reward-only critic backup**: matches the paper's Gaussian experiments,
+  which omit entropy from TD targets. Actor still maximizes entropy via
+  ``log_alpha`` (SAC).
+* **Clipped double Q**: ``v_next = min(Q1_bar, Q2_bar)`` at target-policy
+  actions; online twin heads share that detached bootstrap.
+* **Contiguous trajectories** from :meth:`ReplayBuffer.sample_trajectory`
+  (no newest→oldest ring wrap). Episode cuts inside a segment are masked via
+  ``done`` / ``terminated`` / ``is_init``.
+* **Batch sizing**: ``critic_batch_size`` counts *transitions*; the number of
+  trajectories is ``critic_batch_size // trajectory_length``.
+* **Complexity**: hinge pairs are ``O(B L^2)`` arithmetic on already-computed
+  Q / ``v_next`` (same asymptotic cost as the JAX reference); network
+  forwards remain ``O(B L)``.
+* **Optimizers / AMP**: optional Muon+AdamW (``muon``) and CUDA FP16 AMP
+  (``use_amp``), matching :mod:`sac1`. Temperature ``log_alpha`` stays fp32.
+* **Not in v1**: DDP, symmetry aug, action chunking, n-step TD folding,
+  distributional critics.
+"""
+
 from __future__ import annotations
 
 import copy
 import math
 from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Tuple
 
@@ -16,6 +91,7 @@ from tensordict.nn import (
     TensorDictModuleBase,
     TensorDictSequential as Seq,
 )
+from torch.amp import GradScaler, autocast
 from torchrl.data import Composite, TensorSpec
 from torchrl.objectives import hold_out_net
 
@@ -37,6 +113,7 @@ from active_adaptation.learning.ppo.common import (
     TERM_KEY,
     soft_copy_,
 )
+from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.utils.profiling import ScopedTimer
 
 if TYPE_CHECKING:
@@ -167,6 +244,13 @@ def lql_critic_loss(
     lb_loss = lb_error_sum / (lb_valid_count * num_critics).clamp_min(1.0)
     ub_loss = ub_error_sum / (ub_valid_count * num_critics).clamp_min(1.0)
     total = td_loss + float(lambda_lb) * lb_loss + float(lambda_ub) * ub_loss
+    # Diagnostics (logged under ``critic/`` by :meth:`LQLSAC.train_critic`):
+    # - ``*_loss``: mean squared hinge / TD residual over valid terms.
+    # - ``td_target_mean``: average 1-step bootstrap target on valid transitions.
+    # - ``num_valid_*_terms``: how many mask-accepted TD / hinge pairs entered the mean
+    #   (drops near zero when segments are mostly truncated or ``is_init``).
+    # - ``*_activation``: fraction of valid LB/UB pairs with a positive hinge
+    #   (high ≈ frequent inequality violations; ~0 ≈ constraints already satisfied).
     info = {
         "td_loss": td_loss.detach(),
         "lower_bound_loss": lb_loss.detach(),
@@ -193,6 +277,8 @@ class LQLSACConfig:
     buffer_size: int = 2000
     warm_up_steps: int = 200
     lr: float = 5e-4
+    # If True, actor/Q use :class:`~active_adaptation.learning.utils.opt.MuonAdamWWrapper`.
+    muon: bool = True
     weight_decay: float = 0.02
 
     trajectory_length: int = 8
@@ -218,6 +304,8 @@ class LQLSACConfig:
 
     debug: bool = False
     vecnorm: bool = True
+    # FP16 AMP (CUDA only); separate GradScalers for critic and actor (alpha stays fp32).
+    use_amp: bool = True
     clamp_reward: bool = True
     normalize_reward: bool = True
     reward_norm_epsilon: float = 1e-8
@@ -280,7 +368,7 @@ class LQLSAC(TensorDictModuleBase):
         self.act_dim = action_spec.shape[-1]
         self.entropy_scale = 1.0 / math.sqrt(self.act_dim)
         self.vecnorm_obs = (
-            VecNorm(obs_dim, decay=1.0).to(self.device)
+            VecNorm(obs_dim).to(self.device)
             if cfg.vecnorm
             else nn.Identity()
         )
@@ -314,12 +402,24 @@ class LQLSAC(TensorDictModuleBase):
             torch.tensor(math.log(cfg.alpha_init), device=self.device)
         )
         self.opt_alpha = torch.optim.Adam([self.log_alpha], lr=cfg.lr_alpha)
-        self.opt_actor = torch.optim.AdamW(
-            self.actor.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
-        )
-        self.opt_Q = torch.optim.AdamW(
-            self.Q.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
-        )
+        if cfg.muon:
+            self.opt_actor = MuonAdamWWrapper(
+                [self.actor],
+                lr=cfg.lr,
+                weight_decay=cfg.weight_decay,
+            )
+            self.opt_Q = MuonAdamWWrapper(
+                [self.Q],
+                lr=cfg.lr,
+                weight_decay=cfg.weight_decay,
+            )
+        else:
+            self.opt_actor = torch.optim.AdamW(
+                self.actor.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+            )
+            self.opt_Q = torch.optim.AdamW(
+                self.Q.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+            )
 
         self.reward_normalizer: RewardNormalizer | None = None
         if cfg.normalize_reward:
@@ -330,9 +430,25 @@ class LQLSAC(TensorDictModuleBase):
                 epsilon=cfg.reward_norm_epsilon,
             )
 
+        self._amp_device_type = self.device.type
+        self._amp_enabled = bool(cfg.use_amp and self.device.type == "cuda")
+        # Separate scalers so critic/actor loss scales and Inf/NaN skips stay independent.
+        self.grad_scaler_Q = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
+        self.grad_scaler_actor = GradScaler(
+            self._amp_device_type, enabled=self._amp_enabled
+        )
+
         self.global_step = 0
         self.rb: ReplayBuffer
         self.rb_prior: ReplayBuffer | None = None
+
+    def _autocast(self):
+        if not self._amp_enabled:
+            return nullcontext()
+        return autocast(
+            device_type=self._amp_device_type,
+            dtype=torch.float16,
+        )
 
     def reward_collate_fn(self, reward: torch.Tensor | TensorDict) -> torch.Tensor:
         if isinstance(reward, TensorDict):
@@ -498,13 +614,6 @@ class LQLSAC(TensorDictModuleBase):
         action = batch[ACTION_KEY]
         seq_len, batch_size = obs.shape[:2]
 
-        obs_flat = obs.reshape(seq_len * batch_size, -1)
-        next_obs_flat = next_obs.reshape(seq_len * batch_size, -1)
-        action_flat = action.reshape(seq_len * batch_size, -1)
-        pred = self.Q.get_values(obs_flat, action_flat)
-        q = pred.reshape(seq_len, batch_size, 2).permute(2, 1, 0)
-        v_next = self._target_values(next_obs_flat).reshape(seq_len, batch_size).transpose(0, 1)
-
         rewards = reward.squeeze(-1).transpose(0, 1)
         terminated = batch[TERM_KEY].squeeze(-1).transpose(0, 1).bool()
         done = batch[DONE_KEY].squeeze(-1).transpose(0, 1).bool()
@@ -522,24 +631,45 @@ class LQLSAC(TensorDictModuleBase):
                 * self.cfg.gamma
             )
 
-        q_loss, loss_info = lql_critic_loss(
-            q,
-            v_next,
-            rewards,
-            discounts,
-            terminated,
-            ~done,
-            transition_valid,
-            lambda_lb=self.cfg.lambda_lb,
-            lambda_ub=self.cfg.lambda_ub,
-        )
+        with self._autocast():
+            obs_flat = obs.reshape(seq_len * batch_size, -1)
+            next_obs_flat = next_obs.reshape(seq_len * batch_size, -1)
+            action_flat = action.reshape(seq_len * batch_size, -1)
+            pred = self.Q.get_values(obs_flat, action_flat)
+            q = pred.reshape(seq_len, batch_size, 2).permute(2, 1, 0)
+            v_next = (
+                self._target_values(next_obs_flat)
+                .reshape(seq_len, batch_size)
+                .transpose(0, 1)
+            )
+            q_loss, loss_info = lql_critic_loss(
+                q,
+                v_next,
+                rewards,
+                discounts,
+                terminated,
+                ~done,
+                transition_valid,
+                lambda_lb=self.cfg.lambda_lb,
+                lambda_ub=self.cfg.lambda_ub,
+            )
 
         self.opt_Q.zero_grad(set_to_none=True)
-        q_loss.backward()
-        critic_grad_norm = clip_grad_norm_(
-            self.Q.parameters(), max_norm=self.cfg.max_grad_norm
-        )
-        self.opt_Q.step()
+        if self._amp_enabled:
+            self.grad_scaler_Q.scale(q_loss).backward()
+            # Unscale before clip / grad norm; scaler.step still checks Inf/NaN.
+            self.grad_scaler_Q.unscale_(self.opt_Q)
+            critic_grad_norm = clip_grad_norm_(
+                self.Q.parameters(), max_norm=self.cfg.max_grad_norm
+            )
+            self.grad_scaler_Q.step(self.opt_Q)
+            self.grad_scaler_Q.update()
+        else:
+            q_loss.backward()
+            critic_grad_norm = clip_grad_norm_(
+                self.Q.parameters(), max_norm=self.cfg.max_grad_norm
+            )
+            self.opt_Q.step()
         soft_copy_(self.Q, self.Q_target, tau=self.cfg.tau_Q)
 
         if not diagnostics:
@@ -583,7 +713,7 @@ class LQLSAC(TensorDictModuleBase):
         is_init = batch["is_init"]
         n_online = obs.shape[0] - (0 if batch_prior is None else batch_prior.shape[0])
 
-        with hold_out_net(self.Q):
+        with hold_out_net(self.Q), self._autocast():
             loc, scale = self.actor(obs)
             dist = self.DistClass(loc, scale)
             action_update = dist.rsample((4,))
@@ -607,17 +737,27 @@ class LQLSAC(TensorDictModuleBase):
         valid = (1.0 - is_init.float()).reshape_as(actor_per_sample)
         actor_loss = (actor_per_sample * valid).sum() / valid.sum().clamp_min(1.0)
 
+        # Alpha stays in fp32 (outside AMP).
         self.opt_alpha.zero_grad(set_to_none=True)
         alpha_loss = -(alpha * (-entropy_est.detach() + self.target_entropy)).mean()
         alpha_loss.backward()
         self.opt_alpha.step()
 
         self.opt_actor.zero_grad(set_to_none=True)
-        actor_loss.backward()
-        actor_grad_norm = clip_grad_norm_(
-            self.actor.parameters(), max_norm=self.cfg.max_grad_norm
-        )
-        self.opt_actor.step()
+        if self._amp_enabled:
+            self.grad_scaler_actor.scale(actor_loss).backward()
+            self.grad_scaler_actor.unscale_(self.opt_actor)
+            actor_grad_norm = clip_grad_norm_(
+                self.actor.parameters(), max_norm=self.cfg.max_grad_norm
+            )
+            self.grad_scaler_actor.step(self.opt_actor)
+            self.grad_scaler_actor.update()
+        else:
+            actor_loss.backward()
+            actor_grad_norm = clip_grad_norm_(
+                self.actor.parameters(), max_norm=self.cfg.max_grad_norm
+            )
+            self.opt_actor.step()
         soft_copy_(self.actor, self.actor_target, tau=self.cfg.tau_actor)
 
         if not diagnostics:

@@ -346,7 +346,7 @@ class SAC(TensorDictModuleBase):
         self.entropy_scale = 1.0 / math.sqrt(self.act_dim)
 
         if self.cfg.vecnorm:
-            self.vecnorm_obs = VecNorm(obs_dim, decay=1.0).to(device)
+            self.vecnorm_obs = VecNorm(obs_dim).to(device)
         else:
             self.vecnorm_obs = nn.Identity()
         preproc.append(Mod(self.vecnorm_obs, ["_input"], ["_input_normed"]))
