@@ -84,7 +84,7 @@ class SACConfig:
     _target_: str = "active_adaptation.learning.offpolicy.sac.SAC"
     name: str = "sac"
     train_every: int = 4 # perform network updating per `train_every` env step(s).
-    buffer_size: int = 500
+    buffer_size: int = 2000
     warm_up_steps: int = 200
     lr: float = 5e-4
     # If True, actor/Q use :class:`~active_adaptation.learning.utils.opt.MuonAdamWWrapper` (see ``ppo_symaug``).
@@ -118,13 +118,12 @@ class SACConfig:
     lr_alpha: float = 5e-4
     max_grad_norm: float = 1.0
 
-    debug: bool = True
+    debug: bool = False
     vecnorm: bool = True
     # FP16 AMP (CUDA only); GradScaler for critic, V head, standalone train_v, and actor (alpha stays fp32).
     use_amp: bool = True
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
-    normalized_G_max: float = 5.0
     reward_norm_epsilon: float = 1e-8
 
     # path to prior data for RLPD
@@ -360,9 +359,8 @@ class SAC(TensorDictModuleBase):
 
         if self.cfg.distributional:
             if self.cfg.normalize_reward:
-                v_min = -0.5 # we will not have negative values, but it is a good idea to have a small margin
-                v_max = float(self.cfg.normalized_G_max)
-                num_atoms = 101
+                # Std-normalized returns are O(1); fixed atom support (not task-tuned).
+                v_min, v_max, num_atoms = -0.5, 5.0, 101
             else:
                 v_min, v_max = -1.0, 9.0
                 num_atoms = int((v_max - v_min) / 0.05) + 1
@@ -370,7 +368,7 @@ class SAC(TensorDictModuleBase):
                 obs_dim,
                 act_dim,
                 num_atoms=num_atoms,
-                v_min=v_min, # we actually do not have negative values, but it is a good idea to have a small margin
+                v_min=v_min,
                 v_max=v_max,
             ).to(device)
         else:
@@ -388,7 +386,9 @@ class SAC(TensorDictModuleBase):
         self.Q_target = copy.deepcopy(self.Q).to(device)
         self.actor_target = copy.deepcopy(self.actor).to(device)
         self.Q_target.requires_grad_(False)
+        self.Q_target.eval()
         self.actor_target.requires_grad_(False)
+        self.actor_target.eval()
 
         if self.cfg.target_entropy_sigma is not None:
             self.target_entropy = gaussian_target_entropy(
@@ -426,7 +426,6 @@ class SAC(TensorDictModuleBase):
         if self.cfg.normalize_reward:
             self.reward_normalizer = RewardNormalizer(
                 gamma=float(self.cfg.gamma),
-                G_max=float(self.cfg.normalized_G_max),
                 load_rms=False,
                 device=self.device if isinstance(self.device, torch.device) else torch.device(self.device),
                 epsilon=float(self.cfg.reward_norm_epsilon),
@@ -445,10 +444,11 @@ class SAC(TensorDictModuleBase):
         self._amp_device_type = _dev.type
         self._amp_enabled = bool(self.cfg.use_amp and _dev.type == "cuda")
         self.grad_scaler = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
-        self.compute_target = torch.compile(
-            self._compute_target,
-            mode="reduce-overhead"
-        )
+        # self.compute_target = torch.compile(
+        #     self._compute_target,
+        #     mode="reduce-overhead"
+        # )
+        self.compute_target = self._compute_target
 
     def _autocast(self):
         return autocast(

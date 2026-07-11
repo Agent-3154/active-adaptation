@@ -59,13 +59,13 @@ class PlayConfig:
     """Hydra defaults list: task config, algo config, then this config."""
     hydra: HydraConf = field(default_factory=HydraConf)
     """Hydra runtime settings (output directory, etc.)."""
-    headless: bool = True
+    headless: bool = False
     """Run with a visible GUI window (``false``) or headless (``true``)."""
     backend: str = "isaac"
     """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
-    device: str = "cuda"
+    device: str = "cpu"
     """Torch device for policy inference (e.g. ``cuda``, ``cpu``)."""
-    record_video: bool = True
+    record_video: bool = False
     """Record an MP4 of the rollout (Isaac backend only)."""
     app: IsaacAppConfig = field(default_factory=IsaacAppConfig)
     """Backend-specific application launcher config."""
