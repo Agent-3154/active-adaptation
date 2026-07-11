@@ -393,6 +393,72 @@ class ReplayBuffer:
         samples = self._annotate_sampling_meta(samples, idx_flat, steps, weight)
         return samples
 
+    def sample_trajectory(
+        self,
+        batch_size: int,
+        steps: int,
+        next_obs: bool = False,
+    ) -> TensorDict:
+        """Sample chronologically contiguous segments without crossing the write seam.
+
+        Starts are drawn in logical (oldest-to-newest) ring order and then mapped
+        to physical storage indices.  Unlike :meth:`sample`, a segment can never
+        wrap from the newest stored transition back to the oldest one.
+        """
+        if self._per is not None:
+            raise NotImplementedError("Prioritized replay is not supported for trajectory sampling.")
+        if steps < 1:
+            raise ValueError(f"steps must be positive, got {steps}.")
+        if len(self) == 0:
+            raise RuntimeError("Cannot sample from an empty ReplayBuffer.")
+
+        # fake_bootstrap reconstructs s_{t+1} from the following stored row, so
+        # it needs one additional chronological row beyond the returned segment.
+        rows_needed = steps + int(self.fake_bootstrap and next_obs)
+        if len(self) < rows_needed:
+            raise RuntimeError(
+                f"Need at least {rows_needed} stored rows for a length-{steps} trajectory, "
+                f"but the buffer contains {len(self)}."
+            )
+
+        batch_size = int(batch_size)
+        num_starts = len(self) - rows_needed + 1
+        logical_start = torch.randint(
+            0,
+            num_starts,
+            (batch_size,),
+            device=self._td.device,
+        )
+        env_idx = torch.randint(
+            0,
+            self.num_envs,
+            (batch_size,),
+            device=self._td.device,
+        )
+
+        oldest = self._ptr if len(self) == self.max_size else 0
+        physical_start = (oldest + logical_start) % self.max_size
+        offsets = torch.arange(rows_needed, device=self._td.device).unsqueeze(1)
+        physical_rows = (physical_start.unsqueeze(0) + offsets) % self.max_size
+        samples = self._td[physical_rows, env_idx]
+
+        if self.fake_bootstrap and next_obs:
+            observations = samples.select(*self.observation_keys)
+            observations_t = observations[:steps]
+            observations_t1 = observations[1:]
+            tensordict_next = torch.where(
+                samples[:steps]["next", "done"].squeeze(-1),
+                observations_t,
+                observations_t1,
+            )
+            samples = samples[:steps]
+            samples["next"].update(tensordict_next)
+
+        assert samples.shape[:2] == (steps, batch_size)
+        idx_flat = self.flat_index(physical_start, env_idx)
+        weight = torch.ones(batch_size, device=self._td.device, dtype=torch.float32)
+        return self._annotate_sampling_meta(samples, idx_flat, steps, weight)
+
     def sample_sequential(
         self,
         batch_size: int,
