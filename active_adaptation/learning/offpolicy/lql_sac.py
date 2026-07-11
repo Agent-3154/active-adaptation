@@ -7,8 +7,9 @@ n-Step Inequalities*. arXiv:2605.05812.
 Code: https://github.com/armaan-abraham/lql.
 
 This module ports the single-action LQL critic into the ``train_offpolicy``
-contract used by :mod:`sac1`. Actor / temperature updates follow SAC; the
-critic backup is ordinary reward-return TD (no soft entropy term).
+contract used by :mod:`sac1`. Actor / temperature updates follow SAC. Critic
+bootstraps use ``v_next``; set ``entropy_bonus>0`` to add a soft entropy term
+as in :mod:`sac1` (``0`` recovers the paper's hard reward-return TD).
 
 Core idea
 ---------
@@ -53,11 +54,13 @@ Total critic loss (paper Eq. 10)::
 Design of this port
 -------------------
 * **Scalar twin critics** (:class:`~sac1.TwinScalarCritic`); no C51 / IQN.
-* **Reward-only critic backup**: matches the paper's Gaussian experiments,
-  which omit entropy from TD targets. Actor still maximizes entropy via
-  ``log_alpha`` (SAC).
-* **Clipped double Q**: ``v_next = min(Q1_bar, Q2_bar)`` at target-policy
-  actions; online twin heads share that detached bootstrap.
+* **Soft / hard backup via ``entropy_bonus``**: ``v_next`` is
+  ``min(Q1_bar, Q2_bar)`` at a target-policy sample; when
+  ``entropy_bonus != 0``, add ``entropy_bonus * (-α log π) * entropy_scale``
+  (same construction as :meth:`sac1.SAC._compute_target`). ``0`` matches the
+  paper's hard TD. Actor entropy maximization is always on (SAC).
+* **Clipped double Q**: online twin heads share that detached ``v_next`` for
+  TD and both hinges.
 * **Contiguous trajectories** from :meth:`ReplayBuffer.sample_trajectory`
   (no newest→oldest ring wrap). Episode cuts inside a segment are masked via
   ``done`` / ``terminated`` / ``is_init``.
@@ -246,7 +249,8 @@ def lql_critic_loss(
     total = td_loss + float(lambda_lb) * lb_loss + float(lambda_ub) * ub_loss
     # Diagnostics (logged under ``critic/`` by :meth:`LQLSAC.train_critic`):
     # - ``*_loss``: mean squared hinge / TD residual over valid terms.
-    # - ``td_target_mean``: average 1-step bootstrap target on valid transitions.
+    # - ``td_target_mean``: average 1-step bootstrap target on valid transitions
+    #   (training scale here; denormalized to match ``q_value`` when logged).
     # - ``num_valid_*_terms``: how many mask-accepted TD / hinge pairs entered the mean
     #   (drops near zero when segments are mostly truncated or ``is_init``).
     # - ``*_activation``: fraction of valid LB/UB pairs with a positive hinge
@@ -293,6 +297,7 @@ class LQLSACConfig:
     target_action_noise: float = 0.01
     use_correlated: bool = True
 
+    # Soft TD weight on (-α log π) inside ``v_next`` (sac1-style). 0 = hard TD.
     entropy_bonus: float = 1.0
     alpha_init: float = 4e-3
     target_entropy_sigma: float | None = 0.15
@@ -578,12 +583,30 @@ class LQLSAC(TensorDictModuleBase):
 
     @torch.no_grad()
     def _target_values(self, next_obs: torch.Tensor) -> torch.Tensor:
+        """Target-policy bootstrap values for TD and LQL hinges.
+
+        Matches :meth:`sac1.SAC._compute_target`: evaluate ``Q`` at a noisy
+        action, but form the entropy bonus from ``log π`` of the clean sample.
+        With ``entropy_bonus=0`` this is hard ``min Q``; otherwise soft
+        ``min Q + entropy_bonus * (-α log π) * entropy_scale``.
+        """
         loc, scale = self.actor_target(next_obs)
-        action = self.DistClass(loc, scale).sample()
+        dist = self.DistClass(loc, scale)
+        action = dist.sample()
+        action_q = action
         if self.cfg.target_action_noise:
             noise = torch.randn_like(action).clamp(-3.0, 3.0)
-            action = action + noise * self.cfg.target_action_noise
-        return self.Q_target.get_values(next_obs, action).min(dim=-1).values
+            action_q = action + noise * self.cfg.target_action_noise
+        q = self.Q_target.get_values(next_obs, action_q).min(dim=-1).values
+        if self.cfg.entropy_bonus:
+            log_prob = dist.log_prob(action)
+            alpha = self.log_alpha.exp()
+            q = q + (
+                float(self.cfg.entropy_bonus)
+                * (-alpha * log_prob)
+                * self.entropy_scale
+            )
+        return q
 
     @ScopedTimer("train_critic")
     def train_critic(
@@ -675,9 +698,14 @@ class LQLSAC(TensorDictModuleBase):
         if not diagnostics:
             return {}
         with torch.no_grad():
-            q_values = q[:, :online_batch].permute(1, 2, 0)
+            q_online = q[:, :online_batch]
+            q_values = q_online.permute(1, 2, 0)
+            td_target_mean = loss_info["td_target_mean"]
             if self.reward_normalizer is not None:
                 q_values = self.reward_normalizer.denormalize_return_values(q_values)
+                td_target_mean = self.reward_normalizer.denormalize_return_values(
+                    td_target_mean
+                )
             info = {
                 "critic/q_loss": q_loss.item(),
                 "critic/grad_norm": critic_grad_norm.item(),
@@ -685,9 +713,22 @@ class LQLSAC(TensorDictModuleBase):
                 "critic/q_max": q_values.max().item(),
                 "critic/q_std": q_values.std(dim=-1).mean().item(),
             }
-            info.update(
-                {f"critic/{key}": value.item() for key, value in loss_info.items()}
-            )
+            for key, value in loss_info.items():
+                if key == "td_target_mean":
+                    info["critic/td_target_mean"] = td_target_mean.item()
+                else:
+                    info[f"critic/{key}"] = value.item()
+
+            # Terminal transitions should have small Q (bootstrap masked; target ≈ r).
+            terminated_online = terminated[:online_batch]
+            if terminated_online.any():
+                q_terminated = q_values[terminated_online]
+                info["critic/q_value_terminated"] = q_terminated.mean().item()
+                td_target = rewards + discounts * (~terminated).to(rewards.dtype) * v_next
+                td_err = (q_online - td_target[:online_batch].unsqueeze(0)).square()
+                info["critic/q_loss_terminated"] = (
+                    td_err.mean(dim=0)[terminated_online].mean().item()
+                )
         return info
 
     @ScopedTimer("train_actor")
@@ -725,12 +766,13 @@ class LQLSAC(TensorDictModuleBase):
             policy_term = -q.mean(dim=1)
 
         alpha = self.log_alpha.exp()
+        # ``entropy_bonus`` only scales the critic soft backup (as in sac1);
+        # the actor always maximizes entropy.
         actor_per_sample = (
             policy_term
             - alpha.detach()
             * entropy_est.reshape_as(policy_term)
             * self.entropy_scale
-            * self.cfg.entropy_bonus
             + 0.01
             * ((loc / self.cfg.soft_bound) ** 6).sum(-1).reshape_as(policy_term)
         )
