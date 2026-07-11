@@ -500,12 +500,6 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     @ScopedTimer("env._step", sync=PROFILE_SYNC_TIMERS)
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
-        from omegaconf.errors import ConfigAttributeError
-        try:
-            need_render = self.sim.has_gui() or self.cfg.record_video
-        except ConfigAttributeError:
-            need_render = False
-
         with ScopedTimer("simulation", sync=False):
             with ScopedTimer("process_action", sync=False):
                 for input_key, input_manager in self.input_managers.items():
@@ -518,7 +512,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                     [callback(substep) for callback in self._pre_step_callbacks]
                     self.scene.write_data_to_sim()
                 with ScopedTimer("sim.step", sync=PROFILE_SYNC_TIMERS):
-                    self.sim.step(render=need_render)
+                    self.sim.step(render=False) # never render in substeps
                 with ScopedTimer("scene.update", sync=PROFILE_SYNC_TIMERS):
                     self.scene.update(self.physics_dt)
                 with ScopedTimer("post_step_callbacks", sync=False):

@@ -93,7 +93,7 @@ class TrainConfig:
     """Log statistics every N training iterations."""
     checkpoint_interval: int = 400
     """Save a local checkpoint every N training iterations."""
-    upload_interval: int = 1600
+    upload_interval: int = 3200
     """Upload a checkpoint to WandB every N training iterations."""
 
     seed: int = 42
