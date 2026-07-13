@@ -253,3 +253,43 @@ class joint_pos_target(joint_observation):
         if self.subtract_offset:
             joint_pos_target = joint_pos_target - self.default_joint_pos
         return joint_pos_target.reshape(self.num_envs, -1)
+
+
+class joint_pos_targets(joint_observation):
+    def __init__(
+        self,
+        joint_names: str = ".*",
+        subtract_offset: bool = False,
+    ):
+        super().__init__(joint_names)
+        self.subtract_offset = subtract_offset
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
+
+    @override
+    def compute(self):
+        joint_pos_targets = self.asset.data.joint_pos_target[:, self.joint_ids]
+        if self.subtract_offset:
+            joint_pos_targets = joint_pos_targets - self.default_joint_pos
+        return joint_pos_targets.reshape(self.num_envs, -1)
+
+    @override
+    def symmetry_transform(self):
+        return joint_space_symmetry(self.asset, self.joint_names)
+
+
+class joint_vel_targets(joint_observation):
+    def __init__(self, joint_names: str = ".*"):
+        super().__init__(joint_names)
+
+    @override
+    def compute(self):
+        joint_vel_targets = self.asset.data.joint_vel_target[:, self.joint_ids]
+        return joint_vel_targets.reshape(self.num_envs, -1)
+
+    @override
+    def symmetry_transform(self):
+        return joint_space_symmetry(self.asset, self.joint_names)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 
@@ -230,6 +231,111 @@ class JointPosition(_DelayedJointAction):
             self.pos_target_bound_tracker.update(jpos_target)
 
 
+class JointReferenceModel(_DelayedJointAction):
+    """Second-order reference-model prefilter for PD joint targets.
+
+    Implements Action Space III from the impedance-view analysis: raw policy
+    actions drive a fixed second-order low-pass filter whose state
+    ``(q_bar, v_bar)`` is sent to the PD controller as position/velocity
+    targets::
+
+        target = q0 + action_scaling * a
+        v_dot = omega^2 * (target - q_bar) - 2*zeta*omega * v_bar
+        v_bar <- v_bar + dt * v_dot
+        q_bar <- q_bar + dt * v_bar
+
+    ``omega`` (natural frequency / bandwidth, rad/s) and ``zeta`` (damping
+    ratio) are fixed design constants, not policy outputs. Critical damping
+    is ``zeta = 1`` (``omega`` only sets how fast the filter responds, not
+    whether it is overdamped or underdamped). Use ``zeta >= 1`` to avoid
+    resonant peaking in the reference trajectory. Filter state resets to the
+    current joint positions with ``v_bar = 0`` on episode start to avoid
+    startle transients.
+    """
+
+    def __init__(
+        self,
+        action_scaling: Dict[str, float] | float = 0.5,
+        omega: Dict[str, float] | float = 20.0,
+        zeta: Dict[str, float] | float = 1.0 / math.sqrt(2),
+        max_delay: int = 2,
+        alpha_range: Tuple[float, float] = (1.0, 1.0),
+        track_pos_target_bounds: bool = False,
+        track_vel_target_bounds: bool = False,
+    ):
+        super().__init__(
+            action_scaling=action_scaling,
+            max_delay=max_delay,
+            alpha_range=alpha_range,
+            track_pos_target_bounds=track_pos_target_bounds,
+            track_vel_target_bounds=track_vel_target_bounds,
+        )
+        if isinstance(omega, (int, float)):
+            omega = {".*": float(omega)}
+        if isinstance(zeta, (int, float)):
+            zeta = {".*": float(zeta)}
+        self._omega = dict(omega)
+        self._zeta = dict(zeta)
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
+        self.offset = torch.zeros_like(self.default_joint_pos)
+
+        _, _, omega = string_utils.resolve_matching_names_values(
+            self._omega, self.joint_names
+        )
+        _, _, zeta = string_utils.resolve_matching_names_values(
+            self._zeta, self.joint_names
+        )
+        self.omega = torch.tensor(omega, device=self.device)
+        self.zeta = torch.tensor(zeta, device=self.device)
+
+        self.q_bar = self.default_joint_pos.clone()
+        self.v_bar = torch.zeros_like(self.default_joint_pos)
+
+    def __repr__(self) -> str:
+        return (
+            f"JointReferenceModel(joint_names={self.joint_names}, "
+            f"joint_ids={self.joint_ids.tolist()})"
+        )
+
+    @override
+    def reset(self, env_ids: torch.Tensor):
+        super().reset(env_ids)
+        default_joint_pos = self.asset.data.default_joint_pos[
+            env_ids.unsqueeze(1), self.joint_ids
+        ]
+        self.default_joint_pos[env_ids] = default_joint_pos + self.offset[env_ids]
+        self.q_bar[env_ids] = self.asset.data.joint_pos[
+            env_ids.unsqueeze(1), self.joint_ids
+        ]
+        self.v_bar[env_ids] = 0.0
+
+    @override
+    def apply_action(self, substep: int):
+        self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
+        self.action_queue = self.action_queue.roll(-1, dims=1)
+
+        target = self.default_joint_pos + self.applied_action * self.action_scaling
+        v_dot = (
+            self.omega.square() * (target - self.q_bar)
+            - 2.0 * self.zeta * self.omega * self.v_bar
+        )
+        dt = self.env.physics_dt
+        self.v_bar.add_(dt * v_dot)
+        self.q_bar.add_(dt * self.v_bar)
+
+        self.asset.set_joint_position_target(self.q_bar, joint_ids=self.joint_ids)
+        self.asset.set_joint_velocity_target(self.v_bar, joint_ids=self.joint_ids)
+
+        if self.track_pos_target_bounds:
+            self.pos_target_bound_tracker.update(self.q_bar)
+        if self.track_vel_target_bounds:
+            self.vel_target_bound_tracker.update(self.v_bar)
+
+
 class JointPositionWithVelocityForward(_DelayedJointAction):
     """
     ExtremControl: Low-Latency Humanoid Teleoperation with Direct Extremity Control https://arxiv.org/pdf/2602.11321
@@ -446,6 +552,7 @@ class CorrelatedJointPosition(ActionV2):
 
 __all__ = [
     "JointPosition",
+    "JointReferenceModel",
     "JointPositionWithVelocityForward",
     "JointPositionDelta",
     "JointVelocity",

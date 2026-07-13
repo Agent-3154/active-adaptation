@@ -7,6 +7,7 @@ from .joint import (
     JointPosition,
     JointPositionDelta,
     JointPositionWithVelocityForward,
+    JointReferenceModel,
     JointVelocity,
 )
 from .marker import Marker
@@ -18,6 +19,7 @@ __all__ = [
     "ActionV2",
     "ConcatenatedAction",
     "JointPosition",
+    "JointReferenceModel",
     "JointPositionDelta",
     "CorrelatedJointPosition",
     "JointVelocity",
