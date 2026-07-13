@@ -4,6 +4,8 @@ from .base import Action, ActionV2
 from .composite import ConcatenatedAction
 from .joint import (
     CorrelatedJointPosition,
+    JointLeakyVelocityModel,
+    JointLeakyVelocityReachModel,
     JointPosition,
     JointPositionDelta,
     JointPositionWithVelocityForward,
@@ -20,6 +22,8 @@ __all__ = [
     "ConcatenatedAction",
     "JointPosition",
     "JointReferenceModel",
+    "JointLeakyVelocityModel",
+    "JointLeakyVelocityReachModel",
     "JointPositionDelta",
     "CorrelatedJointPosition",
     "JointVelocity",

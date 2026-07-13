@@ -234,8 +234,7 @@ class JointPosition(_DelayedJointAction):
 class JointReferenceModel(_DelayedJointAction):
     """Second-order reference-model prefilter for PD joint targets.
 
-    Implements Action Space III from the impedance-view analysis: raw policy
-    actions drive a fixed second-order low-pass filter whose state
+    Raw policy actions drive a fixed second-order low-pass filter whose state
     ``(q_bar, v_bar)`` is sent to the PD controller as position/velocity
     targets::
 
@@ -245,8 +244,8 @@ class JointReferenceModel(_DelayedJointAction):
         q_bar <- q_bar + dt * v_bar
 
     ``omega`` (natural frequency / bandwidth, rad/s) and ``zeta`` (damping
-    ratio) are fixed design constants, not policy outputs. Critical damping
-    is ``zeta = 1`` (``omega`` only sets how fast the filter responds, not
+    ratio) are fixed constants, not policy outputs. Critical damping is
+    ``zeta = 1`` (``omega`` only sets how fast the filter responds, not
     whether it is overdamped or underdamped). Use ``zeta >= 1`` to avoid
     resonant peaking in the reference trajectory. Filter state resets to the
     current joint positions with ``v_bar = 0`` on episode start to avoid
@@ -334,6 +333,198 @@ class JointReferenceModel(_DelayedJointAction):
             self.pos_target_bound_tracker.update(self.q_bar)
         if self.track_vel_target_bounds:
             self.vel_target_bound_tracker.update(self.v_bar)
+
+
+class JointLeakyVelocityModel(_DelayedJointAction):
+    """Two-stage leaky velocity reference model for PD joint targets.
+
+    Raw policy actions drive a first-order velocity tracker with a leaky
+    position integrator::
+
+        v_dot = omega * (action_scaling * a - v_bar)
+        v_bar <- v_bar + dt * v_dot
+        q_bar <- q_bar + dt * (v_bar - leak_rate * (q_bar - q0))
+
+    ``action_scaling``, ``omega``, and ``leak_rate`` are fixed constants, not
+    policy outputs. Steady-state position reach from action scales as
+    ``action_scaling / leak_rate``, independent of ``omega``. Filter state
+    resets to current joint positions with ``v_bar = 0`` on episode start.
+    """
+
+    def __init__(
+        self,
+        action_scaling: Dict[str, float] | float = 0.5,
+        omega: Dict[str, float] | float = 20.0,
+        leak_rate: Dict[str, float] | float = 2.0,
+        max_delay: int = 2,
+        alpha_range: Tuple[float, float] = (1.0, 1.0),
+        track_pos_target_bounds: bool = False,
+        track_vel_target_bounds: bool = False,
+    ):
+        super().__init__(
+            action_scaling=action_scaling,
+            max_delay=max_delay,
+            alpha_range=alpha_range,
+            track_pos_target_bounds=track_pos_target_bounds,
+            track_vel_target_bounds=track_vel_target_bounds,
+        )
+        self._omega = self._as_joint_dict(omega)
+        self._leak_rate = self._as_joint_dict(leak_rate)
+
+    @staticmethod
+    def _as_joint_dict(value: Dict[str, float] | float) -> Dict[str, float]:
+        if isinstance(value, (int, float)):
+            return {".*": float(value)}
+        return dict(value)
+
+    def _resolve_filter_params(self) -> Tuple[list[float], list[float], list[float]]:
+        _, _, action_scaling = string_utils.resolve_matching_names_values(
+            self._action_scaling, self.joint_names
+        )
+        _, _, omega = string_utils.resolve_matching_names_values(
+            self._omega, self.joint_names
+        )
+        _, _, leak_rate = string_utils.resolve_matching_names_values(
+            self._leak_rate, self.joint_names
+        )
+        return action_scaling, omega, leak_rate
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
+        self.offset = torch.zeros_like(self.default_joint_pos)
+
+        action_scaling, omega, leak_rate = self._resolve_filter_params()
+        self.action_scaling = torch.tensor(action_scaling, device=self.device)
+        self.omega = torch.tensor(omega, device=self.device)
+        self.leak_rate = torch.tensor(leak_rate, device=self.device)
+
+        self.q_bar = self.default_joint_pos.clone()
+        self.v_bar = torch.zeros_like(self.default_joint_pos)
+
+    def __repr__(self) -> str:
+        return (
+            f"JointLeakyVelocityModel(joint_names={self.joint_names}, "
+            f"joint_ids={self.joint_ids.tolist()})"
+        )
+
+    @override
+    def reset(self, env_ids: torch.Tensor):
+        super().reset(env_ids)
+        default_joint_pos = self.asset.data.default_joint_pos[
+            env_ids.unsqueeze(1), self.joint_ids
+        ]
+        self.default_joint_pos[env_ids] = default_joint_pos + self.offset[env_ids]
+        self.q_bar[env_ids] = self.asset.data.joint_pos[
+            env_ids.unsqueeze(1), self.joint_ids
+        ]
+        self.v_bar[env_ids] = 0.0
+
+    @override
+    def apply_action(self, substep: int):
+        self.applied_action.lerp_(self.action_queue[:, 0], self.alpha)
+        self.action_queue = self.action_queue.roll(-1, dims=1)
+
+        target_vel = self.applied_action * self.action_scaling
+        v_dot = self.omega * (target_vel - self.v_bar)
+        dt = self.env.physics_dt
+        self.v_bar.add_(dt * v_dot)
+        q_dot = self.v_bar - self.leak_rate * (self.q_bar - self.default_joint_pos)
+        self.q_bar.add_(dt * q_dot)
+
+        self.asset.set_joint_position_target(self.q_bar, joint_ids=self.joint_ids)
+        self.asset.set_joint_velocity_target(self.v_bar, joint_ids=self.joint_ids)
+
+        if self.track_pos_target_bounds:
+            self.pos_target_bound_tracker.update(self.q_bar)
+        if self.track_vel_target_bounds:
+            self.vel_target_bound_tracker.update(self.v_bar)
+
+
+class JointLeakyVelocityReachModel(JointLeakyVelocityModel):
+    """Range-normalized leaky velocity model with a single ``t_reach`` knob.
+
+    Same dynamics as :class:`JointLeakyVelocityModel`, but ``action_scaling``,
+    ``omega``, and ``leak_rate`` are derived per joint from the joint range and
+    a reach time ``t_reach`` (seconds to move near the joint limit under
+    sustained unit action)::
+
+        R = (q_high - q_low) / 2
+        leak_rate = 1 / t_reach
+        omega = min(10 * leak_rate, omega_pd / 5)   if omega_pd is given
+                10 * leak_rate                      otherwise
+        action_scaling = kappa * R * leak_rate
+
+    ``kappa`` (default 0.8) is a safety margin so a sustained unit action
+    reaches ``kappa * R`` rather than the physical limit.
+    """
+
+    def __init__(
+        self,
+        t_reach: Dict[str, float] | float = 0.5,
+        kappa: float = 0.8,
+        omega_pd: Dict[str, float] | float | None = None,
+        max_delay: int = 2,
+        alpha_range: Tuple[float, float] = (1.0, 1.0),
+        track_pos_target_bounds: bool = False,
+        track_vel_target_bounds: bool = False,
+    ):
+        t_reach_dict = self._as_joint_dict(t_reach)
+        self._t_reach = t_reach_dict
+        self._kappa = float(kappa)
+        if omega_pd is not None:
+            self._omega_pd = self._as_joint_dict(omega_pd)
+        else:
+            self._omega_pd = None
+
+        super().__init__(
+            action_scaling={key: 1.0 for key in t_reach_dict},
+            omega={".*": 1.0},
+            leak_rate={".*": 1.0},
+            max_delay=max_delay,
+            alpha_range=alpha_range,
+            track_pos_target_bounds=track_pos_target_bounds,
+            track_vel_target_bounds=track_vel_target_bounds,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"JointLeakyVelocityReachModel(joint_names={self.joint_names}, "
+            f"joint_ids={self.joint_ids.tolist()})"
+        )
+
+    @override
+    def _resolve_filter_params(self) -> Tuple[list[float], list[float], list[float]]:
+        _, _, t_reach = string_utils.resolve_matching_names_values(
+            self._t_reach, self.joint_names
+        )
+        limits = self.asset.data.soft_joint_pos_limits
+        if limits is None:
+            limits = self.asset.data.joint_pos_limits
+        limits = limits[0, self.joint_ids]
+        q_low, q_high = limits.unbind(-1)
+        half_range = (q_high - q_low) / 2
+
+        action_scaling: list[float] = []
+        omega: list[float] = []
+        leak_rate: list[float] = []
+        omega_pd_vals: list[float] | None = None
+        if self._omega_pd is not None:
+            _, _, omega_pd_vals = string_utils.resolve_matching_names_values(
+                self._omega_pd, self.joint_names
+            )
+
+        for i, t in enumerate(t_reach):
+            lam = 1.0 / t
+            leak_rate.append(lam)
+            if omega_pd_vals is not None:
+                omega.append(min(10.0 * lam, omega_pd_vals[i] / 5.0))
+            else:
+                omega.append(10.0 * lam)
+            action_scaling.append(self._kappa * float(half_range[i]) * lam)
+
+        return action_scaling, omega, leak_rate
 
 
 class JointPositionWithVelocityForward(_DelayedJointAction):
@@ -553,6 +744,8 @@ class CorrelatedJointPosition(ActionV2):
 __all__ = [
     "JointPosition",
     "JointReferenceModel",
+    "JointLeakyVelocityModel",
+    "JointLeakyVelocityReachModel",
     "JointPositionWithVelocityForward",
     "JointPositionDelta",
     "JointVelocity",
