@@ -1,5 +1,5 @@
 # @package task
-name: G1LocoFlat
+name: G1LocoFlatJLV
 
 viewer:
   resolution: [1280, 720]

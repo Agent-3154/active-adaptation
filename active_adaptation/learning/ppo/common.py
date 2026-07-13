@@ -28,7 +28,7 @@ from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import TensorDictModuleBase as ModBase
 from torchrl.modules import ProbabilisticActor
 from torchrl.data import Composite
-from typing import List
+from typing import List, Tuple, Union
 
 OBS_KEY = "policy"  # ("agents", "observation")
 OBS_PRIV_KEY = "priv"
@@ -40,22 +40,63 @@ TERM_KEY = ("next", "terminated")
 DONE_KEY = ("next", "done")
 CMD_KEY = "command"
 
+ClipParam = Union[float, Tuple[float, float]]
 
-def ppo_clipped_loss(ratio: torch.Tensor, adv: torch.Tensor, clip_param: float) -> torch.Tensor:
-    """Loss to minimize; negates the clipped surrogate so gradient descent maximizes it."""
+
+def resolve_clip_param(clip_param: ClipParam) -> Tuple[float, float]:
+    """Normalize ``clip_param`` to ``(eps_neg, eps_pos)``.
+
+    A scalar ``ε`` is treated as symmetric ``(ε, ε)``. A tuple
+    ``(eps_neg, eps_pos)`` clips the importance ratio to
+    ``[1 - eps_neg, 1 + eps_pos]``.
+    """
+    if isinstance(clip_param, (tuple, list)):
+        if len(clip_param) != 2:
+            raise ValueError(
+                f"clip_param tuple must have length 2, got {clip_param!r}"
+            )
+        eps_neg, eps_pos = float(clip_param[0]), float(clip_param[1])
+    else:
+        eps_neg = eps_pos = float(clip_param)
+    if eps_neg < 0.0 or eps_pos < 0.0:
+        raise ValueError(
+            f"clip_param values must be non-negative, got {(eps_neg, eps_pos)!r}"
+        )
+    return eps_neg, eps_pos
+
+
+def ppo_clipped_loss(
+    ratio: torch.Tensor, adv: torch.Tensor, clip_param: ClipParam
+) -> torch.Tensor:
+    """Loss to minimize; negates the clipped surrogate so gradient descent maximizes it.
+
+    ``clip_param`` may be a scalar ``ε`` (symmetric clip to ``[1-ε, 1+ε]``) or
+    ``(eps_neg, eps_pos)`` (asymmetric clip to ``[1-eps_neg, 1+eps_pos]``).
+    """
     assert ratio.shape == adv.shape
+    eps_neg, eps_pos = resolve_clip_param(clip_param)
     surr1 = adv * ratio
-    surr2 = adv * ratio.clamp(1.0 - clip_param, 1.0 + clip_param)
+    surr2 = adv * ratio.clamp(1.0 - eps_neg, 1.0 + eps_pos)
     return -torch.min(surr1, surr2).mean()
 
 
-def spo_loss(ratio: torch.Tensor, adv: torch.Tensor, clip_param: float) -> torch.Tensor:
+def spo_loss(
+    ratio: torch.Tensor, adv: torch.Tensor, clip_param: ClipParam
+) -> torch.Tensor:
     """
     Simple Policy Optimization Loss from https://arxiv.org/pdf/2401.16025.
     Loss to minimize; negates the SPO objective so gradient descent maximizes it.
+
+    For asymmetric ``clip_param=(eps_neg, eps_pos)``, the quadratic penalty
+    uses ``eps_pos`` when ``ratio > 1`` and ``eps_neg`` when ``ratio < 1``.
     """
     assert ratio.shape == adv.shape
-    obj = ratio * adv - adv.abs() / (2.0 * clip_param) * (ratio - 1.0).square()
+    eps_neg, eps_pos = resolve_clip_param(clip_param)
+    if eps_neg == eps_pos:
+        eps = ratio.new_full((), eps_neg)
+    else:
+        eps = torch.where(ratio >= 1.0, ratio.new_full((), eps_pos), ratio.new_full((), eps_neg))
+    obj = ratio * adv - adv.abs() / (2.0 * eps) * (ratio - 1.0).square()
     return -obj.mean()
 
 

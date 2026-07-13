@@ -1,5 +1,5 @@
 # @package task
-name: G1LocoFlat
+name: G1LocoFlatJRM
 
 viewer:
   resolution: [1280, 720]

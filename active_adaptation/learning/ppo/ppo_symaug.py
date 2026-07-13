@@ -54,6 +54,7 @@ from active_adaptation.learning.modules import (
 from active_adaptation.learning.ppo.common import (
     ppo_clipped_loss,
     spo_loss,
+    resolve_clip_param,
     CMD_KEY,
     OBS_KEY,
     ACTION_KEY,
@@ -84,7 +85,9 @@ class PPOConfig:
     num_minibatches: int = 4
     lr: float = 5e-4
     desired_kl: Union[float, None] = None
-    clip_param: float = 0.2
+    # Scalar ε → clip ratio to [1-ε, 1+ε]. Tuple (eps_neg, eps_pos) →
+    # asymmetric clip to [1-eps_neg, 1+eps_pos] (e.g. [0.1, 0.3] → [0.9, 1.3]).
+    clip_param: Union[float, Tuple[float, float]] = 0.2
     entropy_coef: float = 0.002
 
     clamp_reward: bool = False
@@ -132,7 +135,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.entropy_coef = self.cfg.entropy_coef
         self.max_grad_norm = 1.0
         self.desired_kl = self.cfg.desired_kl
-        self.clip_param = self.cfg.clip_param
+        self.clip_param = resolve_clip_param(self.cfg.clip_param)
         self.actor_loss_fn = spo_loss if self.cfg.spo else ppo_clipped_loss
         self.critic_loss_fn = nn.MSELoss(reduction="none")
         self.gae = GAE(0.99, 0.95)  
@@ -440,8 +443,10 @@ class PPOPolicy(TensorDictModuleBase):
         ret = tensordict["ret"] # [bsize, 1]
         log_ratio = (log_probs - log_probs_data).reshape_as(adv) # [bsize, 1]
         ratio = torch.exp(log_ratio)
-        clamped = ((ratio.detach() - 1.0).abs() > self.clip_param).reshape_as(ret)
-        
+        eps_neg, eps_pos = self.clip_param
+        ratio_det = ratio.detach()
+        clamped = ((ratio_det < 1.0 - eps_neg) | (ratio_det > 1.0 + eps_pos)).reshape_as(ret)
+
         policy_loss = self.actor_loss_fn(ratio, adv, self.clip_param)
         entropy_loss = - self.entropy_coef * entropy
 
