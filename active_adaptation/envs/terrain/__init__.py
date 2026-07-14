@@ -15,7 +15,7 @@ TERRAINS_MUJOCO = {}
 if active_adaptation.get_backend() == "isaac":
     from . import regular
     from . wrapper import BetterTerrainGenerator, BetterTerrainImporter
-else:
+elif active_adaptation.get_backend() == "mujoco":
     from active_adaptation.envs.backends.mujoco.mujoco import MjTerrainCfg
     path = Path(active_adaptation.__path__[0]) / "assets_mjcf" / "plane.xml"
     TERRAINS_MUJOCO["plane"] = MjTerrainCfg(mjcf_path=str(path))

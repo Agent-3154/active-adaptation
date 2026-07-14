@@ -7,10 +7,7 @@ joints. These functions normalize on the articulation's simulation name lists
 and ordering that match the asset, not an arbitrary backend layout.
 """
 
-try:
-    from isaaclab.utils.string import resolve_matching_names
-except (ImportError, ModuleNotFoundError):
-    from mjlab.utils.lab_api.string import resolve_matching_names
+from active_adaptation.utils.string import resolve_matching_names
 
 
 def _get_contact_sensor_primary_names(contact_sensor) -> list[str]:

@@ -8,10 +8,7 @@ from tensordict import TensorClass, MemoryMappedTensor
 from typing import List
 from scipy.spatial.transform import Rotation as sRot, Slerp
 from concurrent.futures import ThreadPoolExecutor
-try:
-    from isaaclab.utils.string import resolve_matching_names
-except ModuleNotFoundError:
-    from mjlab.utils.lab_api.string import resolve_matching_names
+from active_adaptation.utils.string import resolve_matching_names
 
 
 def lerp(x, xp, fp):

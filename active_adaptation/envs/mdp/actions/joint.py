@@ -7,11 +7,7 @@ import torch.nn as nn
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 from typing_extensions import override
 
-try:
-    import isaaclab.utils.string as string_utils
-except ModuleNotFoundError:
-    from mjlab.utils.lab_api import string as string_utils
-
+from active_adaptation.utils.string import resolve_matching_names_values
 from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
 
 from .base import ActionV2
@@ -102,7 +98,7 @@ class _DelayedJointAction(ActionV2):
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
 
-        _, self.joint_names, scaling = string_utils.resolve_matching_names_values(
+        _, self.joint_names, scaling = resolve_matching_names_values(
             self._action_scaling, self.asset.cfg.joint_names_simulation
         )
         self.joint_ids = torch.tensor(
@@ -282,10 +278,10 @@ class JointReferenceModel(_DelayedJointAction):
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
         self.offset = torch.zeros_like(self.default_joint_pos)
 
-        _, _, omega = string_utils.resolve_matching_names_values(
+        _, _, omega = resolve_matching_names_values(
             self._omega, self.joint_names
         )
-        _, _, zeta = string_utils.resolve_matching_names_values(
+        _, _, zeta = resolve_matching_names_values(
             self._zeta, self.joint_names
         )
         self.omega = torch.tensor(omega, device=self.device)
@@ -378,13 +374,13 @@ class JointLeakyVelocityModel(_DelayedJointAction):
         return dict(value)
 
     def _resolve_filter_params(self) -> Tuple[list[float], list[float], list[float]]:
-        _, _, action_scaling = string_utils.resolve_matching_names_values(
+        _, _, action_scaling = resolve_matching_names_values(
             self._action_scaling, self.joint_names
         )
-        _, _, omega = string_utils.resolve_matching_names_values(
+        _, _, omega = resolve_matching_names_values(
             self._omega, self.joint_names
         )
-        _, _, leak_rate = string_utils.resolve_matching_names_values(
+        _, _, leak_rate = resolve_matching_names_values(
             self._leak_rate, self.joint_names
         )
         return action_scaling, omega, leak_rate
@@ -496,7 +492,7 @@ class JointLeakyVelocityReachModel(JointLeakyVelocityModel):
 
     @override
     def _resolve_filter_params(self) -> Tuple[list[float], list[float], list[float]]:
-        _, _, t_reach = string_utils.resolve_matching_names_values(
+        _, _, t_reach = resolve_matching_names_values(
             self._t_reach, self.joint_names
         )
         limits = self.asset.data.soft_joint_pos_limits
@@ -511,7 +507,7 @@ class JointLeakyVelocityReachModel(JointLeakyVelocityModel):
         leak_rate: list[float] = []
         omega_pd_vals: list[float] | None = None
         if self._omega_pd is not None:
-            _, _, omega_pd_vals = string_utils.resolve_matching_names_values(
+            _, _, omega_pd_vals = resolve_matching_names_values(
                 self._omega_pd, self.joint_names
             )
 

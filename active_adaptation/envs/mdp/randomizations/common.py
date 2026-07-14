@@ -11,10 +11,7 @@ import active_adaptation
 from active_adaptation.utils.math import quat_rotate_inverse
 from active_adaptation.utils.profiling import ScopedTimer
 
-try:
-    import isaaclab.utils.string as string_utils
-except ModuleNotFoundError:
-    from mjlab.utils.lab_api import string as string_utils
+import active_adaptation.utils.string as string_utils
 
 
 if active_adaptation.get_backend() == "isaac":
