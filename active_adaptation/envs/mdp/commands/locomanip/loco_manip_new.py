@@ -14,6 +14,7 @@ from active_adaptation.utils.math import (
     quat_rotate_inverse,
     yaw_quat,
 )
+from active_adaptation.utils.symmetry import SymmetryTransform
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -223,6 +224,31 @@ class LocoManipNew(CommandV2):
                 1.0 - self.cmd_eef_status.float(),
             ],
             dim=-1,
+        )
+
+    def symmetry_transform(self):
+        # Mirror left-right: flip y and yaw for all body-frame vectors.
+        cmd_linvel_b = SymmetryTransform(perm=[0, 1], signs=[1, -1])
+        cmd_yawvel_b = SymmetryTransform(perm=[0], signs=[-1])
+        cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        cmd_eef_forward_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        forward_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        cmd_eef_upward_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        upward_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
+        eef_status = SymmetryTransform(perm=[0, 1], signs=[1, 1])
+        return SymmetryTransform.cat(
+            [
+                cmd_linvel_b,
+                cmd_yawvel_b,
+                cmd_eef_pos_b,
+                pos_diff_b,
+                cmd_eef_forward_b,
+                forward_diff_b,
+                cmd_eef_upward_b,
+                upward_diff_b,
+                eef_status,
+            ]
         )
 
     @override
