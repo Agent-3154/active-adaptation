@@ -142,7 +142,7 @@ def make_mjlab_cfg(motrix: bool = False):
     from active_adaptation.assets.asset_cfg import AssetSpec, EntityCfg
     from mjlab.entity import EntityArticulationInfoCfg
     from mjlab.utils.spec_config import CollisionCfg
-    from mjlab.actuator import BuiltinPositionActuatorCfg
+    from mjlab.actuator import BuiltinPdActuatorCfg
     from mjlab.sensor import ContactSensorCfg, ContactMatch
 
     mjcf_path = ROBOT_MODEL_DIR / "a2" / "a2.xml"
@@ -159,7 +159,7 @@ def make_mjlab_cfg(motrix: bool = False):
         spec_fn=spec_fn,
         articulation=EntityArticulationInfoCfg(
             actuators=(
-                BuiltinPositionActuatorCfg(
+                BuiltinPdActuatorCfg(
                     target_names_expr=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"),
                     effort_limit=EFFORT_LIMIT,
                     stiffness=50.0,

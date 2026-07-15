@@ -16,7 +16,7 @@ if active_adaptation.get_backend() == "isaac":
 if active_adaptation.get_backend() == "mjlab":
     from mjlab.utils.lab_api.string import resolve_matching_names_values
     from mjlab.sim import Simulation
-    from mjlab.actuator import BuiltinPositionActuator
+    from mjlab.actuator import BuiltinPositionActuator, BuiltinPdActuator
 
 
 class actuator_pd_gains(RandomizationV2):
@@ -82,8 +82,8 @@ class actuator_pd_gains(RandomizationV2):
         self.model = sim.model
 
         for actuator in self.asset.actuators:
-            if not isinstance(actuator, BuiltinPositionActuator):
-                raise ValueError(f"Actuator {actuator} is not a BuiltinPositionActuator")
+            if not isinstance(actuator, (BuiltinPositionActuator, BuiltinPdActuator)):
+                raise ValueError(f"Actuator {actuator} is not a BuiltinPositionActuator or BuiltinPdActuator")
 
         if self.stiffness_range is not None:
             kp_ids, _, kp_ranges = resolve_matching_names_values(

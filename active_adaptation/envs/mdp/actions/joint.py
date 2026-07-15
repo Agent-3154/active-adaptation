@@ -303,9 +303,7 @@ class JointReferenceModel(_DelayedJointAction):
             env_ids.unsqueeze(1), self.joint_ids
         ]
         self.default_joint_pos[env_ids] = default_joint_pos + self.offset[env_ids]
-        self.q_bar[env_ids] = self.asset.data.joint_pos[
-            env_ids.unsqueeze(1), self.joint_ids
-        ]
+        self.q_bar[env_ids] = self.default_joint_pos[env_ids]
         self.v_bar[env_ids] = 0.0
 
     @override
