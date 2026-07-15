@@ -28,7 +28,8 @@ from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import TensorDictModuleBase as ModBase
 from torchrl.modules import ProbabilisticActor
 from torchrl.data import Composite
-from typing import List, Tuple, Union
+from typing import Any, List, Tuple, Union
+from collections.abc import Sequence
 
 OBS_KEY = "policy"  # ("agents", "observation")
 OBS_PRIV_KEY = "priv"
@@ -40,20 +41,18 @@ TERM_KEY = ("next", "terminated")
 DONE_KEY = ("next", "done")
 CMD_KEY = "command"
 
-ClipParam = Union[float, Tuple[float, float]]
 
-
-def resolve_clip_param(clip_param: ClipParam) -> Tuple[float, float]:
+def resolve_clip_param(clip_param: Any) -> Tuple[float, float]:
     """Normalize ``clip_param`` to ``(eps_neg, eps_pos)``.
 
-    A scalar ``ε`` is treated as symmetric ``(ε, ε)``. A tuple
-    ``(eps_neg, eps_pos)`` clips the importance ratio to
-    ``[1 - eps_neg, 1 + eps_pos]``.
+    A scalar ``ε`` is treated as symmetric ``(ε, ε)``. A length-2 sequence
+    ``(eps_neg, eps_pos)`` (tuple, list, or OmegaConf ``ListConfig``) clips
+    the importance ratio to ``[1 - eps_neg, 1 + eps_pos]``.
     """
-    if isinstance(clip_param, (tuple, list)):
+    if isinstance(clip_param, Sequence) and not isinstance(clip_param, (str, bytes)):
         if len(clip_param) != 2:
             raise ValueError(
-                f"clip_param tuple must have length 2, got {clip_param!r}"
+                f"clip_param sequence must have length 2, got {clip_param!r}"
             )
         eps_neg, eps_pos = float(clip_param[0]), float(clip_param[1])
     else:
@@ -66,12 +65,13 @@ def resolve_clip_param(clip_param: ClipParam) -> Tuple[float, float]:
 
 
 def ppo_clipped_loss(
-    ratio: torch.Tensor, adv: torch.Tensor, clip_param: ClipParam
+    ratio: torch.Tensor, adv: torch.Tensor, clip_param: Any
 ) -> torch.Tensor:
     """Loss to minimize; negates the clipped surrogate so gradient descent maximizes it.
 
     ``clip_param`` may be a scalar ``ε`` (symmetric clip to ``[1-ε, 1+ε]``) or
-    ``(eps_neg, eps_pos)`` (asymmetric clip to ``[1-eps_neg, 1+eps_pos]``).
+    a length-2 sequence ``(eps_neg, eps_pos)`` (asymmetric clip to
+    ``[1-eps_neg, 1+eps_pos]``).
     """
     assert ratio.shape == adv.shape
     eps_neg, eps_pos = resolve_clip_param(clip_param)
@@ -81,7 +81,7 @@ def ppo_clipped_loss(
 
 
 def spo_loss(
-    ratio: torch.Tensor, adv: torch.Tensor, clip_param: ClipParam
+    ratio: torch.Tensor, adv: torch.Tensor, clip_param: Any
 ) -> torch.Tensor:
     """
     Simple Policy Optimization Loss from https://arxiv.org/pdf/2401.16025.

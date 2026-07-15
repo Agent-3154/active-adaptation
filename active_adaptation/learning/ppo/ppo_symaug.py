@@ -39,7 +39,7 @@ from tensordict.nn import (
 
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
-from typing import Union, Tuple, Optional, TYPE_CHECKING
+from typing import Union, Tuple, Optional, Any, TYPE_CHECKING
 from collections import OrderedDict
 
 if TYPE_CHECKING:
@@ -85,9 +85,10 @@ class PPOConfig:
     num_minibatches: int = 4
     lr: float = 5e-4
     desired_kl: Union[float, None] = None
-    # Scalar ε → clip ratio to [1-ε, 1+ε]. Tuple (eps_neg, eps_pos) →
-    # asymmetric clip to [1-eps_neg, 1+eps_pos] (e.g. [0.1, 0.3] → [0.9, 1.3]).
-    clip_param: Union[float, Tuple[float, float]] = 0.2
+    # Scalar ε → [1-ε, 1+ε]. Length-2 list/tuple [eps_neg, eps_pos] →
+    # [1-eps_neg, 1+eps_pos]. Typed as Any: Hydra/OmegaConf cannot express
+    # Union[float, Sequence[float]], and YAML lists become ListConfig.
+    clip_param: Any = (0.2, 0.2)
     entropy_coef: float = 0.002
 
     clamp_reward: bool = False
