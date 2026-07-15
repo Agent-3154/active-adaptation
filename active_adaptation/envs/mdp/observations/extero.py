@@ -676,6 +676,7 @@ class camera_isaac(ObservationV2):
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
+        self.env.render_enabled = True
         if self.body_name is None:
             self.camera_mount: RigidObject = self.env.scene.entities[self.sensor_name + "_mount"]
         self.camera: TiledCamera = self.env.scene.sensors[self.sensor_name]
