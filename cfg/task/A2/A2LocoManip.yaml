@@ -45,27 +45,15 @@ input:
         alpha_range: [0.8, 0.9]
 
 command:
-  _target_: SingleEEFLocoManip
-  eef_body_name: grasp_point
-  gripper_joint_names: "arm_joint[7,8]"
-  # Heading-frame (x,y) offsets from root + z above terrain; tune for Piper workspace.
-  workspace_range:
-    - [0.25, 0.75]
-    - [-0.2, 0.2]
-    - [0.2, 0.8]
-  # Half of resampled envs keep independent local loco/manip commands.
-  # The other half sample a world-frame EEF target and base standoff pose,
-  # then convert them back into the same 6D local command interface.
-  world_goal_prob: 0.25
-  standoff_distance_range: [1.0, 3.0]
-  standoff_linvel_gain_range: [1.0, 2.0]
-  standoff_yaw_gain_range: [1.0, 2.0]
+  _target_: LocoManipNew
+  eef_body_name: "grasp_point"
+  mode_probs_0: [0.0, 0.0, 1.0]
+  mode_probs_1: [0.3, 0.5, 0.2]
+  mode_transition_steps: 2000
 
 observation:
   command:
-    command:  {key: dense}
-  command_sparse:
-    command:  {key: sparse}
+    command:  {}
   policy:
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {steps: 4, noise_std: 0.05}
@@ -92,7 +80,7 @@ reward:
     linvel_z_l2:        {weight: 2.0}
     base_height_exp:    {weight: 1.0, target_height: 0.37, sigma: 0.5}
   manip:
-    eef_pos_forward_tracking: {weight: 1.5}
+    eef_pos_orient_tracking: {weight: 1.5}
     eef_grasp:          {weight: 1.0}
     eef_angvel_penalty: {weight: 0.005}
   regularization:
@@ -102,7 +90,8 @@ reward:
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
-    feet_air_time:      {weight: 0.4, body_names: .*_foot, thres: 0.5}
+    feet_air_time:      {weight: 1.0, body_names: .*_foot, thres: 0.5}
+    max_swing_height:   {weight: 4.0, body_names: .*_foot, target_height: 0.15}
     feet_sliding:       {weight: 0.2, body_names: .*_foot}
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:
@@ -110,7 +99,6 @@ reward:
     linvel_projection:  {weight: 0.5}
     feet_contact_count: {weight: 1.0, body_names: .*_foot}
     eef_pos_error_l1:   {weight: 1.0}
-    # feet_swing_height:  {weight: 0.1, target_height: 0.1}
 
 termination:
   max_episode_length: {}
