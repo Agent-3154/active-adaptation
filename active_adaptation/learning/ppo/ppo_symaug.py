@@ -90,6 +90,7 @@ class PPOConfig:
     # Union[float, Sequence[float]], and YAML lists become ListConfig.
     clip_param: Any = (0.2, 0.2)
     entropy_coef: float = 0.002
+    pred_std: bool = False
 
     clamp_reward: bool = False
 
@@ -169,7 +170,7 @@ class PPOPolicy(TensorDictModuleBase):
         )
         actor_modules = [
             Mod(actor_mlp, ["_obs_normed"], ["_actor_feature"]),
-            Mod(Actor(self.action_dim), ["_actor_feature"], ["loc", "scale"])
+            Mod(Actor(self.action_dim, predict_std=self.cfg.pred_std), ["_actor_feature"], ["loc", "scale"])
         ]
         if self.cfg.aux_coef > 0.0:
             actor_modules.append(Mod(nn.LazyLinear(1), ["_actor_feature"], ["aux_pred"]))
