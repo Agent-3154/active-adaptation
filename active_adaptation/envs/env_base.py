@@ -215,6 +215,8 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         self._create_mdp_terms()
         self._setup_simulation()
+
+        self._render_enabled = self.sim.has_gui() and self.backend != "mjlab"
         self._initialize_mdp_terms()
         self._build_tensor_specs()
 
@@ -238,6 +240,14 @@ class _EnvBase(EnvBase, RegistryMixin):
         else:
             raise ValueError(f"Invalid type for max episode length: {type(value)}")
         self._max_episode_length = value.to(self.device)
+    
+    @property
+    def render_enabled(self) -> bool:
+        return self._render_enabled
+    
+    @render_enabled.setter
+    def render_enabled(self, value: bool):
+        self._render_enabled = value
 
     # ---------------------------------------------------------------------
     # Initialization helpers
@@ -539,7 +549,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             self.command_manager.update()
 
         # TODO: make this backend agnostic
-        if self.sim.has_gui() and self.backend != "mjlab":
+        if self.render_enabled:
             self.sim.render()
         if self.backend == "mjlab":
             self.sim.sense()
