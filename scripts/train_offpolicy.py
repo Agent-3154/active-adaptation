@@ -23,6 +23,7 @@ from tensordict import TensorDictBase
 from tensordict.nn import TensorDictModuleBase
 
 import active_adaptation as aa
+from active_adaptation.pipeline_io import get_artifacts_dir, write_stage_artifacts
 from active_adaptation.utils.profiling import ScopedTimer
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -124,8 +125,8 @@ FILE_PATH = Path(__file__).resolve().parent
 CONFIG_PATH = FILE_PATH.parent / "cfg"
 
 
-@hydra.main(config_path=str(CONFIG_PATH), config_name="train", version_base=None)
-def main(cfg: TrainConfig):
+def run(cfg: TrainConfig) -> dict[str, str]:
+    """Train an off-policy policy and return checkpoint paths for downstream stages."""
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
@@ -135,29 +136,30 @@ def main(cfg: TrainConfig):
         f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}"
     )
 
+    wandb_run = None
     if aa.is_main_process():
-        run = wandb.init(
+        wandb_run = wandb.init(
             job_type=cfg.wandb.job_type,
             project=cfg.wandb.project,
             mode=cfg.wandb.mode,
             tags=cfg.wandb.tags,
         )
-        run.config.update(OmegaConf.to_container(cfg))
-        run.config["world_size"] = aa.get_world_size()
+        wandb_run.config.update(OmegaConf.to_container(cfg))
+        wandb_run.config["world_size"] = aa.get_world_size()
 
         default_run_name = (
             f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         )
-        run_idx = run.name.split("-")[-1]
-        run.name = f"{run_idx}-{default_run_name}"
-        setproctitle(run.name)
+        run_idx = wandb_run.name.split("-")[-1]
+        wandb_run.name = f"{run_idx}-{default_run_name}"
+        setproctitle(wandb_run.name)
 
-        run_dir = Path(run.dir)
+        run_dir = Path(wandb_run.dir)
         run_dir.mkdir(parents=True, exist_ok=True)
         cfg_save_path = run_dir / "cfg.yaml"
         OmegaConf.save(cfg, cfg_save_path)
-        run.save(str(cfg_save_path), policy="now")
-        run.save(str(run_dir / "config.yaml"), policy="now")
+        wandb_run.save(str(cfg_save_path), policy="now")
+        wandb_run.save(str(run_dir / "config.yaml"), policy="now")
 
     from active_adaptation.helpers import make_env_policy, evaluate
     from active_adaptation.utils.helpers import EpisodeStats
@@ -189,15 +191,15 @@ def main(cfg: TrainConfig):
     episode_stats = EpisodeStats(stats_keys, device=env.device)
 
     def save(policy, checkpoint_name: str, *, upload_to_wandb: bool = True):
-        run_dir = Path(run.dir)
+        run_dir = Path(wandb_run.dir)
         ckpt_path = run_dir / f"{checkpoint_name}.pt"
         state_dict = OrderedDict()
-        state_dict["wandb"] = {"name": run.name, "id": run.id}
+        state_dict["wandb"] = {"name": wandb_run.name, "id": wandb_run.id}
         state_dict["policy"] = policy.state_dict()
         
         torch.save(state_dict, ckpt_path)
         if upload_to_wandb:
-            run.save(str(ckpt_path), policy="now", base_path=run.dir)
+            wandb_run.save(str(ckpt_path), policy="now", base_path=wandb_run.dir)
         
         latest_link = run_dir / "checkpoint_latest.pt"
         if latest_link.exists() or latest_link.is_symlink():
@@ -282,9 +284,10 @@ def main(cfg: TrainConfig):
                 )
                 info.update(env.extra)
                 info.update(env.stats_ema)  # step-wise exponential moving average of stats
-                run.log(info)
+                wandb_run.log(info)
                 print(f"Latest checkpoint: {ckpt_path}")
 
+    artifacts: dict[str, str] = {}
     if aa.is_main_process():
         ckpt_path = save(policy, "checkpoint_final")
         policy_eval = policy.get_rollout_policy("eval")
@@ -292,10 +295,27 @@ def main(cfg: TrainConfig):
             env, policy_eval, render=cfg.eval_render, seed=cfg.seed
         )
         info["env_frames"] = env_frames
-        run.log(info)
+        wandb_run.log(info)
         wandb.finish()
         print(f"Final checkpoint: {ckpt_path}")
-    exit(0)
+        artifacts = {
+            "checkpoint_path": ckpt_path,
+            "run_dir": str(run_dir),
+            "task": str(cfg.task.name),
+            "algo": str(cfg.algo.name),
+        }
+        if cfg.algo.get("prior_data") is not None:
+            artifacts["prior_data"] = str(cfg.algo.prior_data)
+        artifacts_dir = get_artifacts_dir()
+        if artifacts_dir is not None:
+            write_stage_artifacts(artifacts, artifacts_dir=artifacts_dir)
+            print(f"Wrote stage artifacts to {artifacts_dir}")
+    return artifacts
+
+
+@hydra.main(config_path=str(CONFIG_PATH), config_name="train", version_base=None)
+def main(cfg: TrainConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

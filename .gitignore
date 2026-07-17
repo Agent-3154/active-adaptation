@@ -175,6 +175,7 @@ outputs_train/
 outputs_rollout/
 outputs_eval/
 outputs_play/
+outputs_pipeline/
 wandb/
 artifacts/
 

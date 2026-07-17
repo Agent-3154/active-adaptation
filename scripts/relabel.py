@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import List, Any
 from dataclasses import dataclass, field
 
-import active_adaptation as aa
 from active_adaptation.envs.env_base import RewardGroup, mdp
+from active_adaptation.pipeline_io import get_artifacts_dir, write_stage_artifacts
 
 from hydra.core.config_store import ConfigStore
 
@@ -51,13 +51,10 @@ def mean_episode_return(
     return returns.mean().item(), returns.numel()
 
 
-@hydra.main(config_path="../cfg", config_name="relabel", version_base=None)
-def main(cfg):
+def run(cfg: RelabelConfig) -> dict[str, str]:
+    """Relabel rollout commands/rewards and return archive paths for downstream stages."""
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
-
-    # This script does not instantiate an environment
-
 
     command_cfg = dict(cfg.task.command)
     _target_ = command_cfg.pop("_target_")
@@ -65,7 +62,7 @@ def main(cfg):
 
     rollout_path = Path(cfg.rollout_path).absolute()
     rollout = torch.load(rollout_path, weights_only=False)
-    
+
     tensordict = rollout["stacked"]
     print(tensordict)
 
@@ -76,7 +73,7 @@ def main(cfg):
     assert is_init.shape == (T, N, 1), f"Expected `is_init` tensor with shape [T, N, 1], got {is_init.shape}"
     assert done.shape == (T, N, 1), f"Expected `(next, done)` tensor with shape [T, N, 1], got {done.shape}"
 
-    print(f"Relabeling command...")
+    print("Relabeling command...")
     command.relabel_command(tensordict)
 
     reward_cfg = cfg.task.reward
@@ -99,11 +96,27 @@ def main(cfg):
             f"\tmean episode return ({group_name}): {mean_ret:.4f} "
             f"({n_episodes} completed episodes)"
         )
-    
+
     rollout["stacked"] = tensordict
     save_path = rollout_path.with_suffix(".relabeled.pt")
     torch.save(rollout, save_path)
     print(f"Rollout saved to {save_path}")
+
+    artifacts = {
+        "rollout_path": str(rollout_path),
+        "relabeled_path": str(save_path.resolve()),
+        "task": str(cfg.task.name),
+    }
+    artifacts_dir = get_artifacts_dir()
+    if artifacts_dir is not None:
+        write_stage_artifacts(artifacts, artifacts_dir=artifacts_dir)
+        print(f"Wrote stage artifacts to {artifacts_dir}")
+    return artifacts
+
+
+@hydra.main(config_path="../cfg", config_name="relabel", version_base=None)
+def main(cfg: RelabelConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

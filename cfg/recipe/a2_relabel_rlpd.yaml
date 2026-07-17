@@ -1,0 +1,31 @@
+# @package _global_
+# Example: teacher PPO -> rollout -> relabel -> RLPD SAC
+name: a2_relabel_rlpd
+work_dir: ./outputs_pipeline/${name}/${now:%Y-%m-%d-%H-%M-%S}
+
+stages:
+  - name: train_teacher
+    script: train_ppo.py
+    overrides:
+      - task=A2/A2LocoManip
+      - algo=ppo_symaug
+
+  - name: rollout
+    script: rollout.py
+    overrides:
+      - task=A2/A2LocoManip
+      - algo=ppo_symaug
+      - checkpoint_path=${artifact.train_teacher.checkpoint_path}
+
+  - name: relabel
+    script: relabel.py
+    overrides:
+      - task=A2/A2LocoManipSparse
+      - rollout_path=${artifact.rollout.rollout_path}
+
+  - name: train_rlpd
+    script: train_offpolicy.py
+    overrides:
+      - task=A2/A2LocoManipSparse
+      - algo=sac
+      - algo.prior_data=${artifact.relabel.relabeled_path}
