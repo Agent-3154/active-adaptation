@@ -5,6 +5,9 @@ Each stage is launched as a fresh Python subprocess (required for Isaac Lab).
 Stages write a flat ``run_state.yaml``; the driver merges keys into
 ``work_dir/run_state.yaml``.
 
+Optional per-stage ``gpus`` (e.g. ``\"0,1\"``) launches that stage under
+``torchrun`` via :mod:`active_adaptation.ddp_launch`.
+
 To resume from completed stages, comment them out and seed::
 
     python scripts/pipeline.py run_state=/path/to/wandb/.../files/run_state.yaml
@@ -27,6 +30,7 @@ from hydra.conf import HydraConf, JobConf, RunDir
 from hydra.core.config_store import ConfigStore
 from omegaconf import OmegaConf
 
+from active_adaptation.ddp_launch import build_torchrun_command
 from active_adaptation.pipeline_io import (
     RUN_STATE_FILENAME,
     load_run_state,
@@ -59,6 +63,8 @@ class StageConfig:
     """Hydra CLI overrides passed to the stage script."""
     enabled: bool = True
     """Skip this stage when false (prefer commenting it out of the recipe instead)."""
+    gpus: Optional[str] = None
+    """Comma-separated GPU ids for DDP (e.g. ``\"0,1\"``). ``null`` runs a single process."""
 
 
 @dataclass
@@ -106,8 +112,9 @@ def run_stage(
     """Run one stage as a subprocess and return its written run state.
 
     Resolves ``${run_state.*}`` placeholders, launches ``scripts/<stage.script>``
-    with ``AA_RUN_STATE_DIR`` pointing at ``work_dir/stages/<name>/``, then loads
-    that directory's ``run_state.yaml``.
+    (optionally under ``torchrun`` when ``stage.gpus`` is set) with
+    ``AA_RUN_STATE_DIR`` pointing at ``work_dir/stages/<name>/``, then loads that
+    directory's ``run_state.yaml``.
     """
     script_path = FILE_PATH / stage.script
     if not script_path.is_file():
@@ -118,8 +125,19 @@ def run_stage(
 
     overrides = OmegaConf.to_container(stage.overrides, resolve=False)
     overrides = resolve_run_state_overrides(overrides, run_state)
-    cmd = [python_executable, str(script_path), *overrides]
-    env = {**os.environ, "AA_RUN_STATE_DIR": str(run_state_dir)}
+    env_updates = {"AA_RUN_STATE_DIR": str(run_state_dir)}
+
+    if stage.gpus:
+        cmd, env = build_torchrun_command(
+            script_path,
+            overrides,
+            gpu_ids=stage.gpus,
+            python_executable=python_executable,
+        )
+        env.update(env_updates)
+    else:
+        cmd = [python_executable, str(script_path), *overrides]
+        env = {**os.environ, **env_updates}
 
     log.info("[%s] running %s", stage.name, " ".join(cmd))
     log.info("[%s] run_state -> %s", stage.name, run_state_dir / RUN_STATE_FILENAME)
