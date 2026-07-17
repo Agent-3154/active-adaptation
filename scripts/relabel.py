@@ -7,7 +7,11 @@ from typing import List, Any
 from dataclasses import dataclass, field
 
 from active_adaptation.envs.env_base import RewardGroup, mdp
-from active_adaptation.pipeline_io import get_artifacts_dir, write_stage_artifacts
+from active_adaptation.pipeline_io import (
+    RUN_STATE_FILENAME,
+    get_run_state_dir,
+    write_run_state,
+)
 
 from hydra.core.config_store import ConfigStore
 
@@ -102,16 +106,18 @@ def run(cfg: RelabelConfig) -> dict[str, str]:
     torch.save(rollout, save_path)
     print(f"Rollout saved to {save_path}")
 
-    artifacts = {
+    run_state = {
         "rollout_path": str(rollout_path),
         "relabeled_path": str(save_path.resolve()),
         "task": str(cfg.task.name),
     }
-    artifacts_dir = get_artifacts_dir()
-    if artifacts_dir is not None:
-        write_stage_artifacts(artifacts, artifacts_dir=artifacts_dir)
-        print(f"Wrote stage artifacts to {artifacts_dir}")
-    return artifacts
+    run_state_dir = save_path.parent
+    run_state_path = write_run_state(run_state, run_state_dir / RUN_STATE_FILENAME)
+    print(f"Wrote run state to {run_state_path}")
+    pipeline_dir = get_run_state_dir()
+    if pipeline_dir is not None and pipeline_dir.resolve() != run_state_dir.resolve():
+        write_run_state(run_state, pipeline_dir / RUN_STATE_FILENAME)
+    return run_state
 
 
 @hydra.main(config_path="../cfg", config_name="relabel", version_base=None)

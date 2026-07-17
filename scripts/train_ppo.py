@@ -23,7 +23,11 @@ from tensordict import TensorDictBase
 from tensordict.nn import TensorDictModuleBase
 
 import active_adaptation as aa
-from active_adaptation.pipeline_io import get_artifacts_dir, write_stage_artifacts
+from active_adaptation.pipeline_io import (
+    RUN_STATE_FILENAME,
+    get_run_state_dir,
+    write_run_state,
+)
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.learning.ppo.ppo_base import PPOBase
 
@@ -399,7 +403,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                 info.update(env.stats_ema)  # step-wise exponential moving average of stats
                 wandb_run.log(info)
 
-    artifacts: dict[str, str] = {}
+    run_state: dict[str, str] = {}
     if aa.is_main_process():
         ckpt_path = save(policy, "checkpoint_final")
         policy_eval = policy.get_rollout_policy("eval")
@@ -410,17 +414,18 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         wandb_run.log(info)
         wandb.finish()
         print(f"Final checkpoint: {ckpt_path}")
-        artifacts = {
+        run_state = {
             "checkpoint_path": ckpt_path,
             "run_dir": str(run_dir),
             "task": str(cfg.task.name),
             "algo": str(cfg.algo.name),
         }
-        artifacts_dir = get_artifacts_dir()
-        if artifacts_dir is not None:
-            write_stage_artifacts(artifacts, artifacts_dir=artifacts_dir)
-            print(f"Wrote stage artifacts to {artifacts_dir}")
-    return artifacts
+        run_state_path = write_run_state(run_state, run_dir / RUN_STATE_FILENAME)
+        print(f"Wrote run state to {run_state_path}")
+        pipeline_dir = get_run_state_dir()
+        if pipeline_dir is not None and pipeline_dir.resolve() != run_dir.resolve():
+            write_run_state(run_state, pipeline_dir / RUN_STATE_FILENAME)
+    return run_state
 
 
 @hydra.main(config_path=str(CONFIG_PATH), config_name="train", version_base=None)

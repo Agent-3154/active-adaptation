@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`active_adaptation/` contains the core package: environments in `envs/`, RL code in `learning/`, shared helpers in `utils/`, `sensors/`, and `project_loading/`. Hydra config lives under `cfg/` with shared defaults in `cfg/base/`, experiments in `cfg/exp/`, and task definitions in `cfg/task/`. Runtime entry points are in `scripts/` (`train_ppo.py`, `eval.py`, `play.py`, `launch_ddp.sh`). Extension projects live in `projects/` and register through `pyproject.toml`. Large robot and scene assets are expected under `.cache/aa-robot-models/`, not committed into the package.
+`active_adaptation/` contains the core package: environments in `envs/`, RL code in `learning/`, shared helpers in `utils/`, `sensors/`, and `project_loading/`. Hydra config lives under `cfg/` with shared defaults in `cfg/base/`, experiments in `cfg/exp/`, task definitions in `cfg/task/`, and multi-stage recipes in `cfg/recipe/`. Runtime entry points are in `scripts/` (`train_ppo.py`, `train_offpolicy.py`, `rollout.py`, `relabel.py`, `pipeline.py`, `eval.py`, `play.py`, `launch_ddp.sh`). Pipeline I/O helpers live in `active_adaptation/pipeline_io.py`. Extension projects live in `projects/` and register through `pyproject.toml`. Large robot and scene assets are expected under `.cache/aa-robot-models/`, not committed into the package.
 
 ## Build, Test, and Development Commands
 Install in a Python 3.11 environment with `uv sync` (or `pip install -e .` for legacy workflows).
@@ -12,6 +12,7 @@ Typical workflows:
 python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
 python scripts/eval.py task=Go2/Go2Flat algo=ppo eval_render=true
 python scripts/play.py task=Go2/Go2Flat algo=ppo checkpoint_path=/path/to/checkpoint.pt
+python scripts/pipeline.py recipe=a2_relabel_rlpd
 bash scripts/launch_ddp.sh 0,1 train_ppo.py task=G1/G1LocoFlat algo=ppo
 ```
 
@@ -67,6 +68,9 @@ Keep `warp-lang` pins in backend env `pyproject.toml` files, not in root, so sol
 
 ## Coding Style & Naming Conventions
 Follow existing Python style: 4-space indentation, snake_case for modules/functions, PascalCase for classes, and concise docstrings only where behavior is not obvious. Keep Hydra config keys and task names consistent with existing patterns such as `Go2/Go2Flat` and `ppo_symaug`. There is no pinned formatter in this repo today; keep imports grouped cleanly and match surrounding file structure. `pyproject.toml` enables Pyright checks, so prefer type-safe changes and preserve annotated APIs.
+
+### Prefer explicit over implicit
+Favor call sites that make behavior obvious. Avoid helpers that hide defaults, auto-detect paths, or silently rewrite inputs (for example: optional `path=None` falling back to an env var, or accepting either a file or a directory and appending a filename). Prefer a small API that takes an exact file path / value, and let callers construct `dir / RUN_STATE_FILENAME` (or similar) themselves. The same rule applies to pipeline wiring: stage refs, seed files, and output paths should be spelled out in recipes and scripts rather than inferred.
 
 ## Testing Guidelines
 There is no dedicated `tests/` suite yet. Validate changes with focused runnable checks:
@@ -216,7 +220,69 @@ Configs are split into two layers:
 
    Nested dataclasses (`WandbConfig`, `IsaacAppConfig`) hold grouped fields. Use OmegaConf interpolation in defaults, e.g. `project: str = "${oc.select:task.project,active_adaptation}"`.
 
-Same dataclass pattern is used in `scripts/rollout.py`, `scripts/play.py`, `scripts/eval.py`, `scripts/relabel.py`, and algo modules such as `learning/ppo/ppo_symaug.py`, `learning/offpolicy/sac.py`.
+Same dataclass pattern is used in `scripts/rollout.py`, `scripts/play.py`, `scripts/eval.py`, `scripts/relabel.py`, `scripts/pipeline.py`, and algo modules such as `learning/ppo/ppo_symaug.py`, `learning/offpolicy/sac.py`.
+
+---
+
+## Multi-stage pipelines
+
+Use `scripts/pipeline.py` to chain existing entry scripts (train → rollout → relabel → off-policy) **without bash**. Each sim stage runs as a **fresh subprocess** because Isaac Lab / `aa.init` / `set_backend` are process-scoped.
+
+### Pieces
+
+| Piece | Role |
+|-------|------|
+| `scripts/pipeline.py` | Hydra driver: resolve recipe, seed/merge `run_state`, launch stages |
+| `cfg/recipe/*.yaml` | Ordered stage list (`name`, `script`, `overrides`) |
+| `active_adaptation/pipeline_io.py` | Flat YAML I/O + `${run_state.*}` override resolution |
+| Entry scripts | Write `run_state.yaml` under their run/output dir; mirror to `$AA_RUN_STATE_DIR` when set |
+
+### `run_state` (not WandB Artifacts)
+
+`run_state` is a **flat** `{key: value}` YAML map of paths and metadata produced by stages. Do not confuse it with WandB Artifacts.
+
+Typical keys: `checkpoint_path`, `rollout_path`, `relabeled_path`, `run_dir`, …
+
+One format everywhere:
+
+- Per-stage file: e.g. wandb `.../files/run_state.yaml`
+- Pipeline accumulator: `work_dir/run_state.yaml` (keys merged with `dict.update` after each stage)
+
+I/O is explicit: `write_run_state(mapping, path)` / `load_run_state(path)` take a **file** path. Callers pass `dir / RUN_STATE_FILENAME`.
+
+### Recipe + placeholders
+
+Recipes live under `cfg/recipe/` (`# @package _global_`). Hydra defaults must put the recipe **after** `_self_` so structured-config empties (e.g. `stages: []`) do not overwrite the recipe.
+
+Stage overrides may reference flat keys:
+
+```yaml
+- checkpoint_path=${run_state.checkpoint_path}
+- algo.prior_data=${run_state.relabeled_path}
+```
+
+`${run_state.*}` is resolved by the driver **before** spawning the subprocess (not by OmegaConf on the full pipeline cfg). Do not call `OmegaConf.resolve(cfg)` on the whole pipeline config if overrides still contain those placeholders.
+
+### Why subprocesses
+
+Do not import and call `train_ppo.run(cfg)` from the same process as the next Isaac stage. Use subprocesses for sim stages; `relabel.py` could run in-process later (no `aa.init`), but the driver keeps one pattern for simplicity.
+
+### Resume / skip completed stages
+
+Comment finished stages out of the recipe and seed from an existing flat `run_state.yaml` that already contains the keys downstream stages need:
+
+```bash
+uv run --project venv/isaac51 python scripts/pipeline.py recipe=a2_relabel_rlpd \
+  run_state=/path/to/wandb/.../files/run_state.yaml
+```
+
+No `run_state_stage` wrapper: a teacher run’s `run_state.yaml` with `checkpoint_path` is enough for `${run_state.checkpoint_path}`.
+
+### Adding a stage
+
+1. Keep the entry script writing `run_state.yaml` to its natural output dir (and to `$AA_RUN_STATE_DIR/run_state.yaml` when that env is set by the driver).
+2. Add a stage entry in `cfg/recipe/...` with Hydra overrides; use `${run_state.<key>}` for upstream outputs.
+3. Prefer unique flat keys (`relabeled_path` vs overwriting `rollout_path`) when stages must not clobber each other.
 
 ---
 
