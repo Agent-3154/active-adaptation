@@ -93,7 +93,9 @@ class PPOConfig:
     pred_std: bool = False
 
     clamp_reward: bool = False
-
+    
+    actor_num_units: Tuple[int, ...] = (256, 256, 256)
+    critic_num_units: Tuple[int, ...] = (512, 256, 256)
     activation: str = "Mish"
     spo: bool = False # use Simple Policy Optimization Loss
     muon: bool = False # use Muon optimizer
@@ -107,6 +109,7 @@ class PPOConfig:
 
 cs = ConfigStore.instance()
 cs.store("ppo_symaug", node=PPOConfig, group="algo")
+cs.store("ppo_symaug_large", node=PPOConfig(actor_num_units=(512, 512, 512), critic_num_units=(512, 512, 512)), group="algo")
 
 
 def vecnorm_sync_(module: nn.Module):
@@ -164,7 +167,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         Activation = getattr(nn, self.cfg.activation)
         actor_mlp = MLP(
-            num_units=[inp_dim, 256, 256, 256],
+            num_units=[inp_dim, *self.cfg.get("actor_num_units", (256, 256, 256))],
             activation=Activation,
             first_non_muon=True,
         )
@@ -184,7 +187,7 @@ class PPOPolicy(TensorDictModuleBase):
         ).to(self.device)
         
         critic_mlp = MLP(
-            num_units=[inp_dim, 512, 256, 256],
+            num_units=[inp_dim, *self.cfg.get("critic_num_units", (512, 256, 256))],
             activation=Activation,
             first_non_muon=True,
         )
