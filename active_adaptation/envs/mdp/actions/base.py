@@ -3,10 +3,10 @@ from __future__ import annotations
 import abc
 import torch
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 
 from active_adaptation.registry import RegistryMixin
-
+from active_adaptation.utils.string import resolve_matching_names
 from ..base import MDPComponent
 
 
@@ -69,6 +69,7 @@ class ActionV2(MDPComponent, RegistryMixin):
 
     def __init__(self) -> None:
         self._initialized = False
+        self._names = None
 
     def _initialize(self, env: "_EnvBase") -> None:
         """Bind to ``env``. Called once at startup."""
@@ -80,6 +81,21 @@ class ActionV2(MDPComponent, RegistryMixin):
     def initialized(self) -> bool:
         """``True`` after :meth:`_initialize` has been called."""
         return self._initialized
+    
+    @property
+    def names(self) -> List[str]:
+        return list(self._names)
+    
+    @names.setter
+    def names(self, names: List[str]):
+        assert len(names) == self.action_dim, f"Expected {self.action_dim} names, got {len(names)}"
+        self._names = names
+    
+    def find_names(self, names: str | List[str], preserve_order=False):
+        if self.names is None:
+            raise RuntimeError("Action names not set")
+        indices, names = resolve_matching_names(names, self.names, preserve_order=preserve_order)
+        return indices, names
 
     @abc.abstractmethod
     def process_action(self, action: torch.Tensor):

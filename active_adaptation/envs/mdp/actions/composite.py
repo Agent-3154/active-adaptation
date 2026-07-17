@@ -36,6 +36,7 @@ class ConcatenatedAction(ActionV2):
         self.action_dims = [
             action_manager.action_dim for action_manager in self.action_managers
         ]
+        self.names = sum([action_manager.names for action_manager in self.action_managers], [])
 
     @property
     def action_dim(self):

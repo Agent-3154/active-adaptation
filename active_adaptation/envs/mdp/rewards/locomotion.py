@@ -527,20 +527,23 @@ class action_rate_l2(RewardV2):
         self,
         weight: float,
         key: str = "action",
+        names: str | List[str] = ".*",
         enabled: bool = True,
         track_var: bool = False,
     ):
         super().__init__(weight, enabled=enabled, track_var=track_var)
         self.key = key
+        self.names = names
 
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
         self.action_manager = self.env.input_managers[self.key]
+        self.indices, self.names = self.action_manager.find_names(self.names)
         assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
 
     def _compute(self) -> torch.Tensor:
-        action_buf = self.action_manager.action_buf
+        action_buf = self.action_manager.action_buf[:, :, self.indices]
         action_diff = action_buf[:, 0] - action_buf[:, 1]
         rew = -action_diff.square().sum(dim=-1, keepdim=True)
         return rew
@@ -553,20 +556,23 @@ class action_rate2_l2(RewardV2):
         self,
         weight: float,
         key: str = "action",
+        names: str | List[str] = ".*",
         enabled: bool = True,
         track_var: bool = False,
     ):
         super().__init__(weight, enabled=enabled, track_var=track_var)
         self.key = key
+        self.names = names
 
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
         self.action_manager = self.env.input_managers[self.key]
+        self.indices, self.names = self.action_manager.find_names(self.names)
         assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
 
     def _compute(self) -> torch.Tensor:
-        action_buf = self.action_manager.action_buf
+        action_buf = self.action_manager.action_buf[:, :, self.indices]
         action_diff = action_buf[:, 0] - 2 * action_buf[:, 1] + action_buf[:, 2]
         rew = -action_diff.square().sum(dim=-1, keepdim=True)
         return rew

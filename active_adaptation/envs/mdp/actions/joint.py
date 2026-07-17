@@ -105,6 +105,7 @@ class _DelayedJointAction(ActionV2):
             [self.asset.joint_names.index(name) for name in self.joint_names],
             device=self.device,
         )
+        self.names = self.joint_names
 
         self.action_scaling = torch.tensor(scaling, device=self.device)
         self.decimation = int(self.env.step_dt / self.env.physics_dt)
@@ -691,6 +692,7 @@ class CorrelatedJointPosition(ActionV2):
             )
         self.matrix = coeffs
         self.action_dim = int(self.matrix.shape[1])
+        self.names = [f"{self.joint_names_expr}_{i}" for i in range(self.action_dim)]
 
         with torch.device(self.device):
             self.default_joint_pos = self.asset.data.default_joint_pos[
