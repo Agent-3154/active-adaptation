@@ -1,16 +1,22 @@
 # active-adaptation
 
-<!-- ## Note (2025.8.26)
+`active-adaptation` is a fast-moving, research-oriented RL codebase for various robotic tasks and algorithms. It emphasizes environment flexibility and ease of use for research.
 
-Thanks for taking a look! The code base was shared for multiple projects so it contains some old code that are no-longer usable. We are actively working on **cleaning up and refactoring to make it camera-ready** (e.g, compatible with Isaac Sim 5.0). It will be ready by the date of CoRL 2025. The core implementation of our CoRL paper [FACET](https://arxiv.org/abs/2505.06883) can be found at `active_adaptation/envs/mdp/commands/facet_commands`.
+Projects using this codebase:
 
-Meanwhile, the code for the live demo (runinng Mujoco in browsers) is here [https://github.com/Facet-Team/facet]. -->
+* [FACET: Force-Adaptive Control via Impedance Reference Tracking for Legged Robots](https://arxiv.org/abs/2505.06883)
 
-## Features
-* Automatic shape handling for observation.
-* Clean and efficient single-file RL implementation.
-* Easy symmetry augmentation.
-* Seamless Mujoco sim2sim.
+* [HDMI: Learning Interactive Humanoid Whole-Body Control from Human Videos](https://arxiv.org/abs/2509.16757)
+
+* [GentleHumanoid: Learning Upper-body Compliance for Contact-rich Human and Object Interaction](https://arxiv.org/abs/2511.04679)
+
+* [Gallant: Voxel Grid-based Humanoid Locomotion and Local-navigation across 3D Constrained Terrains](https://arxiv.org/abs/2511.14625)
+
+* [MimicLite](https://github.com/EGalahad/mimic-lite) at branch `dev/hdmi`.
+
+and more to come...
+
+Note: The main branch is fast-moving and therefore **almost constantly broken somewhere**. We intentionally practice human design and limit AI-generated code. The best usage of this codebase is to read it instead of directly using it for your own projects.
 
 ## Installation
 
