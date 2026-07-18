@@ -450,8 +450,8 @@ class PPOPolicy(TensorDictModuleBase):
         ratio = torch.exp(log_ratio)
         eps_neg, eps_pos = self.clip_param
         ratio_det = ratio.detach()
-        clamped_pos = (ratio_det < 1.0 + eps_pos)
-        clamped_neg = (ratio_det > 1.0 - eps_neg)
+        clamped_pos = (ratio_det > 1.0 + eps_pos)
+        clamped_neg = (ratio_det < 1.0 - eps_neg)
         clamped = (clamped_pos | clamped_neg).reshape_as(ret)
 
         policy_loss = self.actor_loss_fn(ratio, adv, self.clip_param)
