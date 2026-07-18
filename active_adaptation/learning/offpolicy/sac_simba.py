@@ -42,6 +42,11 @@ from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.learning.offpolicy.distributional import C51Critic
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
+from active_adaptation.learning.modules import (
+    SimbaV2Actor,
+    SimbaV2CriticTrunk,
+    normalize_hyper_dense_,
+)
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import (
     unwrap_ddp,
@@ -50,11 +55,8 @@ from active_adaptation.learning.utils.distributed import (
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.symmetry import SymmetryTransform
 
-# Shared actor / critic trunks / rollout policy with scalar SAC.
 from active_adaptation.learning.offpolicy.sac import (
     AlphaModule,
-    CriticTrunk,
-    NormalActor,
     SACRolloutPolicy,
     SimpleDoubleCritic,
     gaussian_target_entropy,
@@ -68,23 +70,31 @@ clip_grad_norm_ = nn.utils.clip_grad_norm_
 
 @dataclass
 class SACConfig:
-    """Soft Actor-Critic with twin **distributional (C51)** critics (``train_offpolicy`` API)."""
+    """Distributional SAC with SimbaV2 hyperspherical actor / critic (``train_offpolicy`` API)."""
 
-    _target_: str = "active_adaptation.learning.offpolicy.sac_dist.SAC"
-    name: str = "sac_dist"
+    _target_: str = "active_adaptation.learning.offpolicy.sac_simba.SAC"
+    name: str = "sac_simba"
     train_every: int = 4
     buffer_size: int = 2000
     warm_up_steps: int = 200
     lr: float = 5e-4
-    # If True, actor/Q use :class:`~active_adaptation.learning.utils.opt.MuonAdamWWrapper` (see ``ppo_symaug``).
+    # If True, actor/Q use MuonAdamWWrapper; HyperDense weights are marked ``_non_muon``.
     muon: bool = True
     weight_decay: float = 0.02
     # TD learning
     n_steps: int = 3
     gamma: float = 0.99
     utd_ratio: int = 4
-    # architecture
-    actor_init: str = "zeros"
+    # SimbaV2 architecture.
+    # Paper default is actor 128×1 / critic 512×2 (~5M on low-dim DMC). We use a wider
+    # actor (256) so policy capacity is closer to our NormalActor (384×2 ≈0.7M params on
+    # loco-manip obs/act); critic stays at the paper width that scales on HBench-Hard.
+    # Prefer scaling critic_hidden_dim over actor if you need more capacity.
+    actor_hidden_dim: int = 256
+    actor_num_blocks: int = 1
+    critic_hidden_dim: int = 512
+    critic_num_blocks: int = 2
+    c_shift: float = 3.0
     # batch sizes
     critic_batch_size: int = 2048
     actor_batch_size: int = 2048
@@ -115,6 +125,9 @@ class SACConfig:
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
     reward_norm_epsilon: float = 1e-8
+    # C51 support half-width when ``normalize_reward`` (SimbaV2 ``normalized_g_max``).
+    v_max: float = 5.0
+    num_atoms: int = 101
 
     # path to prior data for RLPD
     prior_data: str | None = None
@@ -123,7 +136,7 @@ class SACConfig:
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
 
-cs.store(name="sac_dist", node=SACConfig, group="algo")
+cs.store(name="sac_simba", node=SACConfig, group="algo")
 
 
 def TwinC51Critic(
@@ -132,14 +145,18 @@ def TwinC51Critic(
     num_atoms: int,
     v_min: float,
     v_max: float,
-    activation: type[nn.Module] = nn.SiLU,
+    *,
+    hidden_dim: int = 512,
+    num_blocks: int = 2,
+    c_shift: float = 3.0,
 ):
     module = SimpleDoubleCritic(
-        fn=lambda: CriticTrunk(
+        fn=lambda: SimbaV2CriticTrunk(
             input_dim=obs_dim + act_dim,
-            hidden_dim=512,
+            hidden_dim=hidden_dim,
             output_dim=num_atoms,
-            activation=activation,
+            num_blocks=num_blocks,
+            c_shift=c_shift,
         )
     )
     return C51Critic(
@@ -213,8 +230,9 @@ class SAC(TensorDictModuleBase):
             assert self.has_symmetry, "Symmetry augmentation is enabled but no symmetry transform is provided"
 
         if self.cfg.normalize_reward:
-            # Std-normalized returns are O(1); fixed atom support (not task-tuned).
-            v_min, v_max, num_atoms = -0.5, 5.0, 101
+            # Reward-normalized returns ≈ O(1); SimbaV2 uses support [-v_max, v_max].
+            v_min, v_max = -float(self.cfg.v_max), float(self.cfg.v_max)
+            num_atoms = int(self.cfg.num_atoms)
         else:
             v_min, v_max = -1.0, 9.0
             num_atoms = int((v_max - v_min) / 0.05) + 1
@@ -224,15 +242,20 @@ class SAC(TensorDictModuleBase):
             num_atoms=num_atoms,
             v_min=v_min,
             v_max=v_max,
+            hidden_dim=self.cfg.critic_hidden_dim,
+            num_blocks=self.cfg.critic_num_blocks,
+            c_shift=self.cfg.c_shift,
         ).to(device)
 
         self.DistClass = IndependentNormal
-        self.actor = NormalActor(
+        self.actor = SimbaV2Actor(
             obs_dim,
             self.act_dim,
+            hidden_dim=self.cfg.actor_hidden_dim,
+            num_blocks=self.cfg.actor_num_blocks,
+            c_shift=self.cfg.c_shift,
             std_max=1.0,
             std_min=0.001,
-            action_init=self.cfg.actor_init,
         ).to(device)
 
         self.Q_target = copy.deepcopy(self.Q).to(device)
@@ -623,6 +646,7 @@ class SAC(TensorDictModuleBase):
             critic_grad_norm = clip_grad_norm_(self.Q.parameters(), max_norm=self.cfg.max_grad_norm)
             self.opt_Q.step()
 
+        normalize_hyper_dense_(unwrap_ddp(self.Q))
         soft_copy_(self.Q, self.Q_target, tau=self.cfg.tau_Q)
 
         if not diagnostics:
@@ -789,6 +813,7 @@ class SAC(TensorDictModuleBase):
                 self.actor.parameters(), max_norm=self.cfg.max_grad_norm
             )
             self.opt_actor.step()
+        normalize_hyper_dense_(unwrap_ddp(self.actor))
         soft_copy_(self.actor, self.actor_target, tau=self.cfg.tau_actor)
 
         if not diagnostics:

@@ -354,6 +354,30 @@ class C51Critic(nn.Module, CriticBase):
             e2 = expected_from_logits(l2, self.q_support)
         return torch.cat([e1, e2], dim=-1)
 
+    @torch.no_grad()
+    def support_saturation_stats(self, logits: torch.Tensor) -> dict[str, float]:
+        """Diagnostics for whether the categorical support is clipping returns.
+
+        High ``p_at_vmin`` / ``p_at_vmax`` means probability mass piles on the edge
+        atoms (support too narrow). Low headroom means the expected value sits near
+        a bound.
+        """
+        l1, l2 = self._twin_atom_logits(logits)
+        p = 0.5 * (F.softmax(l1, dim=-1) + F.softmax(l2, dim=-1))
+        z = self.q_support.to(device=p.device, dtype=p.dtype)
+        v_min = float(z[0].item())
+        v_max = float(z[-1].item())
+        width = max(v_max - v_min, 1e-8)
+        # Twin expected values in support units (not denormalized).
+        q = (p * z.view(*([1] * (p.ndim - 1)), -1)).sum(dim=-1)  # [...,]
+        q_mean = q.mean()
+        return {
+            "critic/p_at_vmin": p[..., 0].mean().item(),
+            "critic/p_at_vmax": p[..., -1].mean().item(),
+            "critic/q_headroom_lo": ((q_mean - v_min) / width).item(),
+            "critic/q_headroom_hi": ((v_max - q_mean) / width).item(),
+        }
+
     @override
     def get_values(
         self,

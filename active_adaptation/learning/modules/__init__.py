@@ -4,6 +4,15 @@ from .common import SymmetryWrapper, ConditionalBlock, CatTensors
 from .rnn import GRUCore
 from .fusion import FiLM, CrossAttention
 from .common import MLP, ResidualMLP, DtypeConversion, FlattenBatch, SimbaMLP
+from .simba_v2 import (
+    HyperDense,
+    HyperEmbedder,
+    HyperLERPBlock,
+    SimbaV2Actor,
+    SimbaV2CriticTrunk,
+    SimbaV2Encoder,
+    normalize_hyper_dense_,
+)
 
 __all__ = [
     "VecNorm",
@@ -20,4 +29,11 @@ __all__ = [
     "SimbaMLP",
     "ConditionalBlock",
     "CatTensors",
+    "HyperDense",
+    "HyperEmbedder",
+    "HyperLERPBlock",
+    "SimbaV2Actor",
+    "SimbaV2CriticTrunk",
+    "SimbaV2Encoder",
+    "normalize_hyper_dense_",
 ]

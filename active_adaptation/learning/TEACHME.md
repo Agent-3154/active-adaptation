@@ -7,7 +7,7 @@ This is a research-oriented codebase. We prefer single-file implementations that
 | Loop | Script | Reference implementation |
 |------|--------|--------------------------|
 | On-policy | `scripts/train_ppo.py` | `learning/ppo/ppo.py`, `learning/ppo/ppo_symaug.py` |
-| Off-policy | `scripts/train_offpolicy.py` | `learning/offpolicy/sac.py` (scalar), `sac_dist.py` (C51) |
+| Off-policy | `scripts/train_offpolicy.py` | `learning/offpolicy/sac.py` (scalar), `sac_dist.py` (C51), `sac_simba.py` (C51 + SimbaV2) |
 
 This doc is WIP. Refine it as we add algorithms.
 
@@ -127,7 +127,7 @@ Scalar vs distributional: `algo=sac` uses twin scalar critics; `algo=sac_dist` u
 
 - **RLPD:** `prior_data` + `prior_data_ratio`; concat prior batch in `train_critic` / `train_actor`; log `critic/prior_q_*`, `actor/online_advantage`.
 - **Symmetry aug:** duplicate `(obs, act, targets)` with `obs_transform` / `act_transform` in the learner.
-- **Distributional critic:** `algo=sac_dist` / `C51Critic` via `distributional.py`; tune `v_min` / `v_max` with `normalize_reward` if used.
+- **Distributional critic:** `algo=sac_dist` / `algo=sac_simba` (C51 via `distributional.py`); SimbaV2 nets in `sac_simba`. Tune `v_min` / `v_max` with `normalize_reward` if used.
 - **Reward normalization:** `RewardNormalizer` in `reward_normalization.py` (FlashSAC-style); buffer stores raw rewards.
 
 ---
