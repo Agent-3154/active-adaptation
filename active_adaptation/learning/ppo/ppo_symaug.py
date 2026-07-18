@@ -167,7 +167,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         Activation = getattr(nn, self.cfg.activation)
         actor_mlp = MLP(
-            num_units=[inp_dim, *self.cfg.get("actor_num_units", (256, 256, 256))],
+            num_units=[inp_dim, *self.cfg.actor_num_units],
             activation=Activation,
             first_non_muon=True,
         )
@@ -187,7 +187,7 @@ class PPOPolicy(TensorDictModuleBase):
         ).to(self.device)
         
         critic_mlp = MLP(
-            num_units=[inp_dim, *self.cfg.get("critic_num_units", (512, 256, 256))],
+            num_units=[inp_dim, *self.cfg.critic_num_units],
             activation=Activation,
             first_non_muon=True,
         )
@@ -450,7 +450,9 @@ class PPOPolicy(TensorDictModuleBase):
         ratio = torch.exp(log_ratio)
         eps_neg, eps_pos = self.clip_param
         ratio_det = ratio.detach()
-        clamped = ((ratio_det < 1.0 - eps_neg) | (ratio_det > 1.0 + eps_pos)).reshape_as(ret)
+        clamped_pos = (ratio_det < 1.0 + eps_pos)
+        clamped_neg = (ratio_det > 1.0 - eps_neg)
+        clamped = (clamped_pos | clamped_neg).reshape_as(ret)
 
         policy_loss = self.actor_loss_fn(ratio, adv, self.clip_param)
         entropy_loss = - self.entropy_coef * entropy
@@ -484,7 +486,6 @@ class PPOPolicy(TensorDictModuleBase):
         
         with torch.no_grad():
             explained_var = 1 - F.mse_loss(values, ret) / ret.var()
-            clipfrac = clamped.float().mean()
             approx_kl = ((ratio - 1.0) - log_ratio).mean()
             symmetry_loss = F.mse_loss(dist.mean[bsize:], self.act_transform(dist.mean[:bsize]))
             actor_feature_norm = torch.norm(tensordict["_actor_feature"], dim=-1).mean()
@@ -493,7 +494,8 @@ class PPOPolicy(TensorDictModuleBase):
             "actor/policy_loss": policy_loss.detach(),
             "actor/entropy": entropy.detach(),
             "actor/grad_norm": actor_grad_norm,
-            "actor/clamp_ratio": clipfrac,
+            "actor/clamp_pos": clamped_pos.float().mean(),
+            "actor/clamp_neg": clamped_neg.float().mean(),
             "actor/approx_kl": approx_kl,
             "actor/aux_loss": aux_loss,
             "actor/symmetry_loss": symmetry_loss.detach(),

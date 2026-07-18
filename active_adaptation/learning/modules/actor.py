@@ -46,34 +46,40 @@ class Actor(nn.Module):
         return loc, scale
 
 
+def _softplus_inv(y: float) -> float:
+    """Inverse of ``softplus`` for positive ``y`` (used for parameter init)."""
+    return math.log(math.expm1(y))
+
+
 class ActorCov(nn.Module):
-    """Maps backbone features to a low-rank-plus-diagonal Gaussian.
+    """Maps backbone features to a scale–correlation factored Gaussian.
 
     Covariance::
 
-        Σ = L Lᵀ + diag(D),   L ∈ R^{N×K}, K ≪ N,
-        Dᵢ = softplus(uᵢ) + ε.
+        Σ = diag(σ) (I + F diag(α) Fᵀ) diag(σ)
 
-    Returns ``(loc, cov_factor, cov_diag)`` for
-    ``torch.distributions.LowRankMultivariateNormal``.
+    with column-normalized ``F ∈ R^{N×K}`` and per-factor ``α_k ≥ 0``. Equivalently,
+    for ``LowRankMultivariateNormal``::
 
-    Stability choices (aligned with the default diagonal :class:`Actor`):
+        cov_diag   = σ²
+        cov_factor = diag(σ) F diag(√α)
 
-    * ``L`` and ``u`` are **state-independent** by default — shared noise is much
-      easier to optimize with on-policy methods than a state-dependent SPD matrix.
-    * ``L`` is initialized to **0**, so training starts as a unit-variance
-      diagonal Gaussian and correlations are introduced only when useful.
-    * The diagonal uses **softplus + ε** (not ``exp``) to stay SPD without the
-      exploding-std failure mode of unconstrained log-std heads.
-    * ``L`` is scaled by ``1/√K`` so the low-rank term's magnitude does not grow
-      automatically with rank.
+    so ``Σ = cov_factor cov_factorᵀ + diag(cov_diag)``.
+
+    Separating **scale** (``σ``) from **correlation** (``F``, ``α``) avoids the
+    ``∂/∂L ∝ L`` trap of a raw ``LLᵀ + diag(D)`` factor: ``α`` is first-order in the
+    loss, can be initialized to a non-trivial value, and is easy to ablate
+    (``α → 0`` recovers a diagonal policy).
+
+    ``σ``, ``F``, and ``α`` are state-independent by default (stable for PPO).
+    Set ``predict_cov=True`` to predict them from features.
 
     Args:
         action_dim: Action dimension ``N``.
-        rank: Low-rank factor width ``K`` (must satisfy ``1 ≤ K ≤ N``).
-        eps: Positive floor added to each diagonal entry.
-        predict_cov: If true, predict ``L`` and ``u`` from features instead of
-            using shared parameters.
+        rank: Number of correlation factors ``K`` (``1 ≤ K ≤ N``).
+        eps: Positive floor on ``σ`` and on column norms of ``F``.
+        alpha_init: Initial correlation strength for each factor (softplus target).
+        predict_cov: If true, predict ``σ``, ``F``, and ``α`` from features.
     """
 
     def __init__(
@@ -81,6 +87,7 @@ class ActorCov(nn.Module):
         action_dim: int,
         rank: int = 2,
         eps: float = 1e-5,
+        alpha_init: float = 0.3,
         predict_cov: bool = False,
     ) -> None:
         super().__init__()
@@ -90,33 +97,75 @@ class ActorCov(nn.Module):
             raise ValueError(
                 f"rank ({rank}) cannot exceed action_dim ({action_dim})"
             )
+        if alpha_init <= 0.0:
+            raise ValueError(f"alpha_init must be > 0, got {alpha_init}")
         self.action_dim = action_dim
         self.rank = rank
         self.eps = eps
         self.predict_cov = predict_cov
-        self._factor_scale = 1.0 / math.sqrt(rank)
+        self.alpha_init = alpha_init
 
         self.actor_mean = nn.LazyLinear(action_dim)
         self.actor_mean.weight._non_muon = True
 
-        # softplus^{-1}(1) so initial diagonal variance matches Actor's std=1.
-        diag_init = math.log(math.e - 1.0)
+        # softplus^{-1}(1) → σ starts at 1 (same exploration scale as Actor).
+        scale_init = _softplus_inv(1.0)
+        alpha_raw_init = _softplus_inv(alpha_init)
         if predict_cov:
-            self.cov_head = nn.LazyLinear(action_dim * rank + action_dim)
+            # σ (N) + F (N·K) + α (K)
+            self.cov_head = nn.LazyLinear(action_dim + action_dim * rank + rank)
             self.cov_head.weight._non_muon = True
-            # Added to the unconstrained diagonal so a near-zero head output
-            # still yields unit variance before the head is trained.
             self.register_buffer(
-                "_diag_offset", torch.tensor(diag_init), persistent=False
+                "_scale_offset", torch.tensor(scale_init), persistent=False
+            )
+            self.register_buffer(
+                "_alpha_offset", torch.tensor(alpha_raw_init), persistent=False
             )
         else:
-            self.cov_factor = nn.Parameter(torch.zeros(action_dim, rank))
-            self.cov_diag_param = nn.Parameter(
-                torch.full((action_dim,), diag_init)
+            self.scale_param = nn.Parameter(torch.full((action_dim,), scale_init))
+            self.factor_param = nn.Parameter(torch.randn(action_dim, rank))
+            self.alpha_param = nn.Parameter(
+                torch.full((rank,), alpha_raw_init)
             )
 
-    def _diagonal(self, unconstrained: torch.Tensor) -> torch.Tensor:
+    def _sigma(self, unconstrained: torch.Tensor) -> torch.Tensor:
         return F.softplus(unconstrained) + self.eps
+
+    def _alpha(self, unconstrained: torch.Tensor) -> torch.Tensor:
+        return F.softplus(unconstrained)
+
+    def _normalize_factor(self, factor: torch.Tensor) -> torch.Tensor:
+        """Column-normalize ``factor`` over the action dimension."""
+        return factor / factor.norm(dim=-2, keepdim=True).clamp_min(self.eps)
+
+    def _pack(
+        self,
+        sigma: torch.Tensor,
+        factor: torch.Tensor,
+        alpha: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build ``(cov_factor, cov_diag)`` for ``LowRankMultivariateNormal``."""
+        # sigma: (..., N), factor: (..., N, K), alpha: (..., K)
+        factor = self._normalize_factor(factor)
+        cov_diag = sigma.square()
+        cov_factor = sigma.unsqueeze(-1) * factor * alpha.clamp_min(0.0).sqrt().unsqueeze(-2)
+        return cov_factor, cov_diag
+
+    @torch.no_grad()
+    def cov_stats(self) -> dict[str, torch.Tensor]:
+        """Current ``σ`` / ``α`` (state-independent path) for logging."""
+        if self.predict_cov:
+            return {}
+        sigma = self._sigma(self.scale_param)
+        alpha = self._alpha(self.alpha_param)
+        return {
+            "actor/cov/alpha_mean": alpha.mean(),
+            "actor/cov/alpha_max": alpha.max(),
+            "actor/cov/alpha_min": alpha.min(),
+            "actor/cov/sigma_mean": sigma.mean(),
+            "actor/cov/sigma_min": sigma.min(),
+            "actor/cov/sigma_max": sigma.max(),
+        }
 
     def forward(self, features: torch.Tensor):
         """Return ``(loc, cov_factor, cov_diag)`` for ``LowRankMultivariateNormal``."""
@@ -125,18 +174,15 @@ class ActorCov(nn.Module):
 
         if self.predict_cov:
             raw = self.cov_head(features)
-            factor_flat, diag_raw = raw.split(
-                [self.action_dim * self.rank, self.action_dim], dim=-1
-            )
-            cov_factor = factor_flat.reshape(
-                *batch_shape, self.action_dim, self.rank
-            )
-            cov_diag = self._diagonal(diag_raw + self._diag_offset)
+            n, k = self.action_dim, self.rank
+            scale_raw, factor_flat, alpha_raw = raw.split([n, n * k, k], dim=-1)
+            sigma = self._sigma(scale_raw + self._scale_offset)
+            factor = factor_flat.reshape(*batch_shape, n, k)
+            alpha = self._alpha(alpha_raw + self._alpha_offset)
         else:
-            cov_factor = self.cov_factor.expand(*batch_shape, -1, -1)
-            cov_diag = self._diagonal(self.cov_diag_param).expand(
-                *batch_shape, -1
-            )
+            sigma = self._sigma(self.scale_param).expand(*batch_shape, -1)
+            factor = self.factor_param.expand(*batch_shape, -1, -1)
+            alpha = self._alpha(self.alpha_param).expand(*batch_shape, -1)
 
-        cov_factor = cov_factor * self._factor_scale
+        cov_factor, cov_diag = self._pack(sigma, factor, alpha)
         return loc, cov_factor, cov_diag

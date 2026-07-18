@@ -1,99 +1,141 @@
 # Loco-Manipulation Command Design
 
-This note describes the current command split used for the relabel-RLPD workflow. The main idea is to first learn a broad loco-manipulation controller with explicit base and end-effector commands, then reuse those rollouts as prior data for a harder end-effector-only task.
+This note describes the teacher / student command split used for the
+relabel-RLPD workflow. Train a broad loco-manipulation teacher with explicit
+base and end-effector commands, then reuse those rollouts as prior data for a
+harder **EEF-only** student task.
 
-## Command Variants
+## Naming: two different “dense / sparse” meanings
 
-### `SingleEEFLocoManip`
+1. **Teacher command layout:** `LocoManipNew` exposes a *dense* policy command
+   that includes base velocity/yaw **and** EEF targets. The student
+   (`LocoManipSparse`) is *EEF-only* (no base command).
+2. **Student target density over time:** inside `LocoManipSparse`,
+   **goal reaching** uses a **sparse** (persistent) world target, while
+   **trajectory following** uses a **dense** sequence of time-varying targets.
 
-`SingleEEFLocoManip` is the teacher command used by `A2LocoManip`. It exposes two policy-facing command views:
+Do not confuse (1) with (2).
+
+## Teacher: `LocoManipNew` (`A2LocoManip`)
+
+Three command modes (scheduled from `mode_probs_0` → `mode_probs_1`):
+
+| Mode | Name | Behavior |
+|------|------|----------|
+| 0 | World | Persistent world-frame EEF goal + standoff base pose; loco walks to standoff, EEF tracks the world goal |
+| 1 | Body | Body-frame EEF goal that moves with the robot; independent loco command |
+| 2 | Nominal | Hold nominal EEF rest pose; independent loco command |
+
+Dense policy command (23D):
 
 ```text
-dense:  [v_x, v_y, yaw_rate, eef_x, eef_y, eef_z, pos_diff_x, pos_diff_y, pos_diff_z, eef_pitch, cos(eef_pitch), sin(eef_pitch)]
-sparse: [eef_x, eef_y, eef_z, pos_diff_x, pos_diff_y, pos_diff_z]
+[v_x, v_y, yaw_rate, eef_xyz, pos_diff, fwd, fwd_diff, up, up_diff, closed, open]
 ```
 
-The dense view contains explicit base velocity/yaw commands and an end-effector pitch target. The sparse view keeps only the end-effector position command and current heading-frame EEF-to-target delta. This lets the same rollout contain both the teacher observation and the student-compatible command.
+`get_state()` snapshots mode, root/EEF poses, world EEF target, orientation,
+gripper status, and `base_pos_error` for offline relabeling. Rollout collection
+stores this under `command_state` after each env step.
 
-The EEF position convention is shared by both views: `eef_x` and `eef_y` are yaw-aligned offsets from the root, and `eef_z` is height above terrain at the target horizontal location.
+## Student: `LocoManipSparse` (`A2LocoManipSparse`)
 
-`SingleEEFLocoManip` samples a mix of command strategies:
-
-1. Local random commands: sample base velocity, yaw rate, local EEF target, and EEF pitch directly.
-2. World-goal commands: sample a persistent world-frame EEF target and a standoff pose, then continuously convert them to local EEF and base commands as the robot moves.
-
-This command is easier to learn because the policy receives direct locomotion guidance while it learns to coordinate the base and arm.
-
-### `LocoManipSparse`
-
-`LocoManipSparse` is the student command used by `A2LocoManipSparse`. It removes the base command and exposes only:
+EEF-only policy command (20D):
 
 ```text
-[eef_x, eef_y, eef_z, pos_diff_x, pos_diff_y, pos_diff_z]
+[eef_xyz, pos_diff, fwd, fwd_diff, up, up_diff, closed, open]
 ```
 
-On reset, it samples a world-frame EEF target near the environment origin and spawns the robot on a ring around that target. At every step it converts the world target into the same heading-frame EEF command convention used by `SingleEEFLocoManip`.
+Same heading-frame convention as the teacher: `eef_x` / `eef_y` are yaw-aligned
+offsets from the root; `eef_z` is absolute height. No base velocity or yaw rate.
 
-After the EEF reaches the target, the command starts moving the world-frame target continuously. This turns the task from a one-shot reach into a sparse-command tracking problem, while still avoiding explicit base velocity commands.
+### Mode 0 — Goal reaching (sparse target)
 
-This task is harder to learn from scratch because the reward only specifies what the EEF should do; the policy must discover the base motion needed to make the target reachable.
+- Sample a world-frame EEF goal near the env origin (`z` in `eef_z_range`).
+- Spawn the robot on a ring (`spawn_radius_range`).
+- The policy must discover the base motion needed to make the goal reachable.
+- After the EEF is close enough, commands may be resampled.
+
+### Mode 1 — Trajectory following (dense targets)
+
+- Sample a simple parametric curve in world frame (circle or line segment, with
+  optional small height oscillation).
+- Advance the curve phase each step (`ω · dt`) so the EEF target moves continuously.
+- Spawn closer to the curve center (`traj_spawn_radius_range`).
+
+Online mix is controlled by `trajectory_prob` (default `0.5`).
+
+This task is harder to learn from scratch than the teacher: the reward only
+specifies what the EEF should do; base motion is implicit.
 
 ## Relabel-RLPD Workflow
 
-The workflow is:
+```text
+1. Train teacher PPO on A2LocoManip (LocoManipNew)
+2. Roll out teacher → archive with command_state
+3. Relabel with A2LocoManipSparse (LocoManipSparse.relabel_command + reward relabel)
+4. Train SAC / RLPD on A2LocoManipSparse with the relabeled prior
+```
 
-1. Train a teacher policy on `A2LocoManip` with `SingleEEFLocoManip`.
-2. Roll out the teacher policy and save trajectories.
-3. Relabel the rollout so the student sees the sparse command view and rewards aligned with `LocoManipSparse`.
-4. Train SAC on `A2LocoManipSparse` with the relabeled rollout as prior data.
+### Relabel mapping (`LocoManipSparse.relabel_command`)
 
-The relabeled prior should remove reward channels that directly supervise base locomotion toward the teacher's dense command. Keep rewards that are compatible with the sparse task, such as EEF position tracking, EEF progress, regularization, survival, and safety/contact terms.
+| Teacher mode | Student mode | Target at step `t` |
+|--------------|--------------|--------------------|
+| 0 (world) | Goal reaching | Teacher world EEF goal (`cmd_eef_pos_w`), teacher `cmd_eef_rot_w` |
+| 1 or 2 (body / nominal) | Trajectory following | Achieved `eef_pos_w[t+1]` and `eef_quat_w[t+1]` (hindsight); on `done`, fall back to step `t` |
 
-SAC loads the prior archive through `ReplayBuffer.from_rollout`. The prior buffer can compute Monte Carlo returns from the relabeled reward with `ReplayBuffer.compute_return`, storing `ret` and `ret_valid` for diagnostics or prior-value supervision.
+Both paths rebuild the EEF-only `command` / `next.command` and the tracking
+fields used by reward `relabel()` (`pos_error_*`, `forward_diff_w`,
+`upward_diff_w`). Teacher `base_pos_error` is kept for tracking reward gates.
+
+After relabel + RLPD, the policy only needs an EEF target pose or a dense
+target sequence; base movement stays implicit.
+
+**Expectation:** online training from scratch on `A2LocoManipSparse` is much
+harder than bootstrapping from relabeled teacher data via RLPD.
+
+Drop teacher reward channels that supervise base locomotion toward the dense
+command (`linvel_exp`, `angvel_z_exp`, …). Keep sparse-compatible terms: EEF
+position / orientation tracking, grasp, regularization, survival, safety.
+
+SAC loads the prior through `ReplayBuffer.from_rollout`. Optional Monte Carlo
+returns: `ReplayBuffer.compute_return` → `ret` / `ret_valid`.
 
 ## Config Usage
 
 Teacher training:
 
 ```bash
-python scripts/train.py task=A2LocoManip algo=ppo_symaug
+python scripts/train_ppo.py task=A2/A2LocoManip algo=ppo_symaug
 ```
 
-Teacher rollout:
+Teacher rollout (mixed modes so both relabel paths appear):
 
 ```bash
-python scripts/rollout.py task=A2LocoManip algo=ppo_symaug checkpoint_path=/path/to/checkpoint.pt
+python scripts/rollout.py task=A2/A2LocoManip algo=ppo_symaug \
+  checkpoint_path=/path/to/checkpoint.pt
 ```
 
-Sparse-command SAC training with prior data:
+Relabel:
 
 ```bash
-python scripts/train.py task=A2LocoManipSparse algo=sac algo.prior_data=/path/to/rollout_*.pt
+python scripts/relabel.py task=A2/A2LocoManipSparse \
+  rollout_path=/path/to/rollout_*.pt
 ```
 
-Use `scripts/rollout_manager_nicegui.py` to inspect and edit rollout tensors before using them as prior data. In particular, check that the policy observation command matches the sparse command layout expected by `A2LocoManipSparse`.
+Sparse SAC with prior:
 
-## Naming
+```bash
+python scripts/train_offpolicy.py task=A2/A2LocoManipSparse algo=sac \
+  algo.prior_data=/path/to/rollout_*.relabeled.pt
+```
 
-The current names are serviceable, but "dense" and "sparse" can be ambiguous because both commands still contain dense numeric observations. More descriptive alternatives:
+Or chain stages with `scripts/pipeline.py recipe=a2_relabel_rlpd`.
 
-- `guided` / `target_only`
-- `teacher` / `student`
-- `base_eef` / `eef_only`
+Use `scripts/rollout_manager_nicegui.py` to inspect archives. After automatic
+relabel, `command` should already match the sparse layout.
 
-In code, `dense` and `sparse` are still used as command keys for compatibility.
+## Related files
 
-## Next Step: Object Command
-
-We will completely re-write LocoManipObject. It is no longer intended to be used for training. Instead, it computes scripted commands in the same format as `SingleEEFLocoManip` to manipulate the object (a cloth stand-like object) to move it from one position to another.
-
-It works as follows:
-
-1. Sample initial poses for the object and the robot.
-2. Generate appropriate base and EEF commands to approach the object.
-3. Generate EEF target commands to enter a grasp pose.
-4. Grasp by commanding the gripper to close.
-6. Lift the object and move it to the target position.
-7. Open the gripper to release the object and backup to the initial pose.
-
-Modify the file accordingly.
+- Teacher: `loco_manip_new.py`
+- Student: `loco_manip_sparse.py`
+- Tasks: `cfg/task/A2/A2LocoManip.yaml`, `cfg/task/A2/A2LocoManipSparse.yaml`
+- Entry points: `scripts/rollout.py`, `scripts/relabel.py`, `scripts/pipeline.py`

@@ -35,7 +35,7 @@ from tensordict.nn import (
 
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
-from typing import Union, Tuple, TYPE_CHECKING
+from typing import Union, Tuple, TYPE_CHECKING, Any
 
 from active_adaptation.learning.modules import (
     VecNorm, 
@@ -54,6 +54,7 @@ from active_adaptation.learning.ppo.common import (
     make_batch,
     Actor,
     Critic,
+    resolve_clip_param,
 )
 from active_adaptation.learning.ppo.ppo_base import PPOBase
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
@@ -77,7 +78,10 @@ class PPOConfig:
     num_minibatches: int = 4
     lr: float = 5e-4
     desired_kl: Union[float, None] = None
-    clip_param: float = 0.2
+    # Scalar ε → [1-ε, 1+ε]. Length-2 list/tuple [eps_neg, eps_pos] →
+    # [1-eps_neg, 1+eps_pos]. Typed as Any: Hydra/OmegaConf cannot express
+    # Union[float, Sequence[float]], and YAML lists become ListConfig.
+    clip_param: Any = (0.2, 0.2)
     entropy_coef: float = 0.002
 
     clamp_reward: bool = False
@@ -121,6 +125,7 @@ class PPOPolicy(PPOBase):
         self.device = device
 
         self.max_grad_norm = 1.0
+        self.clip_param = resolve_clip_param(self.cfg.clip_param)
         self.critic_loss_fn = nn.MSELoss(reduction="none")
         self.gae = GAE(0.99, 0.95)
 
@@ -351,7 +356,7 @@ class PPOPolicy(PPOBase):
         log_ratio = (log_probs - log_probs_data).unsqueeze(-1)
         ratio = torch.exp(log_ratio)
         surr1 = adv * ratio
-        surr2 = adv * ratio.clamp(1.-self.cfg.clip_param, 1.+self.cfg.clip_param)
+        surr2 = adv * ratio.clamp(1.-self.clip_param[0], 1.+self.clip_param[1])
         policy_loss = - (torch.min(surr1, surr2).reshape_as(valid) * valid).sum() / valid_cnt
         entropy_loss = - self.cfg.entropy_coef * entropy
 
@@ -386,7 +391,8 @@ class PPOPolicy(PPOBase):
         }
         with torch.no_grad():
             info["critic/explained_var"] = 1 - value_loss / b_returns[valid].var()
-            info["actor/clamp_ratio"] = ((ratio - 1.0).abs() > self.cfg.clip_param).float().mean()
+            info["actor/clamp_pos"] = (ratio > 1.0 + self.clip_param[1]).float().mean()
+            info["actor/clamp_neg"] = (ratio < 1.0 - self.clip_param[0]).float().mean()
             info["actor/approx_kl"] = ((ratio - 1.0) - log_ratio).mean()
         return info
 

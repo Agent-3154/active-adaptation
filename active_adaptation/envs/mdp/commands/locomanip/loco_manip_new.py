@@ -15,6 +15,7 @@ from active_adaptation.utils.math import (
     yaw_quat,
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
+from tensordict import TensorClass
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -705,3 +706,72 @@ class LocoManipNew(CommandV2):
                 translations=cmd_eef_pos_w,
                 orientations=cmd_eef_rot_w,
             )
+
+    class CommandState(TensorClass):
+        """Snapshot for offline command / reward relabeling.
+
+        Saved after ``sync_state`` so tracking fields match the reward pass.
+        """
+
+        mode: torch.Tensor  # [N] int32: 0=world, 1=body, 2=nominal
+        root_pose_w: torch.Tensor  # [N, 7] pos + quat (wxyz)
+        eef_pos_w: torch.Tensor  # [N, 3]
+        eef_quat_w: torch.Tensor  # [N, 4]
+        eef_state_w: torch.Tensor  # [N, 13] link state for angvel relabel
+        cmd_eef_pos_w: torch.Tensor  # [N, 3] world goal (mode 0) or reconstructed
+        cmd_eef_pos_b: torch.Tensor  # [N, 3]
+        cmd_eef_rot_w: torch.Tensor  # [N, 4]
+        cmd_eef_status: torch.Tensor  # [N, 1]
+        eef_status: torch.Tensor  # [N, 1]
+        base_pos_error: torch.Tensor  # [N, 1]
+
+    def get_state(self) -> CommandState:
+        root_pos_w = self.asset.data.root_link_pos_w
+        root_quat_w = self.asset.data.root_link_quat_w
+        if hasattr(self.asset.data, "root_link_pose_w"):
+            root_pose_w = self.asset.data.root_link_pose_w
+        else:
+            root_pose_w = torch.cat([root_pos_w, root_quat_w], dim=-1)
+
+        eef_pos_w = self.eef_pos_w
+        eef_quat_w = self.eef_quat_w
+        if hasattr(self.asset.data, "body_link_state_w"):
+            eef_state_w = self.asset.data.body_link_state_w[:, self.eef_body_idx]
+        else:
+            # pos(3) + quat(4) + linvel(3) + angvel(3)
+            linvel = self.asset.data.body_link_lin_vel_w[:, self.eef_body_idx]
+            angvel = self.asset.data.body_link_ang_vel_w[:, self.eef_body_idx]
+            eef_state_w = torch.cat(
+                [eef_pos_w, eef_quat_w, linvel, angvel], dim=-1
+            )
+
+        # Reconstruct world EEF target from heading-frame cmd (valid for all modes).
+        # Mode 0 also keeps the persistent world goal in ``cmd_eef_pos_w``.
+        root_yaw_q = yaw_quat(root_quat_w)
+        offset_xy = self.cmd_eef_pos_b.clone()
+        offset_xy[:, 2] = 0.0
+        track_eef_pos_w = root_pos_w * torch.tensor(
+            [1.0, 1.0, 0.0], device=self.device
+        ) + quat_rotate(root_yaw_q, offset_xy)
+        track_eef_pos_w[:, 2] = self.cmd_eef_pos_b[:, 2]
+        cmd_eef_pos_w = torch.where(
+            (self.mode == 0).unsqueeze(-1),
+            self.cmd_eef_pos_w,
+            track_eef_pos_w,
+        )
+
+        return self.CommandState(
+            mode=self.mode.clone(),
+            root_pose_w=root_pose_w.clone(),
+            eef_pos_w=eef_pos_w.clone(),
+            eef_quat_w=eef_quat_w.clone(),
+            eef_state_w=eef_state_w.clone(),
+            cmd_eef_pos_w=cmd_eef_pos_w.clone(),
+            cmd_eef_pos_b=self.cmd_eef_pos_b.clone(),
+            cmd_eef_rot_w=self.cmd_eef_rot_w.clone(),
+            cmd_eef_status=self.cmd_eef_status.clone(),
+            eef_status=self.eef_status.clone(),
+            base_pos_error=self.base_pos_error.clone(),
+            batch_size=[self.num_envs],
+            device=self.device,
+        )

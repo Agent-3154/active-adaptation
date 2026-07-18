@@ -65,7 +65,7 @@ def resolve_clip_param(clip_param: Any) -> Tuple[float, float]:
 
 
 def ppo_clipped_loss(
-    ratio: torch.Tensor, adv: torch.Tensor, clip_param: Any
+    ratio: torch.Tensor, adv: torch.Tensor, clip_param: Tuple[float, float]
 ) -> torch.Tensor:
     """Loss to minimize; negates the clipped surrogate so gradient descent maximizes it.
 
@@ -74,14 +74,14 @@ def ppo_clipped_loss(
     ``[1-eps_neg, 1+eps_pos]``).
     """
     assert ratio.shape == adv.shape
-    eps_neg, eps_pos = resolve_clip_param(clip_param)
+    eps_neg, eps_pos = clip_param
     surr1 = adv * ratio
     surr2 = adv * ratio.clamp(1.0 - eps_neg, 1.0 + eps_pos)
     return -torch.min(surr1, surr2).mean()
 
 
 def spo_loss(
-    ratio: torch.Tensor, adv: torch.Tensor, clip_param: Any
+    ratio: torch.Tensor, adv: torch.Tensor, clip_param: Tuple[float, float]
 ) -> torch.Tensor:
     """
     Simple Policy Optimization Loss from https://arxiv.org/pdf/2401.16025.

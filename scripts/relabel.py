@@ -1,9 +1,9 @@
 import hydra
 import torch
 
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, ListConfig
 from pathlib import Path
-from typing import List, Any
+from typing import List, Any, Optional, Sequence
 from dataclasses import dataclass, field
 
 from active_adaptation.envs.env_base import RewardGroup, mdp
@@ -24,6 +24,13 @@ defaults = [
 @dataclass
 class RelabelConfig:
     rollout_path: str
+    """Path to a stacked rollout archive (``.pt``)."""
+    reward_groups: Optional[List[str]] = None
+    """Reward groups to (re)label.
+
+    * ``null`` (default): relabel only groups that are **absent** from the archive.
+    * non-empty list: force-relabel these groups (overwrite if already present).
+    """
     defaults: List[Any] = field(default_factory=lambda: defaults)
 
 
@@ -80,16 +87,53 @@ def run(cfg: RelabelConfig) -> dict[str, str]:
     print("Relabeling command...")
     command.relabel_command(tensordict)
 
-    reward_cfg = cfg.task.reward
-    for group_name, group_cfg in reward_cfg.items():
+    reward_groups = cfg.reward_groups
+    if reward_groups is None:
+        print("Reward groups: absent-only (skip keys already present)")
+    else:
+        reward_groups = list(map(str, reward_groups))
+        print(f"Reward groups: force-relabel {reward_groups}")
+    
+    def should_relabel_group(
+        group_name: str,
+    ) -> bool:
+        """Decide whether to (re)label ``group_name``.
+
+        * Specified list → only those names (overwrite).
+        * ``None`` → only groups missing from ``tensordict``.
+        """
         key = ("next", "reward", group_name)
-        if tensordict.get(key) is not None:
-            continue
-        reward_group = RewardGroup.create_from(group_name, group_cfg)
-        if not reward_group.enabled:
+        present = tensordict.get(key) is not None
+        if reward_groups is None:
+            return not present
+        return group_name in reward_groups
+
+    reward_cfg = cfg.task.reward
+    if reward_groups is not None:
+        unknown = [g for g in reward_groups if g not in reward_cfg]
+        if unknown:
+            raise KeyError(
+                f"reward_groups not found in task.reward: {unknown}. "
+                f"Available: {list(reward_cfg.keys())}"
+            )
+
+    for group_name, group_cfg in reward_cfg.items():
+        if not should_relabel_group(group_name):
+            if reward_groups is not None and group_name not in reward_groups:
+                print(f"Skipping reward group (not in reward_groups): {group_name}")
+            elif tensordict.get(("next", "reward", group_name)) is not None:
+                print(f"Skipping reward group (already present): {group_name}")
             continue
 
-        print(f"Relabeling reward group: {group_name}")
+        reward_group = RewardGroup.create_from(group_name, group_cfg)
+        if not reward_group.enabled:
+            print(f"Skipping reward group (disabled): {group_name}")
+            continue
+
+        key = ("next", "reward", group_name)
+        present = tensordict.get(key) is not None
+        action = "Re-relabeling" if present else "Relabeling"
+        print(f"{action} reward group: {group_name}")
         rew = torch.zeros(T, N, 1, device=tensordict.device)
         for name, func in reward_group.funcs.items():
             print(f"\tRelabeling reward {name}...")

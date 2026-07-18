@@ -206,7 +206,7 @@ class RewardV2(Generic[CT], MDPComponent, RegistryMixin):
     
     def relabel(self, tensordict: TensorDictBase) -> torch.Tensor:
         """Relabel the reward."""
-        raise NotImplementedError
+        raise NotImplementedError(f"Relabeling not implemented for {self.__class__.__name__}")
 
 
 __all__ = ["Reward", "RewardV2"]
