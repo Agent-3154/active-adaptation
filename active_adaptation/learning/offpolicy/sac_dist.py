@@ -6,7 +6,7 @@ import einops
 from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Tuple, TYPE_CHECKING, Optional
+from typing import Any, Tuple, TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from active_adaptation.envs import _EnvBase
@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from hydra.core.config_store import ConfigStore
 from tensordict import TensorDict
@@ -28,7 +27,7 @@ from torchrl.data import Composite, TensorSpec
 from torchrl.objectives import hold_out_net
 
 import active_adaptation as aa
-from active_adaptation.learning.modules import VecNorm, IndependentNormal, ConditionalBlock, CatTensors
+from active_adaptation.learning.modules import VecNorm, IndependentNormal, CatTensors
 from active_adaptation.learning.ppo.common import (
     ACTION_KEY,
     DONE_KEY,
@@ -40,22 +39,25 @@ from active_adaptation.learning.ppo.common import (
 )
 
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
-from active_adaptation.learning.offpolicy.distributional import (
-    C51Critic,
-    ScalarCritic,
-)
+from active_adaptation.learning.offpolicy.distributional import C51Critic
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
-from active_adaptation.learning.offpolicy.distribution import FasterTransformedDistribution
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import (
-    check_parameters,
     unwrap_ddp,
     wrap_ddp,
 )
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.symmetry import SymmetryTransform
-from tensordict.nn.probabilistic import interaction_type, InteractionType
+
+# Shared actor / critic trunks / rollout policy with scalar SAC.
+from active_adaptation.learning.offpolicy.sac import (
+    CriticTrunk,
+    NormalActor,
+    SACRolloutPolicy,
+    SimpleDoubleCritic,
+    gaussian_target_entropy,
+)
 
 cs = ConfigStore.instance()
 
@@ -63,27 +65,12 @@ cs = ConfigStore.instance()
 clip_grad_norm_ = nn.utils.clip_grad_norm_
 
 
-def gaussian_target_entropy(act_dim: int, sigma: float) -> float:
-    """Differential entropy of independent \\mathcal N(0, \\sigma^2) in \\mathbb R^d (FlashSAC-style).
-
-    H = (d/2) * log(2 * pi * e * sigma^2). Used as SAC log-alpha target when
-    :attr:`~SACConfig.target_entropy_sigma` is set.
-    """
-    if sigma <= 0:
-        raise ValueError("target_entropy_sigma must be positive for principled entropy.")
-    return 0.5 * float(act_dim) * math.log(2.0 * math.pi * math.e * sigma * sigma)
-
-
-def _init_sac_linear(m: nn.Module, gain: float = 1.0):
-    if isinstance(m, nn.Linear):
-        nn.init.orthogonal_(m.weight, gain=gain)
-        nn.init.zeros_(m.bias)
-
-
 @dataclass
 class SACConfig:
-    _target_: str = "active_adaptation.learning.offpolicy.sac1.SAC"
-    name: str = "sac1"
+    """Soft Actor-Critic with twin **distributional (C51)** critics (``train_offpolicy`` API)."""
+
+    _target_: str = "active_adaptation.learning.offpolicy.sac_dist.SAC"
+    name: str = "sac_dist"
     train_every: int = 4
     buffer_size: int = 2000
     warm_up_steps: int = 200
@@ -97,7 +84,6 @@ class SACConfig:
     utd_ratio: int = 4
     # architecture
     actor_init: str = "zeros"
-    distributional: bool = True
     # batch sizes
     critic_batch_size: int = 2048
     actor_batch_size: int = 2048
@@ -136,95 +122,7 @@ class SACConfig:
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
 
-cs.store(name="sac1", node=SACConfig, group="algo")
-
-
-class CriticTrunk(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int = 512,
-        output_dim: int = 1,
-        activation: type[nn.Module] = nn.SiLU,
-        norm: str | None = "rms",
-        condition_dim: int = 0,
-    ):
-        super().__init__()
-        self.in_layer = nn.Linear(input_dim, hidden_dim)
-        self.in_layer.weight._non_muon = True
-        self.out_layer = nn.Linear(hidden_dim, output_dim)
-        self.out_layer.weight._non_muon = True
-
-        self.block1 = ConditionalBlock(
-            hidden_dim=hidden_dim,
-            activation=activation,
-            norm=norm,
-            condition_dim=condition_dim,
-            dropout=0.005,
-        )
-        self.block2 = ConditionalBlock(
-            hidden_dim=hidden_dim,
-            activation=activation,
-            norm=norm,
-            condition_dim=condition_dim,
-            dropout=0.005,
-        )
-        self.norm = nn.RMSNorm(hidden_dim)
-        self.apply(_init_sac_linear)
-
-    def forward(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
-        x = self.in_layer(x)
-        x = self.block1(x, cond)
-        x = self.block2(x, cond)
-        x = self.norm(x)
-        x = self.out_layer(x)
-        return x
-
-
-class SimpleDoubleCritic(nn.Module):
-    def __init__(
-        self,
-        fn: Callable[..., nn.Module]
-    ):
-        super().__init__()
-        self.critic_1 = fn()
-        self.critic_2 = fn()
-    
-    def forward(
-        self,
-        obs: torch.Tensor,
-        act: torch.Tensor,
-    ) -> torch.Tensor:
-        if act.dim() == 2:
-            input = torch.cat([obs, act], dim=-1)
-            q1 = self.critic_1(input)
-            q2 = self.critic_2(input)
-            return torch.cat([q1, q2], dim=-1)
-        if act.dim() == 3:
-            b, k, _ = act.shape
-            obs_flat = einops.repeat(obs, "batch obs -> (batch k) obs", k=k)
-            act_flat = einops.rearrange(act, "batch k act_dim -> (batch k) act_dim")
-            qs = self.forward(obs_flat, act_flat)
-            # Scalar twin Q: [batch, k, 2]. Distributional: [batch, k, 2 * num_atoms].
-            return einops.rearrange(qs, "(batch k) fused -> batch k fused", batch=b, k=k)
-        raise ValueError(f"act must be rank 2 or 3, got shape {tuple(act.shape)}")
-
-
-def TwinScalarCritic(
-    obs_dim: int,
-    act_dim: int,
-    activation: type[nn.Module] = nn.SiLU,
-):
-    critic_input_dim = obs_dim + act_dim
-    module = SimpleDoubleCritic(
-        fn=lambda: CriticTrunk(
-            input_dim=critic_input_dim,
-            hidden_dim=512,
-            output_dim=1,
-            activation=activation,
-        )
-    )
-    return ScalarCritic(module)
+cs.store(name="sac_dist", node=SACConfig, group="algo")
 
 
 def TwinC51Critic(
@@ -233,7 +131,7 @@ def TwinC51Critic(
     num_atoms: int,
     v_min: float,
     v_max: float,
-    activation: str| type[nn.Module] = nn.SiLU,
+    activation: type[nn.Module] = nn.SiLU,
 ):
     module = SimpleDoubleCritic(
         fn=lambda: CriticTrunk(
@@ -249,53 +147,6 @@ def TwinC51Critic(
         v_max=v_max,
         num_atoms=num_atoms,
     )
-
-
-class NormalActor(nn.Module):
-
-    def __init__(
-        self,
-        obs_dim: int,
-        act_dim: int,
-        std_max: float = 1.0,
-        std_min: float = 0.001,
-        action_init: Literal["zeros", "orthogonal"] = "zeros",
-    ):
-        super().__init__()
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
-
-        self.in_layer = nn.Linear(obs_dim, 384)
-        self.in_layer.weight._non_muon = True
-        self.trunk = nn.Sequential(
-            ConditionalBlock(hidden_dim=384, condition_dim=0, norm="rms"),
-            ConditionalBlock(hidden_dim=384, condition_dim=0, norm="rms"),
-            nn.RMSNorm(384),
-        )
-        self.action = nn.Linear(384, act_dim * 2)
-        self.action.weight._non_muon = True
-        self.trunk.apply(_init_sac_linear)
-        
-        if action_init == "orthogonal":
-            self.action.apply(lambda m: _init_sac_linear(m, gain=0.01))
-        elif action_init == "zeros":
-            # zero-init following FastSAC
-            nn.init.constant_(self.action.weight, 0.0) # zero-init the weight
-            nn.init.constant_(self.action.bias, 0.0) # zero-init the bias
-        else:
-            raise ValueError(f"Invalid action_init: {action_init}")
-
-        if not std_max > 0.0:
-            raise ValueError("std_max must be positive")
-        self.log_std_max = math.log(std_max)
-        self.log_std_min = math.log(std_min)
-
-    def forward(self, obs: torch.Tensor, ):
-        feat = self.trunk(self.in_layer(obs))
-        mean, raw = self.action(feat).chunk(2, dim=-1)
-        # log_std = self.log_std_max - F.softplus(raw)
-        log_std = self.log_std_min + (self.log_std_max - self.log_std_min) * 0.5 * (1 + torch.tanh(raw))
-        return mean, torch.exp(log_std)
 
 
 class SAC(TensorDictModuleBase):
@@ -360,22 +211,19 @@ class SAC(TensorDictModuleBase):
         if self.cfg.sym_aug:
             assert self.has_symmetry, "Symmetry augmentation is enabled but no symmetry transform is provided"
 
-        if self.cfg.distributional:
-            if self.cfg.normalize_reward:
-                # Std-normalized returns are O(1); fixed atom support (not task-tuned).
-                v_min, v_max, num_atoms = -0.5, 5.0, 101
-            else:
-                v_min, v_max = -1.0, 9.0
-                num_atoms = int((v_max - v_min) / 0.05) + 1
-            self.Q = TwinC51Critic(
-                obs_dim,
-                self.act_dim,
-                num_atoms=num_atoms,
-                v_min=v_min,
-                v_max=v_max,
-            ).to(device)
+        if self.cfg.normalize_reward:
+            # Std-normalized returns are O(1); fixed atom support (not task-tuned).
+            v_min, v_max, num_atoms = -0.5, 5.0, 101
         else:
-            self.Q = TwinScalarCritic(obs_dim, self.act_dim).to(device)
+            v_min, v_max = -1.0, 9.0
+            num_atoms = int((v_max - v_min) / 0.05) + 1
+        self.Q = TwinC51Critic(
+            obs_dim,
+            self.act_dim,
+            num_atoms=num_atoms,
+            v_min=v_min,
+            v_max=v_max,
+        ).to(device)
 
         self.DistClass = IndependentNormal
         self.actor = NormalActor(
@@ -805,25 +653,20 @@ class SAC(TensorDictModuleBase):
                     l2_t1 = torch.linalg.vector_norm(policy_act_t1 - act_t1, dim=-1)
                     infos["critic/action_mismatch_t1"] = l2_t1[alive_t1].mean().item()
 
-            if self.cfg.distributional:
-                logits = self.Q(obs, act)
-                q = self.Q.expected_values(logits)
-                q_lower = self.Q.expected_values(logits, risk_alpha=0.5)
-                q_upper = self.Q.expected_values(logits, risk_alpha=-0.5)
-            else:
-                q = self.Q.get_values(obs, act)
+            logits = self.Q(obs, act)
+            q = self.Q.expected_values(logits)
+            q_lower = self.Q.expected_values(logits, risk_alpha=0.5)
+            q_upper = self.Q.expected_values(logits, risk_alpha=-0.5)
 
             # Q is trained on normalized rewards when reward_normalizer is active;
             # map logs to PPO effective-horizon scale (``* S * (1 - gamma)``).
             if self.reward_normalizer is not None:
                 q = self.reward_normalizer.denormalize_return_values(q)
-                if self.cfg.distributional:
-                    q_lower = self.reward_normalizer.denormalize_return_values(q_lower)
-                    q_upper = self.reward_normalizer.denormalize_return_values(q_upper)
+                q_lower = self.reward_normalizer.denormalize_return_values(q_lower)
+                q_upper = self.reward_normalizer.denormalize_return_values(q_upper)
 
-            if self.cfg.distributional:
-                infos["critic/q_lower"] = q_lower.mean().item()
-                infos["critic/q_upper"] = q_upper.mean().item()
+            infos["critic/q_lower"] = q_lower.mean().item()
+            infos["critic/q_upper"] = q_upper.mean().item()
 
             # online statistics
             q_val_mean = q[:B_online].mean().item()
@@ -1022,70 +865,3 @@ class SAC(TensorDictModuleBase):
         if self.reward_normalizer is not None and rk is not None:
             self.reward_normalizer.load_state_dict(rk)
 
-
-class SACRolloutPolicy(TensorDictModuleBase):
-    """Rollout policy for SAC with optional AR(1) pre-tanh noise and Q logging."""
-
-    def __init__(
-        self,
-        preproc: nn.Module,
-        actor: nn.Module,
-        DistClass: type[torch.distributions.Distribution],
-        *,
-        use_correlated: bool = True,
-        Q: nn.Module | None = None,
-        reward_normalizer: RewardNormalizer | None = None,
-        critic: bool = False,
-    ):
-        super().__init__()
-        self.preproc = preproc
-        self.actor = actor
-        self.DistClass = DistClass
-        self.use_correlated = use_correlated
-        self.Q = Q
-        self.reward_normalizer = reward_normalizer
-        self.critic = critic
-
-        in_keys = [OBS_KEY]
-        out_keys = [ACTION_KEY, "loc"]
-        if self.use_correlated:
-            in_keys = in_keys + ["prev_noise", "rho"]
-            out_keys = out_keys + ["next", "prev_noise"]
-        if self.critic is not None:
-            out_keys = out_keys + ["Q_value"]
-        self.in_keys = in_keys
-        self.out_keys = out_keys
-
-    def forward(self, tensordict: TensorDict) -> TensorDict:
-        self.preproc(tensordict)
-        obs = tensordict["_input_normed"]
-        loc, scale = self.actor(obs)
-        dist = self.DistClass(loc, scale)
-
-        if interaction_type() == InteractionType.MODE:
-            sample = loc.clone()
-        elif self.use_correlated:
-            prev_noise = tensordict["prev_noise"]
-            rho = tensordict["rho"]
-            noise = (
-                rho * prev_noise
-                + torch.sqrt((1.0 - rho.square())) * torch.randn_like(loc).clamp(-3.0, 3.0)
-            )
-            sample = loc + noise * scale
-            tensordict["next", "prev_noise"] = noise
-        else:
-            sample = dist.sample()
-
-        if isinstance(dist, FasterTransformedDistribution):
-            for transform in dist.transforms:
-                sample = transform(sample)
-
-        if self.critic and self.Q is not None:
-            qs = self.Q.get_values(obs, sample).mean(dim=-1)
-            if self.reward_normalizer is not None:
-                qs = self.reward_normalizer.denormalize_return_values(qs)
-            tensordict["Q_value"] = qs
-
-        tensordict[ACTION_KEY] = sample
-        tensordict["loc"] = loc
-        return tensordict

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from hydra.core.config_store import ConfigStore
 from tensordict import TensorDict
@@ -39,12 +40,17 @@ from active_adaptation.learning.ppo.common import (
 )
 
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
-from active_adaptation.learning.offpolicy.distributional import ScalarCritic
+from active_adaptation.learning.offpolicy.distributional import (
+    expected_from_logits,
+    cvar_from_logits,
+    project_categorical_bellman,
+)
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
 from active_adaptation.learning.offpolicy.distribution import FasterTransformedDistribution
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import (
+    check_parameters,
     unwrap_ddp,
     wrap_ddp,
 )
@@ -77,10 +83,8 @@ def _init_sac_linear(m: nn.Module, gain: float = 1.0):
 
 @dataclass
 class SACConfig:
-    """Soft Actor-Critic with twin **scalar** critics (``train_offpolicy`` API)."""
-
-    _target_: str = "active_adaptation.learning.offpolicy.sac.SAC"
-    name: str = "sac"
+    _target_: str = "active_adaptation.learning.offpolicy.sac2.SAC"
+    name: str = "sac2"
     train_every: int = 4
     buffer_size: int = 2000
     warm_up_steps: int = 200
@@ -94,6 +98,7 @@ class SACConfig:
     utd_ratio: int = 4
     # architecture
     actor_init: str = "zeros"
+    distributional: bool = True
     # batch sizes
     critic_batch_size: int = 2048
     actor_batch_size: int = 2048
@@ -103,6 +108,7 @@ class SACConfig:
     # AR(1) pre-tanh exploration noise on rollout only: eps_t = rho * eps_{t-1} + sqrt(1-rho^2) * N(0,I).
     use_correlated: bool = True
     # sac specific
+    # Scales the entropy stream: soft Q = Q_task + entropy_bonus * Q_ent (0 = hard task Q).
     entropy_bonus: float = 1.0
     alpha_init: float = 4e-3
     # If set: H_target = (d/2)*log(2*pi*e*sigma^2) for N(0,sigma^2)^d (FlashSAC).
@@ -132,15 +138,18 @@ class SACConfig:
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
 
-cs.store(name="sac", node=SACConfig, group="algo")
+cs.store(name="sac2", node=SACConfig, group="algo")
 
 
-class CriticTrunk(nn.Module):
+class DualHeadCriticTrunk(nn.Module):
+    """Shared backbone with separate task and entropy linear heads."""
+
     def __init__(
         self,
         input_dim: int,
         hidden_dim: int = 512,
-        output_dim: int = 1,
+        task_output_dim: int = 1,
+        ent_output_dim: int = 1,
         activation: type[nn.Module] = nn.SiLU,
         norm: str | None = "rms",
         condition_dim: int = 0,
@@ -148,8 +157,10 @@ class CriticTrunk(nn.Module):
         super().__init__()
         self.in_layer = nn.Linear(input_dim, hidden_dim)
         self.in_layer.weight._non_muon = True
-        self.out_layer = nn.Linear(hidden_dim, output_dim)
-        self.out_layer.weight._non_muon = True
+        self.task_out = nn.Linear(hidden_dim, task_output_dim)
+        self.task_out.weight._non_muon = True
+        self.ent_out = nn.Linear(hidden_dim, ent_output_dim)
+        self.ent_out.weight._non_muon = True
 
         self.block1 = ConditionalBlock(
             hidden_dim=hidden_dim,
@@ -168,59 +179,253 @@ class CriticTrunk(nn.Module):
         self.norm = nn.RMSNorm(hidden_dim)
         self.apply(_init_sac_linear)
 
-    def forward(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, cond: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         x = self.in_layer(x)
         x = self.block1(x, cond)
         x = self.block2(x, cond)
         x = self.norm(x)
-        x = self.out_layer(x)
-        return x
+        return self.task_out(x), self.ent_out(x)
 
 
-class SimpleDoubleCritic(nn.Module):
-    def __init__(
-        self,
-        fn: Callable[..., nn.Module]
-    ):
+class TwinDualStreamModule(nn.Module):
+    """Twin dual-head critics; share backbone within each twin only."""
+
+    def __init__(self, fn: Callable[[], DualHeadCriticTrunk]):
         super().__init__()
         self.critic_1 = fn()
         self.critic_2 = fn()
-    
+
     def forward(
         self,
         obs: torch.Tensor,
         act: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if act.dim() == 2:
-            input = torch.cat([obs, act], dim=-1)
-            q1 = self.critic_1(input)
-            q2 = self.critic_2(input)
-            return torch.cat([q1, q2], dim=-1)
+            inp = torch.cat([obs, act], dim=-1)
+            t1, e1 = self.critic_1(inp)
+            t2, e2 = self.critic_2(inp)
+            # Task/ent: [B, 2] (scalar) or [B, 2 * num_atoms] (C51).
+            return torch.cat([t1, t2], dim=-1), torch.cat([e1, e2], dim=-1)
         if act.dim() == 3:
             b, k, _ = act.shape
             obs_flat = einops.repeat(obs, "batch obs -> (batch k) obs", k=k)
             act_flat = einops.rearrange(act, "batch k act_dim -> (batch k) act_dim")
-            qs = self.forward(obs_flat, act_flat)
-            # Twin scalar Q: [batch, k, 2].
-            return einops.rearrange(qs, "(batch k) fused -> batch k fused", batch=b, k=k)
+            task, ent = self.forward(obs_flat, act_flat)
+            task = einops.rearrange(task, "(batch k) fused -> batch k fused", batch=b, k=k)
+            ent = einops.rearrange(ent, "(batch k) fused -> batch k fused", batch=b, k=k)
+            return task, ent
         raise ValueError(f"act must be rank 2 or 3, got shape {tuple(act.shape)}")
 
 
-def TwinScalarCritic(
+class DualStreamCritic(nn.Module):
+    """Twin critics with shared-backbone dual heads: soft Q = Q_task + λ Q_ent.
+
+    Distributional mode uses separate C51 supports for task vs entropy (different
+    scales). Scalar mode uses MSE on both heads. ``entropy_bonus`` (λ) scales the
+    entropy stream in soft values only; TD uses unscaled ``(-α log π) * scale``.
+    """
+
+    def __init__(
+        self,
+        module: TwinDualStreamModule,
+        *,
+        distributional: bool,
+        entropy_bonus: float = 1.0,
+        task_v_range: tuple[float, float] = (-0.5, 5.0),
+        ent_v_range: tuple[float, float] = (-1.0, 1.0),
+        num_atoms: int = 101,
+    ):
+        super().__init__()
+        self.module = module
+        self.distributional = distributional
+        self.entropy_bonus = float(entropy_bonus)
+        if distributional:
+            t_lo, t_hi = task_v_range
+            e_lo, e_hi = ent_v_range
+            if not (t_hi > t_lo and e_hi > e_lo):
+                raise ValueError(
+                    f"Value ranges must satisfy max > min; got task={task_v_range}, ent={ent_v_range}"
+                )
+            self.register_buffer("task_support", torch.linspace(t_lo, t_hi, num_atoms))
+            self.register_buffer("ent_support", torch.linspace(e_lo, e_hi, num_atoms))
+            self.task_support: torch.Tensor
+            self.ent_support: torch.Tensor
+        else:
+            self.register_buffer("task_support", torch.empty(0))
+            self.register_buffer("ent_support", torch.empty(0))
+
+    def forward(
+        self, obs: torch.Tensor, act: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.module(obs, act)
+
+    def expected(
+        self,
+        pred: torch.Tensor,
+        support: torch.Tensor,
+        risk_alpha: torch.Tensor | float | None = None,
+    ) -> torch.Tensor:
+        """Twin values ``[..., 2]``: identity if scalar, else C51 expectation on ``support``."""
+        if not self.distributional:
+            return pred
+        n_atom = int(support.shape[0])
+        if pred.shape[-1] == 2 * n_atom:
+            l1, l2 = pred.chunk(2, dim=-1)
+        elif pred.shape[-1] == 2 and pred.shape[-2] == n_atom:
+            l1, l2 = pred[..., 0], pred[..., 1]
+        else:
+            raise ValueError(
+                f"Expected logits [..., {n_atom}, 2] or [..., {2 * n_atom}], "
+                f"got shape {tuple(pred.shape)}."
+            )
+        if risk_alpha is not None:
+            e1 = cvar_from_logits(l1, support, risk_alpha)
+            e2 = cvar_from_logits(l2, support, risk_alpha)
+        else:
+            e1 = expected_from_logits(l1, support)
+            e2 = expected_from_logits(l2, support)
+        return torch.cat([e1, e2], dim=-1)
+
+    def soft_q(
+        self,
+        q_task: torch.Tensor,
+        q_ent: torch.Tensor,
+        *,
+        clip: bool = False,
+    ) -> torch.Tensor:
+        """``Q_task + λ Q_ent``; if ``clip``, use per-stream min (shape ``[..., 1]``)."""
+        if clip:
+            q_task = q_task.min(dim=-1, keepdim=True).values
+            q_ent = q_ent.min(dim=-1, keepdim=True).values
+        return q_task + self.entropy_bonus * q_ent
+
+    def get_values(
+        self,
+        obs: torch.Tensor,
+        act: torch.Tensor,
+        *,
+        clip: bool = False,
+        risk_alpha: torch.Tensor | float | None = None,
+    ) -> torch.Tensor:
+        """Soft Q from a single forward (dropout-safe)."""
+        task_pred, ent_pred = self.module(obs, act)
+        return self.soft_q(
+            self.expected(task_pred, self.task_support, risk_alpha),
+            self.expected(ent_pred, self.ent_support, risk_alpha),
+            clip=clip,
+        )
+
+    def _c51_backup(
+        self,
+        logits: torch.Tensor,
+        reward: torch.Tensor,
+        discount: torch.Tensor,
+        support: torch.Tensor,
+    ) -> torch.Tensor:
+        n_atom = int(support.shape[0])
+        l1, l2 = logits.chunk(2, dim=-1) if logits.shape[-1] == 2 * n_atom else (logits[..., 0], logits[..., 1])
+        p1 = project_categorical_bellman(l1, reward, discount, support)
+        p2 = project_categorical_bellman(l2, reward, discount, support)
+        z = support.to(device=logits.device, dtype=logits.dtype).view(1, -1)
+        ev1 = (p1 * z).sum(dim=-1, keepdim=True)
+        ev2 = (p2 * z).sum(dim=-1, keepdim=True)
+        return torch.where(ev1 < ev2, p1, p2)
+
+    def _stream_loss(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        support: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.distributional:
+            return (pred - target).square().sum(dim=-1)
+        n_atom = int(support.shape[0])
+        l1, l2 = pred.chunk(2, dim=-1) if pred.shape[-1] == 2 * n_atom else (pred[..., 0], pred[..., 1])
+        target = target.to(dtype=l1.dtype)
+        log_p1 = F.log_softmax(l1, dim=-1).clamp(min=-30.0)
+        log_p2 = F.log_softmax(l2, dim=-1).clamp(min=-30.0)
+        return -((target * log_p1).sum(dim=-1) + (target * log_p2).sum(dim=-1))
+
+    @torch.no_grad()
+    def compute_targets(
+        self,
+        next_obs: torch.Tensor,
+        next_act: torch.Tensor,
+        reward: torch.Tensor,
+        discount: torch.Tensor,
+        ent_bonus: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Task TD on ``reward``; entropy TD on ``ent_bonus`` (= ``(-α log π) * scale``)."""
+        task_pred, ent_pred = self.module(next_obs, next_act)
+        reward = reward.reshape(-1, 1)
+        discount = discount.reshape(-1, 1)
+        e = ent_bonus.reshape(-1, 1).to(dtype=ent_pred.dtype)
+
+        if self.distributional:
+            task_target = self._c51_backup(task_pred, reward, discount, self.task_support)
+        else:
+            task_target = reward + discount * task_pred.min(dim=-1, keepdim=True).values
+
+        if self.entropy_bonus == 0.0:
+            if self.distributional:
+                n = int(self.ent_support.shape[0])
+                ent_target = torch.full(
+                    (ent_pred.shape[0], n), 1.0 / n, device=ent_pred.device, dtype=ent_pred.dtype
+                )
+            else:
+                ent_target = torch.zeros(ent_pred.shape[0], 1, device=ent_pred.device, dtype=ent_pred.dtype)
+        elif self.distributional:
+            # target = discount * (e + Q_ent) ≡ reward=(discount*e), γ=discount.
+            ent_target = self._c51_backup(ent_pred, discount * e, discount, self.ent_support)
+        else:
+            ent_target = discount * (e + ent_pred.min(dim=-1, keepdim=True).values)
+        return task_target, ent_target
+
+    def compute_loss(
+        self,
+        task_pred: torch.Tensor,
+        ent_pred: torch.Tensor,
+        task_target: torch.Tensor,
+        ent_target: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-sample task + entropy loss (no batch reduction)."""
+        task_loss = self._stream_loss(task_pred, task_target, self.task_support)
+        if self.entropy_bonus == 0.0:
+            return task_loss
+        return task_loss + self._stream_loss(ent_pred, ent_target, self.ent_support)
+
+
+def build_dual_stream_critic(
     obs_dim: int,
     act_dim: int,
+    *,
+    distributional: bool,
+    entropy_bonus: float = 1.0,
+    num_atoms: int = 101,
+    task_v_range: Tuple[float, float] = (-0.5, 5.0),
+    ent_v_range: Tuple[float, float] = (-1.0, 1.0),
     activation: type[nn.Module] = nn.SiLU,
-):
-    critic_input_dim = obs_dim + act_dim
-    module = SimpleDoubleCritic(
-        fn=lambda: CriticTrunk(
-            input_dim=critic_input_dim,
+) -> DualStreamCritic:
+    out_dim = num_atoms if distributional else 1
+    module = TwinDualStreamModule(
+        fn=lambda: DualHeadCriticTrunk(
+            input_dim=obs_dim + act_dim,
             hidden_dim=512,
-            output_dim=1,
+            task_output_dim=out_dim,
+            ent_output_dim=out_dim,
             activation=activation,
         )
     )
-    return ScalarCritic(module)
+    return DualStreamCritic(
+        module,
+        distributional=distributional,
+        entropy_bonus=entropy_bonus,
+        task_v_range=task_v_range,
+        ent_v_range=ent_v_range,
+        num_atoms=num_atoms,
+    )
 
 
 class NormalActor(nn.Module):
@@ -332,7 +537,41 @@ class SAC(TensorDictModuleBase):
         if self.cfg.sym_aug:
             assert self.has_symmetry, "Symmetry augmentation is enabled but no symmetry transform is provided"
 
-        self.Q = TwinScalarCritic(obs_dim, self.act_dim).to(device)
+        if self.cfg.target_entropy_sigma is not None:
+            self.target_entropy = gaussian_target_entropy(
+                self.act_dim, self.cfg.target_entropy_sigma
+            )
+        else:
+            self.target_entropy = -0.5 * float(self.act_dim)
+
+        if self.cfg.distributional:
+            if self.cfg.normalize_reward:
+                # Std-normalized returns are O(1); fixed atom support (not task-tuned).
+                task_v_range = (-0.5, 5.0)
+                num_atoms = 101
+            else:
+                task_v_range = (-1.0, 9.0)
+                num_atoms = int((task_v_range[1] - task_v_range[0]) / 0.05) + 1
+            # Q_ent ≈ γ/(1-γ) * α H_target * entropy_scale; pad ×2 and mirror about 0.
+            e_typ = abs(self.cfg.alpha_init * self.target_entropy * self.entropy_scale)
+            half = max(2.0 * (self.cfg.gamma / max(1e-8, 1.0 - self.cfg.gamma)) * e_typ, 1e-3)
+            ent_v_range = (-half, half)
+            self.Q = build_dual_stream_critic(
+                obs_dim,
+                self.act_dim,
+                distributional=True,
+                num_atoms=num_atoms,
+                task_v_range=task_v_range,
+                ent_v_range=ent_v_range,
+                entropy_bonus=self.cfg.entropy_bonus,
+            ).to(device)
+        else:
+            self.Q = build_dual_stream_critic(
+                obs_dim,
+                self.act_dim,
+                distributional=False,
+                entropy_bonus=self.cfg.entropy_bonus,
+            ).to(device)
 
         self.DistClass = IndependentNormal
         self.actor = NormalActor(
@@ -350,12 +589,6 @@ class SAC(TensorDictModuleBase):
         self.actor_target.requires_grad_(False)
         self.actor_target.eval()
 
-        if self.cfg.target_entropy_sigma is not None:
-            self.target_entropy = gaussian_target_entropy(
-                self.act_dim, self.cfg.target_entropy_sigma
-            )
-        else:
-            self.target_entropy = - 0.5 * float(self.act_dim)
         self.log_alpha = nn.Parameter(torch.tensor(math.log(self.cfg.alpha_init), device=device))
         self.opt_alpha = torch.optim.Adam([self.log_alpha], lr=self.cfg.lr_alpha)
         if self.cfg.muon:
@@ -703,7 +936,7 @@ class SAC(TensorDictModuleBase):
 
         with self._autocast():
             with ScopedTimer("compute_target"):
-                q_target = self.compute_target(next_obs, reward, discount)
+                task_target, ent_target = self.compute_target(next_obs, reward, discount)
 
             # as of torch 2.11, compiling loss computation leads to numerically
             # inconsistent results and degrades performance
@@ -714,12 +947,15 @@ class SAC(TensorDictModuleBase):
                 act_mirror = self.act_transform(act)
                 obs = torch.cat([obs, obs_mirror], dim=0)
                 act = torch.cat([act, act_mirror], dim=0)
-                q_target = torch.cat([q_target, q_target], dim=0)
+                task_target = torch.cat([task_target, task_target], dim=0)
+                ent_target = torch.cat([ent_target, ent_target], dim=0)
                 terminated = torch.cat([terminated, terminated], dim=0)
                 is_init = torch.cat([is_init, is_init], dim=0)
 
-            pred = self.Q(obs, act)
-            per_sample_q_loss = self.Q.compute_loss(pred, q_target)
+            pred_task, pred_ent = self.Q(obs, act)
+            per_sample_q_loss = self.Q.compute_loss(
+                pred_task, pred_ent, task_target, ent_target
+            )
             valid = (1.0 - is_init.float()).reshape_as(per_sample_q_loss)
             denom = valid.sum().clamp_min(1e-8)
             q_loss = (per_sample_q_loss * valid).sum() / denom
@@ -762,36 +998,56 @@ class SAC(TensorDictModuleBase):
                     l2_t1 = torch.linalg.vector_norm(policy_act_t1 - act_t1, dim=-1)
                     infos["critic/action_mismatch_t1"] = l2_t1[alive_t1].mean().item()
 
-            q = self.Q.get_values(obs, act)
+            task_pred, ent_pred = self.Q(obs, act)
+            q_task = self.Q.expected(task_pred, self.Q.task_support)
+            q_ent = self.Q.expected(ent_pred, self.Q.ent_support)
+            if self.cfg.distributional:
+                q_task_lower = self.Q.expected(task_pred, self.Q.task_support, risk_alpha=0.5)
+                q_task_upper = self.Q.expected(task_pred, self.Q.task_support, risk_alpha=-0.5)
+            else:
+                q_task_lower = q_task_upper = None
 
-            # Q is trained on normalized rewards when reward_normalizer is active;
-            # map logs to PPO effective-horizon scale (``* S * (1 - gamma)``).
+            q_soft = self.Q.soft_q(q_task, q_ent)
+
+            # Task stream trained on normalized rewards; denormalize task only.
             if self.reward_normalizer is not None:
-                q = self.reward_normalizer.denormalize_return_values(q)
+                q_task_log = self.reward_normalizer.denormalize_return_values(q_task)
+                q_soft_log = self.Q.soft_q(q_task_log, q_ent)
+                if q_task_lower is not None:
+                    q_task_lower = self.reward_normalizer.denormalize_return_values(q_task_lower)
+                    q_task_upper = self.reward_normalizer.denormalize_return_values(q_task_upper)
+            else:
+                q_task_log = q_task
+                q_soft_log = q_soft
 
-            # online statistics
-            q_val_mean = q[:B_online].mean().item()
-            q_val_max = q[:B_online].max().item()
-            q_val_std = q[:B_online].std(dim=-1).mean().item()
+            if q_task_lower is not None:
+                infos["critic/q_task_lower"] = q_task_lower.mean().item()
+                infos["critic/q_task_upper"] = q_task_upper.mean().item()
 
-        infos["critic/q_value"] = q_val_mean
-        infos["critic/q_max"] = q_val_max
-        infos["critic/q_std"] = q_val_std
+            q_online = q_soft_log[:B_online]
+            infos["critic/q_value"] = q_online.mean().item()
+            infos["critic/q_max"] = q_online.max().item()
+            infos["critic/q_std"] = q_online.std(dim=-1).mean().item()
+            infos["critic/q_soft"] = infos["critic/q_value"]
+            infos["critic/q_task"] = q_task_log[:B_online].mean().item()
+            infos["critic/q_ent"] = q_ent[:B_online].mean().item()
         
         if B_prior > 0:
-            q_prior = q[B_online: B_eff]
+            q_prior = q_soft_log[B_online: B_eff]
             infos["critic/prior_q_mean"] = q_prior.mean().item()
             infos["critic/prior_q_max"] = q_prior.max().item()
         
         if terminated.any():
-            q_val_terminated = q[terminated.reshape(q.shape[0])]
-            infos["critic/q_value_terminated"] = q_val_terminated.mean().item()
-            infos["critic/q_loss_terminated"] = per_sample_q_loss[terminated.reshape(q.shape[0])].mean().item()
+            term_mask = terminated.reshape(q_soft_log.shape[0])
+            infos["critic/q_value_terminated"] = q_soft_log[term_mask].mean().item()
+            infos["critic/q_loss_terminated"] = per_sample_q_loss[term_mask].mean().item()
 
         return infos
 
     @torch.no_grad()
-    def _compute_target(self, next_obs: torch.Tensor, reward: torch.Tensor, discount: torch.Tensor) -> torch.Tensor:
+    def _compute_target(
+        self, next_obs: torch.Tensor, reward: torch.Tensor, discount: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # actions are sampled with uncorrelated noise
         loc, scale = self.actor_target(next_obs)
         dist = self.DistClass(loc, scale)
@@ -799,18 +1055,16 @@ class SAC(TensorDictModuleBase):
 
         next_log_prob = dist.log_prob(next_action)
         alpha = self.log_alpha.exp()
-        lp = next_log_prob.reshape_as(reward)
-
-        entropy_bonus = (-alpha * lp).reshape_as(reward) * self.entropy_scale
-        adjusted_reward = reward + discount * self.cfg.entropy_bonus * entropy_bonus
+        # Unscaled entropy bonus for the entropy-stream TD (λ applied in soft Q only).
+        ent_bonus = (-alpha * next_log_prob).reshape_as(reward) * self.entropy_scale
         noise = torch.randn_like(next_action).clamp(-3.0, 3.0)
-        q_target = self.Q_target.compute_target(
+        return unwrap_ddp(self.Q_target).compute_targets(
             next_obs,
             next_action + noise * self.cfg.target_action_noise,
-            adjusted_reward,
+            reward,
             discount,
+            ent_bonus,
         )
-        return q_target
 
     @ScopedTimer("train_actor")
     def train_actor(self, diagnostics: bool = False):
@@ -852,10 +1106,12 @@ class SAC(TensorDictModuleBase):
             dist = self.DistClass(loc, scale)
             action_update = dist.rsample((4,))  # [4, N, D]
             entropy_est = -dist.log_prob(action_update).mean(dim=0)
-            q = self.Q.get_values(
-                obs,
-                einops.rearrange(action_update, "k n d -> n k d"),
-            ).mean(dim=-1)
+            # Actor path: one forward for soft min (avoids dropout mismatch).
+            act_k = einops.rearrange(action_update, "k n d -> n k d")
+            task_pred, ent_pred = self.Q(obs, act_k)
+            q_task_v = self.Q.expected(task_pred, self.Q.task_support)
+            q_ent_v = self.Q.expected(ent_pred, self.Q.ent_support)
+            q = self.Q.soft_q(q_task_v, q_ent_v, clip=True).squeeze(-1)
             policy_term = -q.mean(dim=1)
 
         alpha = self.log_alpha.exp()
@@ -907,9 +1163,11 @@ class SAC(TensorDictModuleBase):
 
         assert q_action_grad_norm is not None
         with torch.no_grad():
-            q_for_log = q
             if self.reward_normalizer is not None:
-                q_for_log = self.reward_normalizer.denormalize_return_values(q_for_log)
+                q_task_log = self.reward_normalizer.denormalize_return_values(q_task_v)
+                q_for_log = self.Q.soft_q(q_task_log, q_ent_v, clip=True).squeeze(-1)
+            else:
+                q_for_log = q
             # prior data may not contain "loc" key
             # mean_change = (dist.loc[: batch.shape[0]] - batch["loc"]).abs().mean()
             infos = {
@@ -924,11 +1182,8 @@ class SAC(TensorDictModuleBase):
                 "actor/mean_scale": scale.mean().item(),
             }
             if self.rb_prior is not None:
-                # compare Q(s, a_prior) with mean_k Q(s, a_k)
-                q_prior = self.Q.get_values(
-                    prior_obs,
-                    prior_action,
-                ).mean(dim=-1)
+                # compare soft Q(s, a_prior) with mean_k soft Q(s, a_k)
+                q_prior = self.Q.get_values(prior_obs, prior_action, clip=True).squeeze(-1)
                 q_policy_prior = q[:n_unaug][-prior_count:].mean(dim=1)
                 advantage = q_policy_prior - q_prior
                 # whether the online policy is better than the offline policy
@@ -1025,9 +1280,12 @@ class SACRolloutPolicy(TensorDictModuleBase):
                 sample = transform(sample)
 
         if self.critic and self.Q is not None:
-            qs = self.Q.get_values(obs, sample).mean(dim=-1)
+            task_pred, ent_pred = self.Q(obs, sample)
+            q_task = self.Q.expected(task_pred, self.Q.task_support)
+            q_ent = self.Q.expected(ent_pred, self.Q.ent_support)
             if self.reward_normalizer is not None:
-                qs = self.reward_normalizer.denormalize_return_values(qs)
+                q_task = self.reward_normalizer.denormalize_return_values(q_task)
+            qs = self.Q.soft_q(q_task, q_ent).mean(dim=-1)
             tensordict["Q_value"] = qs
 
         tensordict[ACTION_KEY] = sample

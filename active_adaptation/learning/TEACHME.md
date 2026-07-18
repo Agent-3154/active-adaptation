@@ -7,7 +7,7 @@ This is a research-oriented codebase. We prefer single-file implementations that
 | Loop | Script | Reference implementation |
 |------|--------|--------------------------|
 | On-policy | `scripts/train_ppo.py` | `learning/ppo/ppo.py`, `learning/ppo/ppo_symaug.py` |
-| Off-policy | `scripts/train_offpolicy.py` | `learning/offpolicy/sac1.py` |
+| Off-policy | `scripts/train_offpolicy.py` | `learning/offpolicy/sac.py` (scalar), `sac_dist.py` (C51) |
 
 This doc is WIP. Refine it as we add algorithms.
 
@@ -30,13 +30,13 @@ This doc is WIP. Refine it as we add algorithms.
 
 - Keep a dedicated algorithm file and register a dataclass config via `ConfigStore` in the same file (`algo=<name>`).
 - Avoid `Literal[...]` on Hydra dataclass fields; use `str` / primitives in the schema and validate allowed values at runtime.
-- Set `_target_` to the policy class (e.g. `active_adaptation.learning.offpolicy.sac1.SAC`).
+- Set `_target_` to the policy class (e.g. `active_adaptation.learning.offpolicy.sac.SAC`).
 
 ### TorchRL / TensorDict
 
 - `TensorDictModule` accepts not only `nn.Module`, but also callables.
 - Use TorchRL's `interaction_type` (`InteractionType.MODE` vs stochastic) inside rollout policies to switch eval vs exploration without duplicating policy code. `train_offpolicy.py` wraps rollout in `ExplorationType.RANDOM`; eval uses `get_rollout_policy("eval")` with `ExplorationType.MODE`.
-- If rollout needs persistent state (RNN, AR(1) noise, etc.), implement `make_tensordict_primer()` so `make_env_policy` can attach a `TensorDictPrimer` **before** the env is used. The primer spec must match what the rollout policy reads/writes (see `sac1.py`: `prev_noise`, `rho`).
+- If rollout needs persistent state (RNN, AR(1) noise, etc.), implement `make_tensordict_primer()` so `make_env_policy` can attach a `TensorDictPrimer` **before** the env is used. The primer spec must match what the rollout policy reads/writes (see `sac.py`: `prev_noise`, `rho`).
 
 ### Diagnostics and stabilization
 
@@ -71,7 +71,7 @@ Reuse the existing pipeline shape first (`train_op`, `_update`, `compute_advanta
 
 ## Off-policy algorithms (`train_offpolicy.py`)
 
-### Interface (`sac1.py`)
+### Interface (`sac.py` / `sac_dist.py`)
 
 The training script does **not** stack transitions. Each env step: rollout → `env.step_and_maybe_reset` → `policy.step(td)`.
 
@@ -80,12 +80,14 @@ The training script does **not** stack transitions. Each env step: rollout → `
 | `from_env(cls, cfg, env, device)` | Construct policy; optional symmetry transforms for `sym_aug` |
 | `make_tensordict_primer()` | Optional; register rollout state keys on the env |
 | `on_stage_start(stage, env)` | Build `ReplayBuffer` from `env.fake_tensordict()`; optional prior buffer (RLPD) |
-| `get_rollout_policy(mode, critic=False)` | Per-step rollout policy (`SACRolloutPolicy` in `sac1.py`) |
+| `get_rollout_policy(mode, critic=False)` | Per-step rollout policy (`SACRolloutPolicy` in `sac.py`) |
 | `step(tensordict)` | Push transition to replay buffer; update running reward stats; call `train_op()` on schedule |
 | `train_op()` | Sample buffer, run UTD critic steps + actor steps; return metrics dict |
 | `state_dict()` / `load_state_dict()` | Checkpoints; use `unwrap_ddp` on wrapped modules |
 
 `train_offpolicy.py` strips `next` observations and private `_` keys before `policy.step`. Do not rely on `next` obs being present in the buffer push.
+
+Scalar vs distributional: `algo=sac` uses twin scalar critics; `algo=sac_dist` uses twin C51 critics. Both share `NormalActor`, `CriticTrunk`, `SimpleDoubleCritic`, and `SACRolloutPolicy` from `sac.py`. Leave experimental dual-stream SAC in `sac2.py`.
 
 ### Replay and batching
 
@@ -94,7 +96,7 @@ The training script does **not** stack transitions. Each env step: rollout → `
 - Use `ReplayBuffer.sample(..., steps=n_steps, next_obs=True)` for multi-step TD; keep `MultiStepReturn` in `objectives.py` for `n_steps > 1`.
 - Warm-up: only push to the buffer until `global_step > warm_up_steps`; gate `train_op` on `global_step % train_every == 0`.
 
-### Training loop shape (`sac1.py`)
+### Training loop shape (`sac.py`)
 
 - **Critic:** `train_every * utd_ratio` updates per `train_op`; diagnostics on the last UTD step only.
 - **Actor:** `train_every` updates per `train_op`; diagnostics on the last actor step only.
@@ -121,11 +123,11 @@ The training script does **not** stack transitions. Each env step: rollout → `
 - `torch.compile` the target computation (`_compute_target`) only; compiling the full critic loss was numerically inconsistent / slower as of torch 2.11.
 - With AMP: `grad_scaler.unscale_` before grad clip; keep `log_alpha` / alpha update in fp32.
 
-### Optional features (see `sac1.py`)
+### Optional features (see `sac.py` / `sac_dist.py`)
 
 - **RLPD:** `prior_data` + `prior_data_ratio`; concat prior batch in `train_critic` / `train_actor`; log `critic/prior_q_*`, `actor/online_advantage`.
 - **Symmetry aug:** duplicate `(obs, act, targets)` with `obs_transform` / `act_transform` in the learner.
-- **Distributional critic:** `C51Critic` via `distributional.py`; tune `v_min` / `v_max` with `normalize_reward` if used.
+- **Distributional critic:** `algo=sac_dist` / `C51Critic` via `distributional.py`; tune `v_min` / `v_max` with `normalize_reward` if used.
 - **Reward normalization:** `RewardNormalizer` in `reward_normalization.py` (FlashSAC-style); buffer stores raw rewards.
 
 ---

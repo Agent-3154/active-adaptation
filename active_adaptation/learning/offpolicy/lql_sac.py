@@ -7,9 +7,9 @@ n-Step Inequalities*. arXiv:2605.05812.
 Code: https://github.com/armaan-abraham/lql.
 
 This module ports the single-action LQL critic into the ``train_offpolicy``
-contract used by :mod:`sac1`. Actor / temperature updates follow SAC. Critic
+contract used by :mod:`sac`. Actor / temperature updates follow SAC. Critic
 bootstraps use ``v_next``; set ``entropy_bonus>0`` to add a soft entropy term
-as in :mod:`sac1` (``0`` recovers the paper's hard reward-return TD).
+as in :mod:`sac` (``0`` recovers the paper's hard reward-return TD).
 
 Core idea
 ---------
@@ -53,11 +53,11 @@ Total critic loss (paper Eq. 10)::
 
 Design of this port
 -------------------
-* **Scalar twin critics** (:class:`~sac1.TwinScalarCritic`); no C51 / IQN.
+* **Scalar twin critics** (:class:`~sac.TwinScalarCritic`); no C51 / IQN.
 * **Soft / hard backup via ``entropy_bonus``**: ``v_next`` is
   ``min(Q1_bar, Q2_bar)`` at a target-policy sample; when
   ``entropy_bonus != 0``, add ``entropy_bonus * (-α log π) * entropy_scale``
-  (same construction as :meth:`sac1.SAC._compute_target`). ``0`` matches the
+  (same construction as :meth:`sac.SAC._compute_target`). ``0`` matches the
   paper's hard TD. Actor entropy maximization is always on (SAC).
 * **Clipped double Q**: online twin heads share that detached ``v_next`` for
   TD and both hinges.
@@ -70,7 +70,7 @@ Design of this port
   Q / ``v_next`` (same asymptotic cost as the JAX reference); network
   forwards remain ``O(B L)``.
 * **Optimizers / AMP**: optional Muon+AdamW (``muon``) and CUDA FP16 AMP
-  (``use_amp``), matching :mod:`sac1`. Temperature ``log_alpha`` stays fp32.
+  (``use_amp``), matching :mod:`sac`. Temperature ``log_alpha`` stays fp32.
 * **Not in v1**: DDP, symmetry aug, action chunking, n-step TD folding,
   distributional critics.
 """
@@ -101,7 +101,7 @@ from torchrl.objectives import hold_out_net
 from active_adaptation.learning.modules import CatTensors, IndependentNormal, VecNorm
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
-from active_adaptation.learning.offpolicy.sac1 import (
+from active_adaptation.learning.offpolicy.sac import (
     NormalActor,
     SACRolloutPolicy,
     TwinScalarCritic,
@@ -297,7 +297,7 @@ class LQLSACConfig:
     target_action_noise: float = 0.01
     use_correlated: bool = True
 
-    # Soft TD weight on (-α log π) inside ``v_next`` (sac1-style). 0 = hard TD.
+    # Soft TD weight on (-α log π) inside ``v_next`` (sac-style). 0 = hard TD.
     entropy_bonus: float = 1.0
     alpha_init: float = 4e-3
     target_entropy_sigma: float | None = 0.15
@@ -585,7 +585,7 @@ class LQLSAC(TensorDictModuleBase):
     def _target_values(self, next_obs: torch.Tensor) -> torch.Tensor:
         """Target-policy bootstrap values for TD and LQL hinges.
 
-        Matches :meth:`sac1.SAC._compute_target`: evaluate ``Q`` at a noisy
+        Matches :meth:`sac.SAC._compute_target`: evaluate ``Q`` at a noisy
         action, but form the entropy bonus from ``log π`` of the clean sample.
         With ``entropy_bonus=0`` this is hard ``min Q``; otherwise soft
         ``min Q + entropy_bonus * (-α log π) * entropy_scale``.
@@ -766,7 +766,7 @@ class LQLSAC(TensorDictModuleBase):
             policy_term = -q.mean(dim=1)
 
         alpha = self.log_alpha.exp()
-        # ``entropy_bonus`` only scales the critic soft backup (as in sac1);
+        # ``entropy_bonus`` only scales the critic soft backup (as in sac);
         # the actor always maximizes entropy.
         actor_per_sample = (
             policy_term
