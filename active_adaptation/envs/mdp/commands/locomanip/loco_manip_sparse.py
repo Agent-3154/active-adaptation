@@ -36,8 +36,10 @@ class LocoManipSparse(CommandV2):
 
     Two online modes (mix controlled by ``trajectory_prob``):
 
-    0. **Goal reaching** (sparse target): world-frame EEF goal near the env
-       origin; robot spawns on a ring around it.
+    0. **Goal reaching** (sparse target): spawn near the env origin; sample a
+       world-frame EEF goal in a polar annulus about the root
+       (``world_goal_radius_range``), matching ``LocoManipNew`` world-mode
+       geometry. ``eef_z`` uses ``eef_z_range`` (terrain-relative height).
     1. **Trajectory following** (dense targets): a parametric curve (circle or
        line segment) in world frame, advanced each step.
 
@@ -54,8 +56,9 @@ class LocoManipSparse(CommandV2):
         self,
         eef_body_name: str,
         gripper_joint_names: str,
-        eef_z_range: Tuple[float, float] = (0.2, 0.75),
-        spawn_radius_range: Tuple[float, float] = (1.0, 3.0),
+        eef_z_range: Tuple[float, float] = (0.2, 0.8),
+        world_goal_radius_range: Tuple[float, float] = (1.5, 3.0),
+        goal_spawn_radius_range: Tuple[float, float] = (0.0, 0.3),
         trajectory_prob: float = 0.5,
         traj_spawn_radius_range: Tuple[float, float] = (0.3, 1.0),
         curve_radius_range: Tuple[float, float] = (0.15, 0.4),
@@ -70,7 +73,8 @@ class LocoManipSparse(CommandV2):
         self.eef_body_name = eef_body_name
         self.gripper_joint_names = gripper_joint_names
         self.eef_z_range = eef_z_range
-        self.spawn_radius_range = spawn_radius_range
+        self.world_goal_radius_range = world_goal_radius_range
+        self.goal_spawn_radius_range = goal_spawn_radius_range
         self.trajectory_prob = float(trajectory_prob)
         self.traj_spawn_radius_range = traj_spawn_radius_range
         self.curve_radius_range = curve_radius_range
@@ -236,11 +240,11 @@ class LocoManipSparse(CommandV2):
 
     @override
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Spawn near env origin (goal) or near the curve (traj), matching teacher layout."""
         origins = self.env.scene.get_spawn_origins(env_ids)
         robot_init = self.init_root_state[env_ids].clone()
         default_z_offset = robot_init[:, 2].clone()
 
-        # Assign mode before spawn so trajectory envs use a tighter ring.
         is_traj = torch.rand(len(env_ids), device=self.device) < self.trajectory_prob
         self.sparse_mode[env_ids] = torch.where(
             is_traj,
@@ -248,13 +252,14 @@ class LocoManipSparse(CommandV2):
             torch.full((), MODE_GOAL_REACHING, dtype=torch.int32, device=self.device),
         )
 
+        # Goal: small jitter about origin (like LocoManipNew). Traj: tighter ring.
         radius = torch.empty(len(env_ids), device=self.device)
         if is_traj.any():
             n_traj = int(is_traj.sum())
             radius[is_traj] = self._sample_uniform(n_traj, self.traj_spawn_radius_range)
         if (~is_traj).any():
             n_goal = int((~is_traj).sum())
-            radius[~is_traj] = self._sample_uniform(n_goal, self.spawn_radius_range)
+            radius[~is_traj] = self._sample_uniform(n_goal, self.goal_spawn_radius_range)
 
         angle = torch.rand(len(env_ids), device=self.device) * 2 * torch.pi
         robot_init[:, 0] = origins[:, 0] + radius * torch.cos(angle)
@@ -269,14 +274,29 @@ class LocoManipSparse(CommandV2):
         return robot_init
 
     def _sample_goal_commands(self, env_ids: torch.Tensor) -> None:
-        origins = self.env.scene.env_origins[env_ids]
-        z_offset = self._sample_uniform(len(env_ids), self.eef_z_range)
-        target_w = origins.clone()
-        target_w[:, 2] = self.env.get_ground_height_at(origins) + z_offset
-        self.world_eef_pos_w[env_ids] = target_w
-        self.cmd_eef_rot_w[env_ids] = self._sample_orientation(len(env_ids))
+        """Polar world EEF goal about the current root (same geometry as LocoManipNew)."""
+        n = len(env_ids)
+        root_pos_w = self.asset.data.root_link_pos_w[env_ids]
+        root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w[env_ids])
+
+        radius = self._sample_uniform(n, self.world_goal_radius_range)
+        alpha = torch.rand(n, device=self.device) * 2 * torch.pi
+        offset_b = torch.stack(
+            [radius * torch.cos(alpha), radius * torch.sin(alpha), torch.zeros(n, device=self.device)],
+            dim=-1,
+        )
+        offset_w = quat_rotate(root_yaw_q, offset_b)
+        target_xy = root_pos_w[:, :2] + offset_w[:, :2]
+        z_offset = self._sample_uniform(n, self.eef_z_range)
+        target_xyz = torch.cat(
+            [target_xy, torch.zeros(n, 1, device=self.device)], dim=-1
+        )
+        target_xyz[:, 2] = self.env.get_ground_height_at(target_xyz) + z_offset
+
+        self.world_eef_pos_w[env_ids] = target_xyz
+        self.cmd_eef_rot_w[env_ids] = self._sample_orientation(n)
         self.cmd_eef_status[env_ids] = (
-            torch.rand(len(env_ids), 1, device=self.device) < 0.5
+            torch.rand(n, 1, device=self.device) < 0.5
         ).long()
         self.base_pos_error[env_ids] = 0.0
 

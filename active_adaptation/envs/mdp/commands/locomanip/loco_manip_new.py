@@ -243,7 +243,7 @@ class LocoManipNew(CommandV2):
         linvel_x_range: Tuple[float, float] = (-1.0, 1.0),
         linvel_y_range: Tuple[float, float] = (-1.0, 1.0),
         yaw_rate_range: Tuple[float, float] = (-torch.pi / 2, torch.pi / 2),
-        world_goal_radius_range: Tuple[float, float] = (1.0, 2.5),
+        world_goal_radius_range: Tuple[float, float] = (1.5, 3.0),
         standoff_reach_range: Tuple[float, float] = (0.5, 0.7),
         world_linvel_gain_range: Tuple[float, float] = (1.0, 2.0),
         world_yaw_gain_range: Tuple[float, float] = (1.0, 2.0),

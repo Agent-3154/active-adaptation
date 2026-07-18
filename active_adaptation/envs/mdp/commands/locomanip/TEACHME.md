@@ -22,7 +22,7 @@ Three command modes (scheduled from `mode_probs_0` → `mode_probs_1`):
 
 | Mode | Name | Behavior |
 |------|------|----------|
-| 0 | World | Persistent world-frame EEF goal + standoff base pose; loco walks to standoff, EEF tracks the world goal |
+| 0 | World | Persistent world-frame EEF goal in a polar annulus about the root (`world_goal_radius_range`, default 1.5–3.0 m) + standoff base pose; loco walks to standoff, EEF tracks the world goal |
 | 1 | Body | Body-frame EEF goal that moves with the robot; independent loco command |
 | 2 | Nominal | Hold nominal EEF rest pose; independent loco command |
 
@@ -49,8 +49,10 @@ offsets from the root; `eef_z` is absolute height. No base velocity or yaw rate.
 
 ### Mode 0 — Goal reaching (sparse target)
 
-- Sample a world-frame EEF goal near the env origin (`z` in `eef_z_range`).
-- Spawn the robot on a ring (`spawn_radius_range`).
+- Spawn near the env origin (`goal_spawn_radius_range`, small jitter).
+- Sample a world-frame EEF goal in a polar annulus about the root
+  (`world_goal_radius_range`, shared with `LocoManipNew`), with height in
+  `eef_z_range`.
 - The policy must discover the base motion needed to make the goal reachable.
 - After the EEF is close enough, commands may be resampled.
 

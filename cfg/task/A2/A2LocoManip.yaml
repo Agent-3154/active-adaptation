@@ -47,6 +47,12 @@ input:
 command:
   _target_: LocoManipNew
   eef_body_name: "grasp_point"
+  # Shared with A2LocoManipSparse goal-reaching geometry
+  world_goal_radius_range: [1.5, 3.0]
+  workspace_range:
+    - [0.25, 0.75]   # x
+    - [-0.2, 0.2]    # y
+    - [0.2, 0.8]     # z (align with sparse eef_z_range)
   mode_probs_0: [0.0, 0.0, 1.0]
   mode_probs_1: [0.3, 0.5, 0.2]
   mode_transition_steps: 9600

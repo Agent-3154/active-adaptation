@@ -8,6 +8,7 @@ USD for Isaac must be provided as ``a2_piper.usd`` in that folder (export separa
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from active_adaptation import ROBOT_MODEL_DIR
@@ -52,7 +53,13 @@ _ARM_JOINT_SYMMETRY = {
     "arm_joint8": (-1, "arm_joint7"),
 }
 
-INIT_JOINT_POS = {**A2_INIT_JOINT_POS, "arm_joint[1-8]": 0.0}
+INIT_JOINT_POS = {
+    **A2_INIT_JOINT_POS,
+    "arm_joint1": 0.0,
+    "arm_joint2": math.pi / 2,
+    "arm_joint3": - math.pi / 2,
+    "arm_joint[4-8]": 0.0,
+}
 
 JOINT_SYMMETRY_MAPPING = {**A2_JOINT_SYMMETRY_MAPPING, **_ARM_JOINT_SYMMETRY}
 
