@@ -110,7 +110,7 @@ class SACConfig:
     # FP16 AMP (CUDA only); separate GradScalers for critic and actor (alpha stays fp32).
     use_amp: bool = True
     # Clamp aggregated rewards at 0 before TD / reward-norm (avoids suicide from negative rewards).
-    clamp_reward: bool = True
+    clamp_reward: bool = False
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
     reward_norm_epsilon: float = 1e-8
@@ -389,10 +389,10 @@ class SAC(TensorDictModuleBase):
     @classmethod
     def from_env(cls, cfg: SACConfig, env: _EnvBase, device: torch.device):
         if cfg.sym_aug:
-            obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform()
+            obs_transform = env.observation_groups[OBS_KEY].symmetry_transform()
             act_transform = env.action_manager.symmetry_transform()
             if CMD_KEY in env.observation_spec.keys(True, True):
-                cmd_transform = env.observation_funcs[CMD_KEY].symmetry_transform()
+                cmd_transform = env.observation_groups[CMD_KEY].symmetry_transform()
                 obs_transform = SymmetryTransform.cat([cmd_transform, obs_transform])
         else:
             obs_transform = None
