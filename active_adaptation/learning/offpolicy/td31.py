@@ -497,7 +497,7 @@ class TD3(TensorDictModuleBase):
     def step(self, tensordict: TensorDict):
         """Push one env transition and optionally run a training cycle.
 
-        Matches :meth:`active_adaptation.learning.offpolicy.sac1.SAC.step` for
+        Matches :meth:`active_adaptation.learning.offpolicy.sac.SAC.step` for
         :mod:`scripts.train_offpolicy`.
         """
         self.global_step += 1

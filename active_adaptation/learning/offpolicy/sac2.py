@@ -48,6 +48,7 @@ from active_adaptation.learning.offpolicy.distributional import (
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
 from active_adaptation.learning.offpolicy.distribution import FasterTransformedDistribution
+from active_adaptation.learning.offpolicy.sac import AlphaModule
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import (
     check_parameters,
@@ -589,8 +590,8 @@ class SAC(TensorDictModuleBase):
         self.actor_target.requires_grad_(False)
         self.actor_target.eval()
 
-        self.log_alpha = nn.Parameter(torch.tensor(math.log(self.cfg.alpha_init), device=device))
-        self.opt_alpha = torch.optim.Adam([self.log_alpha], lr=self.cfg.lr_alpha)
+        self.alpha = AlphaModule(self.cfg.alpha_init).to(device)
+        self.opt_alpha = torch.optim.Adam(self.alpha.parameters(), lr=self.cfg.lr_alpha)
         if self.cfg.muon:
             self.opt_actor = MuonAdamWWrapper(
                 [self.actor],
@@ -624,7 +625,7 @@ class SAC(TensorDictModuleBase):
             )
 
         # Distributed wiring: wrap *after* deepcopy of targets so target nets
-        # stay plain modules, and *after* ``log_alpha`` / optimizers exist so
+        # stay plain modules, and *after* ``alpha`` / optimizers exist so
         # the initial broadcast includes them. DDP shares the underlying
         # parameter tensors with the wrapped module, so optimizers built from
         # ``self.actor.parameters()`` keep pointing at the same params.
@@ -675,6 +676,7 @@ class SAC(TensorDictModuleBase):
             ddp_kwargs.update(device_ids=[local_rank], output_device=local_rank)
         self.actor = wrap_ddp(self.actor, **ddp_kwargs)
         self.Q = wrap_ddp(self.Q, **ddp_kwargs)
+        self.alpha = wrap_ddp(self.alpha, **ddp_kwargs)
 
     @torch.no_grad()
     def _broadcast_parameters(self) -> None:
@@ -682,7 +684,7 @@ class SAC(TensorDictModuleBase):
 
         Includes the target networks (deepcopied locally, so their initial RNG
         state would otherwise diverge across ranks), :attr:`vecnorm_obs`, and
-        the scalar :attr:`log_alpha`.
+        :attr:`alpha`.
         """
         if not self._distributed:
             return
@@ -692,23 +694,12 @@ class SAC(TensorDictModuleBase):
             self.actor_target,
             self.Q,
             self.Q_target,
+            self.alpha,
         ):
             for param in module.parameters():
                 dist.broadcast(param.data, src=0)
             for buffer in module.buffers():
                 dist.broadcast(buffer.data, src=0)
-        dist.broadcast(self.log_alpha.data, src=0)
-
-    @torch.no_grad()
-    def _all_reduce_param_grad(self, param: nn.Parameter) -> None:
-        """Average the gradient on a single parameter (e.g. :attr:`log_alpha`).
-
-        :attr:`log_alpha` lives on the SAC module itself, not on the actor / Q,
-        so DDP never sees it.
-        """
-        if not self._distributed or param.grad is None:
-            return
-        dist.all_reduce(param.grad.data, op=dist.ReduceOp.AVG)
 
     def make_tensordict_primer(self):
         """Register correlated-noise state **before** constructing :class:`SAC` so replay ``fake_tensordict`` matches rollouts."""
@@ -1054,7 +1045,7 @@ class SAC(TensorDictModuleBase):
         next_action = dist.sample()
 
         next_log_prob = dist.log_prob(next_action)
-        alpha = self.log_alpha.exp()
+        alpha = self.alpha()
         # Unscaled entropy bonus for the entropy-stream TD (λ applied in soft Q only).
         ent_bonus = (-alpha * next_log_prob).reshape_as(reward) * self.entropy_scale
         noise = torch.randn_like(next_action).clamp(-3.0, 3.0)
@@ -1114,7 +1105,7 @@ class SAC(TensorDictModuleBase):
             q = self.Q.soft_q(q_task_v, q_ent_v, clip=True).squeeze(-1)
             policy_term = -q.mean(dim=1)
 
-        alpha = self.log_alpha.exp()
+        alpha = self.alpha()
         actor_loss = (
             policy_term
             + alpha.detach() * (-entropy_est.reshape_as(policy_term) * self.entropy_scale)
@@ -1137,8 +1128,6 @@ class SAC(TensorDictModuleBase):
         self.opt_alpha.zero_grad(set_to_none=True)
         alpha_loss = -(alpha * (-entropy_est.detach() + self.target_entropy)).mean()
         alpha_loss.backward()
-        # ``log_alpha`` is not inside a DDP-wrapped submodule; all-reduce its grad.
-        self._all_reduce_param_grad(self.log_alpha)
         self.opt_alpha.step()
 
         self.opt_actor.zero_grad(set_to_none=True)
@@ -1204,7 +1193,7 @@ class SAC(TensorDictModuleBase):
         # distributed and single-process runs.
         state_dict["Q"] = unwrap_ddp(self.Q).state_dict()
         state_dict["actor"] = unwrap_ddp(self.actor).state_dict()
-        state_dict["log_alpha"] = self.log_alpha.detach()
+        state_dict["alpha"] = unwrap_ddp(self.alpha).state_dict()
         state_dict["vecnorm_obs"] = self.vecnorm_obs.state_dict()
         if self.reward_normalizer is not None:
             state_dict["reward_normalizer"] = self.reward_normalizer.state_dict()
@@ -1215,7 +1204,11 @@ class SAC(TensorDictModuleBase):
         unwrap_ddp(self.actor).load_state_dict(state_dict["actor"], strict=strict)
         if "opt_alpha" in state_dict:
             self.opt_alpha.load_state_dict(state_dict["opt_alpha"])
-        self.log_alpha.data = state_dict["log_alpha"].to(self.device)
+        alpha = unwrap_ddp(self.alpha)
+        if "alpha" in state_dict:
+            alpha.load_state_dict(state_dict["alpha"], strict=strict)
+        elif "log_alpha" in state_dict:
+            alpha.log_alpha.data = state_dict["log_alpha"].to(self.device)
         self.vecnorm_obs.load_state_dict(state_dict["vecnorm_obs"])
         rk = state_dict.get("reward_normalizer")
         if self.reward_normalizer is not None and rk is not None:

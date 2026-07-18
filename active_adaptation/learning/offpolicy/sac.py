@@ -75,6 +75,28 @@ def _init_sac_linear(m: nn.Module, gain: float = 1.0):
         nn.init.zeros_(m.bias)
 
 
+def quantile_mse_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    quantile: float,
+    valid: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Asymmetric (quantile) squared error used by BAC for the V critic.
+
+    For ``τ > 0.5``, underestimation (``target > pred``) is weighted more heavily, so the
+    fit tracks an optimistic upper quantile of the regression targets.
+    """
+    if not 0.0 < quantile < 1.0:
+        raise ValueError(f"quantile must be in (0, 1), got {quantile}")
+    err = target - pred
+    weight = torch.where(err < 0, 1.0 - quantile, quantile)
+    per = weight * err.square()
+    if valid is None:
+        return per.mean()
+    valid = valid.reshape_as(per)
+    return (per * valid).sum() / valid.sum().clamp_min(1e-8)
+
+
 @dataclass
 class SACConfig:
     """Soft Actor-Critic with twin **scalar** critics (``train_offpolicy`` API)."""
@@ -128,6 +150,11 @@ class SACConfig:
     # path to prior data for RLPD
     prior_data: str | None = None
     prior_data_ratio: float = 0.4
+
+    # BAC-style diagnostic V: quantile-regress the same soft TD target as Q (no Q-target change).
+    # τ > 0.5 → optimistic V; logged as ``critic/q_upper``.
+    learn_v: bool = True
+    v_quantile: float = 0.9
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
@@ -223,6 +250,19 @@ def TwinScalarCritic(
     return ScalarCritic(module)
 
 
+def ValueCritic(
+    obs_dim: int,
+    activation: type[nn.Module] = nn.SiLU,
+) -> nn.Module:
+    """State-value trunk (same backbone as Q, observation-only)."""
+    return CriticTrunk(
+        input_dim=obs_dim,
+        hidden_dim=512,
+        output_dim=1,
+        activation=activation,
+    )
+
+
 class NormalActor(nn.Module):
 
     def __init__(
@@ -268,6 +308,17 @@ class NormalActor(nn.Module):
         # log_std = self.log_std_max - F.softplus(raw)
         log_std = self.log_std_min + (self.log_std_max - self.log_std_min) * 0.5 * (1 + torch.tanh(raw))
         return mean, torch.exp(log_std)
+
+
+class AlphaModule(nn.Module):
+    """Learnable SAC temperature ``α = exp(log_α)``, DDP-wrappable as a module."""
+
+    def __init__(self, init_value: float = 1.0):
+        super().__init__()
+        self.log_alpha = nn.Parameter(torch.tensor(math.log(init_value)))
+
+    def forward(self) -> torch.Tensor:
+        return self.log_alpha.exp()
 
 
 class SAC(TensorDictModuleBase):
@@ -350,14 +401,24 @@ class SAC(TensorDictModuleBase):
         self.actor_target.requires_grad_(False)
         self.actor_target.eval()
 
+        # Diagnostic V (BAC quantile regression). Not used in the Q Bellman target yet.
+        self.V: nn.Module | None = None
+        self.opt_V = None
+        if self.cfg.learn_v:
+            if not 0.0 < float(self.cfg.v_quantile) < 1.0:
+                raise ValueError(
+                    f"v_quantile must be in (0, 1), got {self.cfg.v_quantile}"
+                )
+            self.V = ValueCritic(obs_dim).to(device)
+
         if self.cfg.target_entropy_sigma is not None:
             self.target_entropy = gaussian_target_entropy(
                 self.act_dim, self.cfg.target_entropy_sigma
             )
         else:
             self.target_entropy = - 0.5 * float(self.act_dim)
-        self.log_alpha = nn.Parameter(torch.tensor(math.log(self.cfg.alpha_init), device=device))
-        self.opt_alpha = torch.optim.Adam([self.log_alpha], lr=self.cfg.lr_alpha)
+        self.alpha = AlphaModule(self.cfg.alpha_init).to(device)
+        self.opt_alpha = torch.optim.Adam(self.alpha.parameters(), lr=self.cfg.lr_alpha)
         if self.cfg.muon:
             self.opt_actor = MuonAdamWWrapper(
                 [self.actor],
@@ -369,9 +430,19 @@ class SAC(TensorDictModuleBase):
                 lr=self.cfg.lr,
                 weight_decay=self.cfg.weight_decay,
             )
+            if self.V is not None:
+                self.opt_V = MuonAdamWWrapper(
+                    [self.V],
+                    lr=self.cfg.lr,
+                    weight_decay=self.cfg.weight_decay,
+                )
         else:
             self.opt_actor = torch.optim.AdamW(self.actor.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
             self.opt_Q = torch.optim.AdamW(self.Q.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
+            if self.V is not None:
+                self.opt_V = torch.optim.AdamW(
+                    self.V.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay
+                )
 
         self.global_step = 0
 
@@ -391,7 +462,7 @@ class SAC(TensorDictModuleBase):
             )
 
         # Distributed wiring: wrap *after* deepcopy of targets so target nets
-        # stay plain modules, and *after* ``log_alpha`` / optimizers exist so
+        # stay plain modules, and *after* ``alpha`` / optimizers exist so
         # the initial broadcast includes them. DDP shares the underlying
         # parameter tensors with the wrapped module, so optimizers built from
         # ``self.actor.parameters()`` keep pointing at the same params.
@@ -405,6 +476,7 @@ class SAC(TensorDictModuleBase):
         # Separate scalers so critic/actor loss scales and Inf/NaN skips stay independent.
         self.grad_scaler_Q = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
         self.grad_scaler_actor = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
+        self.grad_scaler_V = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
         # self.compute_target = torch.compile(
         #     self._compute_target,
         #     mode="reduce-overhead",
@@ -442,6 +514,9 @@ class SAC(TensorDictModuleBase):
             ddp_kwargs.update(device_ids=[local_rank], output_device=local_rank)
         self.actor = wrap_ddp(self.actor, **ddp_kwargs)
         self.Q = wrap_ddp(self.Q, **ddp_kwargs)
+        self.alpha = wrap_ddp(self.alpha, **ddp_kwargs)
+        if self.V is not None:
+            self.V = wrap_ddp(self.V, **ddp_kwargs)
 
     @torch.no_grad()
     def _broadcast_parameters(self) -> None:
@@ -449,33 +524,25 @@ class SAC(TensorDictModuleBase):
 
         Includes the target networks (deepcopied locally, so their initial RNG
         state would otherwise diverge across ranks), :attr:`vecnorm_obs`, and
-        the scalar :attr:`log_alpha`.
+        :attr:`alpha`.
         """
         if not self._distributed:
             return
-        for module in (
+        modules = [
             self.vecnorm_obs,
             self.actor,
             self.actor_target,
             self.Q,
             self.Q_target,
-        ):
+            self.alpha,
+        ]
+        if self.V is not None:
+            modules.append(self.V)
+        for module in modules:
             for param in module.parameters():
                 dist.broadcast(param.data, src=0)
             for buffer in module.buffers():
                 dist.broadcast(buffer.data, src=0)
-        dist.broadcast(self.log_alpha.data, src=0)
-
-    @torch.no_grad()
-    def _all_reduce_param_grad(self, param: nn.Parameter) -> None:
-        """Average the gradient on a single parameter (e.g. :attr:`log_alpha`).
-
-        :attr:`log_alpha` lives on the SAC module itself, not on the actor / Q,
-        so DDP never sees it.
-        """
-        if not self._distributed or param.grad is None:
-            return
-        dist.all_reduce(param.grad.data, op=dist.ReduceOp.AVG)
 
     def make_tensordict_primer(self):
         """Register correlated-noise state **before** constructing :class:`SAC` so replay ``fake_tensordict`` matches rollouts."""
@@ -724,6 +791,20 @@ class SAC(TensorDictModuleBase):
             denom = valid.sum().clamp_min(1e-8)
             q_loss = (per_sample_q_loss * valid).sum() / denom
 
+            # Same soft TD target as Q; quantile regression → optimistic V (logged as q_upper).
+            # Use V(obs) not V(next_obs): q_target = r + γ soft_V(s'), so it is a return
+            # from ``obs``, not a value at ``next_obs``.
+            v_pred = None
+            v_loss = None
+            if self.V is not None:
+                v_pred = self.V(obs)
+                v_loss = quantile_mse_loss(
+                    v_pred,
+                    q_target.detach(),
+                    float(self.cfg.v_quantile),
+                    valid=valid.reshape(obs.shape[0], 1),
+                )
+
         self.opt_Q.zero_grad(set_to_none=True)
         if self._amp_enabled:
             self.grad_scaler_Q.scale(q_loss).backward()
@@ -742,6 +823,20 @@ class SAC(TensorDictModuleBase):
             self.opt_Q.step()
 
         soft_copy_(self.Q, self.Q_target, tau=self.cfg.tau_Q)
+
+        if v_loss is not None:
+            assert self.opt_V is not None
+            self.opt_V.zero_grad(set_to_none=True)
+            if self._amp_enabled:
+                self.grad_scaler_V.scale(v_loss).backward()
+                self.grad_scaler_V.unscale_(self.opt_V)
+                clip_grad_norm_(self.V.parameters(), max_norm=self.cfg.max_grad_norm)
+                self.grad_scaler_V.step(self.opt_V)
+                self.grad_scaler_V.update()
+            else:
+                v_loss.backward()
+                clip_grad_norm_(self.V.parameters(), max_norm=self.cfg.max_grad_norm)
+                self.opt_V.step()
 
         if not diagnostics:
             return
@@ -774,6 +869,12 @@ class SAC(TensorDictModuleBase):
             q_val_max = q[:B_online].max().item()
             q_val_std = q[:B_online].std(dim=-1).mean().item()
 
+            if v_pred is not None:
+                v = v_pred[:B_online]
+                if self.reward_normalizer is not None:
+                    v = self.reward_normalizer.denormalize_return_values(v)
+                infos["critic/q_upper"] = v.mean().item()
+
         infos["critic/q_value"] = q_val_mean
         infos["critic/q_max"] = q_val_max
         infos["critic/q_std"] = q_val_std
@@ -798,7 +899,7 @@ class SAC(TensorDictModuleBase):
         next_action = dist.sample()
 
         next_log_prob = dist.log_prob(next_action)
-        alpha = self.log_alpha.exp()
+        alpha = self.alpha()
         lp = next_log_prob.reshape_as(reward)
 
         entropy_bonus = (-alpha * lp).reshape_as(reward) * self.entropy_scale
@@ -858,7 +959,7 @@ class SAC(TensorDictModuleBase):
             ).mean(dim=-1)
             policy_term = -q.mean(dim=1)
 
-        alpha = self.log_alpha.exp()
+        alpha = self.alpha()
         actor_loss = (
             policy_term
             + alpha.detach() * (-entropy_est.reshape_as(policy_term) * self.entropy_scale)
@@ -881,8 +982,6 @@ class SAC(TensorDictModuleBase):
         self.opt_alpha.zero_grad(set_to_none=True)
         alpha_loss = -(alpha * (-entropy_est.detach() + self.target_entropy)).mean()
         alpha_loss.backward()
-        # ``log_alpha`` is not inside a DDP-wrapped submodule; all-reduce its grad.
-        self._all_reduce_param_grad(self.log_alpha)
         self.opt_alpha.step()
 
         self.opt_actor.zero_grad(set_to_none=True)
@@ -949,7 +1048,9 @@ class SAC(TensorDictModuleBase):
         # distributed and single-process runs.
         state_dict["Q"] = unwrap_ddp(self.Q).state_dict()
         state_dict["actor"] = unwrap_ddp(self.actor).state_dict()
-        state_dict["log_alpha"] = self.log_alpha.detach()
+        if self.V is not None:
+            state_dict["V"] = unwrap_ddp(self.V).state_dict()
+        state_dict["alpha"] = unwrap_ddp(self.alpha).state_dict()
         state_dict["vecnorm_obs"] = self.vecnorm_obs.state_dict()
         if self.reward_normalizer is not None:
             state_dict["reward_normalizer"] = self.reward_normalizer.state_dict()
@@ -958,9 +1059,15 @@ class SAC(TensorDictModuleBase):
     def load_state_dict(self, state_dict: dict, strict: bool = True):
         unwrap_ddp(self.Q).load_state_dict(state_dict["Q"], strict=strict)
         unwrap_ddp(self.actor).load_state_dict(state_dict["actor"], strict=strict)
+        if self.V is not None and "V" in state_dict:
+            unwrap_ddp(self.V).load_state_dict(state_dict["V"], strict=strict)
         if "opt_alpha" in state_dict:
             self.opt_alpha.load_state_dict(state_dict["opt_alpha"])
-        self.log_alpha.data = state_dict["log_alpha"].to(self.device)
+        alpha = unwrap_ddp(self.alpha)
+        if "alpha" in state_dict:
+            alpha.load_state_dict(state_dict["alpha"], strict=strict)
+        elif "log_alpha" in state_dict:
+            alpha.log_alpha.data = state_dict["log_alpha"].to(self.device)
         self.vecnorm_obs.load_state_dict(state_dict["vecnorm_obs"])
         rk = state_dict.get("reward_normalizer")
         if self.reward_normalizer is not None and rk is not None:

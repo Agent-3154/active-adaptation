@@ -114,14 +114,14 @@ Scalar vs distributional: `algo=sac` uses twin scalar critics; `algo=sac_dist` u
 
 - Wrap **only** online `actor` and `Q` in DDP, **after** `deepcopy` of targets and **after** optimizers are built (DDP shares parameter tensors with the optimizer).
 - Target nets stay plain modules; load targets with `unwrap_ddp(self.Q).state_dict()`.
-- Broadcast all parameters/buffers (including targets, `vecnorm_obs`, `log_alpha`) from rank 0 at startup.
-- `log_alpha` is not inside DDP; all-reduce its gradient manually after `alpha_loss.backward()`.
+- Broadcast all parameters/buffers (including targets, `vecnorm_obs`, `alpha`) from rank 0 at startup.
+- Wrap `AlphaModule` in DDP with actor/Q so temperature grads sync automatically (no manual all-reduce).
 - Checkpoints: save/load via `unwrap_ddp` so single-GPU and DDP checkpoints are interchangeable.
 
 ### Performance notes
 
 - `torch.compile` the target computation (`_compute_target`) only; compiling the full critic loss was numerically inconsistent / slower as of torch 2.11.
-- With AMP: `grad_scaler.unscale_` before grad clip; keep `log_alpha` / alpha update in fp32.
+- With AMP: `grad_scaler.unscale_` before grad clip; keep `alpha` / temperature update in fp32.
 
 ### Optional features (see `sac.py` / `sac_dist.py`)
 

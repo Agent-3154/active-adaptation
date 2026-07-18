@@ -46,6 +46,6 @@ stages:
     # gpus: "0,1"
     overrides:
       - task=A2/A2LocoManipSparse
-      - algo=sac1
+      - algo=sac_dist
       - algo.prior_data=${run_state.relabeled_path}
       # - algo.prior_data=${run_state.rollout_path}

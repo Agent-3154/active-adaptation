@@ -70,7 +70,7 @@ Design of this port
   Q / ``v_next`` (same asymptotic cost as the JAX reference); network
   forwards remain ``O(B L)``.
 * **Optimizers / AMP**: optional Muon+AdamW (``muon``) and CUDA FP16 AMP
-  (``use_amp``), matching :mod:`sac`. Temperature ``log_alpha`` stays fp32.
+  (``use_amp``), matching :mod:`sac`. Temperature ``AlphaModule`` stays fp32.
 * **Not in v1**: DDP, symmetry aug, action chunking, n-step TD folding,
   distributional critics.
 """
@@ -102,6 +102,7 @@ from active_adaptation.learning.modules import CatTensors, IndependentNormal, Ve
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
 from active_adaptation.learning.offpolicy.sac import (
+    AlphaModule,
     NormalActor,
     SACRolloutPolicy,
     TwinScalarCritic,
@@ -403,10 +404,8 @@ class LQLSAC(TensorDictModuleBase):
             self.target_entropy = gaussian_target_entropy(
                 self.act_dim, cfg.target_entropy_sigma
             )
-        self.log_alpha = nn.Parameter(
-            torch.tensor(math.log(cfg.alpha_init), device=self.device)
-        )
-        self.opt_alpha = torch.optim.Adam([self.log_alpha], lr=cfg.lr_alpha)
+        self.alpha = AlphaModule(cfg.alpha_init).to(self.device)
+        self.opt_alpha = torch.optim.Adam(self.alpha.parameters(), lr=cfg.lr_alpha)
         if cfg.muon:
             self.opt_actor = MuonAdamWWrapper(
                 [self.actor],
@@ -600,7 +599,7 @@ class LQLSAC(TensorDictModuleBase):
         q = self.Q_target.get_values(next_obs, action_q).min(dim=-1).values
         if self.cfg.entropy_bonus:
             log_prob = dist.log_prob(action)
-            alpha = self.log_alpha.exp()
+            alpha = self.alpha()
             q = q + (
                 float(self.cfg.entropy_bonus)
                 * (-alpha * log_prob)
@@ -765,7 +764,7 @@ class LQLSAC(TensorDictModuleBase):
             ).mean(dim=-1)
             policy_term = -q.mean(dim=1)
 
-        alpha = self.log_alpha.exp()
+        alpha = self.alpha()
         # ``entropy_bonus`` only scales the critic soft backup (as in sac);
         # the actor always maximizes entropy.
         actor_per_sample = (
@@ -824,7 +823,7 @@ class LQLSAC(TensorDictModuleBase):
             Q_target=self.Q_target.state_dict(),
             actor=self.actor.state_dict(),
             actor_target=self.actor_target.state_dict(),
-            log_alpha=self.log_alpha.detach(),
+            alpha=self.alpha.state_dict(),
             vecnorm_obs=self.vecnorm_obs.state_dict(),
         )
         if self.reward_normalizer is not None:
@@ -838,7 +837,10 @@ class LQLSAC(TensorDictModuleBase):
         self.actor_target.load_state_dict(
             state_dict.get("actor_target", state_dict["actor"]), strict=strict
         )
-        self.log_alpha.data.copy_(state_dict["log_alpha"].to(self.device))
+        if "alpha" in state_dict:
+            self.alpha.load_state_dict(state_dict["alpha"], strict=strict)
+        elif "log_alpha" in state_dict:
+            self.alpha.log_alpha.data.copy_(state_dict["log_alpha"].to(self.device))
         self.vecnorm_obs.load_state_dict(state_dict["vecnorm_obs"])
         reward_state = state_dict.get("reward_normalizer")
         if self.reward_normalizer is not None and reward_state is not None:

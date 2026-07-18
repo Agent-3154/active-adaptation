@@ -24,5 +24,5 @@ stages:
     overrides:
       - task=G1/G1LocoFlat
       - task.num_envs=2048
-      - algo=sac1
+      - algo=sac_dist
       - algo.prior_data=${run_state.rollout_path}
