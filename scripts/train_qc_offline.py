@@ -185,7 +185,8 @@ def main(cfg: TrainConfig):
                 and i % cfg.offline_eval_interval == 0
             ):
                 with set_exploration_type(ExplorationType.MODE):
-                    eval_info, _, _ = evaluate(env, policy, seed=cfg.seed + i)
+                    policy_eval = policy.get_rollout_policy("eval")
+                    eval_info, _, _ = evaluate(env, policy_eval, seed=cfg.seed + i)
                 run.log(eval_info, step=i)
                 pbar.set_postfix({
                     "q_loss": info.get("critic/q_loss", 0),
@@ -212,7 +213,8 @@ def main(cfg: TrainConfig):
                     and i % cfg.online_eval_interval == 0
                 ):
                     with set_exploration_type(ExplorationType.MODE):
-                        eval_info, _, _ = evaluate(env, policy, seed=cfg.seed + i)
+                        policy_eval = policy.get_rollout_policy("eval")
+                        eval_info, _, _ = evaluate(env, policy_eval, seed=cfg.seed + i)
                     run.log(eval_info, step=cfg.offline_iters + i)
 
         total_iters = cfg.offline_iters + cfg.online_iters
@@ -222,8 +224,9 @@ def main(cfg: TrainConfig):
     # ── final eval & save ────────────────────────────────────────────
     if aa.is_main_process():
         with set_exploration_type(ExplorationType.MODE):
+            policy_eval = policy.get_rollout_policy("eval")
             final_info, _, _ = evaluate(
-                env, policy, seed=cfg.seed + 9999, render=cfg.eval_render,
+                env, policy_eval, seed=cfg.seed + 9999, render=cfg.eval_render,
             )
         run.log(final_info, step=total_iters)
         ckpt_path = save("checkpoint_final")

@@ -479,15 +479,16 @@ class QC(TensorDictModuleBase):
             raise NotImplementedError
 
 
-    def forward(self, tensordict: TensorDictBase) -> TensorDictBase:
-        """Action selection for environment interaction (eval / rollout)."""
-        obs = tensordict[OBS_KEY]
-        if CMD_KEY in tensordict.keys(True, True):
-            obs = torch.cat([tensordict[CMD_KEY], obs], dim=-1)
-        obs = self.vecnorm_obs(obs)
-        action = self.sample_actions(obs)
-        tensordict[ACTION_KEY] = action
-        return tensordict
+    def get_rollout_policy(self, mode: str = "eval", critic: bool = False) -> TensorDictModuleBase:
+        """Return a :class:`QCRolloutPolicy` for eval / rollout."""
+        return QCRolloutPolicy(
+            vecnorm_obs=self.vecnorm_obs,
+            sample_fn=self.sample_actions,
+            horizon_length=self.cfg.horizon_length,
+            action_dim=self.action_dim,
+            obs_key=OBS_KEY,
+            cmd_key=CMD_KEY,
+        )
 
     def compute_flow_actions(self, next_obs, noises: torch.Tensor):
         actions = noises
@@ -501,3 +502,83 @@ class QC(TensorDictModuleBase):
             actions += vels / self.cfg.flow_steps
 
         return actions
+
+
+class QCRolloutPolicy(TensorDictModuleBase):
+    """Rollout policy for QC with action chunking.
+
+    Samples a full H-step action chunk via flow matching and caches it.
+    Subsequent calls return the next pre-computed action from the chunk,
+    re-planning only after H steps or when an environment resets.
+    """
+
+    def __init__(
+        self,
+        vecnorm_obs: nn.Module,
+        sample_fn: Callable[[torch.Tensor], torch.Tensor],
+        horizon_length: int,
+        action_dim: int,
+        obs_key: str = "policy",
+        cmd_key: str = "command",
+    ):
+        super().__init__()
+        self.vecnorm_obs = vecnorm_obs
+        self.sample_fn = sample_fn
+        self.horizon_length = horizon_length
+        self.action_dim = action_dim
+        self.obs_key = obs_key
+        self.cmd_key = cmd_key
+
+        self.in_keys = [obs_key]
+        self.out_keys = [ACTION_KEY]
+
+        self._chunk_step: torch.Tensor | None = None
+        self._action_chunk: torch.Tensor | None = None
+
+    @torch.no_grad()
+    def forward(self, tensordict: TensorDictBase) -> TensorDictBase:
+        obs = tensordict[self.obs_key]
+        if self.cmd_key in tensordict.keys(True, True):
+            obs = torch.cat([tensordict[self.cmd_key], obs], dim=-1)
+        obs = self.vecnorm_obs(obs)
+
+        batch_size = obs.shape[0]
+        device = obs.device
+
+        if (
+            self._chunk_step is None
+            or self._chunk_step.shape[0] != batch_size
+        ):
+            self._chunk_step = torch.zeros(
+                batch_size, dtype=torch.long, device=device
+            )
+            self._action_chunk = torch.zeros(
+                batch_size, self.horizon_length, self.action_dim, device=device
+            )
+
+        is_init = tensordict.get("is_init")
+        need_replan = self._chunk_step >= self.horizon_length
+        if is_init is not None:
+            need_replan = need_replan | is_init.squeeze(-1).bool()
+
+        if need_replan.any():
+            replan_idx = need_replan.nonzero(as_tuple=True)[0]
+            if need_replan.all():
+                new_chunk = self.sample_fn(obs)
+            else:
+                obs_replan = obs[replan_idx]
+                new_chunk = self._action_chunk.clone()
+                new_chunk[replan_idx] = self.sample_fn(obs_replan).view(
+                    replan_idx.shape[0], self.horizon_length, self.action_dim
+                )
+            self._action_chunk = new_chunk.view(
+                batch_size, self.horizon_length, self.action_dim
+            )
+            self._chunk_step[replan_idx] = 0
+
+        idx = self._chunk_step.clamp(max=self.horizon_length - 1)
+        action = self._action_chunk[torch.arange(batch_size, device=device), idx]
+        self._chunk_step += 1
+
+        tensordict[ACTION_KEY] = action
+        return tensordict
