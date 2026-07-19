@@ -426,16 +426,12 @@ class QC(TensorDictModuleBase):
             done=batch[DONE_KEY],
             env_discount=env_disc_ms,
         )
-        is_init = batch["is_init"][0]
 
         q_target = self._compute_target(next_obs, reward, discount)
 
         act_concated = act_n.flatten(start_dim=1)
         pred = self.Q(obs, act_concated)
-        per_sample_loss = self.Q.compute_loss(pred, q_target)
-        valid = (1.0 - is_init.float()).reshape_as(per_sample_loss)
-        denom = valid.sum().clamp_min(1e-8)
-        q_loss = (per_sample_loss * valid).sum() / denom
+        q_loss = self.Q.compute_loss(pred, q_target).mean()
 
         self.opt_Q.zero_grad(set_to_none=True)
         q_loss.backward()
@@ -469,12 +465,16 @@ class QC(TensorDictModuleBase):
 
         per_sample_loss = (pred_v - v) ** 2
 
-        is_init = batch["is_init"][0]
-        valid = (1.0 - is_init.float()).reshape((batch_size, 1))
+        # Per-timestep valid mask: action[t] is valid only when no episode
+        # boundary occurs before t within the chunk (matching reference).
+        _done = batch[DONE_KEY].squeeze(-1)  # [H, B]
+        prev_done = torch.cat([torch.zeros_like(_done[:1]), _done[:-1]], dim=0)
+        valid_t = 1.0 - prev_done.cumsum(dim=0).clamp(max=1.0)  # [H, B]
 
-        actor_loss = per_sample_loss * valid
-        denom = valid.sum().clamp(1e-8)
-        actor_loss = actor_loss.sum() / denom
+        per_sample_loss = per_sample_loss.reshape(
+            batch_size, self.cfg.horizon_length, self.action_dim,
+        )
+        actor_loss = (per_sample_loss * valid_t.permute(1, 0).unsqueeze(-1)).mean()
 
         self.opt_actor.zero_grad(set_to_none=True)
         actor_loss.backward()
