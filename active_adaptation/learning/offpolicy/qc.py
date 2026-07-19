@@ -1,21 +1,15 @@
 from __future__ import annotations
 
 import copy
-import math
 import einops
-from collections import OrderedDict
-from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Tuple, TYPE_CHECKING, Optional
+from typing import Callable, Literal, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from active_adaptation.envs import _EnvBase
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
 from hydra.core.config_store import ConfigStore
 from tensordict import TensorDict
 from tensordict.nn import (
@@ -24,11 +18,9 @@ from tensordict.nn import (
     TensorDictSequential as Seq,
 )
 
-from torchrl.data import Composite, TensorSpec
-from torchrl.objectives import hold_out_net
+from torchrl.data import Composite
 
-import active_adaptation as aa
-from active_adaptation.learning.modules import VecNorm, IndependentNormal, ConditionalBlock, CatTensors
+from active_adaptation.learning.modules import VecNorm, ConditionalBlock, CatTensors
 from active_adaptation.learning.ppo.common import (
     ACTION_KEY,
     DONE_KEY,
@@ -40,27 +32,12 @@ from active_adaptation.learning.ppo.common import (
 )
 
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
-from active_adaptation.learning.offpolicy.distributional import (
-    C51Critic,
-    ScalarCritic,
-)
+from active_adaptation.learning.offpolicy.distributional import ScalarCritic
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
-from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
-from active_adaptation.learning.offpolicy.distribution import FasterTransformedDistribution
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
-from active_adaptation.learning.utils.distributed import (
-    check_parameters,
-    unwrap_ddp,
-    wrap_ddp,
-)
-from active_adaptation.utils.profiling import ScopedTimer
-from active_adaptation.utils.symmetry import SymmetryTransform
-from tensordict.nn.probabilistic import interaction_type, InteractionType
 
 cs = ConfigStore.instance()
 
-OBS_PRIV_KEY = "priv"
-OBS_HIST_KEY = "policy_h"
 ACTION_KEY   = "action"
 REWARD_KEY   = ("next", "reward")
 TERM_KEY     = ("next", "terminated")
@@ -82,10 +59,8 @@ class QCConfig:
     name: str = "qc"
 
     # general setting
-    debug: bool = False
     vecnorm: bool = True
     clamp_reward: bool = False
-    normalize_reward: bool = False
     lr: float = 3e-5
     weight_decay: float = 0.02
     muon: bool = True
@@ -99,6 +74,7 @@ class QCConfig:
     actor_hidden_dims: tuple[int]  = (512, 512, 512, 512)
     # offline stage
     prior_data_path: str | None = '/home/cv/zjx/active-adaptation/scripts/rollout/G1LocoFlat-sac/2026-07-08-20-32-07/rollout_1000_4096.pt'
+    bootstrap_observation_keys: Tuple[str, ...] = ("prev_noise", "rho")
     batch_size: int = 2
     tau_critic: float = 0.1
 
@@ -114,13 +90,15 @@ class CriticTrunk(nn.Module):
         self,
         input_dim: int,
         output_dim: int = 1,
-        hidden_num: int = 2,
-        hidden_dim: int = 512,
+        hidden_dims: tuple[int, ...] = (512, 512, 512, 512),
         activation: type[nn.Module] = nn.SiLU,
         norm: Literal["rms"] | None = "rms",
         condition_dim: int = 0,
     ):
         super().__init__()
+        if len(set(hidden_dims)) != 1:
+            raise ValueError("CriticTrunk currently expects equal hidden dimensions.")
+        hidden_dim = hidden_dims[0]
 
         self.in_layer = nn.Linear(input_dim, hidden_dim)
         self.in_layer.weight._non_muon = True
@@ -135,7 +113,7 @@ class CriticTrunk(nn.Module):
                     norm=norm,
                     condition_dim=condition_dim,
                 )
-                for _ in range(hidden_num)
+                for _ in hidden_dims
             ]
         )
         self.norm = nn.RMSNorm(hidden_dim)
@@ -215,13 +193,14 @@ class ActorVectorField(nn.Module):
 def TwinScalarCritic(
     obs_dim: int,
     act_dim: int,
+    hidden_dims: tuple[int, ...],
     activation: type[nn.Module] = nn.SiLU,
 ):
     critic_input_dim = obs_dim + act_dim
     module = SimpleDoubleCritic(
         fn=lambda: CriticTrunk(
             input_dim=critic_input_dim,
-            hidden_dim=512,
+            hidden_dims=hidden_dims,
             output_dim=1,
             activation=activation,
         )
@@ -248,8 +227,6 @@ class QC(TensorDictModuleBase):
         self.action_dim       = action_spec.shape[-1]
         self.full_action_dim  = self.action_dim * cfg.horizon_length
 
-        self._distributed = False
-        
         fake = observation_spec.zero()
         preproc = []
         if CMD_KEY in observation_spec.keys(True, True):
@@ -277,14 +254,15 @@ class QC(TensorDictModuleBase):
         preproc.append(Mod(self.vecnorm_obs, ["_input"], ["_input_normed"]))
         self.preproc = Seq(*preproc).to(device)
 
-        self.has_symmetry = False
-        self.reward_normalizer = None
         self.msr = MultiStepReturn(self.cfg.gamma, self.cfg.horizon_length).to(device)
-        self.compute_target = self._compute_target
-        # Construct Networks
+
+        critic_hidden_dims = tuple(self.cfg.critic_hidden_dims)
+        actor_hidden_dims = tuple(self.cfg.actor_hidden_dims)
+
         self.Q = TwinScalarCritic(
-            obs_dim=self.obs_dim, 
-            act_dim=self.full_action_dim
+            obs_dim=self.obs_dim,
+            act_dim=self.full_action_dim,
+            hidden_dims=critic_hidden_dims,
         ).to(device)
         self.Q_target = copy.deepcopy(self.Q).to(device)
         self.Q_target.requires_grad_(False)
@@ -292,7 +270,9 @@ class QC(TensorDictModuleBase):
 
         self.actor = ActorVectorField(
             obs_dim=self.obs_dim,
-            action_dim=self.full_action_dim
+            action_dim=self.full_action_dim,
+            hidden_num=len(actor_hidden_dims),
+            hidden_dim=actor_hidden_dims[0],
         ).to(device)
 
         if self.cfg.muon:
@@ -316,17 +296,14 @@ class QC(TensorDictModuleBase):
     def on_stage_start(self, stage: str, env: _EnvBase):
         if stage == "offline":
             if self.cfg.prior_data_path is None:
-                raise ValueError(f"Offline training need prior data but got None")
-            else:
-                observation_keys = set(env.observation_spec.keys(True, True))
-                observation_keys = observation_keys = {"prev_noise", "rho"}
-                self.prior_rb = ReplayBuffer.from_rollout(
-                    self.cfg.prior_data_path,
-                    fake_bootstrap=True,
-                    observation_keys=list(observation_keys)
-                )
-                print("Prior data buffer:")
-                print(self.prior_rb)
+                raise ValueError("Offline training requires prior data but got None.")
+            self.prior_rb = ReplayBuffer.from_rollout(
+                self.cfg.prior_data_path,
+                fake_bootstrap=True,
+                observation_keys=list(self.cfg.bootstrap_observation_keys),
+            )
+            print("Prior data buffer:")
+            print(self.prior_rb)
         elif stage == "online":
             raise NotImplementedError
         else:
@@ -348,78 +325,55 @@ class QC(TensorDictModuleBase):
 
 
     def step_offline(self):
-        "Sample and update once."
-        infos = {}
-
+        """Sample a batch, preprocess once, then update critic and actor."""
         batch = self.prior_rb.sample(
             batch_size=self.cfg.batch_size,
             steps=self.cfg.horizon_length,
-            next_obs=True
+            next_obs=True,
         ).to(self.device)
 
-        if self.cfg.debug:
-            print(batch.batch_size)
-            print(batch.keys(True, True))
-            print(batch)
+        batch = batch.select(*self.training_keys, inplace=False, strict=False)
+        self.preproc(batch)
+        self.preproc(batch["next"])
 
-        info = self.train_critic(batch, diagnostic=True)
-
-        infos.update(info)
-
-        info = self.train_actor(batch, diagnostic=True)
-
-        infos.update(info)
+        infos = {}
+        infos.update(self.train_critic(batch))
+        infos.update(self.train_actor(batch))
         return dict(sorted(infos.items()))
 
 
-    def train_critic(self, batch: TensorDict, diagnostic: bool = True):
+    def train_critic(self, batch: TensorDict):
+        """Update critic on a preprocessed batch (``batch.select`` + ``preproc`` already applied)."""
         self.Q.train()
-        batch = batch.select(*self.training_keys, inplace=False, strict=False)
-        
-        def collate_reward(reward: torch.Tensor | TensorDict) -> torch.Tensor:
+
+        def _collate_reward(reward: torch.Tensor | TensorDict) -> torch.Tensor:
             if isinstance(reward, TensorDict):
                 reward = torch.cat(list(reward.values()), dim=-1)
             reward = reward.sum(dim=-1, keepdim=True)
             if self.cfg.clamp_reward:
                 reward = reward.clamp_min(0.0)
             return reward
-        
-        reward = collate_reward(batch[REWARD_KEY])
-        if self.reward_normalizer is not None:
-            reward = self.reward_normalizer.normalize_rewards(reward)
-        else:
-            reward = reward * (1.0 - self.cfg.gamma)
 
-        # maybe concat or normalize the obs.
-        self.preproc(batch)
-        self.preproc(batch["next"])
-
-        assert self.cfg.horizon_length > 1
-        assert self.msr is not None
+        reward = _collate_reward(batch[REWARD_KEY])
+        reward = reward * (1.0 - self.cfg.gamma)
 
         obs = batch["_input_normed"][0]
         act_n = batch[ACTION_KEY]
         env_disc_ms = batch.get(("next", "discount"))
         if env_disc_ms is not None:
             env_disc_ms = env_disc_ms[: self.msr.n_steps]
+
         act_n, next_obs, reward, discount, terminated = self.msr(
             actions=act_n,
             next_observations=batch["next", "_input_normed"],
-            rewards=reward[:self.msr.n_steps],
+            rewards=reward[: self.msr.n_steps],
             terminated=batch[TERM_KEY],
             done=batch[DONE_KEY],
             env_discount=env_disc_ms,
         )
-        act = act_n[:, 0]
         is_init = batch["is_init"][0]
 
-        if self.cfg.debug:
-            print("=========================")
-            print(f'{act_n.shape}\n{next_obs.shape}\n{reward.shape}\n{discount.shape}\n{terminated.shape}')
-            print("=========================")
-
-        with ScopedTimer("compute_target"):
-            q_target = self.compute_target(next_obs, reward, discount)
+        q_target = self._compute_target(next_obs, reward, discount)
 
         act_concated = act_n.flatten(start_dim=1)
         pred = self.Q(obs, act_concated)
@@ -432,29 +386,22 @@ class QC(TensorDictModuleBase):
         q_loss.backward()
         self.opt_Q.step()
 
-        # soft update target
-        soft_copy_(
-            self.Q,
-            self.Q_target,
-            self.cfg.tau_critic
-        )
-        
+        soft_copy_(self.Q, self.Q_target, self.cfg.tau_critic)
+
         return {
             "critic/q_loss": q_loss.detach().item(),
             "critic/q_mean": pred.detach().mean().item(),
-            "critic/target_mean": q_target.detach().mean().item()
+            "critic/target_mean": q_target.detach().mean().item(),
         }
 
 
-    def train_actor(self, batch: TensorDict, diagnostic: bool = True):
+    def train_actor(self, batch: TensorDict):
+        """Update actor on a preprocessed batch (``batch.select`` + ``preproc`` already applied)."""
         self.actor.train()
 
-        batch = batch.select(*self.training_keys, inplace=False, strict=False)
-        self.preproc(batch)
         obs = batch["_input_normed"][0]
         batch_actions = einops.rearrange(
-            batch[ACTION_KEY],
-            "t b a -> b (t a)"
+            batch[ACTION_KEY], "t b a -> b (t a)"
         ).contiguous()
         batch_size, action_dim = batch_actions.shape
 
@@ -474,13 +421,11 @@ class QC(TensorDictModuleBase):
         denom = valid.sum().clamp(1e-8)
         actor_loss = actor_loss.sum() / denom
 
-        self.opt_actor.zero_grad()
+        self.opt_actor.zero_grad(set_to_none=True)
         actor_loss.backward()
         self.opt_actor.step()
 
-        return {
-            "actor/loss": actor_loss.item()
-        }
+        return {"actor/loss": actor_loss.item()}
 
 
     @torch.no_grad()
@@ -533,6 +478,16 @@ class QC(TensorDictModuleBase):
         elif self.cfg.actor_type == "distll-ddpg":
             raise NotImplementedError
 
+
+    def forward(self, tensordict: TensorDictBase) -> TensorDictBase:
+        """Action selection for environment interaction (eval / rollout)."""
+        obs = tensordict[OBS_KEY]
+        if CMD_KEY in tensordict.keys(True, True):
+            obs = torch.cat([tensordict[CMD_KEY], obs], dim=-1)
+        obs = self.vecnorm_obs(obs)
+        action = self.sample_actions(obs)
+        tensordict[ACTION_KEY] = action
+        return tensordict
 
     def compute_flow_actions(self, next_obs, noises: torch.Tensor):
         actions = noises
