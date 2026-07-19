@@ -55,26 +55,19 @@ class TrainConfig:
     device: str = "cuda"
 
     app: IsaacAppConfig = field(default_factory=IsaacAppConfig)
-    total_frames: int = 150_000_000
 
     eval_render: bool = False
-    log_interval: int = 32
-    checkpoint_interval: int = 400
-    upload_interval: int = 3200
 
     seed: int = 42
     checkpoint_path: Optional[str] = None
     discard_unused_obs: bool = True
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
-    horizon_length: int = 4
-    discount: float = 0.99
-
-    offline_iters: int = 1
-    offline_eval_interval: int = 100
+    offline_iters: int = 1_000
+    offline_eval_interval: int = 1000
 
     online_iters: int = 1_000
-    online_eval_interval: int = 100
+    online_eval_interval: int = 1000
 
 
 cs = ConfigStore.instance()
@@ -183,6 +176,7 @@ def main(cfg: TrainConfig):
             if (
                 cfg.offline_eval_interval > 0
                 and i % cfg.offline_eval_interval == 0
+                and i != 0
             ):
                 with set_exploration_type(ExplorationType.MODE):
                     policy_eval = policy.get_rollout_policy("eval")
@@ -234,6 +228,7 @@ def main(cfg: TrainConfig):
                 if (
                     cfg.online_eval_interval > 0
                     and i % cfg.online_eval_interval == 0
+                    and i != 0
                 ):
                     with set_exploration_type(ExplorationType.MODE):
                         policy_eval = policy.get_rollout_policy("eval")
