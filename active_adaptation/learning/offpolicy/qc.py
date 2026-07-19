@@ -313,42 +313,20 @@ class QC(TensorDictModuleBase):
         if stage == "offline":
             if self.cfg.prior_data_path is None:
                 raise ValueError("Offline training requires prior data but got None.")
-            self.prior_rb = ReplayBuffer.from_rollout(
+
+            num_envs = env.fake_tensordict().shape[0]
+            max_time_steps = max(self.cfg.buffer_size // num_envs, 1)
+
+            self.rb = ReplayBuffer.from_rollout(
                 self.cfg.prior_data_path,
+                max_size=max_time_steps,
                 fake_bootstrap=True,
                 observation_keys=list(self.cfg.bootstrap_observation_keys),
             )
-            print("Prior data buffer:")
-            print(self.prior_rb)
-        elif stage == "online":
-            # Create replay buffer and pre-fill with offline data so that
-            # online transitions gradually overwrite older entries via FIFO,
-            # matching the reference implementation's data mixing strategy.
-            fake_rb = (
-                env.fake_tensordict()
-                .exclude(("next", "stats"), "collector")
-            )
-            num_envs = fake_rb.shape[0]
-            max_time_steps = max(self.cfg.buffer_size // num_envs, 1)
-
-            observation_keys = set(env.observation_spec.keys(True, True))
-            observation_keys = observation_keys - set(self.cfg.bootstrap_observation_keys)
-            self.rb = ReplayBuffer.from_fake(
-                max_time_steps,
-                fake_rb,
-                fake_bootstrap=True,
-                observation_keys=list(observation_keys),
-            )
-
-            prior_size = len(self.prior_rb)
-            take = min(prior_size, max_time_steps)
-            if take > 0:
-                self.rb._td[:take] = self.prior_rb._td[:take].to(self.rb._td.device)
-                self.rb._current_size = take
-                self.rb._ptr = take % max_time_steps
-
-            print("Online replay buffer:")
+            print("Replay buffer:")
             print(self.rb)
+        elif stage == "online":
+            pass
         else:
             raise ValueError(f"Stage {stage} is invalid.")
         
@@ -370,7 +348,7 @@ class QC(TensorDictModuleBase):
     @ScopedTimer("step_offline")
     def step_offline(self):
         """Sample a batch, preprocess once, then update critic and actor."""
-        batch = self.prior_rb.sample(
+        batch = self.rb.sample(
             batch_size=self.cfg.batch_size,
             steps=self.cfg.horizon_length,
             next_obs=True,
