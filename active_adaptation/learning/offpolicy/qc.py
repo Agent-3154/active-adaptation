@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import copy
 import einops
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable, Literal, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Literal, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from active_adaptation.envs import _EnvBase
@@ -35,6 +36,7 @@ from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.learning.offpolicy.distributional import ScalarCritic
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
+from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 
 cs = ConfigStore.instance()
@@ -86,6 +88,9 @@ class QCConfig:
     buffer_size: int = 10_000_000
     utd_ratio: int = 1
     warm_up_steps: int = 0
+    # FlashSAC-style: scale rewards by running discounted-return variance.
+    normalize_reward: bool = True
+    reward_norm_epsilon: float = 1e-8
 
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
@@ -265,6 +270,16 @@ class QC(TensorDictModuleBase):
 
         self.msr = MultiStepReturn(self.cfg.gamma, self.cfg.horizon_length).to(device)
 
+        self.reward_normalizer: RewardNormalizer | None = None
+        if self.cfg.normalize_reward:
+            dev = device if isinstance(device, torch.device) else torch.device(device)
+            self.reward_normalizer = RewardNormalizer(
+                gamma=float(self.cfg.gamma),
+                load_rms=False,
+                device=dev,
+                epsilon=float(self.cfg.reward_norm_epsilon),
+            )
+
         critic_hidden_dims = tuple(self.cfg.critic_hidden_dims)
         actor_hidden_dims = tuple(self.cfg.actor_hidden_dims)
 
@@ -374,13 +389,24 @@ class QC(TensorDictModuleBase):
         self.global_step += 1
 
         td = tensordict.exclude(("next", "stats"), "collector")
-        self.rb.push(td)
 
         # Per-step reward statistics.
         r = td[REWARD_KEY]
         if isinstance(r, TensorDict):
             r = torch.cat(list(r.values()), dim=-1)
-        r = r.sum(dim=-1)
+        r = r.sum(dim=-1, keepdim=True)
+
+        if self.reward_normalizer is not None:
+            truncated = td.get(("next", "truncated"))
+            if truncated is None:
+                truncated = torch.zeros_like(td[TERM_KEY])
+            self.reward_normalizer.update_reward_stats(
+                reward=r,
+                terminated=td[TERM_KEY],
+                truncated=truncated,
+            )
+
+        self.rb.push(td)
 
         infos: dict = {
             "rb_size": len(self.rb),
@@ -428,7 +454,11 @@ class QC(TensorDictModuleBase):
         if self.cfg.debug:
             reward = torch.ones_like(reward) * (1.0 - self.cfg.gamma)
 
-        reward = reward * (1.0 - self.cfg.gamma)
+        if self.reward_normalizer is not None:
+            reward = self.reward_normalizer.normalize_rewards(reward)
+        else:
+            # scale by effective horizon (SAC fallback when normalizer is off)
+            reward = reward * (1.0 - self.cfg.gamma)
 
         obs = batch["_input_normed"][0]
         act_n = batch[ACTION_KEY]
@@ -475,12 +505,15 @@ class QC(TensorDictModuleBase):
 
         with torch.no_grad():
             q_values = self.Q.get_values(obs, act_concated).mean(dim=-1)
-            infos["critic/q_value"] = q_values.mean().item()
-            infos["critic/q_std"] = q_values.std(dim=-1).mean().item()
+            q_log = q_values
+            if self.reward_normalizer is not None:
+                q_log = self.reward_normalizer.denormalize_return_values(q_log)
+            infos["critic/q_value"] = q_log.mean().item()
+            infos["critic/q_std"] = q_log.std(dim=-1).mean().item()
 
             if terminated.any():
                 term_mask = terminated.reshape(q_values.shape[0])
-                infos["critic/q_value_terminated"] = q_values[term_mask].mean().item()
+                infos["critic/q_value_terminated"] = q_log[term_mask].mean().item()
                 infos["critic/q_loss_terminated"] = (
                     self.Q.compute_loss(pred[term_mask], q_target[term_mask]).mean().item()
                 )
@@ -606,6 +639,23 @@ class QC(TensorDictModuleBase):
             obs_key=OBS_KEY,
             cmd_key=CMD_KEY,
         )
+
+    def state_dict(self) -> "OrderedDict[str, Any]":
+        """Include reward-normalizer running stats alongside nn.Module params."""
+        sd: "OrderedDict[str, Any]" = OrderedDict(super().state_dict())
+        if self.reward_normalizer is not None:
+            sd["reward_normalizer"] = self.reward_normalizer.state_dict()
+        sd["global_step"] = int(self.global_step)
+        return sd
+
+    def load_state_dict(self, state_dict: "OrderedDict[str, Any]", strict: bool = True):
+        rn_state = state_dict.pop("reward_normalizer", None)
+        gs = state_dict.pop("global_step", None)
+        super().load_state_dict(state_dict, strict=strict)
+        if self.reward_normalizer is not None and rn_state is not None:
+            self.reward_normalizer.load_state_dict(rn_state)
+        if gs is not None:
+            self.global_step = int(gs)
 
     def compute_flow_actions(self, next_obs, noises: torch.Tensor):
         actions = noises
