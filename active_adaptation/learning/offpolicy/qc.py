@@ -78,6 +78,7 @@ class QCConfig:
     bootstrap_observation_keys: Tuple[str, ...] = ("prev_noise", "rho")
     batch_size: int = 2
     tau_critic: float = 0.1
+    max_grad_norm: float = 1.0
     # online stage
     buffer_size: int = 10_000_000
     utd_ratio: int = 1
@@ -377,7 +378,9 @@ class QC(TensorDictModuleBase):
         self.preproc(batch)
         self.preproc(batch["next"])
 
-        infos = {}
+        self.global_step += 1
+
+        infos: dict = {"training/global_step": self.global_step}
         infos.update(self.train_critic(batch))
         infos.update(self.train_actor(batch))
         return dict(sorted(infos.items()))
@@ -390,7 +393,20 @@ class QC(TensorDictModuleBase):
         td = tensordict.exclude(("next", "stats"), "collector")
         self.rb.push(td)
 
-        infos: dict = {"rb_size": len(self.rb)}
+        # Per-step reward statistics.
+        r = td[REWARD_KEY]
+        if isinstance(r, TensorDict):
+            r = torch.cat(list(r.values()), dim=-1)
+        r = r.sum(dim=-1)
+
+        infos: dict = {
+            "rb_size": len(self.rb),
+            "training/global_step": self.global_step,
+            "training/neg_rew_ratio": (r <= 0).float().mean().item(),
+            "reward/step_mean": r.mean().item(),
+            "reward/step_std": r.std().item(),
+        }
+
         if self.global_step < self.cfg.warm_up_steps:
             return infos
 
@@ -423,6 +439,7 @@ class QC(TensorDictModuleBase):
             return reward
 
         reward = _collate_reward(batch[REWARD_KEY])
+        reward_raw = reward.clone()
         reward = reward * (1.0 - self.cfg.gamma)
 
         obs = batch["_input_normed"][0]
@@ -448,15 +465,38 @@ class QC(TensorDictModuleBase):
 
         self.opt_Q.zero_grad(set_to_none=True)
         q_loss.backward()
+        critic_grad_norm = nn.utils.clip_grad_norm_(
+            self.Q.parameters(), max_norm=self.cfg.max_grad_norm,
+        )
         self.opt_Q.step()
 
         soft_copy_(self.Q, self.Q_target, self.cfg.tau_critic)
 
-        return {
+        infos: dict = {
             "critic/q_loss": q_loss.detach().item(),
+            "critic/grad_norm": critic_grad_norm.item(),
             "critic/q_mean": pred.detach().mean().item(),
+            "critic/q_max": pred.detach().max().item(),
+            "critic/q_min": pred.detach().min().item(),
             "critic/target_mean": q_target.detach().mean().item(),
+            "critic/target_max": q_target.detach().max().item(),
+            "reward/mean": reward_raw.mean().item(),
+            "reward/std": reward_raw.std().item(),
         }
+
+        with torch.no_grad():
+            q_values = self.Q.get_values(obs, act_concated).mean(dim=-1)
+            infos["critic/q_value"] = q_values.mean().item()
+            infos["critic/q_std"] = q_values.std(dim=-1).mean().item()
+
+            if terminated.any():
+                term_mask = terminated.reshape(q_values.shape[0])
+                infos["critic/q_value_terminated"] = q_values[term_mask].mean().item()
+                infos["critic/q_loss_terminated"] = (
+                    self.Q.compute_loss(pred[term_mask], q_target[term_mask]).mean().item()
+                )
+
+        return infos
 
 
     def train_actor(self, batch: TensorDict):
@@ -476,7 +516,7 @@ class QC(TensorDictModuleBase):
         v = x1 - x0
         pred_v = self.actor(obs, xt, t)
 
-        per_sample_loss = (pred_v - v) ** 2
+        per_element_loss = (pred_v - v) ** 2
 
         # Per-timestep valid mask: action[t] is valid only when no episode
         # boundary occurs before t within the chunk (matching reference).
@@ -484,16 +524,32 @@ class QC(TensorDictModuleBase):
         prev_done = torch.cat([torch.zeros_like(_done[:1]), _done[:-1]], dim=0)
         valid_t = 1.0 - prev_done.cumsum(dim=0).clamp(max=1.0)  # [H, B]
 
-        per_sample_loss = per_sample_loss.reshape(
+        per_element_loss = per_element_loss.reshape(
             batch_size, self.cfg.horizon_length, self.action_dim,
         )
-        actor_loss = (per_sample_loss * valid_t.permute(1, 0).unsqueeze(-1)).mean()
+        actor_loss = (per_element_loss * valid_t.permute(1, 0).unsqueeze(-1)).mean()
 
         self.opt_actor.zero_grad(set_to_none=True)
         actor_loss.backward()
+        actor_grad_norm = nn.utils.clip_grad_norm_(
+            self.actor.parameters(), max_norm=self.cfg.max_grad_norm,
+        )
         self.opt_actor.step()
 
-        return {"actor/loss": actor_loss.item()}
+        infos: dict = {
+            "actor/loss": actor_loss.item(),
+            "actor/grad_norm": actor_grad_norm.item(),
+            "actor/pred_v_norm": pred_v.detach().norm(dim=-1).mean().item(),
+            "actor/valid_frac": valid_t.mean().item(),
+        }
+
+        # Per-timestep flow loss breakdown.
+        with torch.no_grad():
+            loss_by_step = per_element_loss.mean(dim=(0, 2))  # [H]
+            for step_idx in range(min(self.cfg.horizon_length, loss_by_step.shape[0])):
+                infos[f"actor/flow_loss_t{step_idx}"] = loss_by_step[step_idx].item()
+
+        return infos
 
 
     @torch.no_grad()
