@@ -30,6 +30,7 @@ from active_adaptation.learning.ppo.common import (
     TERM_KEY,
     soft_copy_,
 )
+from active_adaptation.utils.profiling import ScopedTimer
 
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.learning.offpolicy.distributional import ScalarCritic
@@ -366,6 +367,7 @@ class QC(TensorDictModuleBase):
         )
 
 
+    @ScopedTimer("step_offline")
     def step_offline(self):
         """Sample a batch, preprocess once, then update critic and actor."""
         batch = self.prior_rb.sample(
@@ -386,6 +388,7 @@ class QC(TensorDictModuleBase):
         return dict(sorted(infos.items()))
 
 
+    @ScopedTimer("step")
     def step(self, tensordict: TensorDictBase) -> dict:
         """Online training step: push transition, sample batch, update."""
         self.global_step += 1
@@ -426,6 +429,7 @@ class QC(TensorDictModuleBase):
 
         return dict(sorted(infos.items()))
 
+    @ScopedTimer("train_critic")
     def train_critic(self, batch: TensorDict):
         """Update critic on a preprocessed batch (``batch.select`` + ``preproc`` already applied)."""
         self.Q.train()
@@ -457,7 +461,8 @@ class QC(TensorDictModuleBase):
             env_discount=env_disc_ms,
         )
 
-        q_target = self._compute_target(next_obs, reward, discount)
+        with ScopedTimer("compute_target"):
+            q_target = self._compute_target(next_obs, reward, discount)
 
         act_concated = act_n.flatten(start_dim=1)
         pred = self.Q(obs, act_concated)
@@ -499,6 +504,7 @@ class QC(TensorDictModuleBase):
         return infos
 
 
+    @ScopedTimer("train_actor")
     def train_actor(self, batch: TensorDict):
         """Update actor on a preprocessed batch (``batch.select`` + ``preproc`` already applied)."""
         self.actor.train()
@@ -564,6 +570,7 @@ class QC(TensorDictModuleBase):
         )
         return q_target
     
+    @ScopedTimer("sample_actions")
     def sample_actions(self, next_obs: torch.Tensor):
         batch_size = next_obs.shape[0]
         device = next_obs.device
@@ -579,8 +586,10 @@ class QC(TensorDictModuleBase):
                 device=device
             )
 
-            actions = self.compute_flow_actions(next_obss, noise)
-            q_values = self.Q_target(next_obss, actions)
+            with ScopedTimer("compute_flow_actions"):
+                actions = self.compute_flow_actions(next_obss, noise)
+            with ScopedTimer("critic_forward"):
+                q_values = self.Q_target(next_obss, actions)
 
             if self.cfg.q_agg == "mean":
                 q_values = q_values.mean(dim=-1)
