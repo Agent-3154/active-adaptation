@@ -7,7 +7,7 @@ This is a research-oriented codebase. We prefer single-file implementations that
 | Loop | Script | Reference implementation |
 |------|--------|--------------------------|
 | On-policy | `scripts/train_ppo.py` | `learning/ppo/ppo.py`, `learning/ppo/ppo_symaug.py` |
-| Off-policy | `scripts/train_offpolicy.py` | `learning/offpolicy/sac.py` (scalar), `sac_dist.py` (C51), `sac_simba.py` (C51 + SimbaV2) |
+| Off-policy | `scripts/train_offpolicy.py` | `learning/offpolicy/sac.py` (scalar), `sac_dist.py` (C51), `sac_simba.py` / `sac_dist_simba.py` (SimbaV2) |
 
 This doc is WIP. Refine it as we add algorithms.
 
@@ -87,7 +87,7 @@ The training script does **not** stack transitions. Each env step: rollout → `
 
 `train_offpolicy.py` strips `next` observations and private `_` keys before `policy.step`. Do not rely on `next` obs being present in the buffer push.
 
-Scalar vs distributional: `algo=sac` uses twin scalar critics; `algo=sac_dist` uses twin C51 critics. Both share `NormalActor`, `CriticTrunk`, `SimpleDoubleCritic`, and `SACRolloutPolicy` from `sac.py`. Leave experimental dual-stream SAC in `sac2.py`.
+Scalar vs distributional: `algo=sac` / `algo=sac_simba` use twin scalar critics; `algo=sac_dist` / `algo=sac_dist_simba` use twin C51 critics. MLP variants share `NormalActor` / `CriticTrunk` from `sac.py`; Simba variants use `SimbaV2Actor` / `SimbaV2CriticTrunk`. Leave experimental dual-stream SAC in `sac2.py`.
 
 ### Replay and batching
 
@@ -127,7 +127,8 @@ Scalar vs distributional: `algo=sac` uses twin scalar critics; `algo=sac_dist` u
 
 - **RLPD:** `prior_data` + `prior_data_ratio`; concat prior batch in `train_critic` / `train_actor`; log `critic/prior_q_*`, `actor/online_advantage`.
 - **Symmetry aug:** duplicate `(obs, act, targets)` with `obs_transform` / `act_transform` in the learner.
-- **Distributional critic:** `algo=sac_dist` / `algo=sac_simba` (C51 via `distributional.py`); SimbaV2 nets in `sac_simba`. Tune `v_min` / `v_max` with `normalize_reward` if used.
+- **Distributional critic:** `algo=sac_dist` / `algo=sac_dist_simba` (C51 via `distributional.py`). Tune `v_min` / `v_max` with `normalize_reward` if used.
+- **SimbaV2 nets:** `algo=sac_simba` (scalar) / `algo=sac_dist_simba` (C51); Adam without weight decay / Muon; call `normalize_hyper_dense_` after optimizer steps.
 - **Reward normalization:** `RewardNormalizer` in `reward_normalization.py` (FlashSAC-style); buffer stores raw rewards.
 
 ---

@@ -50,10 +50,11 @@ offsets from the root; `eef_z` is absolute height. No base velocity or yaw rate.
 ### Mode 0 — Goal reaching (sparse target)
 
 - Spawn near the env origin (`goal_spawn_radius_range`, small jitter).
-- Sample a world-frame EEF goal in a polar annulus about the root
-  (`world_goal_radius_range`, shared with `LocoManipNew`), with height in
-  `eef_z_range`.
-- The policy must discover the base motion needed to make the goal reachable.
+- Sample / update world goals with the **same Warp helpers** as
+  `LocoManipNew` mode 0 (`sample_world_goal` / `update_world_command` in
+  `loco_manip_kernels.py`): polar annulus (`world_goal_radius_range`), standoff,
+  heading-frame EEF refresh, and `base_pos_error` for reward gates.
+- Policy observation stays EEF-only (no base velocity command).
 - After the EEF is close enough, commands may be resampled.
 
 ### Mode 1 — Trajectory following (dense targets)

@@ -39,7 +39,7 @@ from active_adaptation.learning.ppo.common import (
 )
 
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
-from active_adaptation.learning.offpolicy.distributional import ScalarCritic
+from active_adaptation.learning.offpolicy.distributional import C51Critic
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
 from active_adaptation.learning.modules import (
@@ -59,7 +59,6 @@ from active_adaptation.learning.offpolicy.sac import (
     SACRolloutPolicy,
     SimpleDoubleCritic,
     gaussian_target_entropy,
-    quantile_mse_loss,
 )
 
 cs = ConfigStore.instance()
@@ -70,10 +69,10 @@ clip_grad_norm_ = nn.utils.clip_grad_norm_
 
 @dataclass
 class SACConfig:
-    """Scalar twin-critic SAC with SimbaV2 hyperspherical actor / critic."""
+    """Distributional (C51) SAC with SimbaV2 hyperspherical actor / critic."""
 
-    _target_: str = "active_adaptation.learning.offpolicy.sac_simba.SAC"
-    name: str = "sac_simba"
+    _target_: str = "active_adaptation.learning.offpolicy.sac_dist_simba.SAC"
+    name: str = "sac_dist_simba"
     train_every: int = 4
     buffer_size: int = 2000
     warm_up_steps: int = 200
@@ -123,25 +122,26 @@ class SACConfig:
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
     reward_norm_epsilon: float = 1e-8
+    # C51 support half-width when ``normalize_reward`` (SimbaV2 ``normalized_g_max``).
+    v_max: float = 5.0
+    num_atoms: int = 101
 
     # path to prior data for RLPD
     prior_data: str | None = None
     prior_data_ratio: float = 0.4
 
-    # BAC-style diagnostic V: quantile-regress the same soft TD target as Q (no Q-target change).
-    # τ > 0.5 → optimistic V; logged as ``critic/q_upper``.
-    learn_v: bool = True
-    v_quantile: float = 0.9
-
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
 
-cs.store(name="sac_simba", node=SACConfig, group="algo")
+cs.store(name="sac_dist_simba", node=SACConfig, group="algo")
 
 
-def TwinScalarCritic(
+def TwinC51Critic(
     obs_dim: int,
     act_dim: int,
+    num_atoms: int,
+    v_min: float,
+    v_max: float,
     *,
     hidden_dim: int = 512,
     num_blocks: int = 2,
@@ -151,28 +151,16 @@ def TwinScalarCritic(
         fn=lambda: SimbaV2CriticTrunk(
             input_dim=obs_dim + act_dim,
             hidden_dim=hidden_dim,
-            output_dim=1,
+            output_dim=num_atoms,
             num_blocks=num_blocks,
             c_shift=c_shift,
         )
     )
-    return ScalarCritic(module)
-
-
-def ValueCritic(
-    obs_dim: int,
-    *,
-    hidden_dim: int = 512,
-    num_blocks: int = 2,
-    c_shift: float = 3.0,
-) -> nn.Module:
-    """State-value trunk (same SimbaV2 backbone as Q, observation-only)."""
-    return SimbaV2CriticTrunk(
-        input_dim=obs_dim,
-        hidden_dim=hidden_dim,
-        output_dim=1,
-        num_blocks=num_blocks,
-        c_shift=c_shift,
+    return C51Critic(
+        module=module,
+        v_min=v_min,
+        v_max=v_max,
+        num_atoms=num_atoms,
     )
 
 
@@ -238,9 +226,19 @@ class SAC(TensorDictModuleBase):
         if self.cfg.sym_aug:
             assert self.has_symmetry, "Symmetry augmentation is enabled but no symmetry transform is provided"
 
-        self.Q = TwinScalarCritic(
+        if self.cfg.normalize_reward:
+            # Reward-normalized returns ≈ O(1); SimbaV2 uses support [-v_max, v_max].
+            v_min, v_max = -float(self.cfg.v_max), float(self.cfg.v_max)
+            num_atoms = int(self.cfg.num_atoms)
+        else:
+            v_min, v_max = -1.0, 9.0
+            num_atoms = int((v_max - v_min) / 0.05) + 1
+        self.Q = TwinC51Critic(
             obs_dim,
             self.act_dim,
+            num_atoms=num_atoms,
+            v_min=v_min,
+            v_max=v_max,
             hidden_dim=self.cfg.critic_hidden_dim,
             num_blocks=self.cfg.critic_num_blocks,
             c_shift=self.cfg.c_shift,
@@ -264,21 +262,6 @@ class SAC(TensorDictModuleBase):
         self.actor_target.requires_grad_(False)
         self.actor_target.eval()
 
-        # Diagnostic V (BAC quantile regression). Not used in the Q Bellman target yet.
-        self.V: nn.Module | None = None
-        self.opt_V = None
-        if self.cfg.learn_v:
-            if not 0.0 < float(self.cfg.v_quantile) < 1.0:
-                raise ValueError(
-                    f"v_quantile must be in (0, 1), got {self.cfg.v_quantile}"
-                )
-            self.V = ValueCritic(
-                obs_dim,
-                hidden_dim=self.cfg.critic_hidden_dim,
-                num_blocks=self.cfg.critic_num_blocks,
-                c_shift=self.cfg.c_shift,
-            ).to(device)
-
         if self.cfg.target_entropy_sigma is not None:
             self.target_entropy = gaussian_target_entropy(
                 self.act_dim, self.cfg.target_entropy_sigma
@@ -289,8 +272,6 @@ class SAC(TensorDictModuleBase):
         self.opt_alpha = torch.optim.Adam(self.alpha.parameters(), lr=self.cfg.lr_alpha)
         self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=self.cfg.lr)
         self.opt_Q = torch.optim.Adam(self.Q.parameters(), lr=self.cfg.lr)
-        if self.V is not None:
-            self.opt_V = torch.optim.Adam(self.V.parameters(), lr=self.cfg.lr)
 
         self.global_step = 0
 
@@ -324,7 +305,6 @@ class SAC(TensorDictModuleBase):
         # Separate scalers so critic/actor loss scales and Inf/NaN skips stay independent.
         self.grad_scaler_Q = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
         self.grad_scaler_actor = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
-        self.grad_scaler_V = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
         # self.compute_target = torch.compile(
         #     self._compute_target,
         #     mode="reduce-overhead",
@@ -363,8 +343,6 @@ class SAC(TensorDictModuleBase):
         self.actor = wrap_ddp(self.actor, **ddp_kwargs)
         self.Q = wrap_ddp(self.Q, **ddp_kwargs)
         self.alpha = wrap_ddp(self.alpha, **ddp_kwargs)
-        if self.V is not None:
-            self.V = wrap_ddp(self.V, **ddp_kwargs)
 
     @torch.no_grad()
     def _broadcast_parameters(self) -> None:
@@ -376,17 +354,14 @@ class SAC(TensorDictModuleBase):
         """
         if not self._distributed:
             return
-        modules = [
+        for module in (
             self.vecnorm_obs,
             self.actor,
             self.actor_target,
             self.Q,
             self.Q_target,
             self.alpha,
-        ]
-        if self.V is not None:
-            modules.append(self.V)
-        for module in modules:
+        ):
             for param in module.parameters():
                 dist.broadcast(param.data, src=0)
             for buffer in module.buffers():
@@ -639,20 +614,6 @@ class SAC(TensorDictModuleBase):
             denom = valid.sum().clamp_min(1e-8)
             q_loss = (per_sample_q_loss * valid).sum() / denom
 
-            # Same soft TD target as Q; quantile regression → optimistic V (logged as q_upper).
-            # Use V(obs) not V(next_obs): q_target = r + γ soft_V(s'), so it is a return
-            # from ``obs``, not a value at ``next_obs``.
-            v_pred = None
-            v_loss = None
-            if self.V is not None:
-                v_pred = self.V(obs)
-                v_loss = quantile_mse_loss(
-                    v_pred,
-                    q_target.detach(),
-                    float(self.cfg.v_quantile),
-                    valid=valid.reshape(obs.shape[0], 1),
-                )
-
         self.opt_Q.zero_grad(set_to_none=True)
         if self._amp_enabled:
             self.grad_scaler_Q.scale(q_loss).backward()
@@ -673,21 +634,6 @@ class SAC(TensorDictModuleBase):
         normalize_hyper_dense_(unwrap_ddp(self.Q))
         soft_copy_(self.Q, self.Q_target, tau=self.cfg.tau_Q)
 
-        if v_loss is not None:
-            assert self.opt_V is not None
-            self.opt_V.zero_grad(set_to_none=True)
-            if self._amp_enabled:
-                self.grad_scaler_V.scale(v_loss).backward()
-                self.grad_scaler_V.unscale_(self.opt_V)
-                clip_grad_norm_(self.V.parameters(), max_norm=self.cfg.max_grad_norm)
-                self.grad_scaler_V.step(self.opt_V)
-                self.grad_scaler_V.update()
-            else:
-                v_loss.backward()
-                clip_grad_norm_(self.V.parameters(), max_norm=self.cfg.max_grad_norm)
-                self.opt_V.step()
-            normalize_hyper_dense_(unwrap_ddp(self.V))
-
         if not diagnostics:
             return
 
@@ -707,23 +653,26 @@ class SAC(TensorDictModuleBase):
                     l2_t1 = torch.linalg.vector_norm(policy_act_t1 - act_t1, dim=-1)
                     infos["critic/action_mismatch_t1"] = l2_t1[alive_t1].mean().item()
 
-            q = self.Q.get_values(obs, act)
+            logits = self.Q(obs, act)
+            q = self.Q.expected_values(logits)
+            q_lower = self.Q.expected_values(logits, risk_alpha=0.5)
+            q_upper = self.Q.expected_values(logits, risk_alpha=-0.5)
+            infos.update(self.Q.support_saturation_stats(logits))
 
             # Q is trained on normalized rewards when reward_normalizer is active;
             # map logs to PPO effective-horizon scale (``* S * (1 - gamma)``).
             if self.reward_normalizer is not None:
                 q = self.reward_normalizer.denormalize_return_values(q)
+                q_lower = self.reward_normalizer.denormalize_return_values(q_lower)
+                q_upper = self.reward_normalizer.denormalize_return_values(q_upper)
+
+            infos["critic/q_lower"] = q_lower.mean().item()
+            infos["critic/q_upper"] = q_upper.mean().item()
 
             # online statistics
             q_val_mean = q[:B_online].mean().item()
             q_val_max = q[:B_online].max().item()
             q_val_std = q[:B_online].std(dim=-1).mean().item()
-
-            if v_pred is not None:
-                v = v_pred[:B_online]
-                if self.reward_normalizer is not None:
-                    v = self.reward_normalizer.denormalize_return_values(v)
-                infos["critic/q_upper"] = v.mean().item()
 
         infos["critic/q_value"] = q_val_mean
         infos["critic/q_max"] = q_val_max
@@ -900,8 +849,6 @@ class SAC(TensorDictModuleBase):
         state_dict["Q"] = unwrap_ddp(self.Q).state_dict()
         state_dict["actor"] = unwrap_ddp(self.actor).state_dict()
         state_dict["alpha"] = unwrap_ddp(self.alpha).state_dict()
-        if self.V is not None:
-            state_dict["V"] = unwrap_ddp(self.V).state_dict()
         state_dict["vecnorm_obs"] = self.vecnorm_obs.state_dict()
         if self.reward_normalizer is not None:
             state_dict["reward_normalizer"] = self.reward_normalizer.state_dict()
@@ -910,8 +857,6 @@ class SAC(TensorDictModuleBase):
     def load_state_dict(self, state_dict: dict, strict: bool = True):
         unwrap_ddp(self.Q).load_state_dict(state_dict["Q"], strict=strict)
         unwrap_ddp(self.actor).load_state_dict(state_dict["actor"], strict=strict)
-        if self.V is not None and "V" in state_dict:
-            unwrap_ddp(self.V).load_state_dict(state_dict["V"], strict=strict)
         if "opt_alpha" in state_dict:
             self.opt_alpha.load_state_dict(state_dict["opt_alpha"])
         alpha = unwrap_ddp(self.alpha)

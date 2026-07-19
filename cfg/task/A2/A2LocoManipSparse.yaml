@@ -45,9 +45,12 @@ command:
   _target_: LocoManipSparse
   eef_body_name: grasp_point
   gripper_joint_names: "arm_joint[7,8]"
-  # Shared with A2LocoManip world-mode geometry
+  # Shared with A2LocoManip world-mode geometry / Warp sampling
   eef_z_range: [0.2, 0.8]
   world_goal_radius_range: [1.5, 3.0]
+  standoff_reach_range: [0.5, 0.7]
+  world_linvel_gain_range: [1.0, 2.0]
+  world_yaw_gain_range: [1.0, 2.0]
   goal_spawn_radius_range: [0.0, 0.3]  # near origin, like teacher spawn
   # Mix of goal reaching (sparse target) and trajectory following (dense targets)
   trajectory_prob: 0.5

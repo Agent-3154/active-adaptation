@@ -7,6 +7,11 @@ import torch
 import warp as wp
 
 from active_adaptation.envs.mdp.commands.base import CommandV2
+from active_adaptation.envs.mdp.commands.locomanip.loco_manip_kernels import (
+    quat_wxyz_to_xyzw,
+    sample_world_goal,
+    update_world_command,
+)
 from active_adaptation.utils.math import (
     quat_conjugate,
     quat_mul,
@@ -19,11 +24,6 @@ from tensordict import TensorClass
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
-
-
-def _quat_wxyz_to_xyzw(quat_wxyz: torch.Tensor) -> torch.Tensor:
-    """Torch / Isaac (w, x, y, z) → Warp (x, y, z, w)."""
-    return quat_wxyz[:, [1, 2, 3, 0]].contiguous()
 
 
 @wp.kernel(enable_backward=False)
@@ -82,43 +82,37 @@ def sample_commands(
     else:
         mode[tid] = wp.int32(2)
 
-    oz = wp.randf(seed_, eef_z_min, eef_z_max)
     m = mode[tid]
     if m == wp.int32(0):
-        # World EEF goal in a larger polar region around the current root.
-        alpha = wp.randf(seed_, 0.0, 2.0 * wp.pi)
-        radius = wp.randf(seed_, world_radius_min, world_radius_max)
-        offset_xy = wp.vec3(radius * wp.cos(alpha), radius * wp.sin(alpha), 0.0)
-        root_xy = wp.vec3(root_pos_w[tid][0], root_pos_w[tid][1], 0.0)
-        world_xy = root_xy + wp.quat_rotate(root_yaw_quat[tid], offset_xy)
-        cmd_eef_pos_w[tid] = wp.vec3(world_xy[0], world_xy[1], oz)
-
-        # Standoff: approach pose short of the EEF goal along root→goal, so the base
-        # does not walk into the world target (arm reach away from the goal).
-        goal_xy = wp.vec3(world_xy[0], world_xy[1], 0.0)
-        to_goal = goal_xy - root_xy
-        dist = wp.sqrt(to_goal[0] * to_goal[0] + to_goal[1] * to_goal[1])
-        reach = wp.randf(seed_, standoff_reach_min, standoff_reach_max)
-        if dist > reach:
-            inv_dist = 1.0 / dist
-            standoff_xy = goal_xy - wp.vec3(
-                to_goal[0] * inv_dist * reach,
-                to_goal[1] * inv_dist * reach,
-                0.0,
-            )
-        else:
-            # Goal already within arm reach; keep the current base pose.
-            standoff_xy = root_xy
-        standoff_pos_w[tid] = standoff_xy
-        # Face the EEF goal from the standoff.
-        standoff_yaw_w[tid] = wp.atan2(
-            goal_xy[1] - standoff_xy[1], goal_xy[0] - standoff_xy[0]
+        (
+            seed_,
+            cmd_eef_w,
+            standoff_xy,
+            standoff_yaw,
+            linvel_gain,
+            yaw_gain,
+        ) = sample_world_goal(
+            seed_,
+            root_pos_w[tid],
+            root_yaw_quat[tid],
+            eef_z_min,
+            eef_z_max,
+            world_radius_min,
+            world_radius_max,
+            standoff_reach_min,
+            standoff_reach_max,
+            linvel_gain_min,
+            linvel_gain_max,
+            yaw_gain_min,
+            yaw_gain_max,
         )
-
-        # Loco toward standoff is refreshed every step in update_command.
-        world_linvel_gain[tid] = wp.randf(seed_, linvel_gain_min, linvel_gain_max)
-        world_yaw_gain[tid] = wp.randf(seed_, yaw_gain_min, yaw_gain_max)
+        cmd_eef_pos_w[tid] = cmd_eef_w
+        standoff_pos_w[tid] = standoff_xy
+        standoff_yaw_w[tid] = standoff_yaw
+        world_linvel_gain[tid] = linvel_gain
+        world_yaw_gain[tid] = yaw_gain
     elif m == wp.int32(1):
+        oz = wp.randf(seed_, eef_z_min, eef_z_max)
         ox = wp.randf(seed_, eef_x_min, eef_x_max)
         oy = wp.randf(seed_, eef_y_min, eef_y_max)
         cmd_eef_pos_b[tid] = wp.vec3(ox, oy, oz)
@@ -169,30 +163,26 @@ def update_command(
     """Refresh body-frame EEF command from mode and world / nominal targets."""
     tid = wp.tid()
     if mode[tid] == 0:
-        root_xy = wp.vec3(root_pos_w[tid][0], root_pos_w[tid][1], 0.0)
-
-        # EEF tracks the persistent world-frame goal.
-        eef_delta_w = cmd_eef_pos_w[tid] - root_xy
-        cmd_eef_pos_b[tid] = wp.quat_rotate_inv(root_yaw_quat[tid], eef_delta_w)
-
-        # Base walks toward the standoff (not into the EEF goal).
-        standoff_delta_w = standoff_pos_w[tid] - root_xy
-        standoff_delta_xy_w = wp.vec3(standoff_delta_w[0], standoff_delta_w[1], 0.0)
-        delta_b = wp.quat_rotate_inv(root_yaw_quat[tid], standoff_delta_xy_w)
-        dx = delta_b[0]
-        dy = delta_b[1]
-        dist = wp.sqrt(dx * dx + dy * dy)
-        base_pos_error[tid] = dist
-
-        vx = wp.clamp(world_linvel_gain[tid] * dx, linvel_x_min, linvel_x_max)
-        vy = wp.clamp(world_linvel_gain[tid] * dy, linvel_y_min, linvel_y_max)
-        cmd_linvel_b[tid] = wp.vec3(vx, vy, 0.0)
-
-        yaw_err = standoff_yaw_w[tid] - heading_w[tid]
-        yaw_err = wp.atan2(wp.sin(yaw_err), wp.cos(yaw_err))
-        cmd_yawvel_b[tid] = wp.clamp(
-            world_yaw_gain[tid] * yaw_err, yaw_rate_min, yaw_rate_max
+        cmd_eef_b, cmd_linvel, cmd_yawvel, base_err = update_world_command(
+            root_pos_w[tid],
+            root_yaw_quat[tid],
+            heading_w[tid],
+            cmd_eef_pos_w[tid],
+            standoff_pos_w[tid],
+            standoff_yaw_w[tid],
+            world_linvel_gain[tid],
+            world_yaw_gain[tid],
+            linvel_x_min,
+            linvel_x_max,
+            linvel_y_min,
+            linvel_y_max,
+            yaw_rate_min,
+            yaw_rate_max,
         )
+        cmd_eef_pos_b[tid] = cmd_eef_b
+        cmd_linvel_b[tid] = cmd_linvel
+        cmd_yawvel_b[tid] = cmd_yawvel
+        base_pos_error[tid] = base_err
     elif mode[tid] == 1:
         # Body-frame goal already stored in cmd_eef_pos_b; leave as-is.
         base_pos_error[tid] = 0.0
@@ -490,7 +480,7 @@ class LocoManipNew(CommandV2):
     def sample_commands_warp(self, resample: torch.Tensor, mode_probs: torch.Tensor) -> None:
         self._warp_seed = (self._warp_seed + 1) % (2**31 - 1)
         root_pos_w = self.asset.data.root_link_pos_w.contiguous()
-        root_yaw_xyzw = _quat_wxyz_to_xyzw(
+        root_yaw_xyzw = quat_wxyz_to_xyzw(
             yaw_quat(self.asset.data.root_link_quat_w)
         )
         wx, wy, wz = self.workspace_range
@@ -615,7 +605,7 @@ class LocoManipNew(CommandV2):
         self.sample_commands_warp(resample, self.mode_probs)
 
         root_pos_w = self.asset.data.root_link_pos_w.contiguous()
-        root_yaw_xyzw = _quat_wxyz_to_xyzw(
+        root_yaw_xyzw = quat_wxyz_to_xyzw(
             yaw_quat(self.asset.data.root_link_quat_w)
         )
         heading_w = self.asset.data.heading_w.contiguous()
