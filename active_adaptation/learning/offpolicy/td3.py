@@ -308,7 +308,6 @@ class TD3(TensorDictModuleBase):
             self.train_keys = (
                 CMD_KEY, OBS_KEY, ("next", OBS_KEY), ("next", CMD_KEY), ACTION_KEY,
                 REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
-                "priority_weight", "replay_flat_index"
             )
 
             obs_dim = fake_obs[OBS_KEY].shape[-1] + fake_obs[CMD_KEY].shape[-1]
@@ -319,7 +318,6 @@ class TD3(TensorDictModuleBase):
             self.train_keys = (
                 OBS_KEY, ("next", OBS_KEY), ACTION_KEY,
                 REWARD_KEY, TERM_KEY, DONE_KEY, ("next", "discount"), "is_init",
-                "priority_weight", "replay_flat_index"
             )
             obs_dim = fake_obs[OBS_KEY].shape[-1]
             preproc.append(

@@ -77,8 +77,8 @@ class SACConfig:
     train_every: int = 4
     buffer_size: int = 2000
     warm_up_steps: int = 200
-    # Paper: Adam without weight decay; LR ~1e-4 (hyperspherical renorm keeps ELR stable).
-    lr: float = 1e-4
+    # Paper: Adam without weight decay; LR ~5e-4 (hyperspherical renorm keeps ELR stable).
+    lr: float = 5e-4
     # TD learning
     n_steps: int = 3
     gamma: float = 0.99
@@ -123,15 +123,20 @@ class SACConfig:
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
     reward_norm_epsilon: float = 1e-8
+    # Twin Q regression: ``mse`` or ``huber`` (fp32 loss; see ``ScalarCritic.compute_loss``).
+    critic_loss: str = "mse"
+    huber_delta: float = 1.0
 
     # path to prior data for RLPD
     prior_data: str | None = None
     prior_data_ratio: float = 0.4
 
-    # BAC-style diagnostic V: quantile-regress the same soft TD target as Q (no Q-target change).
-    # τ > 0.5 → optimistic V; logged as ``critic/q_upper``.
+    # BAC V + BEE Bellman mix (Seizing Serendipity):
+    # V: quantile-regress soft-V toward Q_target(s, a_replay); logged as ``critic/q_upper``.
+    # Q: target = λ·(r+γ V(s')) + (1-λ)·soft-Q target. ``bee_lambda=0`` → plain SAC.
     learn_v: bool = True
     v_quantile: float = 0.9
+    bee_lambda: float = 0.5
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
@@ -146,6 +151,8 @@ def TwinScalarCritic(
     hidden_dim: int = 512,
     num_blocks: int = 2,
     c_shift: float = 3.0,
+    loss: str = "mse",
+    huber_delta: float = 1.0,
 ):
     module = SimpleDoubleCritic(
         fn=lambda: SimbaV2CriticTrunk(
@@ -156,7 +163,7 @@ def TwinScalarCritic(
             c_shift=c_shift,
         )
     )
-    return ScalarCritic(module)
+    return ScalarCritic(module, loss=loss, huber_delta=huber_delta)
 
 
 def ValueCritic(
@@ -244,6 +251,8 @@ class SAC(TensorDictModuleBase):
             hidden_dim=self.cfg.critic_hidden_dim,
             num_blocks=self.cfg.critic_num_blocks,
             c_shift=self.cfg.c_shift,
+            loss=self.cfg.critic_loss,
+            huber_delta=self.cfg.huber_delta,
         ).to(device)
 
         self.DistClass = IndependentNormal
@@ -264,9 +273,14 @@ class SAC(TensorDictModuleBase):
         self.actor_target.requires_grad_(False)
         self.actor_target.eval()
 
-        # Diagnostic V (BAC quantile regression). Not used in the Q Bellman target yet.
+        # BAC V (quantile soft-V); mixed into the Q target when ``bee_lambda > 0`` (BEE).
         self.V: nn.Module | None = None
         self.opt_V = None
+        bee_lambda = float(self.cfg.bee_lambda)
+        if not 0.0 <= bee_lambda <= 1.0:
+            raise ValueError(f"bee_lambda must be in [0, 1], got {bee_lambda}")
+        if bee_lambda > 0.0 and not self.cfg.learn_v:
+            raise ValueError("bee_lambda > 0 requires learn_v=True")
         if self.cfg.learn_v:
             if not 0.0 < float(self.cfg.v_quantile) < 1.0:
                 raise ValueError(
@@ -639,16 +653,22 @@ class SAC(TensorDictModuleBase):
             denom = valid.sum().clamp_min(1e-8)
             q_loss = (per_sample_q_loss * valid).sum() / denom
 
-            # Same soft TD target as Q; quantile regression → optimistic V (logged as q_upper).
-            # Use V(obs) not V(next_obs): q_target = r + γ soft_V(s'), so it is a return
-            # from ``obs``, not a value at ``next_obs``.
+            # BAC V: quantile-regress soft-V(s) toward Q_target(s, a_replay).
             v_pred = None
             v_loss = None
             if self.V is not None:
+                loc_v, scale_v = self.actor(obs)
+                dist_v = self.DistClass(loc_v, scale_v)
+                a_pi = dist_v.rsample()
+                log_pi_v = dist_v.log_prob(a_pi).reshape(obs.shape[0], 1)
+                alpha_v = self.alpha()
                 v_pred = self.V(obs)
+                soft_v = v_pred - alpha_v * log_pi_v.detach() * self.entropy_scale
+                with torch.no_grad():
+                    q_replay = self.Q_target.get_values(obs, act).min(dim=-1, keepdim=True).values
                 v_loss = quantile_mse_loss(
-                    v_pred,
-                    q_target.detach(),
+                    soft_v,
+                    q_replay,
                     float(self.cfg.v_quantile),
                     valid=valid.reshape(obs.shape[0], 1),
                 )
@@ -743,7 +763,7 @@ class SAC(TensorDictModuleBase):
 
     @torch.no_grad()
     def _compute_target(self, next_obs: torch.Tensor, reward: torch.Tensor, discount: torch.Tensor) -> torch.Tensor:
-        # actions are sampled with uncorrelated noise
+        # Soft Q bootstrap (expectile path ``next_q_value_e`` in BAC).
         loc, scale = self.actor_target(next_obs)
         dist = self.DistClass(loc, scale)
         next_action = dist.sample()
@@ -755,13 +775,21 @@ class SAC(TensorDictModuleBase):
         entropy_bonus = (-alpha * lp).reshape_as(reward) * self.entropy_scale
         adjusted_reward = reward + discount * self.cfg.entropy_bonus * entropy_bonus
         noise = torch.randn_like(next_action).clamp(-3.0, 3.0)
-        q_target = self.Q_target.compute_target(
+        q_target_e = self.Q_target.compute_target(
             next_obs,
             next_action + noise * self.cfg.target_action_noise,
             adjusted_reward,
             discount,
         )
-        return q_target
+
+        # BEE mix: λ·(r + γ V(s')) + (1-λ)·soft-Q target (``fixed_λ`` in BAC).
+        lam = float(self.cfg.bee_lambda)
+        if lam <= 0.0 or self.V is None:
+            return q_target_e
+        q_target_d = reward + discount * self.V(next_obs)
+        if lam >= 1.0:
+            return q_target_d
+        return lam * q_target_d + (1.0 - lam) * q_target_e
 
     @ScopedTimer("train_actor")
     def train_actor(self, diagnostics: bool = False):

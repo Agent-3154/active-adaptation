@@ -261,9 +261,21 @@ class CriticBase(ABC):
 
 
 class ScalarCritic(nn.Module, CriticBase):
-    def __init__(self, module: nn.Module):
+    def __init__(
+        self,
+        module: nn.Module,
+        *,
+        loss: str = "mse",
+        huber_delta: float = 1.0,
+    ):
         super().__init__()
+        if loss not in ("mse", "huber"):
+            raise ValueError(f"loss must be 'mse' or 'huber', got {loss!r}")
+        if huber_delta <= 0.0:
+            raise ValueError(f"huber_delta must be > 0, got {huber_delta}")
         self.module = module
+        self.loss = loss
+        self.huber_delta = float(huber_delta)
 
     def forward(self, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:
         return self.module(obs, act)
@@ -287,6 +299,13 @@ class ScalarCritic(nn.Module, CriticBase):
 
     @override
     def compute_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Always fp32: AMP fp16 MSE/Huber overflows easily on large TD residuals.
+        pred = pred.float()
+        target = target.float().expand_as(pred)
+        if self.loss == "huber":
+            return F.huber_loss(
+                pred, target, reduction="none", delta=self.huber_delta
+            ).sum(dim=-1)
         return (pred - target).square().sum(dim=-1)
 
 

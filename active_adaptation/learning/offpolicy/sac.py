@@ -88,12 +88,15 @@ def quantile_mse_loss(
     """
     if not 0.0 < quantile < 1.0:
         raise ValueError(f"quantile must be in (0, 1), got {quantile}")
+    # fp32: avoid AMP overflow on large residuals.
+    pred = pred.float()
+    target = target.float()
     err = target - pred
     weight = torch.where(err < 0, 1.0 - quantile, quantile)
     per = weight * err.square()
     if valid is None:
         return per.mean()
-    valid = valid.reshape_as(per)
+    valid = valid.reshape_as(per).float()
     return (per * valid).sum() / valid.sum().clamp_min(1e-8)
 
 
@@ -146,6 +149,9 @@ class SACConfig:
     # FlashSAC-style: scale learning rewards by running discounted-return stats (buffer stores raw).
     normalize_reward: bool = True
     reward_norm_epsilon: float = 1e-8
+    # Twin Q regression: ``mse`` or ``huber`` (fp32 loss; see ``ScalarCritic.compute_loss``).
+    critic_loss: str = "mse"
+    huber_delta: float = 1.0
 
     # path to prior data for RLPD
     prior_data: str | None = None
@@ -237,6 +243,9 @@ def TwinScalarCritic(
     obs_dim: int,
     act_dim: int,
     activation: type[nn.Module] = nn.SiLU,
+    *,
+    loss: str = "mse",
+    huber_delta: float = 1.0,
 ):
     critic_input_dim = obs_dim + act_dim
     module = SimpleDoubleCritic(
@@ -247,7 +256,7 @@ def TwinScalarCritic(
             activation=activation,
         )
     )
-    return ScalarCritic(module)
+    return ScalarCritic(module, loss=loss, huber_delta=huber_delta)
 
 
 def ValueCritic(
@@ -383,7 +392,12 @@ class SAC(TensorDictModuleBase):
         if self.cfg.sym_aug:
             assert self.has_symmetry, "Symmetry augmentation is enabled but no symmetry transform is provided"
 
-        self.Q = TwinScalarCritic(obs_dim, self.act_dim).to(device)
+        self.Q = TwinScalarCritic(
+            obs_dim,
+            self.act_dim,
+            loss=self.cfg.critic_loss,
+            huber_delta=self.cfg.huber_delta,
+        ).to(device)
 
         self.DistClass = IndependentNormal
         self.actor = NormalActor(
