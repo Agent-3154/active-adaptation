@@ -79,7 +79,7 @@ class QCConfig:
     batch_size: int = 2
     tau_critic: float = 0.1
     # online stage
-    buffer_size: int = 2_000_000
+    buffer_size: int = 10_000_000
     utd_ratio: int = 1
     warm_up_steps: int = 0
 
@@ -326,21 +326,24 @@ class QC(TensorDictModuleBase):
                 env.fake_tensordict()
                 .exclude(("next", "stats"), "collector")
             )
+            num_envs = fake_rb.shape[0]
+            max_time_steps = max(self.cfg.buffer_size // num_envs, 1)
+
             observation_keys = set(env.observation_spec.keys(True, True))
             observation_keys = observation_keys - set(self.cfg.bootstrap_observation_keys)
             self.rb = ReplayBuffer.from_fake(
-                self.cfg.buffer_size,
+                max_time_steps,
                 fake_rb,
                 fake_bootstrap=True,
                 observation_keys=list(observation_keys),
             )
 
             prior_size = len(self.prior_rb)
-            take = min(prior_size, self.cfg.buffer_size)
+            take = min(prior_size, max_time_steps)
             if take > 0:
                 self.rb._td[:take] = self.prior_rb._td[:take].to(self.rb._td.device)
                 self.rb._current_size = take
-                self.rb._ptr = take % self.cfg.buffer_size
+                self.rb._ptr = take % max_time_steps
 
             print("Online replay buffer:")
             print(self.rb)
