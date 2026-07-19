@@ -77,6 +77,10 @@ class QCConfig:
     bootstrap_observation_keys: Tuple[str, ...] = ("prev_noise", "rho")
     batch_size: int = 2
     tau_critic: float = 0.1
+    # online stage
+    buffer_size: int = 2_000_000
+    utd_ratio: int = 1
+    warm_up_steps: int = 0
 
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
@@ -305,7 +309,31 @@ class QC(TensorDictModuleBase):
             print("Prior data buffer:")
             print(self.prior_rb)
         elif stage == "online":
-            raise NotImplementedError
+            # Create replay buffer and pre-fill with offline data so that
+            # online transitions gradually overwrite older entries via FIFO,
+            # matching the reference implementation's data mixing strategy.
+            fake_rb = (
+                env.fake_tensordict()
+                .exclude(("next", "stats"), "collector")
+            )
+            observation_keys = set(env.observation_spec.keys(True, True))
+            observation_keys = observation_keys - set(self.cfg.bootstrap_observation_keys)
+            self.rb = ReplayBuffer.from_fake(
+                self.cfg.buffer_size,
+                fake_rb,
+                fake_bootstrap=True,
+                observation_keys=list(observation_keys),
+            )
+
+            prior_size = len(self.prior_rb)
+            take = min(prior_size, self.cfg.buffer_size)
+            if take > 0:
+                self.rb._td[:take] = self.prior_rb._td[:take].to(self.rb._td.device)
+                self.rb._current_size = take
+                self.rb._ptr = take % self.cfg.buffer_size
+
+            print("Online replay buffer:")
+            print(self.rb)
         else:
             raise ValueError(f"Stage {stage} is invalid.")
         
@@ -341,6 +369,33 @@ class QC(TensorDictModuleBase):
         infos.update(self.train_actor(batch))
         return dict(sorted(infos.items()))
 
+
+    def step(self, tensordict: TensorDictBase) -> dict:
+        """Online training step: push transition, sample batch, update."""
+        self.global_step += 1
+
+        td = tensordict.exclude(("next", "stats"), "collector")
+        self.rb.push(td)
+
+        infos: dict = {"rb_size": len(self.rb)}
+        if self.global_step < self.cfg.warm_up_steps:
+            return infos
+
+        for _ in range(self.cfg.utd_ratio):
+            batch = self.rb.sample(
+                batch_size=self.cfg.batch_size,
+                steps=self.cfg.horizon_length,
+                next_obs=True,
+            ).to(self.device)
+
+            batch = batch.select(*self.training_keys, inplace=False, strict=False)
+            self.preproc(batch)
+            self.preproc(batch["next"])
+
+            infos.update(self.train_critic(batch))
+            infos.update(self.train_actor(batch))
+
+        return dict(sorted(infos.items()))
 
     def train_critic(self, batch: TensorDict):
         """Update critic on a preprocessed batch (``batch.select`` + ``preproc`` already applied)."""

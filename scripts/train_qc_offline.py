@@ -195,15 +195,38 @@ def main(cfg: TrainConfig):
                 })
 
     # ── online stage ─────────────────────────────────────────────────
-    if cfg.online_iters > 0 and hasattr(policy, "step_online"):
+    if cfg.online_iters > 0:
         policy.on_stage_start(stage="online", env=env)
+        rollout_policy = policy.get_rollout_policy("train")
 
-        pbar = tqdm(range(cfg.online_iters), desc="online", unit="step")
+        carry = env.reset()
+
+        if aa.is_main_process():
+            pbar = tqdm(range(cfg.online_iters), desc="online", unit="step")
+        else:
+            pbar = range(cfg.online_iters)
+
+        observation_keys = list(env.observation_spec.keys(True, True))
+        private_keys = None
+
         for i in pbar:
-            info = policy.step_online()
+            with torch.no_grad():
+                carry = rollout_policy(carry)
+
+            td, carry = env.step_and_maybe_reset(carry)
+            if private_keys is None:
+                private_keys = [
+                    key for key in td.keys(True, True)
+                    if isinstance(key, str) and key.startswith("_")
+                ]
+            td = td.exclude(*private_keys)
+            td["next"] = td["next"].exclude(*observation_keys)
+
+            info = policy.step(td)
 
             if aa.is_main_process():
-                run.log(info, step=cfg.offline_iters + i)
+                if len(info) > 0:
+                    run.log(info, step=cfg.offline_iters + i)
 
                 if cfg.checkpoint_interval > 0 and i % cfg.checkpoint_interval == 0:
                     ckpt_path = save(f"checkpoint_{cfg.offline_iters + i:06d}")
@@ -214,7 +237,9 @@ def main(cfg: TrainConfig):
                 ):
                     with set_exploration_type(ExplorationType.MODE):
                         policy_eval = policy.get_rollout_policy("eval")
-                        eval_info, _, _ = evaluate(env, policy_eval, seed=cfg.seed + i)
+                        eval_info, _, _ = evaluate(
+                            env, policy_eval, seed=cfg.seed + i,
+                        )
                     run.log(eval_info, step=cfg.offline_iters + i)
 
         total_iters = cfg.offline_iters + cfg.online_iters
