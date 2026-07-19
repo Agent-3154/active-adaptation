@@ -57,6 +57,7 @@ class TrainConfig:
     app: IsaacAppConfig = field(default_factory=IsaacAppConfig)
 
     eval_render: bool = False
+    checkpoint_interval: int = -1
 
     seed: int = 42
     checkpoint_path: Optional[str] = None
