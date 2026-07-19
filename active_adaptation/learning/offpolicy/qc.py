@@ -61,14 +61,14 @@ class QCConfig:
     # general setting
     vecnorm: bool = True
     clamp_reward: bool = False
-    lr: float = 3e-5
-    weight_decay: float = 0.02
+    lr: float = 3e-4
+    weight_decay: float = 0.0
     muon: bool = True
-    q_agg: str = "min"
+    q_agg: str = "mean"
     actor_type: str = "best-of-n"
-    actor_nums: int = 4
+    actor_nums: int = 32
     gamma: float = 0.99
-    horizon_length: int = 4
+    horizon_length: int = 5
     flow_steps: int = 10
     compile_flow: bool = False
     critic_hidden_dims: tuple[int] = (512, 512, 512, 512)
@@ -76,8 +76,8 @@ class QCConfig:
     # offline stage
     prior_data_path: str | None = '/home/cv/zjx/active-adaptation/scripts/rollout/G1LocoFlat-sac/2026-07-08-20-32-07/rollout_1000_4096.pt'
     bootstrap_observation_keys: Tuple[str, ...] = ("prev_noise", "rho")
-    batch_size: int = 2
-    tau_critic: float = 0.1
+    batch_size: int = 256
+    tau_critic: float = 0.005
     max_grad_norm: float = 1.0
     # online stage
     buffer_size: int = 10_000_000

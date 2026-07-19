@@ -64,11 +64,11 @@ class TrainConfig:
     discard_unused_obs: bool = True
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
-    offline_iters: int = 1_000
-    offline_eval_interval: int = 1000
+    offline_iters: int = 1_000_000
+    offline_eval_interval: int = 100_000
 
-    online_iters: int = 1_000
-    online_eval_interval: int = 1000
+    online_iters: int = 1_000_000
+    online_eval_interval: int = 100_000
 
 
 cs = ConfigStore.instance()
