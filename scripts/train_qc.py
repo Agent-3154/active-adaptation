@@ -70,6 +70,8 @@ class TrainConfig:
     online_iters: int = 1_000_000
     online_eval_interval: int = 100_000
 
+    log_interval: int = 100
+
 
 cs = ConfigStore.instance()
 cs.store(
@@ -129,6 +131,8 @@ def main(cfg: TrainConfig):
         run_dir = None
 
     from active_adaptation.helpers import make_env_policy, evaluate
+    from active_adaptation.utils.helpers import EpisodeStats
+    from active_adaptation.utils.profiling import ScopedTimer
 
     env, policy = make_env_policy(
         task_cfg=cfg.task,
@@ -141,6 +145,15 @@ def main(cfg: TrainConfig):
     )
 
     assert env.training
+
+    max_episode_length = cfg.task.max_episode_length
+    log_interval = cfg.log_interval
+
+    stats_keys = [
+        k for k in env.reward_spec.keys(True, True)
+        if isinstance(k, tuple) and k[0] == "stats"
+    ]
+    episode_stats = EpisodeStats(stats_keys, device=env.device)
 
     def save(checkpoint_name: str, *, upload_to_wandb: bool = True):
         ckpt_path = run_dir / f"{checkpoint_name}.pt"
@@ -169,7 +182,8 @@ def main(cfg: TrainConfig):
         info = policy.step_offline()
 
         if aa.is_main_process():
-            run.log(info, step=i)
+            if i % log_interval == 0 or len(info) > 0:
+                run.log(info, step=i)
 
             if cfg.checkpoint_interval > 0 and i % cfg.checkpoint_interval == 0:
                 ckpt_path = save(f"checkpoint_{i:06d}")
@@ -195,6 +209,7 @@ def main(cfg: TrainConfig):
         rollout_policy = policy.get_rollout_policy("train")
 
         carry = env.reset()
+        env_frames = 0
 
         if aa.is_main_process():
             pbar = tqdm(range(cfg.online_iters), desc="online", unit="step")
@@ -203,28 +218,56 @@ def main(cfg: TrainConfig):
 
         observation_keys = list(env.observation_spec.keys(True, True))
         private_keys = None
+        last_log_episode_stats = 0
 
         for i in pbar:
             with torch.no_grad():
-                carry = rollout_policy(carry)
+                with (
+                    set_exploration_type(ExplorationType.RANDOM),
+                    ScopedTimer("policy_inference"),
+                ):
+                    carry = rollout_policy(carry)
 
-            td, carry = env.step_and_maybe_reset(carry)
-            if private_keys is None:
-                private_keys = [
-                    key for key in td.keys(True, True)
-                    if isinstance(key, str) and key.startswith("_")
-                ]
-            td = td.exclude(*private_keys)
-            td["next"] = td["next"].exclude(*observation_keys)
+                with ScopedTimer("env_step") as timer:
+                    td, carry = env.step_and_maybe_reset(carry)
+                    if private_keys is None:
+                        private_keys = [
+                            key for key in td.keys(True, True)
+                            if isinstance(key, str) and key.startswith("_")
+                        ]
+                    td = td.exclude(*private_keys)
+                    td["next"] = td["next"].exclude(*observation_keys)
 
+            episode_stats.add(td)
+            new_frames = td.shape[0]
+            env_frames += new_frames
             info = policy.step(td)
 
             if aa.is_main_process():
-                if len(info) > 0:
-                    run.log(info, step=cfg.offline_iters + i)
+                step = cfg.offline_iters + i
+                if i % log_interval == 0 or len(info) > 0:
+                    log_info = {**info}
+                    log_info["env_frames"] = env_frames * aa.get_world_size()
+                    log_info["performance/rollout_fps"] = (
+                        1.0 / timer.last_time * new_frames * aa.get_world_size()
+                    )
+
+                    if (
+                        i - last_log_episode_stats >= max_episode_length
+                        and len(episode_stats) > 0
+                    ):
+                        for k, v in sorted(episode_stats.pop().items(True, True)):
+                            key = "train/" + ("/".join(k) if isinstance(k, tuple) else k)
+                            log_info[key] = torch.mean(v.float()).item()
+                        last_log_episode_stats = i
+
+                    ScopedTimer.print_summary(clear=True, depth=3)
+                    log_info.update(getattr(env, "extra", {}))
+                    log_info.update(getattr(env, "stats_ema", {}))
+                    run.log(log_info, step=step)
 
                 if cfg.checkpoint_interval > 0 and i % cfg.checkpoint_interval == 0:
-                    ckpt_path = save(f"checkpoint_{cfg.offline_iters + i:06d}")
+                    ckpt_path = save(f"checkpoint_{step:06d}")
 
                 if (
                     cfg.online_eval_interval > 0
@@ -236,7 +279,7 @@ def main(cfg: TrainConfig):
                         eval_info, _, _ = evaluate(
                             env, policy_eval, seed=cfg.seed + i,
                         )
-                    run.log(eval_info, step=cfg.offline_iters + i)
+                    run.log(eval_info, step=step)
 
         total_iters = cfg.offline_iters + cfg.online_iters
     else:
