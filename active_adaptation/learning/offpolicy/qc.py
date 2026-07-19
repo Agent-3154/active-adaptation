@@ -281,7 +281,7 @@ class QC(TensorDictModuleBase):
         ).to(device)
 
         # Pre-register timestep values for flow integration (avoids per-iteration allocations).
-        ts = torch.arange(cfg.flow_steps, dtype=torch.float32) / cfg.flow_steps
+        ts = torch.arange(cfg.flow_steps, dtype=torch.float32, device=device) / cfg.flow_steps
         self.register_buffer("_flow_ts", ts)
 
         if self.cfg.muon:
