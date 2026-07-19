@@ -70,6 +70,7 @@ class QCConfig:
     gamma: float = 0.99
     horizon_length: int = 4
     flow_steps: int = 10
+    compile_flow: bool = False
     critic_hidden_dims: tuple[int] = (512, 512, 512, 512)
     actor_hidden_dims: tuple[int]  = (512, 512, 512, 512)
     # offline stage
@@ -279,6 +280,10 @@ class QC(TensorDictModuleBase):
             hidden_dim=actor_hidden_dims[0],
         ).to(device)
 
+        # Pre-register timestep values for flow integration (avoids per-iteration allocations).
+        ts = torch.arange(cfg.flow_steps, dtype=torch.float32) / cfg.flow_steps
+        self.register_buffer("_flow_ts", ts)
+
         if self.cfg.muon:
             self.opt_actor = MuonAdamWWrapper(
                 [self.actor],
@@ -293,6 +298,11 @@ class QC(TensorDictModuleBase):
         else:
             self.opt_actor = torch.optim.AdamW(self.actor.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
             self.opt_Q = torch.optim.AdamW(self.Q.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
+
+        if self.cfg.compile_flow:
+            self.compute_flow_actions = torch.compile(
+                self.compute_flow_actions, mode="reduce-overhead",
+            )
 
         self.global_step = 0
 
@@ -548,14 +558,8 @@ class QC(TensorDictModuleBase):
     def compute_flow_actions(self, next_obs, noises: torch.Tensor):
         actions = noises
         for i in range(self.cfg.flow_steps):
-            time = torch.full_like(actions[..., 0], i / self.cfg.flow_steps).to(next_obs.device)
-            time = time[..., None]
-            assert time.dim() == 2
-            assert next_obs.dim() == 2
-            assert actions.dim() == 2
-            vels = self.actor(next_obs, actions, time)
-            actions += vels / self.cfg.flow_steps
-
+            time = self._flow_ts[i].expand(actions.shape[0], 1)
+            actions += self.actor(next_obs, actions, time) / self.cfg.flow_steps
         return actions
 
 
