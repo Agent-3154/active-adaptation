@@ -60,6 +60,8 @@ class QCConfig:
     name: str = "qc"
 
     # general setting
+    debug: bool = True
+
     vecnorm: bool = True
     clamp_reward: bool = False
     lr: float = 3e-4
@@ -78,7 +80,7 @@ class QCConfig:
     prior_data_path: str | None = '/home/cv/zjx/active-adaptation/scripts/rollout/G1LocoFlat-sac/2026-07-08-20-32-07/rollout_1000_4096.pt'
     bootstrap_observation_keys: Tuple[str, ...] = ("prev_noise", "rho")
     batch_size: int = 256
-    tau_critic: float = 0.005
+    tau_critic: float = 0.2
     max_grad_norm: float = 1.0
     # online stage
     buffer_size: int = 10_000_000
@@ -422,6 +424,10 @@ class QC(TensorDictModuleBase):
 
         reward = _collate_reward(batch[REWARD_KEY])
         reward_raw = reward.clone()
+
+        if self.cfg.debug:
+            reward = torch.ones_like(reward) * (1.0 - self.cfg.gamma)
+
         reward = reward * (1.0 - self.cfg.gamma)
 
         obs = batch["_input_normed"][0]
