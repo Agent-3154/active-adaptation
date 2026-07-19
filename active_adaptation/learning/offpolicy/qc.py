@@ -82,10 +82,12 @@ class QCConfig:
     name: str = "qc"
 
     # general setting
-    debug: bool = True
+    debug: bool = False
     vecnorm: bool = True
-    clamp_reward: bool = True
+    clamp_reward: bool = False
     normalize_reward: bool = False
+    lr: float = 3e-5
+    weight_decay: float = 0.02
     muon: bool = True
     q_agg: str = "min"
     actor_type: str = "best-of-n"
@@ -199,8 +201,8 @@ class ActorVectorField(nn.Module):
                 lambda m: _init_linear(m, gain=0.01)
             )
         elif action_init == "zeros":
-            nn.init.zeros_(self.action.weight, 0.0)
-            nn.init.zeros_(self.action.bias, 0.0)
+            nn.init.zeros_(self.action.weight)
+            nn.init.zeros_(self.action.bias)
         else:
             raise ValueError(f"Invalid action_init: {action_init}")
         
@@ -291,7 +293,7 @@ class QC(TensorDictModuleBase):
         self.actor = ActorVectorField(
             obs_dim=self.obs_dim,
             action_dim=self.full_action_dim
-        )
+        ).to(device)
 
         if self.cfg.muon:
             self.opt_actor = MuonAdamWWrapper(
@@ -364,12 +366,15 @@ class QC(TensorDictModuleBase):
 
         infos.update(info)
 
+        info = self.train_actor(batch, diagnostic=True)
+
+        infos.update(info)
         return dict(sorted(infos.items()))
 
-    
+
     def train_critic(self, batch: TensorDict, diagnostic: bool = True):
         self.Q.train()
-        batch = batch.select(*self.training_keys, inplace=True, strict=False)
+        batch = batch.select(*self.training_keys, inplace=False, strict=False)
         
         def collate_reward(reward: torch.Tensor | TensorDict) -> torch.Tensor:
             if isinstance(reward, TensorDict):
@@ -415,17 +420,68 @@ class QC(TensorDictModuleBase):
 
         with ScopedTimer("compute_target"):
             q_target = self.compute_target(next_obs, reward, discount)
-            print(q_target)
 
-        act_concated = torch.concat(act_n, dim=1)
+        act_concated = act_n.flatten(start_dim=1)
         pred = self.Q(obs, act_concated)
         per_sample_loss = self.Q.compute_loss(pred, q_target)
         valid = (1.0 - is_init.float()).reshape_as(per_sample_loss)
         denom = valid.sum().clamp_min(1e-8)
         q_loss = (per_sample_loss * valid).sum() / denom
 
-        self.
-        return {}
+        self.opt_Q.zero_grad(set_to_none=True)
+        q_loss.backward()
+        self.opt_Q.step()
+
+        # soft update target
+        soft_copy_(
+            self.Q,
+            self.Q_target,
+            self.cfg.tau_critic
+        )
+        
+        return {
+            "critic/q_loss": q_loss.detach().item(),
+            "critic/q_mean": pred.detach().mean().item(),
+            "critic/target_mean": q_target.detach().mean().item()
+        }
+
+
+    def train_actor(self, batch: TensorDict, diagnostic: bool = True):
+        self.actor.train()
+
+        batch = batch.select(*self.training_keys, inplace=False, strict=False)
+        self.preproc(batch)
+        obs = batch["_input_normed"][0]
+        batch_actions = einops.rearrange(
+            batch[ACTION_KEY],
+            "t b a -> b (t a)"
+        ).contiguous()
+        batch_size, action_dim = batch_actions.shape
+
+        x0 = torch.rand(batch_actions.shape, device=batch_actions.device)
+        x1 = batch_actions
+        t = torch.rand((batch_size, 1), device=batch_actions.device)
+        xt = (1 - t) * x0 + t * x1
+        v = x1 - x0
+        pred_v = self.actor(obs, xt, t)
+
+        per_sample_loss = (pred_v - v) ** 2
+
+        is_init = batch["is_init"][0]
+        valid = (1.0 - is_init.float()).reshape((batch_size, 1))
+
+        actor_loss = per_sample_loss * valid
+        denom = valid.sum().clamp(1e-8)
+        actor_loss = actor_loss.sum() / denom
+
+        self.opt_actor.zero_grad()
+        actor_loss.backward()
+        self.opt_actor.step()
+
+        return {
+            "actor/loss": actor_loss.item()
+        }
+
 
     @torch.no_grad()
     def _compute_target(self, next_obs: torch.Tensor, reward: torch.Tensor, discount: torch.Tensor) -> torch.Tensor:
@@ -440,31 +496,40 @@ class QC(TensorDictModuleBase):
         return q_target
     
     def sample_actions(self, next_obs: torch.Tensor):
-        ex_actions = torch.rand(self.cfg.batch_size * self.cfg.actor_nums, self.action_spec.shape[-1] * self.cfg.horizon_length)
+        batch_size = next_obs.shape[0]
+        device = next_obs.device
 
         if self.cfg.actor_type == "best-of-n":
-            assert ex_actions.dim() == 2
-            assert next_obs.dim() == 2
-            noises = torch.rand_like(ex_actions)
-            next_obss = next_obs.repeat(self.cfg.actor_nums, 1)
-            actions = self.compute_flow_actions(next_obss, noises)
+            next_obss = next_obs.repeat_interleave(
+                self.cfg.actor_nums, dim=0
+            )
 
+            noise = torch.rand(
+                batch_size * self.cfg.actor_nums,
+                self.full_action_dim,
+                device=device
+            )
+
+            actions = self.compute_flow_actions(next_obss, noise)
             q_values = self.Q_target(next_obss, actions)
-            
-            if self.cfg.debug:
-                print(q_values.shape) #[batch_size * actor_num, 2]
 
             if self.cfg.q_agg == "mean":
-                q_values = torch.mean(q_values, dim=-1)
+                q_values = q_values.mean(dim=-1)
             elif self.cfg.q_agg == "min":
-                q_values, _ = torch.min(q_values, dim=-1)
-            # [batch_size * actor_num,]
-            q_values = torch.reshape(q_values, (self.cfg.batch_size, self.cfg.actor_nums))
-            print(q_values.shape)
-            indices = torch.argmax(q_values, dim=-1)
-            actions = torch.reshape(actions, (self.cfg.batch_size, self.cfg.actor_nums, actions.shape[-1]))
-            actions = actions[:, indices, :].squeeze()
-            return actions
+                q_values = q_values.min(dim=-1).values
+            else:
+                raise NotImplementedError(f"Unknown q_agg: {self.cfg.q_agg}")
+            
+            q_values = q_values.view(batch_size, self.cfg.actor_nums)
+            actions = actions.view(
+                batch_size,self.cfg.actor_nums,self.full_action_dim
+            )
+
+            indices = q_values.argmax(dim=-1)
+            batch_indices = torch.arange(batch_size, device=device)
+
+            return actions[batch_indices, indices]
+        
         elif self.cfg.actor_type == "distll-ddpg":
             raise NotImplementedError
 
