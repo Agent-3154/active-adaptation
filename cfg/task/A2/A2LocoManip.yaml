@@ -59,7 +59,11 @@ command:
 
 observation:
   command:
-    command:  {}
+    command:  {key: teacher}
+  command_teacher: # automatically discarded if unused
+    command:  {key: teacher}
+  command_student: # automatically discarded if unused
+    command:  {key: student}
   policy:
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {steps: 4, noise_std: 0.05}

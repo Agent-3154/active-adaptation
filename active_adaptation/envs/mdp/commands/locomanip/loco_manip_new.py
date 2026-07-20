@@ -279,30 +279,43 @@ class LocoManipNew(CommandV2):
         t = min(1.0, self._mode_schedule_step / self.mode_transition_steps)
         return torch.lerp(self.mode_probs_0, self.mode_probs_1, t)
     
-    @property
-    def command(self):
+    def command(self, key: str):
         # Dense layout (23D), orientation fixed at nominal body-frame rest pose:
         # [v_x, v_y, yaw_rate, eef_xyz, pos_diff, fwd, fwd_diff, up, up_diff, closed, open]
-        return torch.cat(
-            [
-                self.cmd_linvel_b[:, :2],
-                self.cmd_yawvel_b,
-                self.cmd_eef_pos_b,
-                self.pos_diff_b,
-                self.cmd_eef_forward_b,
-                self.forward_diff_b,
-                self.cmd_eef_upward_b,
-                self.upward_diff_b,
-                self.cmd_eef_status.float(),
-                1.0 - self.cmd_eef_status.float(),
-            ],
-            dim=-1,
-        )
+        if key == "teacher":
+            result = torch.cat(
+                [
+                    self.cmd_linvel_b[:, :2],
+                    self.cmd_yawvel_b,
+                    self.cmd_eef_pos_b,
+                    self.pos_diff_b,
+                    self.cmd_eef_forward_b,
+                    self.forward_diff_b,
+                    self.cmd_eef_upward_b,
+                    self.upward_diff_b,
+                    self.cmd_eef_status.float(),
+                    1.0 - self.cmd_eef_status.float(),
+                ],
+                dim=-1,
+            )
+        elif key == "student": # eef command only
+            result = torch.cat([
+                self.cmd_eef_pos_b, # [N, 3]
+                self.pos_diff_b, # [N, 3]
+                self.cmd_eef_forward_b, # [N, 3]
+                self.forward_diff_b, # [N, 3]
+                self.cmd_eef_upward_b, # [N, 3]
+                self.upward_diff_b, # [N, 3]
+                self.cmd_eef_status.float(), # [N, 1]
+                (1 - self.cmd_eef_status.float()) # [N, 1]
+            ], dim=-1)
+        else:
+            raise ValueError(f"Invalid key: {key}")
+        return result
 
-    def symmetry_transform(self):
+    def symmetry_transform(self, key: str = "teacher"):
         # Mirror left-right: flip y and yaw for all body-frame vectors.
-        cmd_linvel_b = SymmetryTransform(perm=[0, 1], signs=[1, -1])
-        cmd_yawvel_b = SymmetryTransform(perm=[0], signs=[-1])
+        # Layout must match ``command(key)``.
         cmd_eef_pos_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
         pos_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
         cmd_eef_forward_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
@@ -310,19 +323,22 @@ class LocoManipNew(CommandV2):
         cmd_eef_upward_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
         upward_diff_b = SymmetryTransform(perm=[0, 1, 2], signs=[1, -1, 1])
         eef_status = SymmetryTransform(perm=[0, 1], signs=[1, 1])
-        return SymmetryTransform.cat(
-            [
-                cmd_linvel_b,
-                cmd_yawvel_b,
-                cmd_eef_pos_b,
-                pos_diff_b,
-                cmd_eef_forward_b,
-                forward_diff_b,
-                cmd_eef_upward_b,
-                upward_diff_b,
-                eef_status,
-            ]
-        )
+        eef_block = [
+            cmd_eef_pos_b,
+            pos_diff_b,
+            cmd_eef_forward_b,
+            forward_diff_b,
+            cmd_eef_upward_b,
+            upward_diff_b,
+            eef_status,
+        ]
+        if key == "teacher":
+            cmd_linvel_b = SymmetryTransform(perm=[0, 1], signs=[1, -1])
+            cmd_yawvel_b = SymmetryTransform(perm=[0], signs=[-1])
+            return SymmetryTransform.cat([cmd_linvel_b, cmd_yawvel_b, *eef_block])
+        if key == "student":
+            return SymmetryTransform.cat(eef_block)
+        raise ValueError(f"Invalid key: {key}")
 
     @override
     def reset(self, env_ids: torch.Tensor) -> None:
