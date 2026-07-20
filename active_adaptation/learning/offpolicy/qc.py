@@ -396,7 +396,7 @@ class QC(TensorDictModuleBase):
             r = torch.cat(list(r.values()), dim=-1)
         r = r.sum(dim=-1, keepdim=True)
 
-        if self.reward_normalizer is not None:
+        if self.reward_normalizer is not None and not self.cfg.debug:
             truncated = td.get(("next", "truncated"))
             if truncated is None:
                 truncated = torch.zeros_like(td[TERM_KEY])
