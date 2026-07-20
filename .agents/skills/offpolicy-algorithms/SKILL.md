@@ -108,6 +108,23 @@ Prefer copying `sac.py` structure and deleting/changing only what the paper requ
 - Warm-up: push only until `global_step > warm_up_steps`; train when `global_step % train_every == 0`
 - Gate diagnostics: last UTD critic step and last actor step only (see `sac.py`)
 
+#### `buffer_size` meaning (easy to get wrong)
+
+`cfg.buffer_size` is **not** a flat transition count. `ReplayBuffer.from_fake(max_size, fake_tensordict)` allocates a ring with batch shape **`[buffer_size, num_envs]`**:
+
+| Quantity | Value |
+|----------|--------|
+| Ring length (time / steps) | `buffer_size` (e.g. SAC default **2000**) |
+| Parallel slots | `num_envs` (often thousands) |
+| Max stored transitions | `buffer_size * num_envs` |
+| One `push(td)` | writes **one step** across all envs at `write_ptr` |
+
+So `buffer_size=2000` with 4096 envs ≈ 8M transitions. Values like `1e5`–`1e6` (common in single-env / flat-buffer papers) are **far too large** here and will OOM. Prefer O(10³) ring lengths aligned with SAC (`2000`) / TD3 (`1500`), not paper “1e6 replay size” numbers.
+
+`len(rb)` / `rb.max_size` report the filled/capacity **ring length** (first dim), not `× num_envs`. `rb.num_samples == len(rb) * num_envs` is the transition count. Sampling draws `(t, env)` pairs uniformly over stored rows.
+
+See `learning/offpolicy/buffer.py` (`from_fake`, `push`, `sample`) and `sac.py` `on_stage_start`.
+
 ### 4. Training loop counts (SAC convention)
 
 - **Critic:** `train_every * utd_ratio` updates per `train_op`

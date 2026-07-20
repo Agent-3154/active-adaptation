@@ -20,18 +20,28 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 """
-Teacher–Student PPO (two stages, no GRU).
+Teacher–Student PPO (two stages).
+
+Key groups (config)
+-------------------
+- ``teacher_keys``: observations available to the teacher / critic.
+- ``student_keys``: observations available to the student.
+- ``privileged_keys = teacher_keys \\ student_keys``: encoded by the teacher MLP
+  and distilled into by the student GRU.
+- Shared keys (intersection) go to the actor directly (normed).
+- Student-only keys (e.g. ``command_student``) feed the GRU but not the actor.
 
 Architecture
 ------------
-- Separate command encoders for ``command_teacher`` / ``command_student``.
-- Shared policy VecNorm + actor MLP + action head (input: ``[_cmd_feat, _obs_normed]``).
-- Critic always sees privileged teacher inputs (``command_teacher`` + ``policy``).
+- Teacher encoder: MLP on privileged keys → ``_priv_feature``.
+- Student encoder: GRU over all ``student_keys`` history → ``_priv_pred``.
+- Shared actor: ``[shared_normed…, _priv_feat]``.
+- Critic: all ``teacher_keys`` (privileged, not distilled features).
 
 Stages
 ------
-- **teacher**: PPO on the teacher path; distill student cmd encoder → teacher cmd features.
-- **student**: DAgger-style rollouts with the student path; distill only (no PPO on student).
+- **teacher**: PPO on the teacher path; distill student GRU → teacher features (BPTT).
+- **student**: DAgger-style rollouts with the student GRU; distill only (no PPO).
 
 Symmetry augmentation applies only during the teacher PPO update.
 """
@@ -41,10 +51,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import warnings
+import einops
 import torch.utils._pytree as pytree
 
-from torchrl.data import Composite, TensorSpec
+from torchrl.data import Composite, TensorSpec, Unbounded
 from torchrl.modules import ProbabilisticActor
+from torchrl.envs.transforms import TensorDictPrimer
 from tensordict import TensorDict
 from tensordict.nn import (
     TensorDictModuleBase,
@@ -53,8 +65,8 @@ from tensordict.nn import (
 )
 
 from hydra.core.config_store import ConfigStore
-from dataclasses import dataclass
-from typing import Tuple, Optional, Any, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import Tuple, Optional, Any, Dict, List, TYPE_CHECKING
 from collections import OrderedDict
 
 if TYPE_CHECKING:
@@ -66,24 +78,41 @@ from active_adaptation.learning.modules import (
     MLP,
     CatTensors,
 )
+from active_adaptation.learning.modules.rnn import set_recurrent_mode, recurrent_mode
 from active_adaptation.learning.ppo.common import (
     ppo_clipped_loss,
     resolve_clip_param,
     OBS_KEY,
+    OBS_PRIV_KEY,
     ACTION_KEY,
     REWARD_KEY,
     TERM_KEY,
     DONE_KEY,
     GAE,
     make_batch,
+    make_mlp,
     Actor,
     Critic,
 )
+from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.symmetry import SymmetryTransform
 
-CMD_TEACHER_KEY = "command_teacher"
-CMD_STUDENT_KEY = "command_student"
+GRU_HIDDEN = 128
+
+
+def _normed_key(key: str) -> str:
+    return f"_{key}_normed"
+
+
+def _unique_preserve(keys: Tuple[str, ...]) -> Tuple[str, ...]:
+    seen = set()
+    out: List[str] = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return tuple(out)
 
 
 @dataclass
@@ -103,21 +132,33 @@ class PPOTSCfg:
 
     actor_num_units: Tuple[int, ...] = (256, 256, 256)
     critic_num_units: Tuple[int, ...] = (512, 256, 256)
-    # Hidden widths for cmd encoders; final output dim is ``cmd_feat_dim``.
+    # Hidden widths for the teacher privileged MLP; final dim is ``priv_feat_dim``.
+    # Student uses a fixed FACET-style GRU (128-d hidden).
     encoder_num_units: Tuple[int, ...] = (128,)
-    cmd_feat_dim: int = 64
+    priv_feat_dim: int = 64
     distill_epochs: int = 2
     activation: str = "Mish"
 
     # Symmetry aug only used in teacher PPO updates (ignored in student stage).
     symaug: bool = True
+    muon: bool = False  # Muon for teacher PPO (encoder + actor + critic)
     compile: bool = False
 
     stage: str = "teacher"  # "teacher" or "student"
 
-    teacher_keys: Tuple[str, ...] = (CMD_TEACHER_KEY, OBS_KEY)
-    student_keys: Tuple[str, ...] = (CMD_STUDENT_KEY, OBS_KEY)
-    in_keys: Tuple[str, ...] = (CMD_TEACHER_KEY, CMD_STUDENT_KEY, OBS_KEY)
+    # ``privileged_keys = teacher_keys \\ student_keys`` (order preserved from teacher).
+    # Examples:
+    #   teacher=(policy, priv), student=(policy,)
+    #   teacher=(command_teacher, policy), student=(command_student, policy)
+    teacher_keys: Tuple[str, ...] = (OBS_KEY, OBS_PRIV_KEY)
+    student_keys: Tuple[str, ...] = (OBS_KEY,)
+    # Union of teacher ∪ student; recomputed in ``__post_init__``.
+    in_keys: Tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self):
+        self.teacher_keys = tuple(self.teacher_keys)
+        self.student_keys = tuple(self.student_keys)
+        self.in_keys = _unique_preserve((*self.teacher_keys, *self.student_keys))
 
 
 cs = ConfigStore.instance()
@@ -129,8 +170,58 @@ cs.store(
 )
 
 
+class GRU(nn.Module):
+    """Step / sequence GRU cell with episode resets (from ``ppo_facet``)."""
+
+    def __init__(self, input_size, hidden_size, burn_in: bool = False) -> None:
+        super().__init__()
+        self.gru = nn.GRUCell(input_size, hidden_size)
+        self.ln = nn.LayerNorm(hidden_size)
+        self.burn_in = burn_in
+
+    def forward(self, x: torch.Tensor, is_init: torch.Tensor, hx: torch.Tensor):
+        if recurrent_mode():
+            N, T = x.shape[:2]
+            hx = hx[:, 0]
+            output = []
+            reset = 1.0 - is_init.float().reshape(N, T, 1)
+            for i, x_t, reset_t in zip(range(T), x.unbind(1), reset.unbind(1)):
+                hx = self.gru(x_t, hx * reset_t)
+                if self.burn_in and i < T // 4:
+                    hx = hx.detach()
+                output.append(hx)
+            output = torch.stack(output, dim=1)
+            output = self.ln(output)
+            return output, einops.repeat(hx, "b h -> b t h", t=T)
+        else:
+            hx = self.gru(x, hx)
+            output = self.ln(hx)
+            return output, hx
+
+
+class GRUModule(nn.Module):
+    """MLP → GRU → residual out head (FACET adapt module)."""
+
+    def __init__(self, dim: int, split=None):
+        super().__init__()
+        self.split = split
+        self.mlp = make_mlp([GRU_HIDDEN, GRU_HIDDEN])
+        self.gru = GRU(GRU_HIDDEN, hidden_size=GRU_HIDDEN)
+        self.out = nn.LazyLinear(dim)
+
+    def forward(self, x, is_init, hx):
+        out1 = self.mlp(x)
+        out2, hx = self.gru(out1, is_init, hx)
+        out3 = self.out(out2 + out1)
+        if self.split is None:
+            out = (out3,)
+        else:
+            out = torch.split(out3, self.split, dim=-1)
+        return out + (hx.contiguous(),)
+
+
 class PPOTeacherStudentPolicy(TensorDictModuleBase):
-    """Two-stage teacher–student PPO with shared actor and feature distillation."""
+    """Two-stage teacher–student PPO with key-driven GRU feature distillation."""
 
     def __init__(
         self,
@@ -140,9 +231,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         reward_spec: TensorSpec,
         device,
         *,
-        cmd_teacher_transform: Optional[SymmetryTransform] = None,
-        cmd_student_transform: Optional[SymmetryTransform] = None,
-        obs_transform: Optional[SymmetryTransform] = None,
+        obs_transforms: Optional[Dict[str, SymmetryTransform]] = None,
         act_transform: Optional[SymmetryTransform] = None,
     ):
         super().__init__()
@@ -150,6 +239,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         if self.cfg.stage not in ("teacher", "student"):
             raise ValueError(f"Invalid stage: {self.cfg.stage!r}")
         self.device = device
+        self.observation_spec = observation_spec
 
         self.entropy_coef = self.cfg.entropy_coef
         self.max_grad_norm = 1.0
@@ -159,71 +249,104 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         self.distill_loss_fn = nn.MSELoss(reduction="none")
         self.gae = GAE(0.99, 0.95)
 
+        student_set = set(self.cfg.student_keys)
+        self.teacher_keys = tuple(self.cfg.teacher_keys)
+        self.student_keys = tuple(self.cfg.student_keys)
+        # Privileged: in teacher but not student (teacher order).
+        self.privileged_keys = tuple(
+            k for k in self.teacher_keys if k not in student_set
+        )
+        # Shared: in both (teacher order).
+        self.shared_keys = tuple(k for k in self.teacher_keys if k in student_set)
+        self.in_keys = tuple(self.cfg.in_keys)
+
+        if not self.privileged_keys:
+            raise ValueError(
+                "teacher_keys must contain at least one privileged key not in "
+                f"student_keys; got teacher={self.teacher_keys}, "
+                f"student={self.student_keys}"
+            )
+        if not self.student_keys:
+            raise ValueError("student_keys must be non-empty")
+
         fake_input = observation_spec.zero().to(self.device)
-        for key in self.cfg.in_keys:
+        for key in self.in_keys:
             if key not in observation_spec.keys(True, True):
                 raise KeyError(
                     f"Expected observation key {key!r} in observation_spec; "
                     f"got {list(observation_spec.keys(True, True))}"
                 )
 
-        self.cmd_teacher_transform = (
-            cmd_teacher_transform.to(self.device) if cmd_teacher_transform is not None else None
+        self.obs_transforms: Dict[str, SymmetryTransform] = {}
+        if obs_transforms is not None:
+            for key, transform in obs_transforms.items():
+                self.obs_transforms[key] = transform.to(self.device)
+        self.act_transform = (
+            act_transform.to(self.device) if act_transform is not None else None
         )
-        self.cmd_student_transform = (
-            cmd_student_transform.to(self.device) if cmd_student_transform is not None else None
-        )
-        self.obs_transform = obs_transform.to(self.device) if obs_transform is not None else None
-        self.act_transform = act_transform.to(self.device) if act_transform is not None else None
 
-        cmd_teacher_dim = fake_input[CMD_TEACHER_KEY].shape[-1]
-        cmd_student_dim = fake_input[CMD_STUDENT_KEY].shape[-1]
-        obs_dim = fake_input[OBS_KEY].shape[-1]
+        key_dims = {key: fake_input[key].shape[-1] for key in self.in_keys}
         self.action_dim = action_spec.shape[-1]
-        cmd_feat_dim = self.cfg.cmd_feat_dim
-        actor_inp_dim = cmd_feat_dim + obs_dim
-        critic_inp_dim = cmd_teacher_dim + obs_dim
+        priv_feat_dim = self.cfg.priv_feat_dim
+        priv_inp_dim = sum(key_dims[k] for k in self.privileged_keys)
+        shared_dim = sum(key_dims[k] for k in self.shared_keys)
+        actor_inp_dim = shared_dim + priv_feat_dim
+        critic_inp_dim = sum(key_dims[k] for k in self.teacher_keys)
 
         Activation = getattr(nn, self.cfg.activation)
 
+        # VecNorm every observation group we consume.
         self.vecnorm = Seq(
+            *[
+                Mod(
+                    VecNorm((key_dims[key],)),
+                    [key],
+                    [_normed_key(key)],
+                )
+                for key in self.in_keys
+            ]
+        ).to(self.device)
+
+        # Teacher: MLP over privileged observations → distill target.
+        teacher_normed = [_normed_key(k) for k in self.privileged_keys]
+        self.encoder_teacher = Seq(
+            CatTensors(
+                teacher_normed,
+                "_priv_enc_inp",
+                del_keys=False,
+                sort=False,
+            ),
             Mod(
-                VecNorm((cmd_teacher_dim,)),
-                [CMD_TEACHER_KEY],
-                ["_cmd_teacher_normed"],
+                MLP(
+                    num_units=[priv_inp_dim, *self.cfg.encoder_num_units, priv_feat_dim],
+                    activation=Activation,
+                    first_non_muon=True,
+                ),
+                ["_priv_enc_inp"],
+                ["_priv_feature"],
+            ),
+        ).to(self.device)
+
+        # Student: GRU over all student-visible keys → predict privileged features.
+        student_normed = [_normed_key(k) for k in self.student_keys]
+        self.encoder_student = Seq(
+            CatTensors(
+                student_normed,
+                "_student_enc_inp",
+                del_keys=False,
+                sort=False,
             ),
             Mod(
-                VecNorm((cmd_student_dim,)),
-                [CMD_STUDENT_KEY],
-                ["_cmd_student_normed"],
+                GRUModule(priv_feat_dim, split=None),
+                ["_student_enc_inp", "is_init", "adapt_hx"],
+                ["_priv_pred", ("next", "adapt_hx")],
             ),
-            Mod(VecNorm((obs_dim,)), [OBS_KEY], ["_obs_normed"]),
         ).to(self.device)
 
-        # Teacher / student cmd encoders → same feature width for MSE distill.
-        self.encoder_teacher = Mod(
-            MLP(
-                num_units=[cmd_teacher_dim, *self.cfg.encoder_num_units, cmd_feat_dim],
-                activation=Activation,
-                first_non_muon=True,
-            ),
-            ["_cmd_teacher_normed"],
-            ["_cmd_feature"],
-        ).to(self.device)
-        self.encoder_student = Mod(
-            MLP(
-                num_units=[cmd_student_dim, *self.cfg.encoder_num_units, cmd_feat_dim],
-                activation=Activation,
-                first_non_muon=True,
-            ),
-            ["_cmd_student_normed"],
-            ["_cmd_pred"],
-        ).to(self.device)
+        self._teacher_to_actor = Mod(nn.Identity(), ["_priv_feature"], ["_priv_feat"])
+        self._student_to_actor = Mod(nn.Identity(), ["_priv_pred"], ["_priv_feat"])
 
-        # Remap encoder outputs onto the shared actor input key.
-        self._teacher_to_actor = Mod(nn.Identity(), ["_cmd_feature"], ["_cmd_feat"])
-        self._student_to_actor = Mod(nn.Identity(), ["_cmd_pred"], ["_cmd_feat"])
-
+        actor_in_keys = [_normed_key(k) for k in self.shared_keys] + ["_priv_feat"]
         actor_mlp = MLP(
             num_units=[actor_inp_dim, *self.cfg.actor_num_units],
             activation=Activation,
@@ -232,7 +355,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         self.actor: ProbabilisticActor = ProbabilisticActor(
             module=Seq(
                 CatTensors(
-                    ["_cmd_feat", "_obs_normed"],
+                    actor_in_keys,
                     "_actor_inp",
                     del_keys=False,
                     sort=False,
@@ -250,7 +373,8 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             return_log_prob=True,
         ).to(self.device)
 
-        # Privileged critic: teacher command + policy (not distilled features).
+        # Privileged critic: raw teacher keys (not distilled features).
+        critic_normed = [_normed_key(k) for k in self.teacher_keys]
         critic_mlp = MLP(
             num_units=[critic_inp_dim, *self.cfg.critic_num_units],
             activation=Activation,
@@ -258,7 +382,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         )
         self.critic = Seq(
             CatTensors(
-                ["_cmd_teacher_normed", "_obs_normed"],
+                critic_normed,
                 "_critic_inp",
                 del_keys=False,
                 sort=False,
@@ -272,13 +396,15 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             "adv",
             "ret",
             "is_init",
-            CMD_TEACHER_KEY,
-            CMD_STUDENT_KEY,
-            OBS_KEY,
             ACTION_KEY,
+            *self.in_keys,
         ]
 
-        # Lazy init / shape check.
+        # Lazy init / shape check (GRU needs is_init + adapt_hx).
+        with torch.device(self.device):
+            fake_input["is_init"] = torch.ones(fake_input.shape[0], 1, dtype=torch.bool)
+            fake_input["adapt_hx"] = torch.zeros(fake_input.shape[0], GRU_HIDDEN)
+
         self.vecnorm(fake_input)
         self.encoder_teacher(fake_input)
         self._teacher_to_actor(fake_input)
@@ -305,12 +431,14 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
 
     @classmethod
     def from_env(cls, cfg: PPOTSCfg, env: _EnvBase, device: str):
+        cfg = PPOTSCfg(**cfg) if not isinstance(cfg, PPOTSCfg) else cfg
         observation_spec = env.observation_spec
         action_spec = env.action_spec
         reward_spec = env.reward_spec
-        cmd_teacher_transform = env.observation_groups[CMD_TEACHER_KEY].symmetry_transform()
-        cmd_student_transform = env.observation_groups[CMD_STUDENT_KEY].symmetry_transform()
-        obs_transform = env.observation_groups[OBS_KEY].symmetry_transform()
+        obs_transforms = {
+            key: env.observation_groups[key].symmetry_transform()
+            for key in cfg.in_keys
+        }
         act_transform = env.action_manager.symmetry_transform()
         return cls(
             cfg=cfg,
@@ -318,24 +446,35 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             action_spec=action_spec,
             reward_spec=reward_spec,
             device=device,
-            cmd_teacher_transform=cmd_teacher_transform,
-            cmd_student_transform=cmd_student_transform,
-            obs_transform=obs_transform,
+            obs_transforms=obs_transforms,
             act_transform=act_transform,
         )
+
+    def make_tensordict_primer(self):
+        num_envs = self.observation_spec.shape[0]
+        spec = Unbounded((num_envs, GRU_HIDDEN), device=self.device)
+        return TensorDictPrimer({"adapt_hx": spec}, reset_key="done", expand_specs=False)
 
     def on_stage_start(self, _stage: str, _env: _EnvBase):
         # One stage per run for now; ``cfg.stage`` selects teacher vs student.
         if self.cfg.stage == "teacher":
-            self.opt_ppo = torch.optim.AdamW(
-                [
-                    {"params": self.encoder_teacher.parameters()},
-                    {"params": self.actor.parameters()},
-                    {"params": self.critic.parameters()},
-                ],
-                lr=self.cfg.lr,
-                weight_decay=0.01,
-            )
+            if self.cfg.muon:
+                self.opt_ppo = MuonAdamWWrapper(
+                    [self.encoder_teacher, self.actor, self.critic],
+                    lr=self.cfg.lr,
+                    weight_decay=0.01,
+                )
+            else:
+                self.opt_ppo = torch.optim.AdamW(
+                    [
+                        {"params": self.encoder_teacher.parameters()},
+                        {"params": self.actor.parameters()},
+                        {"params": self.critic.parameters()},
+                    ],
+                    lr=self.cfg.lr,
+                    weight_decay=0.01,
+                )
+            # Student GRU distill stays on AdamW (recurrent / LazyLinear mix).
             self.opt_distill = torch.optim.AdamW(
                 [{"params": self.encoder_student.parameters()}],
                 lr=self.cfg.lr,
@@ -343,7 +482,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             )
         elif self.cfg.stage == "student":
             # Shared actor / critic / teacher encoder already carry teacher weights
-            # from the checkpoint. Only the student encoder is updated (DAgger).
+            # from the checkpoint. Only the student GRU is updated (DAgger).
             self.opt_ppo = None
             self.opt_distill = torch.optim.AdamW(
                 [{"params": self.encoder_student.parameters()}],
@@ -365,7 +504,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         if self.cfg.stage == "teacher":
             modules += [self.encoder_teacher, self._teacher_to_actor, self.actor]
         elif self.cfg.stage == "student":
-            # Collect with student modules (DAgger).
+            # Collect with student GRU (DAgger); carries adapt_hx via primer.
             modules += [self.encoder_student, self._student_to_actor, self.actor]
         else:
             raise ValueError(f"Invalid stage: {self.cfg.stage}")
@@ -418,20 +557,23 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         infos["critic/neg_rew_ratio"] = (reward_aggregated <= 0.0).float().mean().item()
         return infos
 
+    @set_recurrent_mode(True)
     def train_distillation(self, tensordict: TensorDict):
-        """MSE: student cmd features ≈ teacher cmd features (stop-grad teacher)."""
+        """MSE: student GRU features ≈ teacher privileged features (BPTT)."""
         infos = []
         self.vecnorm(tensordict)
         with torch.no_grad():
             self.encoder_teacher(tensordict)
 
         for _epoch in range(self.cfg.distill_epochs):
-            for minibatch in make_batch(tensordict, self.cfg.num_minibatches):
+            for minibatch in make_batch(
+                tensordict, self.cfg.num_minibatches, self.cfg.train_every
+            ):
                 self.encoder_student(minibatch)
                 valid = (~minibatch["is_init"]).float()
                 valid_cnt = valid.sum().clamp_min(1.0)
                 feat_loss = self.distill_loss_fn(
-                    minibatch["_cmd_pred"], minibatch["_cmd_feature"]
+                    minibatch["_priv_pred"], minibatch["_priv_feature"]
                 )
                 feat_loss = (feat_loss.mean(dim=-1, keepdim=True) * valid).sum() / valid_cnt
 
@@ -494,15 +636,16 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
 
     def _augment_symmetry(self, tensordict: TensorDict) -> TensorDict:
         symmetry = tensordict.empty()
-        symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
-        symmetry[CMD_TEACHER_KEY] = self.cmd_teacher_transform(tensordict[CMD_TEACHER_KEY])
-        if self.cmd_student_transform is not None:
-            symmetry[CMD_STUDENT_KEY] = self.cmd_student_transform(
-                tensordict[CMD_STUDENT_KEY]
-            )
+        if self.act_transform is not None:
+            symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
         else:
-            symmetry[CMD_STUDENT_KEY] = tensordict[CMD_STUDENT_KEY]
-        symmetry[OBS_KEY] = self.obs_transform(tensordict[OBS_KEY])
+            symmetry[ACTION_KEY] = tensordict[ACTION_KEY]
+        for key in self.in_keys:
+            transform = self.obs_transforms.get(key)
+            if transform is not None:
+                symmetry[key] = transform(tensordict[key])
+            else:
+                symmetry[key] = tensordict[key]
         symmetry["action_log_prob"] = tensordict["action_log_prob"]
         symmetry["adv"] = tensordict["adv"]
         symmetry["ret"] = tensordict["ret"]
@@ -583,15 +726,13 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         state_dict = OrderedDict()
         for name, module in self.named_children():
             state_dict[name] = module.state_dict()
-        if self.cmd_teacher_transform is not None:
-            state_dict["cmd_teacher_transform"] = self.cmd_teacher_transform.state_dict()
-        if self.cmd_student_transform is not None:
-            state_dict["cmd_student_transform"] = self.cmd_student_transform.state_dict()
-        if self.obs_transform is not None:
-            state_dict["obs_transform"] = self.obs_transform.state_dict()
+        for key, transform in self.obs_transforms.items():
+            state_dict[f"obs_transform/{key}"] = transform.state_dict()
         if self.act_transform is not None:
             state_dict["act_transform"] = self.act_transform.state_dict()
         state_dict["last_stage"] = self.cfg.stage
+        state_dict["teacher_keys"] = self.teacher_keys
+        state_dict["student_keys"] = self.student_keys
         return state_dict
 
     def load_state_dict(self, state_dict, strict=True):

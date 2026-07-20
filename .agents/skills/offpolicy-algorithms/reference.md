@@ -40,6 +40,7 @@ Inside `policy.step` (SAC pattern):
 ## `ReplayBuffer` essentials
 
 - Built via `ReplayBuffer.from_fake(buffer_size, fake_td, ...)` in `on_stage_start`
+- **Layout:** ring shape `[buffer_size, num_envs]` — `buffer_size` is steps along the ring, **not** total transitions (`capacity ≈ buffer_size * num_envs`). Defaults are O(10³) (e.g. SAC `2000`); do not copy flat-buffer paper sizes like `1e6`.
 - `sample(batch_size, steps=n_steps, next_obs=True/False)`
 - RLPD prior: `ReplayBuffer.from_rollout(path, ...)`
 - Keys must match `train_keys` and env tensordict layout
