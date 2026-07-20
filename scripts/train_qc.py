@@ -65,10 +65,7 @@ class TrainConfig:
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
     offline_iters: int = 10_000
-    offline_eval_interval: int = -1
-
     online_iters: int = 10_000
-    online_eval_interval: int = 1000
 
     log_interval: int = 100
 
@@ -188,21 +185,6 @@ def main(cfg: TrainConfig):
             if cfg.checkpoint_interval > 0 and i % cfg.checkpoint_interval == 0:
                 ckpt_path = save(f"checkpoint_{i:06d}")
 
-            if (
-                cfg.offline_eval_interval > 0
-                and i % cfg.offline_eval_interval == 0
-                and i != 0
-            ):
-                with set_exploration_type(ExplorationType.MODE):
-                    policy_eval = policy.get_rollout_policy("eval")
-                    eval_info, _, _ = evaluate(env, policy_eval, seed=cfg.seed + i)
-                run.log(eval_info, step=i)
-                pbar.set_postfix({
-                    "q_loss": info.get("critic/q_loss", 0),
-                    "a_loss": info.get("actor/loss", 0),
-                    "eval_ret": eval_info.get("eval/return", 0),
-                })
-
     # ── online stage ─────────────────────────────────────────────────
     if cfg.online_iters > 0:
         policy.on_stage_start(stage="online", env=env)
@@ -269,29 +251,17 @@ def main(cfg: TrainConfig):
                 if cfg.checkpoint_interval > 0 and i % cfg.checkpoint_interval == 0:
                     ckpt_path = save(f"checkpoint_{step:06d}")
 
-                if (
-                    cfg.online_eval_interval > 0
-                    and i % cfg.online_eval_interval == 0
-                    and i != 0
-                ):
-                    with set_exploration_type(ExplorationType.MODE):
-                        policy_eval = policy.get_rollout_policy("eval")
-                        eval_info, _, _ = evaluate(
-                            env, policy_eval, seed=cfg.seed + i,
-                        )
-                    run.log(eval_info, step=step)
-
         total_iters = cfg.offline_iters + cfg.online_iters
     else:
         total_iters = cfg.offline_iters
 
     # ── final eval & save ────────────────────────────────────────────
     if aa.is_main_process():
-        with set_exploration_type(ExplorationType.MODE):
-            policy_eval = policy.get_rollout_policy("eval")
-            final_info, _, _ = evaluate(
-                env, policy_eval, seed=cfg.seed + 9999, render=cfg.eval_render,
-            )
+        policy_eval = policy.get_rollout_policy("eval")
+        final_info, _, _ = evaluate(
+            env, policy_eval, render=cfg.eval_render, seed=cfg.seed,
+        )
+        final_info["env_frames"] = env_frames
         run.log(final_info, step=total_iters)
         ckpt_path = save("checkpoint_final")
         wandb.finish()
