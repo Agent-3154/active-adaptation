@@ -1,5 +1,18 @@
 # Repository Guidelines
 
+## Agent skills (coding agents)
+
+Focused playbooks for implementing RL in this repo. **Location:** `.agents/skills/` (committed; Cursor and other agents read this path).
+
+| Skill | When to read |
+|-------|----------------|
+| [.agents/skills/onpolicy-algorithms/SKILL.md](.agents/skills/onpolicy-algorithms/SKILL.md) | PPO, `train_ppo.py`, `learning/ppo/` |
+| [.agents/skills/offpolicy-algorithms/SKILL.md](.agents/skills/offpolicy-algorithms/SKILL.md) | SAC, `train_offpolicy.py`, `learning/offpolicy/` |
+
+Usage: [.agents/skills/README.md](.agents/skills/README.md). Workspace must be this repo root (or symlink `.agents/skills` from a parent monorepo).
+
+Shared style: `active_adaptation/learning/TEACHME.md`.
+
 ## Project Structure & Module Organization
 `active_adaptation/` contains the core package: environments in `envs/`, RL code in `learning/`, shared helpers in `utils/`, `sensors/`, and `project_loading/`. Hydra config lives under `cfg/` with shared defaults in `cfg/base/`, experiments in `cfg/exp/`, task definitions in `cfg/task/`, and multi-stage recipes in `cfg/recipe/`. Runtime entry points are in `scripts/` (`train_ppo.py`, `train_offpolicy.py`, `rollout.py`, `relabel.py`, `pipeline.py`, `eval.py`, `play.py`, `launch_ddp.py`, `launch_ddp.sh`). Shared DDP launch helpers live in `active_adaptation/ddp_launch.py`; pipeline I/O in `active_adaptation/pipeline_io.py`. Extension projects live in `projects/` and register through `pyproject.toml`. Large robot and scene assets are expected under `.cache/aa-robot-models/`, not committed into the package.
 

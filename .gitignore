@@ -1,7 +1,9 @@
 tests
-docs
 .vscode
 .omx
+
+# Agent / IDE local dirs (committed skills: .agents/skills/)
+.cursor/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
