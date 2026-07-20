@@ -433,6 +433,7 @@ class SAC(TensorDictModuleBase):
                 fake_bootstrap=True,
                 observation_keys=list(observation_keys),
             )
+            self.rb_prior.compute_return(gamma=self.cfg.gamma, reward_collate_fn=self.reward_collate_fn)
             print("Prior data buffer:")
             print(self.rb_prior)
         else:
@@ -671,7 +672,7 @@ class SAC(TensorDictModuleBase):
         
         if B_prior > 0:
             q_prior = q[B_online: B_eff]
-            infos["critic/prior_q_mean"] = q_prior.mean().item()
+            infos["critic/prior_q_value"] = q_prior.mean().item()
             infos["critic/prior_q_max"] = q_prior.max().item()
         
         if terminated.any():
@@ -715,16 +716,19 @@ class SAC(TensorDictModuleBase):
             batch_prior = self.rb_prior.sample(
                 batch_size=int(self.cfg.actor_batch_size * self.cfg.prior_data_ratio),
                 steps=1,
-            ).select(*self.train_keys, strict=False).to(self.device)
+                next_obs=False,
+                term_obs=True,
+            ).to(self.device)
+            G = batch_prior["G"]
+            steps_to_go = batch_prior["steps_to_go"]
+            term_obs = batch_prior["term_obs"]
+            batch_prior = batch_prior.select(*self.train_keys, strict=False)
             batch = torch.cat([batch, batch_prior], dim=0)
-            # we will see if the prior action gives larger Q(s, a)
-            prior_action = batch_prior[ACTION_KEY]
 
         self.preproc(batch)
         obs = batch["_input_normed"]
         act = batch[ACTION_KEY]
         is_init = batch["is_init"]
-        n_unaug = obs.shape[0]
         prior_obs = None
         prior_count = 0
         if self.rb_prior is not None:
@@ -813,14 +817,31 @@ class SAC(TensorDictModuleBase):
                 "actor/mean_scale": scale.mean().item(),
             }
             if self.rb_prior is not None:
-                # compare Q(s, a_prior) with mean_k Q(s, a_k)
-                q_prior = self.Q.get_values(
+                # Online π vs prior MC return-to-go (no entropy): positive ⇒ π beats demo.
+                # baseline = G + γ^H Q(s_term, a~π) with G/Q in the critic's reward scale.
+                assert prior_obs is not None
+                loc_p, scale_p = self.actor(prior_obs)
+                dist_p = self.DistClass(loc_p, scale_p)
+                a_p = dist_p.rsample((4,))
+                online_q = self.Q.get_values(
                     prior_obs,
-                    prior_action,
-                ).mean(dim=-1)
-                q_policy_prior = q[:n_unaug][-prior_count:].mean(dim=1)
-                advantage = q_policy_prior - q_prior
-                # whether the online policy is better than the offline policy
+                    einops.rearrange(a_p, "k n d -> n k d"),
+                ).mean(dim=-1).mean(dim=1)
+
+                term_td = term_obs.clone()
+                self.preproc(term_td)
+                term_in = term_td["_input_normed"]
+                loc_t, scale_t = self.actor(term_in)
+                a_t = self.DistClass(loc_t, scale_t).rsample()
+                q_term = self.Q.get_values(term_in, a_t).mean(dim=-1)
+
+                if self.reward_normalizer is not None:
+                    G_scaled = self.reward_normalizer.normalize_rewards(G)
+                else:
+                    G_scaled = G * (1.0 - self.cfg.gamma)
+                H = steps_to_go.to(dtype=online_q.dtype).squeeze(-1)
+                baseline = G_scaled.squeeze(-1) + torch.pow(float(self.cfg.gamma), H) * q_term
+                advantage = online_q - baseline
                 infos["actor/online_advantage"] = advantage.mean().item()
 
         if self.has_symmetry:

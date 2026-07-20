@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import numpy as np
 import torch
 from tensordict import TensorDict
-from typing import Any, Dict, Optional, Tuple, Union, Callable, Sequence
+from typing import Any, Dict, Optional, Tuple, Union, Sequence, Callable
 from pathlib import Path
-
-from torchrl.data.replay_buffers.samplers import PrioritizedSampler
 
 # Written by :mod:`active_adaptation.scripts.rollout` and read by :meth:`ReplayBuffer.from_rollout`.
 ROLLOUT_ARCHIVE_NAME = "rollout.pt"
@@ -23,15 +20,11 @@ class ReplayBuffer:
     def __init__(
         self,
         buffer_tensordict: TensorDict,
+        observation_keys: Sequence[str],
         *,
         current_size: int = 0,
         write_ptr: int = 0,
-        per_alpha: Optional[float] = None,
-        per_beta: float = 1.0,
-        per_eps: float = 1e-8,
-        per_generator: Optional[torch.Generator] = None,
         fake_bootstrap: bool = False,
-        observation_keys: Sequence[str] | None = None,
     ):
         if len(buffer_tensordict.batch_size) != 2:
             raise ValueError(
@@ -45,18 +38,10 @@ class ReplayBuffer:
         self._ptr = write_ptr
 
         self.fake_bootstrap = fake_bootstrap
-        self.observation_keys = observation_keys
+        self.observation_keys = tuple(observation_keys)
         if self.fake_bootstrap:
-            assert self.observation_keys is not None, "observation_keys must be provided when fake_bootstrap is True"
             self._td["next"] = self._td["next"].exclude(*self.observation_keys)
 
-        self._per: Optional[PrioritizedSampler] = None
-        self._init_prioritized_sampler(
-            per_alpha=per_alpha,
-            per_beta=per_beta,
-            per_eps=per_eps,
-            per_generator=per_generator,
-        )
         self.mem_bytes = self.estimate_memory_nbytes()
 
     def __repr__(self) -> str:
@@ -69,17 +54,11 @@ class ReplayBuffer:
                 + ", ".join(repr(k) for k in keys[:12])
                 + f", … (+{len(keys) - 12} keys)]"
             )
-        if self._per is None:
-            sampling = "uniform"
-        else:
-            alpha = getattr(self._per, "alpha", None)
-            beta = getattr(self._per, "beta", None)
-            sampling = f"PER(α={alpha}, β={beta})"
         mem = format_nbytes(self.mem_bytes)
         return (
             f"{self.__class__.__name__}("
             f"ring={len(self)}/{self.max_size}×{self.num_envs}, "
-            f"write_ptr={self._ptr}, {sampling}, mem≈{mem}, device={self.device}, "
+            f"write_ptr={self._ptr}, sampling=uniform, mem≈{mem}, device={self.device}, "
             f"keys={key_desc})"
         )
 
@@ -93,26 +72,6 @@ class ReplayBuffer:
     
     def keys(self):
         return self._td.keys(True, True)
-
-    def _init_prioritized_sampler(
-        self,
-        *,
-        per_alpha: Optional[float],
-        per_beta: float,
-        per_eps: float,
-        per_generator: Optional[torch.Generator],
-    ) -> None:
-        if per_alpha is None:
-            return
-        cap = self.max_size * self.num_envs
-        self._per = PrioritizedSampler(
-            max_capacity=cap,
-            alpha=per_alpha,
-            beta=per_beta,
-            eps=per_eps,
-            dtype=torch.float,
-        )
-        self._per._rng = per_generator
     
     def select_(self, *keys: str) -> ReplayBuffer:
         self._td = self._td.select(*keys, inplace=True, strict=True)
@@ -128,28 +87,17 @@ class ReplayBuffer:
         max_size: int,
         fake_tensordict: TensorDict,
         *,
-        per_alpha: Optional[float] = None,
-        per_beta: float = 1.0,
-        per_eps: float = 1e-8,
-        per_generator: Optional[torch.Generator] = None,
+        observation_keys: Sequence[str],
         fake_bootstrap: bool = False,
-        observation_keys: Sequence[str] | None = None,
     ) -> ReplayBuffer:
         """Build ring storage ``[max_size, num_envs]`` from a one-step template and construct the buffer."""
-        if fake_bootstrap:
-            assert observation_keys is not None, "observation_keys must be provided when fake_bootstrap is True"
-            fake_tensordict["next"] = fake_tensordict["next"].exclude(*observation_keys)
         td = fake_tensordict.expand(max_size, *fake_tensordict.shape).clone()
         return cls(
             td,
+            observation_keys,
             current_size=0,
             write_ptr=0,
-            per_alpha=per_alpha,
-            per_beta=per_beta,
-            per_eps=per_eps,
-            per_generator=per_generator,
             fake_bootstrap=fake_bootstrap,
-            observation_keys=observation_keys,
         )
 
     @classmethod
@@ -157,14 +105,10 @@ class ReplayBuffer:
         cls,
         path: Union[str, Path],
         *,
+        observation_keys: Sequence[str],
         max_size: Optional[int] = None,
-        per_alpha: Optional[float] = None,
-        per_beta: float = 1.0,
-        per_eps: float = 1e-8,
-        per_generator: Optional[torch.Generator] = None,
         map_location: Union[str, torch.device] = "cpu",
         fake_bootstrap: bool = False,
-        observation_keys: Sequence[str] | None = None,
     ) -> ReplayBuffer:
         """Load from a rollout archive produced by :mod:`active_adaptation.scripts.rollout`.
 
@@ -173,6 +117,7 @@ class ReplayBuffer:
 
         Args:
             path: File ``rollout.pt`` or directory containing it.
+            observation_keys: Keys treated as observations (required for bootstrap / term_obs).
             max_size: Ring capacity. Defaults to ``max(writer_max_size, T)`` from the archive.
         """
         root = Path(path)
@@ -207,84 +152,19 @@ class ReplayBuffer:
             td[:take] = stacked[:take]
         ptr = take % ring_cap
 
-        out = cls(
+        return cls(
             td,
+            observation_keys,
             current_size=take,
             write_ptr=ptr,
-            per_alpha=per_alpha,
-            per_beta=per_beta,
-            per_eps=per_eps,
-            per_generator=per_generator,
             fake_bootstrap=fake_bootstrap,
-            observation_keys=observation_keys,
         )
-        if out._per is not None:
-            for wrow in range(take):
-                flat = (
-                    torch.arange(out.num_envs, dtype=torch.long, device=torch.device("cpu"))
-                    + int(wrow) * out.num_envs
-                )
-                out._per.mark_update(flat)
-        return out
-
-    @property
-    def prioritized(self):
-        return self._per is not None
-
-    def flat_index(self, t: torch.Tensor, e: torch.Tensor) -> torch.Tensor:
-        """Map ring indices to the flat layout used by :meth:`sample` and :meth:`update_priority`."""
-        return t * self._td.shape[1] + e
-
-    def update_priority(
-        self,
-        flat_index: Union[torch.Tensor, int],
-        priority: Union[torch.Tensor, float],
-    ) -> None:
-        """Update PER priorities (e.g. :math:`|\\delta|`). Uses Schaul-style :math:`(p+\\varepsilon)^\\alpha` internally.
-
-        ``flat_index`` matches the flattened layout ``t * num_envs + env`` consistent with :meth:`sample`.
-        """
-        if self._per is None:
-            raise RuntimeError("Prioritized replay is disabled (per_alpha=None).")
-
-        idx = torch.as_tensor(flat_index, dtype=torch.long, device=torch.device("cpu")).reshape(-1)
-        pr = torch.as_tensor(priority, dtype=torch.float, device=torch.device("cpu")).reshape(-1)
-        if pr.numel() == 1 and idx.numel() > 1:
-            pr = pr.expand_as(idx)
-        self._per.update_priority(idx, pr)
-
-    def _annotate_sampling_meta(
-        self,
-        samples: TensorDict,
-        idx_flat: torch.Tensor,
-        steps: int,
-        priority_weight: torch.Tensor,
-    ) -> TensorDict:
-        """Attach ``replay_flat_index`` (always) and ``priority_weight`` (PER or all-ones).
-
-        Segment starts use the flattened layout ``t * num_envs + env``."""
-        priority_weight_batched = (
-            priority_weight
-            if steps == 1
-            else priority_weight.view(1, -1).expand(steps, -1).contiguous()
-        )
-        idx_long = idx_flat.to(dtype=torch.long)
-        rfi = (
-            idx_long
-            if steps == 1
-            else idx_long.view(1, -1).expand(steps, -1).contiguous()
-        )
-        return samples.set("priority_weight", priority_weight_batched).set("replay_flat_index", rfi)
 
     def push(self, tensordict: TensorDict):
         wrow = self._ptr
         self._td[wrow] = tensordict.to(self.device)
         self._ptr = (self._ptr + 1) % self._td.shape[0]
         self._current_size = min(self._current_size + 1, self.max_size)
-
-        if self._per is not None:
-            flat = torch.arange(self.num_envs, dtype=torch.long) + int(wrow) * self.num_envs
-            self._per.mark_update(flat)
 
     append = push
 
@@ -306,64 +186,33 @@ class ReplayBuffer:
     def num_samples(self):
         return self._td.shape[1] * len(self)
 
-    def _sample_prioritized_flat(self, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        ps = self._per
-        n = self.num_samples
-        p_sum = ps._sum_tree.query(0, n)
-        p_min = ps._min_tree.query(0, n)
-        if p_sum <= 0 or p_min <= 0:
-            raise RuntimeError("non-positive prioritized mass; check replay buffer PRI setup.")
-
-        if ps._rng is None:
-            mass = np.random.uniform(0.0, p_sum, size=batch_size)
-        else:
-            mass = torch.rand(batch_size, generator=ps._rng) * p_sum
-
-        index = torch.as_tensor(ps._sum_tree.scan_lower_bound(mass))
-        if not index.ndim:
-            index = index.unsqueeze(0)
-        index.clamp_max_(n - 1)
-
-        weight = torch.as_tensor(ps._sum_tree[index])
-        zero_weight = weight == 0
-        while zero_weight.any():
-            index = torch.where(zero_weight, index - 1, index)
-            if (index < 0).any():
-                raise RuntimeError("Prioritized replay sampling failed to find suitable indices.")
-            weight = torch.as_tensor(ps._sum_tree[index])
-            zero_weight = weight == 0
-
-        importance = torch.pow(weight / p_min, -ps.beta)
-
-        return (
-            index.to(device=self._td.device, dtype=torch.long),
-            importance.to(device=self._td.device, dtype=torch.float32),
-        )
-
-    def sample(self, batch_size: int, steps: int = 1, next_obs: bool = False) -> TensorDict:
+    def sample(self, batch_size: int, steps: int = 1, next_obs: bool = False, term_obs: bool = False) -> TensorDict:
         """Draw a batch (optionally n-step segments along ring time per env).
 
-        Every batch includes ``replay_flat_index`` (flattened ``t * num_envs + env`` for
-        segment starts). ``priority_weight`` is the PER importance sampling weight when
-        ``per_alpha`` is set; otherwise all ones (same tensor layout so learners need not branch on keys).
-
-        Call :meth:`update_priority` with ``replay_flat_index`` only when
-        ``prioritized`` is true.
+        Args:
+            batch_size: Number of independent starts (env indices).
+            steps: Segment length along ring time. ``1`` returns a flat batch.
+            next_obs: If ``fake_bootstrap`` is set, reconstruct ``next`` observations
+                from the following ring row (repeat current obs when ``done``).
+            term_obs: Attach the observation at episode end under ``term_obs``.
+                Requires :meth:`compute_return` (uses ``steps_to_go``). Only
+                supported for ``steps == 1`` on chronological rollout buffers.
         """
+        if term_obs:
+            if steps != 1:
+                raise NotImplementedError("term_obs sampling requires steps=1.")
+            if "steps_to_go" not in self._td.keys(True, True):
+                raise RuntimeError(
+                    "term_obs requires compute_return() first (missing 'steps_to_go')."
+                )
+
         if len(self) == 0 or self.num_samples == 0:
             raise RuntimeError("Cannot sample from an empty ReplayBuffer.")
         
         batch_size = int(batch_size)
-
-        if self._per is not None:
-            idx_flat, weight = self._sample_prioritized_flat(batch_size)
-        else:
-            idx_flat = torch.randint(
-                0, self.num_samples, ((batch_size),), device=self._td.device
-            )
-            weight = torch.ones(
-                batch_size, device=self._td.device, dtype=torch.float32
-            )
+        idx_flat = torch.randint(
+            0, self.num_samples, ((batch_size),), device=self._td.device
+        )
 
         t, e = torch.unravel_index(idx_flat, (len(self), self._td.shape[1]))
         
@@ -390,7 +239,15 @@ class ReplayBuffer:
                 samples = self._td[ts, e]#.rename("time", "env")
                 assert samples.shape[:2] == (steps, batch_size)
 
-        samples = self._annotate_sampling_meta(samples, idx_flat, steps, weight)
+        if term_obs:
+            # Terminal transition is ``steps_to_go - 1`` steps ahead (inclusive horizon).
+            stg = samples["steps_to_go"].squeeze(-1).long().clamp_min(1)
+            term_t = (t + stg - 1).clamp_max(len(self) - 1)
+            samples.set(
+                "term_obs",
+                self._td.select(*self.observation_keys)[term_t, e],
+            )
+
         return samples
 
     def sample_trajectory(
@@ -405,8 +262,6 @@ class ReplayBuffer:
         to physical storage indices.  Unlike :meth:`sample`, a segment can never
         wrap from the newest stored transition back to the oldest one.
         """
-        if self._per is not None:
-            raise NotImplementedError("Prioritized replay is not supported for trajectory sampling.")
         if steps < 1:
             raise ValueError(f"steps must be positive, got {steps}.")
         if len(self) == 0:
@@ -455,9 +310,7 @@ class ReplayBuffer:
             samples["next"].update(tensordict_next)
 
         assert samples.shape[:2] == (steps, batch_size)
-        idx_flat = self.flat_index(physical_start, env_idx)
-        weight = torch.ones(batch_size, device=self._td.device, dtype=torch.float32)
-        return self._annotate_sampling_meta(samples, idx_flat, steps, weight)
+        return samples
 
     def sample_sequential(
         self,
@@ -517,6 +370,90 @@ class ReplayBuffer:
             assert samples.shape[:2] == (steps, batch_size)
 
         return samples, (t, e)
+    
+    def compute_return(self, gamma: float, reward_collate_fn: Callable[[TensorDict | torch.Tensor], torch.Tensor]) -> None:
+        """Compute return-to-go and steps-to-go for each filled step.
+
+        Only valid for chronologically stored rollouts (e.g. :meth:`from_rollout`):
+        episode ends must be visible in the buffer. Writes:
+
+        * ``G`` — discounted Monte Carlo return-to-go
+        * ``steps_to_go`` — steps until episode end (inclusive)
+
+        If ``("next", "discount")`` is present with shape ``[T, N, 1]``, it multiplies
+        ``gamma`` on each step: ``G_t = r_t + γ · discount_t · (1 - done_t) · G_{t+1}``.
+        """
+        if "G" in self._td.keys(True, True):
+            raise ValueError("Return key 'G' already exists in buffer.")
+        if "steps_to_go" in self._td.keys(True, True):
+            raise ValueError("Key 'steps_to_go' already exists in buffer.")
+
+        T = len(self)
+        if T == 0:
+            raise RuntimeError("Cannot compute returns on an empty ReplayBuffer.")
+        # from_rollout stores oldest→newest in ``[:T]``; a wrapped online ring does not.
+        if T == self.max_size and self._ptr != 0:
+            raise RuntimeError(
+                "compute_return requires chronological storage (e.g. from_rollout); "
+                "wrapped ring buffers are not supported."
+            )
+
+        N = self.num_envs
+        rew_raw = self._td[("next", "reward")] # must exist
+        rew_raw = rew_raw[:T]
+        rew = reward_collate_fn(rew_raw)
+
+        done = self._td[("next", "done")] # must exist
+        done = done[:T].float()
+        if done.shape != (T, N, 1):
+            raise ValueError(f"Expected done shape {(T, N, 1)}, got {tuple(done.shape)}.")
+
+        discount = self._td.get(("next", "discount"), default=None)
+        if discount is None:
+            discount = torch.ones(T, N, 1, device=rew.device, dtype=rew.dtype)
+        else:
+            discount = discount[:T].float()
+            if discount.shape != (T, N, 1):
+                raise ValueError(
+                    f"Expected discount shape {(T, N, 1)} or absent, got {tuple(discount.shape)}."
+                )
+
+        is_init = self._td.get("is_init", default=None)
+        if is_init is not None:
+            is_init = is_init[:T].bool()
+            if is_init.shape == (T, N, 1):
+                is_init = is_init.squeeze(-1)
+            if is_init.shape != (T, N):
+                raise ValueError(
+                    f"Expected is_init shape {(T, N)} or {(T, N, 1)}, got {tuple(is_init.shape)}."
+                )
+
+        G = torch.zeros_like(rew)
+        steps_to_go = torch.zeros(T, N, 1, device=rew.device, dtype=torch.long)
+        running_g = torch.zeros(N, 1, device=rew.device, dtype=rew.dtype)
+        running_h = torch.zeros(N, 1, device=rew.device, dtype=torch.long)
+
+        for t in reversed(range(T)):
+            cont = 1.0 - done[t]
+            running_g = rew[t] + float(gamma) * discount[t] * cont * running_g
+            running_h = 1 + (running_h * cont.long())
+            G[t] = running_g
+            steps_to_go[t] = running_h
+            if is_init is not None:
+                keep = (~is_init[t]).unsqueeze(-1)
+                running_g = running_g * keep.float()
+                running_h = running_h * keep.long()
+
+        out_g = torch.zeros(
+            self.max_size, N, 1, device=rew.device, dtype=rew.dtype
+        )
+        out_h = torch.zeros(
+            self.max_size, N, 1, device=rew.device, dtype=torch.long
+        )
+        out_g[:T] = G
+        out_h[:T] = steps_to_go
+        self._td.set("G", out_g)
+        self._td.set("steps_to_go", out_h)
 
     def __len__(self):
         return self._current_size
@@ -532,4 +469,3 @@ def format_nbytes(nbytes: int) -> str:
         size /= 1024.0
         unit = next_unit
     return f"{size:.2f}{unit}"
-
