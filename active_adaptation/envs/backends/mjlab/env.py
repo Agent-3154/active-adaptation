@@ -136,7 +136,7 @@ class MjlabBackendEnv(_EnvBase):
             num_envs=scene.num_envs,
             cfg=SimulationCfg(
                 nconmax=200,
-                njmax=500,
+                njmax=1000,
                 contact_sensor_maxmatch=80,
                 mujoco=MujocoCfg(
                     timestep=0.005,

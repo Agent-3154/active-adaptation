@@ -259,7 +259,9 @@ class AssetCfg:
             non-``.urdf`` suffix) uses USD spawn; ``.urdf`` uses URDF spawn. Required field.
         init_state: Initial state configuration for the asset. Required field.
         actuators: Dictionary mapping actuator names to their configurations. Required field.
-        self_collisions: Whether to enable self-collisions for the asset. Defaults to True.
+        self_collisions: Whether robot collision geoms can collide with each other.
+            In MJLab this selects ``contype=1, conaffinity=1`` when enabled and
+            ``contype=0, conaffinity=1`` when disabled. Defaults to True.
         joint_symmetry_mapping: Optional dictionary mapping joint names to symmetry information.
             Format: {joint_name: (symmetry_group_id, symmetric_joint_name)}. Defaults to None.
         spatial_symmetry_mapping: Optional dictionary mapping spatial elements for symmetry.
@@ -496,12 +498,14 @@ class AssetCfg:
             EntityCfg: MuJoCo Lab compatible asset configuration with:
                 - Initial state configuration
                 - Articulation info with actuator configurations
-                - Empty collisions tuple (collisions handled by MJCF)
+                - Collision masks derived from ``self_collisions``
         """
-        collisions = tuple(
-            CollisionCfg(**asdict(collision_cfg))
-            for collision_cfg in self.mjlab_collisions
-        )
+        collisions = []
+        for collision_cfg in self.mjlab_collisions:
+            fields = asdict(collision_cfg)
+            fields["contype"] = 1 if self.self_collisions else 0
+            fields["conaffinity"] = 1
+            collisions.append(CollisionCfg(**fields))
         
         spec = mujoco.MjSpec.from_file(str(self.mjcf_path))
 
@@ -515,7 +519,7 @@ class AssetCfg:
                 ),
                 soft_joint_pos_limit_factor=0.9,
             ),
-            collisions=collisions,
+            collisions=tuple(collisions),
             joint_symmetry_mapping=self.joint_symmetry_mapping,
             spatial_symmetry_mapping=self.spatial_symmetry_mapping,
             joint_names_simulation=self.joint_names_simulation,
@@ -566,14 +570,6 @@ class MjlabCollisionCfg:
 
     geom_names_expr: tuple[str, ...]
     """Tuple of regex patterns to match geom names."""
-    contype: int | dict[str, int] = 1
-    """Collision type (int or dict mapping patterns to values). Must be non-negative."""
-    conaffinity: int | dict[str, int] = 1
-    """Collision affinity (int or dict mapping patterns to values). Must be
-    non-negative."""
-    condim: int | dict[str, int] = 3
-    """Contact dimension (int or dict mapping patterns to values). Must be one
-    of {1, 3, 4, 6}."""
     priority: int | dict[str, int] = 0
     """Collision priority (int or dict mapping patterns to values). Must be
     non-negative."""

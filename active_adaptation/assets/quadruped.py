@@ -252,9 +252,6 @@ UNITREE_A2_CFG = AssetCfg(
         # no self collisions
         MjlabCollisionCfg(
             geom_names_expr=(".*_collision",),
-            contype=0,
-            conaffinity=1,
-            condim=3,
             priority=1,
             friction=(0.6, 0.01, 0.01),
         ),
