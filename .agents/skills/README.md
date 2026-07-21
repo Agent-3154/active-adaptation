@@ -8,6 +8,7 @@ Portable playbooks for coding agents. **Canonical location:** `.agents/skills/` 
 |-------|------|----------|
 | On-policy (PPO) | [onpolicy-algorithms/SKILL.md](onpolicy-algorithms/SKILL.md) | `learning/ppo/`, `train_ppo.py`, GAE, sym aug, Muon |
 | Off-policy (SAC) | [offpolicy-algorithms/SKILL.md](offpolicy-algorithms/SKILL.md) | `learning/offpolicy/`, `train_offpolicy.py`, replay, RLPD |
+| WandB diagnostics | [wandb-diagnostics/SKILL.md](wandb-diagnostics/SKILL.md) | Debugging/analysis from WandB run history (grad norms, losses, KL/entropy, explained variance) |
 | Environment / MDP | *(planned)* `environment-mdp/` | `cfg/task/`, rewards, commands, obs groups |
 
 Each skill has a `reference.md` with file maps and diagrams.
