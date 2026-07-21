@@ -47,6 +47,7 @@ Symmetry augmentation applies only during the teacher PPO update.
 """
 from __future__ import annotations
 
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -321,14 +322,18 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             ),
         ).to(self.device)
 
+        self.from_teacher = Mod(nn.Identity(), ["_priv_feature"], ["_priv"])
+        self.from_student = Mod(nn.Identity(), ["_priv_pred"], ["_priv"])
+        
         teacher_head = nn.Sequential(
             MLP(num_units=[actor_inp_dim, *self.cfg.actor_num_units], activation=Activation),
             Actor(self.action_dim, predict_std=self.cfg.pred_std),
         )
-        self.actor: ProbabilisticActor = ProbabilisticActor(
+        
+        self.actor_teacher: ProbabilisticActor = ProbabilisticActor(
             module=Seq(
                 CatTensors(
-                    [_normed_key(k) for k in self.shared_keys] + ["_priv_feature"],
+                    [_normed_key(k) for k in self.shared_keys] + ["_priv"],
                     "_teacher_inp",
                     sort=False,
                 ),
@@ -340,24 +345,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             return_log_prob=True,
         ).to(self.device)
 
-        student_head = nn.Sequential(
-            MLP(num_units=[actor_inp_dim, *self.cfg.actor_num_units], activation=Activation),
-            Actor(self.action_dim, predict_std=self.cfg.pred_std),
-        )
-        self.actor_student: ProbabilisticActor = ProbabilisticActor(
-            module=Seq(
-                CatTensors(
-                    [_normed_key(k) for k in self.student_keys] + ["_priv_pred"],
-                    "_student_inp",
-                    sort=False,
-                ),
-                Mod(student_head, ["_student_inp"], ["loc", "scale"]),
-            ),
-            in_keys=["loc", "scale"],
-            out_keys=[ACTION_KEY],
-            distribution_class=IndependentNormal,
-            return_log_prob=True,
-        ).to(self.device)
+        self.actor_student = copy.deepcopy(self.actor_teacher)
 
         # Privileged critic: raw teacher keys (not distilled features).
         critic_normed = [_normed_key(k) for k in self.teacher_keys]
@@ -392,10 +380,9 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             fake_input["adapt_hx"] = torch.zeros(fake_input.shape[0], GRU_HIDDEN)
 
         self.vecnorm(fake_input)
-        self.encoder_teacher(fake_input)
-        self.actor(fake_input)
+        self.actor_teacher(self.from_teacher(self.encoder_teacher(fake_input.copy())))
+        self.actor_student(self.from_student(self.encoder_student(fake_input.copy())))
         self.critic(fake_input)
-        self.encoder_student(fake_input)
 
         def init_(module):
             if isinstance(module, nn.Linear):
@@ -407,7 +394,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
 
         self.encoder_teacher.apply(init_)
         self.encoder_student.apply(init_)
-        self.actor.apply(init_)
+        self.actor_teacher.apply(init_)
         self.critic.apply(init_)
 
         self.opt_ppo: Optional[torch.optim.Optimizer] = None
@@ -445,7 +432,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         if self.cfg.stage == "teacher":
             if self.cfg.muon:
                 self.opt_ppo = MuonAdamWWrapper(
-                    [self.encoder_teacher, self.actor, self.critic],
+                    [self.encoder_teacher, self.actor_teacher, self.critic],
                     lr=self.cfg.lr,
                     weight_decay=0.01,
                 )
@@ -453,7 +440,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
                 self.opt_ppo = torch.optim.AdamW(
                     [
                         {"params": self.encoder_teacher.parameters()},
-                        {"params": self.actor.parameters()},
+                        {"params": self.actor_teacher.parameters()},
                         {"params": self.critic.parameters()},
                     ],
                     lr=self.cfg.lr,
@@ -474,11 +461,9 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
                 lr=self.cfg.lr,
                 weight_decay=0.01,
             )
-            self.encoder_teacher.requires_grad_(False)
-            self.actor.requires_grad_(False)
             self.critic.requires_grad_(False)
             # copy to initialize student actor
-            hard_copy_(self.actor, self.actor_student)
+            hard_copy_(self.actor_teacher, self.actor_student)
         else:
             raise ValueError(f"Invalid stage: {self.cfg.stage}")
 
@@ -489,10 +474,10 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
     def get_rollout_policy(self, mode: str = "train", critic: bool = False):
         modules = [self.vecnorm]
         if self.cfg.stage == "teacher":
-            modules += [self.encoder_teacher, self.actor]
+            modules += [self.encoder_teacher, self.from_teacher, self.actor_teacher]
         elif self.cfg.stage == "student":
             # Collect with student GRU (DAgger); carries adapt_hx via primer.
-            modules += [self.encoder_student, self.actor_student]
+            modules += [self.encoder_student, self.from_student, self.actor_student]
         else:
             raise ValueError(f"Invalid stage: {self.cfg.stage}")
         if critic:
@@ -518,6 +503,10 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         return dict(sorted(info.items()))
 
     def train_policy(self, tensordict: TensorDict):
+        self.encoder_teacher.requires_grad_(True)
+        self.actor_teacher.requires_grad_(True)
+        self.critic.requires_grad_(True)
+
         infos = []
         with ScopedTimer("compute_advantage"):
             self.compute_advantage(
@@ -548,13 +537,13 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
     def train_distillation(self, tensordict: TensorDict):
         """MSE: student GRU features ≈ teacher privileged features (BPTT)."""
         self.encoder_teacher.requires_grad_(False)
-        self.actor.requires_grad_(False)
+        self.actor_teacher.requires_grad_(False)
 
         infos = []
         self.vecnorm(tensordict)
         with torch.no_grad():
             self.encoder_teacher(tensordict)
-            self.actor(tensordict)
+            self.actor_teacher(self.from_teacher(tensordict))
             teacher_action = tensordict.pop(ACTION_KEY)
             tensordict["action_teacher"] = teacher_action
 
@@ -563,7 +552,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
                 tensordict, self.cfg.num_minibatches, self.cfg.train_every
             ):
                 self.encoder_student(minibatch)
-                self.actor_student(minibatch)
+                self.actor_teacher(self.from_student(minibatch))
 
                 valid = (~minibatch["is_init"]).float()
                 valid_cnt = valid.sum().clamp_min(1.0)
@@ -578,7 +567,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
                 )
                 action_loss = (action_loss.mean(dim=-1, keepdim=True) * valid).sum() / valid_cnt
                 
-                loss = feat_loss + action_loss
+                loss = feat_loss + action_loss * 0.0
                 self.opt_distill.zero_grad(set_to_none=True)
                 loss.backward()
                 grad_norm = nn.utils.clip_grad_norm_(
@@ -660,15 +649,14 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         assert self.cfg.stage == "teacher"
         bsize = tensordict.shape[0] // 2 if self.cfg.symaug else tensordict.shape[0]
 
-        self.vecnorm(tensordict)
-        self.encoder_teacher(tensordict)
-
         valid = (~tensordict["is_init"]).float()
         valid_cnt = valid.sum().clamp_min(1.0)
         action_data = tensordict[ACTION_KEY]
         log_probs_data = tensordict["action_log_prob"]
 
-        self.actor(tensordict)
+        self.vecnorm(tensordict)
+        self.encoder_teacher(tensordict)
+        self.actor_teacher(self.from_teacher(tensordict))
         dist = IndependentNormal(tensordict["loc"], tensordict["scale"])
         log_probs = dist.log_prob(action_data)
         entropy = (dist.entropy().reshape_as(valid) * valid).sum() / valid_cnt
@@ -692,9 +680,11 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         loss = policy_loss + entropy_loss + value_loss
         self.opt_ppo.zero_grad(set_to_none=True)
         loss.backward()
+        encoder_grad_norm = nn.utils.clip_grad_norm_(
+            self.encoder_teacher.parameters(), self.max_grad_norm
+        )
         actor_grad_norm = nn.utils.clip_grad_norm_(
-            list(self.encoder_teacher.parameters()) + list(self.actor.parameters()),
-            self.max_grad_norm,
+            self.actor_teacher.parameters(), self.max_grad_norm
         )
         critic_grad_norm = nn.utils.clip_grad_norm_(
             self.critic.parameters(), self.max_grad_norm
@@ -715,6 +705,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             "actor/policy_loss": policy_loss.detach(),
             "actor/entropy": entropy.detach(),
             "actor/grad_norm": actor_grad_norm,
+            "actor/encoder_grad_norm": encoder_grad_norm,
             "actor/clamp_pos": clamped_pos.float().mean(),
             "actor/clamp_neg": clamped_neg.float().mean(),
             "actor/approx_kl": approx_kl,
