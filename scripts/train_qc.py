@@ -23,8 +23,8 @@ torch.backends.cudnn.benchmark = False
 
 
 DEFAULTS = [
-    {"task": "Velocity"},
-    {"algo": "sac"},
+    {"task": "G1/G1LocoFlat"},
+    {"algo": "qc"},
     "_self_",
 ]
 
@@ -64,10 +64,13 @@ class TrainConfig:
     discard_unused_obs: bool = True
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
-    offline_iters: int = 10_000
-    online_iters: int = 10_000
+    offline_policy_iters: int = 3_000
+    offline_critic_iters: int = 3_000
+    offline_eval_interval: int = 500
 
-    log_interval: int = 100
+    online_iters: int = 0
+
+    log_interval: int = 2
 
 
 cs = ConfigStore.instance()
@@ -174,16 +177,32 @@ def main(cfg: TrainConfig):
     policy.on_stage_start(stage="offline", env=env)
     ckpt_path = None
 
-    pbar = tqdm(range(cfg.offline_iters), desc="offline", unit="step")
+    # policy BC
+    pbar = tqdm(range(cfg.offline_policy_iters), desc="offline_policy", unit="step")
     for i in pbar:
-        info = policy.step_offline()
-
+        info = policy.update_flow_policy()
         if aa.is_main_process():
-            if i % log_interval == 0 or len(info) > 0:
+            if i % log_interval and len(info) > 0:
                 run.log(info, step=i)
 
-            if cfg.checkpoint_interval > 0 and i % cfg.checkpoint_interval == 0:
-                ckpt_path = save(f"checkpoint_{i:06d}")
+    # critic update
+    pbar = tqdm(range(cfg.offline_critic_iters), desc="offline_critic", unit="step")
+    for i in pbar:
+        info = policy.update_critic()
+        if aa.is_main_process():
+            if i % log_interval and len(info) > 0:
+                run.log(info, step=i)
+
+            if i % cfg.offline_eval_interval == 0:
+                policy_eval = policy.get_rollout_policy("eval")
+                info, _, _ = evaluate(
+                    env, policy_eval, render=cfg.eval_render, seed=cfg.seed,
+                )
+                run.log(info, step=i+cfg.offline_policy_iters)
+
+
+    # save offline checkpoint
+    ckpt_path = save(f"checkpoint_offline_{cfg.offline_policy_iters}_{cfg.offline_critic_iters}")
 
     # ── online stage ─────────────────────────────────────────────────
     if cfg.online_iters > 0:
@@ -223,11 +242,16 @@ def main(cfg: TrainConfig):
             episode_stats.add(td)
             new_frames = td.shape[0]
             env_frames += new_frames
-            info = policy.step(td)
+
+            # ===========================
+            # online update
+            policy.update_rb(td)
+            info = policy.update_online()
+            # ===========================
 
             if aa.is_main_process():
-                step = cfg.offline_iters + i
-                if i % log_interval == 0 or len(info) > 0:
+                step = cfg.offline_policy_iters + cfg.offline_critic_iters + i
+                if i % log_interval == 0 and len(info) > 0:
                     log_info = {**info}
                     log_info["env_frames"] = env_frames * aa.get_world_size()
                     log_info["performance/rollout_fps"] = (
@@ -251,9 +275,9 @@ def main(cfg: TrainConfig):
                 if cfg.checkpoint_interval > 0 and i % cfg.checkpoint_interval == 0:
                     ckpt_path = save(f"checkpoint_{step:06d}")
 
-        total_iters = cfg.offline_iters + cfg.online_iters
+        total_iters = cfg.online_iters
     else:
-        total_iters = cfg.offline_iters
+        total_iters = 0
 
     # ── final eval & save ────────────────────────────────────────────
     if aa.is_main_process():

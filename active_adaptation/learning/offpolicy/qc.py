@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 import torch
 import torch.nn as nn
 from hydra.core.config_store import ConfigStore
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import (
     TensorDictModuleBase,
     TensorDictModule as Mod,
@@ -62,7 +62,9 @@ class QCConfig:
     name: str = "qc"
 
     # general setting
-    debug: bool = True
+    debug: bool = False
+    use_prior_online: bool = True
+    action_clip: bool = False
 
     vecnorm: bool = True
     clamp_reward: bool = False
@@ -73,21 +75,21 @@ class QCConfig:
     actor_type: str = "best-of-n"
     actor_nums: int = 32
     gamma: float = 0.99
-    horizon_length: int = 5
+    horizon_length: int = 3
     flow_steps: int = 10
     compile_flow: bool = False
-    critic_hidden_dims: tuple[int] = (512, 512, 512, 512)
-    actor_hidden_dims: tuple[int]  = (512, 512, 512, 512)
+    critic_hidden_dims: tuple[int] = (512, 512)
+    actor_hidden_dims: tuple[int]  = (512, 512)
     # offline stage
     prior_data_path: str | None = '/home/cv/zjx/active-adaptation/scripts/rollout/G1LocoFlat-sac/2026-07-08-20-32-07/rollout_1000_4096.pt'
     bootstrap_observation_keys: Tuple[str, ...] = ("prev_noise", "rho")
     batch_size: int = 256
-    tau_critic: float = 0.2
+    tau_critic: float = 5e-3
     max_grad_norm: float = 1.0
     # online stage
     buffer_size: int = 10_000_000
     utd_ratio: int = 1
-    warm_up_steps: int = 0
+    warm_up_steps: int = 100
     # FlashSAC-style: scale rewards by running discounted-return variance.
     normalize_reward: bool = True
     reward_norm_epsilon: float = 1e-8
@@ -323,7 +325,8 @@ class QC(TensorDictModuleBase):
                 self.compute_flow_actions, mode="reduce-overhead",
             )
 
-        self.global_step = 0
+        self.policy_offline_steps = 0
+        self.critic_steps = 0
 
 
     def on_stage_start(self, stage: str, env: _EnvBase):
@@ -340,10 +343,13 @@ class QC(TensorDictModuleBase):
                 fake_bootstrap=True,
                 observation_keys=list(self.cfg.bootstrap_observation_keys),
             )
-            print("Replay buffer:")
+            print("offline Replay buffer:")
             print(self.rb)
         elif stage == "online":
-            pass
+            if not self.cfg.use_prior_online:
+                self.rb._current_size = 0
+            print("online Replay buffer:")
+            print(self.rb)
         else:
             raise ValueError(f"Stage {stage} is invalid.")
         
@@ -362,32 +368,40 @@ class QC(TensorDictModuleBase):
         )
 
 
-    @ScopedTimer("step_offline")
-    def step_offline(self):
-        """Sample a batch, preprocess once, then update critic and actor."""
+    @ScopedTimer("update_flow_policy")
+    def update_flow_policy(self):
         batch = self.rb.sample(
             batch_size=self.cfg.batch_size,
             steps=self.cfg.horizon_length,
-            next_obs=True,
+            next_obs=True
         ).to(self.device)
-
-        batch = batch.select(*self.training_keys, inplace=False, strict=False)
+        batch = batch.select(*self.training_keys, inplace=True, strict=False)
         self.preproc(batch)
         self.preproc(batch["next"])
-
-        self.global_step += 1
-
-        infos: dict = {"training/global_step": self.global_step}
-        infos.update(self.train_critic(batch))
+        self.policy_offline_steps += 1
+        infos: dict = { "training/policy_step": self.policy_offline_steps }
         infos.update(self.train_actor(batch))
         return dict(sorted(infos.items()))
 
 
-    @ScopedTimer("step")
-    def step(self, tensordict: TensorDictBase) -> dict:
-        """Online training step: push transition, sample batch, update."""
-        self.global_step += 1
+    @ScopedTimer("update_critic")
+    def update_critic(self):
+        batch = self.rb.sample(
+            batch_size=self.cfg.batch_size,
+            steps=self.cfg.horizon_length,
+            next_obs=True
+        ).to(self.device)
+        batch = batch.select(*self.training_keys, inplace=True, strict=False)
+        self.preproc(batch)
+        self.preproc(batch["next"])
+        self.critic_steps += 1
+        infos: dict = { "training/critic_steps": self.critic_steps }
+        infos.update(self.train_critic(batch))
+        return dict(sorted(infos.items()))
 
+
+    def update_rb(self, tensordict: TensorDictBase):
+        self.online_steps += 1
         td = tensordict.exclude(("next", "stats"), "collector")
 
         # Per-step reward statistics.
@@ -416,9 +430,13 @@ class QC(TensorDictModuleBase):
             "reward/step_std": r.std().item(),
         }
 
-        if self.global_step < self.cfg.warm_up_steps:
-            return infos
+        return infos
+    
+    def update_online(self):
+        if self.online_steps < self.cfg.warm_up_steps:
+            return
 
+        infos: dict = {}
         for _ in range(self.cfg.utd_ratio):
             batch = self.rb.sample(
                 batch_size=self.cfg.batch_size,
@@ -430,8 +448,8 @@ class QC(TensorDictModuleBase):
             self.preproc(batch)
             self.preproc(batch["next"])
 
-            infos.update(self.train_critic(batch))
             infos.update(self.train_actor(batch))
+            infos.update(self.train_critic(batch))
 
         return dict(sorted(infos.items()))
 
@@ -501,6 +519,8 @@ class QC(TensorDictModuleBase):
             "critic/target_max": q_target.detach().max().item(),
             "reward/mean": reward_raw.mean().item(),
             "reward/std": reward_raw.std().item(),
+            "critic/a_scale": act_n.detach().mean().item(),
+            "critic/sa_scale": self.sample_actions(obs).detach().mean().item()
         }
 
         with torch.no_grad():
@@ -532,13 +552,13 @@ class QC(TensorDictModuleBase):
         ).contiguous()
         batch_size, action_dim = batch_actions.shape
 
-        x0 = torch.rand(batch_actions.shape, device=batch_actions.device)
+        x0 = torch.randn_like(batch_actions)
         x1 = batch_actions
         t = torch.rand((batch_size, 1), device=batch_actions.device)
         xt = (1 - t) * x0 + t * x1
         v = x1 - x0
-        pred_v = self.actor(obs, xt, t)
 
+        pred_v = self.actor(obs, xt, t)
         per_element_loss = (pred_v - v) ** 2
 
         # Per-timestep valid mask: action[t] is valid only when no episode
@@ -562,6 +582,7 @@ class QC(TensorDictModuleBase):
         infos: dict = {
             "actor/loss": actor_loss.item(),
             "actor/grad_norm": actor_grad_norm.item(),
+            "actor/v_norm": v.detach().norm(dim=-1).mean().item(),
             "actor/pred_v_norm": pred_v.detach().norm(dim=-1).mean().item(),
             "actor/valid_frac": valid_t.mean().item(),
         }
@@ -587,6 +608,7 @@ class QC(TensorDictModuleBase):
         )
         return q_target
     
+
     @ScopedTimer("sample_actions")
     def sample_actions(self, next_obs: torch.Tensor):
         batch_size = next_obs.shape[0]
@@ -645,23 +667,21 @@ class QC(TensorDictModuleBase):
         sd: "OrderedDict[str, Any]" = OrderedDict(super().state_dict())
         if self.reward_normalizer is not None:
             sd["reward_normalizer"] = self.reward_normalizer.state_dict()
-        sd["global_step"] = int(self.global_step)
         return sd
 
     def load_state_dict(self, state_dict: "OrderedDict[str, Any]", strict: bool = True):
         rn_state = state_dict.pop("reward_normalizer", None)
-        gs = state_dict.pop("global_step", None)
         super().load_state_dict(state_dict, strict=strict)
         if self.reward_normalizer is not None and rn_state is not None:
             self.reward_normalizer.load_state_dict(rn_state)
-        if gs is not None:
-            self.global_step = int(gs)
 
     def compute_flow_actions(self, next_obs, noises: torch.Tensor):
         actions = noises
         for i in range(self.cfg.flow_steps):
             time = self._flow_ts[i].expand(actions.shape[0], 1)
             actions += self.actor(next_obs, actions, time) / self.cfg.flow_steps
+        if self.cfg.action_clip:
+            actions = torch.clip(actions, min= -2 * torch.pi, max= 2 * torch.pi)
         return actions
 
 
