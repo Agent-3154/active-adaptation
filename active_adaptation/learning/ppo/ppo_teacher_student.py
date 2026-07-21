@@ -80,6 +80,7 @@ from active_adaptation.learning.modules import (
 )
 from active_adaptation.learning.modules.rnn import set_recurrent_mode, recurrent_mode
 from active_adaptation.learning.ppo.common import (
+    hard_copy_,
     ppo_clipped_loss,
     resolve_clip_param,
     OBS_KEY,
@@ -103,16 +104,6 @@ GRU_HIDDEN = 128
 
 def _normed_key(key: str) -> str:
     return f"_{key}_normed"
-
-
-def _unique_preserve(keys: Tuple[str, ...]) -> Tuple[str, ...]:
-    seen = set()
-    out: List[str] = []
-    for k in keys:
-        if k not in seen:
-            seen.add(k)
-            out.append(k)
-    return tuple(out)
 
 
 @dataclass
@@ -152,13 +143,7 @@ class PPOTSCfg:
     #   teacher=(command_teacher, policy), student=(command_student, policy)
     teacher_keys: Tuple[str, ...] = (OBS_KEY, OBS_PRIV_KEY)
     student_keys: Tuple[str, ...] = (OBS_KEY,)
-    # Union of teacher ∪ student; recomputed in ``__post_init__``.
-    in_keys: Tuple[str, ...] = field(default_factory=tuple)
-
-    def __post_init__(self):
-        self.teacher_keys = tuple(self.teacher_keys)
-        self.student_keys = tuple(self.student_keys)
-        self.in_keys = _unique_preserve((*self.teacher_keys, *self.student_keys))
+    in_keys: Tuple[str, ...] = tuple(set((*teacher_keys, *student_keys)))
 
 
 cs = ConfigStore.instance()
@@ -310,17 +295,15 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         # Teacher: MLP over privileged observations → distill target.
         teacher_normed = [_normed_key(k) for k in self.privileged_keys]
         self.encoder_teacher = Seq(
-            CatTensors(
-                teacher_normed,
-                "_priv_enc_inp",
-                del_keys=False,
-                sort=False,
-            ),
+            CatTensors(teacher_normed, "_priv_enc_inp", sort=False),
             Mod(
-                MLP(
-                    num_units=[priv_inp_dim, *self.cfg.encoder_num_units, priv_feat_dim],
-                    activation=Activation,
-                    first_non_muon=True,
+                nn.Sequential(
+                    MLP(
+                        num_units=[priv_inp_dim, *self.cfg.encoder_num_units],
+                        activation=Activation,
+                        first_non_muon=True,
+                    ),
+                    nn.Linear(self.cfg.encoder_num_units[-1], priv_feat_dim),
                 ),
                 ["_priv_enc_inp"],
                 ["_priv_feature"],
@@ -330,12 +313,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         # Student: GRU over all student-visible keys → predict privileged features.
         student_normed = [_normed_key(k) for k in self.student_keys]
         self.encoder_student = Seq(
-            CatTensors(
-                student_normed,
-                "_student_enc_inp",
-                del_keys=False,
-                sort=False,
-            ),
+            CatTensors(student_normed, "_student_enc_inp", sort=False),
             Mod(
                 GRUModule(priv_feat_dim, split=None),
                 ["_student_enc_inp", "is_init", "adapt_hx"],
@@ -343,29 +321,37 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             ),
         ).to(self.device)
 
-        self._teacher_to_actor = Mod(nn.Identity(), ["_priv_feature"], ["_priv_feat"])
-        self._student_to_actor = Mod(nn.Identity(), ["_priv_pred"], ["_priv_feat"])
-
-        actor_in_keys = [_normed_key(k) for k in self.shared_keys] + ["_priv_feat"]
-        actor_mlp = MLP(
-            num_units=[actor_inp_dim, *self.cfg.actor_num_units],
-            activation=Activation,
-            first_non_muon=True,
+        teacher_head = nn.Sequential(
+            MLP(num_units=[actor_inp_dim, *self.cfg.actor_num_units], activation=Activation),
+            Actor(self.action_dim, predict_std=self.cfg.pred_std),
         )
         self.actor: ProbabilisticActor = ProbabilisticActor(
             module=Seq(
                 CatTensors(
-                    actor_in_keys,
-                    "_actor_inp",
-                    del_keys=False,
+                    [_normed_key(k) for k in self.shared_keys] + ["_priv_feature"],
+                    "_teacher_inp",
                     sort=False,
                 ),
-                Mod(actor_mlp, ["_actor_inp"], ["_actor_feature"]),
-                Mod(
-                    Actor(self.action_dim, predict_std=self.cfg.pred_std),
-                    ["_actor_feature"],
-                    ["loc", "scale"],
+                Mod(teacher_head, ["_teacher_inp"], ["loc", "scale"]),
+            ),
+            in_keys=["loc", "scale"],
+            out_keys=[ACTION_KEY],
+            distribution_class=IndependentNormal,
+            return_log_prob=True,
+        ).to(self.device)
+
+        student_head = nn.Sequential(
+            MLP(num_units=[actor_inp_dim, *self.cfg.actor_num_units], activation=Activation),
+            Actor(self.action_dim, predict_std=self.cfg.pred_std),
+        )
+        self.actor_student: ProbabilisticActor = ProbabilisticActor(
+            module=Seq(
+                CatTensors(
+                    [_normed_key(k) for k in self.student_keys] + ["_priv_pred"],
+                    "_student_inp",
+                    sort=False,
                 ),
+                Mod(student_head, ["_student_inp"], ["loc", "scale"]),
             ),
             in_keys=["loc", "scale"],
             out_keys=[ACTION_KEY],
@@ -407,7 +393,6 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
 
         self.vecnorm(fake_input)
         self.encoder_teacher(fake_input)
-        self._teacher_to_actor(fake_input)
         self.actor(fake_input)
         self.critic(fake_input)
         self.encoder_student(fake_input)
@@ -492,6 +477,8 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             self.encoder_teacher.requires_grad_(False)
             self.actor.requires_grad_(False)
             self.critic.requires_grad_(False)
+            # copy to initialize student actor
+            hard_copy_(self.actor, self.actor_student)
         else:
             raise ValueError(f"Invalid stage: {self.cfg.stage}")
 
@@ -502,10 +489,10 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
     def get_rollout_policy(self, mode: str = "train", critic: bool = False):
         modules = [self.vecnorm]
         if self.cfg.stage == "teacher":
-            modules += [self.encoder_teacher, self._teacher_to_actor, self.actor]
+            modules += [self.encoder_teacher, self.actor]
         elif self.cfg.stage == "student":
             # Collect with student GRU (DAgger); carries adapt_hx via primer.
-            modules += [self.encoder_student, self._student_to_actor, self.actor]
+            modules += [self.encoder_student, self.actor_student]
         else:
             raise ValueError(f"Invalid stage: {self.cfg.stage}")
         if critic:
@@ -560,25 +547,40 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
     @set_recurrent_mode(True)
     def train_distillation(self, tensordict: TensorDict):
         """MSE: student GRU features ≈ teacher privileged features (BPTT)."""
+        self.encoder_teacher.requires_grad_(False)
+        self.actor.requires_grad_(False)
+
         infos = []
         self.vecnorm(tensordict)
         with torch.no_grad():
             self.encoder_teacher(tensordict)
+            self.actor(tensordict)
+            teacher_action = tensordict.pop(ACTION_KEY)
+            tensordict["action_teacher"] = teacher_action
 
         for _epoch in range(self.cfg.distill_epochs):
             for minibatch in make_batch(
                 tensordict, self.cfg.num_minibatches, self.cfg.train_every
             ):
                 self.encoder_student(minibatch)
+                self.actor_student(minibatch)
+
                 valid = (~minibatch["is_init"]).float()
                 valid_cnt = valid.sum().clamp_min(1.0)
-                feat_loss = self.distill_loss_fn(
-                    minibatch["_priv_pred"], minibatch["_priv_feature"]
+                
+                feat_loss = F.mse_loss(
+                    minibatch["_priv_pred"], minibatch["_priv_feature"], reduction="none"
                 )
                 feat_loss = (feat_loss.mean(dim=-1, keepdim=True) * valid).sum() / valid_cnt
-
+                
+                action_loss = F.mse_loss(
+                    minibatch[ACTION_KEY], minibatch["action_teacher"], reduction="none"
+                )
+                action_loss = (action_loss.mean(dim=-1, keepdim=True) * valid).sum() / valid_cnt
+                
+                loss = feat_loss + action_loss
                 self.opt_distill.zero_grad(set_to_none=True)
-                feat_loss.backward()
+                loss.backward()
                 grad_norm = nn.utils.clip_grad_norm_(
                     self.encoder_student.parameters(), self.max_grad_norm
                 )
@@ -586,6 +588,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
                 infos.append(
                     {
                         "distill/feat_loss": feat_loss.detach(),
+                        "distill/action_loss": action_loss.detach(),
                         "distill/grad_norm": grad_norm.detach()
                         if torch.is_tensor(grad_norm)
                         else torch.tensor(grad_norm),
@@ -659,7 +662,6 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
 
         self.vecnorm(tensordict)
         self.encoder_teacher(tensordict)
-        self._teacher_to_actor(tensordict)
 
         valid = (~tensordict["is_init"]).float()
         valid_cnt = valid.sum().clamp_min(1.0)
