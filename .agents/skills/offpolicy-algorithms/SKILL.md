@@ -149,6 +149,12 @@ See `learning/offpolicy/buffer.py` (`from_fake`, `push`, `sample`) and `sac.py` 
 | `actor`, `Q` (and `V`, `alpha` if present) | `Q_target`, `actor_target` (plain `deepcopy`, eval-only) |
 | | `VecNorm`, `RewardNormalizer` (sync running stats separately) |
 
+#### Target `deepcopy` and lazy init
+
+- `deepcopy` targets **only after** a warm-up forward has materialized any `Lazy*` params (canonical SAC already does this). Copying still-lazy graphs is unsafe; `soft_copy_` / `hard_copy_` in `learning/ppo/common.py` reject `Uninitialized*` and shared storage.
+- For **twin trainable** modules (rare off-policy; common in on-policy teacher–student), prefer constructing twice via a factory — see TEACHME “Cloning modules”.
+- **Future:** deprecate lazy initialization codebase-wide; prefer explicit dims from specs in new nets.
+
 #### Correct setup order (off-policy, `sac.py` pattern)
 
 1. Build modules + `deepcopy` targets (targets stay **unwrapped**).
@@ -265,6 +271,8 @@ Always log when adding behavior:
 - DDP-wrapping target networks
 - Putting shared math in the algo file when it belongs in `distributional.py`, `objectives.py`, or `reward_normalization.py`
 - Raising Simba LR / adding weight decay (paper uses ~1e-4 Adam, hyperspherical renorm)
+- `deepcopy` of online nets **before** a warm-up forward when the graph still has `Lazy*` params — materialize first; `soft_copy_` rejects `Uninitialized*`
+- Adding new lazy / `nn.LazyLinear` entry points — **lazy init is deprecated going forward**; prefer explicit dims from specs (see TEACHME)
 
 ---
 

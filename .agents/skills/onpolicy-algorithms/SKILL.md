@@ -244,6 +244,17 @@ algo.compile=false           # avoid with debug or DDP
 - `torch.compile` with `debug=True` or distributed (guarded in `ppo_symaug`)
 - Forgetting `action_log_prob` in rollout (breaks importance ratio)
 - Using off-policy `step()` / replay patterns in on-policy code
+- Building twin actors with `copy.deepcopy` when the graph still has `Lazy*` params (e.g. `Actor`) — use a `make_actor()` factory twice; see TEACHME “Cloning modules”
+- Freezing teacher modules with `requires_grad_(False)` during distill and forgetting to re-enable them before the next PPO update
+- Letting `VecNorm` keep updating in a student/adapt stage while the actor is frozen (freeze norms after the teacher checkpoint)
+
+---
+
+## Module clones and lazy init
+
+- Weight sync: `hard_copy_` / `soft_copy_` in `learning/ppo/common.py` (strict: names, shapes, no shared storage, no `Uninitialized*`).
+- Teacher–student (`ppo_teacher_student.py`): `make_actor()` twice for `actor_teacher` / `actor_student`; `hard_copy_` on student stage start — not `deepcopy` of the teacher.
+- **Deprecate lazy init going forward** — prefer explicit dims from specs; do not add new `LazyLinear` / lazy MLP entry points.
 
 ---
 

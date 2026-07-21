@@ -344,18 +344,123 @@ def init_(module):
         nn.init.constant_(module.bias, 0.0)
 
 
+def _paired_named_tensors(
+    source_module: nn.Module,
+    target_module: nn.Module,
+    *,
+    include_buffers: bool = True,
+):
+    """Yield ``(name, src, tgt)`` for matching parameters (and optionally buffers).
+
+    Raises if modules are aliased, names/shapes disagree, any pair shares storage,
+    or either side still has lazy / uninitialized parameters or buffers.
+    """
+    if source_module is target_module:
+        raise ValueError(
+            "source_module and target_module are the same object; refusing to copy."
+        )
+
+    def _ensure_initialized(name: str, tensor: torch.Tensor, which: str) -> None:
+        # LazyLinear / Lazy* leave UninitializedParameter/Buffer until first forward.
+        if type(tensor).__name__.startswith("Uninitialized"):
+            raise ValueError(
+                f"{which} {name!r} is still lazy/uninitialized ({type(tensor).__name__}). "
+                "Run a warm-up forward on both modules before hard_copy_/soft_copy_, "
+                "or build them separately with make_*() instead of copy.deepcopy()."
+            )
+
+    src_params = list(source_module.named_parameters())
+    tgt_params = list(target_module.named_parameters())
+    if len(src_params) != len(tgt_params):
+        raise ValueError(
+            f"Parameter count mismatch: source has {len(src_params)}, "
+            f"target has {len(tgt_params)}."
+        )
+
+    pairs = []
+    for (src_name, src), (tgt_name, tgt) in zip(src_params, tgt_params, strict=True):
+        if src_name != tgt_name:
+            raise ValueError(
+                f"Parameter name mismatch: source {src_name!r} vs target {tgt_name!r}. "
+                "Modules must have identical named_parameters() order and names."
+            )
+        _ensure_initialized(src_name, src, "source parameter")
+        _ensure_initialized(tgt_name, tgt, "target parameter")
+        if src.shape != tgt.shape:
+            raise ValueError(
+                f"Parameter shape mismatch for {src_name!r}: {tuple(src.shape)} vs "
+                f"{tuple(tgt.shape)}."
+            )
+        if src is tgt or src.data_ptr() == tgt.data_ptr():
+            raise ValueError(
+                f"Parameter {src_name!r} is shared between source and target "
+                "(same Tensor storage). Copy would be a no-op or corrupt both; "
+                "use separate make_*() construction, not a shallow alias."
+            )
+        pairs.append((src_name, src, tgt))
+
+    if include_buffers:
+        src_bufs = list(source_module.named_buffers())
+        tgt_bufs = list(target_module.named_buffers())
+        if len(src_bufs) != len(tgt_bufs):
+            raise ValueError(
+                f"Buffer count mismatch: source has {len(src_bufs)}, "
+                f"target has {len(tgt_bufs)}."
+            )
+        for (src_name, src), (tgt_name, tgt) in zip(src_bufs, tgt_bufs, strict=True):
+            if src_name != tgt_name:
+                raise ValueError(
+                    f"Buffer name mismatch: source {src_name!r} vs target {tgt_name!r}."
+                )
+            _ensure_initialized(src_name, src, "source buffer")
+            _ensure_initialized(tgt_name, tgt, "target buffer")
+            if src.shape != tgt.shape:
+                raise ValueError(
+                    f"Buffer shape mismatch for {src_name!r}: {tuple(src.shape)} vs "
+                    f"{tuple(tgt.shape)}."
+                )
+            if src is tgt or (
+                src.numel() > 0 and tgt.numel() > 0 and src.data_ptr() == tgt.data_ptr()
+            ):
+                raise ValueError(
+                    f"Buffer {src_name!r} is shared between source and target."
+                )
+            pairs.append((src_name, src, tgt))
+
+    if not pairs:
+        raise ValueError("No parameters or buffers to copy.")
+
+    return pairs
+
+
+@torch.no_grad()
 def hard_copy_(source_module: nn.Module, target_module: nn.Module):
-    for params_source, params_target in zip(
-        source_module.parameters(), target_module.parameters()
-    ):
-        params_target.data.copy_(params_source.data)
+    """In-place ``target ← source`` for all parameters and buffers.
+
+    Validates matching names/shapes and rejects aliased / shared storages.
+    """
+    for _name, src, tgt in _paired_named_tensors(source_module, target_module):
+        tgt.data.copy_(src.data)
 
 
+@torch.no_grad()
 def soft_copy_(source_module: nn.Module, target_module: nn.Module, tau: float = 0.01):
-    for params_source, params_target in zip(
-        source_module.parameters(), target_module.parameters()
-    ):
-        params_target.data.lerp_(params_source.data, tau)
+    """Polyak update: ``target ← (1 - τ) target + τ source`` (in-place).
+
+    Floating tensors use ``lerp_``; non-floating buffers use a hard copy when
+    ``τ == 1``, otherwise are left unchanged. Validates names/shapes and rejects
+    shared storages (same checks as :func:`hard_copy_`).
+    """
+    if not (0.0 < tau <= 1.0):
+        raise ValueError(f"tau must be in (0, 1], got {tau!r}")
+    for _name, src, tgt in _paired_named_tensors(source_module, target_module):
+        if tgt.is_floating_point() and src.is_floating_point():
+            if tau == 1.0:
+                tgt.data.copy_(src.data)
+            else:
+                tgt.data.lerp_(src.data, tau)
+        elif tau == 1.0:
+            tgt.data.copy_(src.data)
 
 
 class L2Norm(nn.Module):

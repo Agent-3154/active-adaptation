@@ -180,7 +180,7 @@ class GRU(nn.Module):
             output = self.ln(output)
             return output, einops.repeat(hx, "b h -> b t h", t=T)
         else:
-            hx = self.gru(x, hx)
+            hx = self.gru(x, hx * (1.0 - is_init.float()))
             output = self.ln(hx)
             return output, hx
 
@@ -325,27 +325,28 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         self.from_teacher = Mod(nn.Identity(), ["_priv_feature"], ["_priv"])
         self.from_student = Mod(nn.Identity(), ["_priv_pred"], ["_priv"])
         
-        teacher_head = nn.Sequential(
-            MLP(num_units=[actor_inp_dim, *self.cfg.actor_num_units], activation=Activation),
-            Actor(self.action_dim, predict_std=self.cfg.pred_std),
-        )
-        
-        self.actor_teacher: ProbabilisticActor = ProbabilisticActor(
-            module=Seq(
-                CatTensors(
-                    [_normed_key(k) for k in self.shared_keys] + ["_priv"],
-                    "_teacher_inp",
-                    sort=False,
+        def make_actor() -> ProbabilisticActor:
+            action_head = nn.Sequential(
+                MLP(num_units=[actor_inp_dim, *self.cfg.actor_num_units], activation=Activation),
+                Actor(self.action_dim, predict_std=self.cfg.pred_std),
+            )
+            return ProbabilisticActor(
+                module=Seq(
+                    CatTensors(
+                        [_normed_key(k) for k in self.shared_keys] + ["_priv"],
+                        "_actor_inp",
+                        sort=False,
+                    ),
+                    Mod(action_head, ["_actor_inp"], ["loc", "scale"]),
                 ),
-                Mod(teacher_head, ["_teacher_inp"], ["loc", "scale"]),
-            ),
-            in_keys=["loc", "scale"],
-            out_keys=[ACTION_KEY],
-            distribution_class=IndependentNormal,
-            return_log_prob=True,
-        ).to(self.device)
+                in_keys=["loc", "scale"],
+                out_keys=[ACTION_KEY],
+                distribution_class=IndependentNormal,
+                return_log_prob=True,
+            ).to(self.device)
 
-        self.actor_student = copy.deepcopy(self.actor_teacher)
+        self.actor_teacher = make_actor()
+        self.actor_student = make_actor()
 
         # Privileged critic: raw teacher keys (not distilled features).
         critic_normed = [_normed_key(k) for k in self.teacher_keys]
@@ -472,7 +473,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             self.update = torch.compile(self.update)
 
     def get_rollout_policy(self, mode: str = "train", critic: bool = False):
-        modules = [self.vecnorm]
+        modules = [self.vecnorm if self.cfg.stage == "teacher" else VecNorm.freeze()(self.vecnorm)]
         if self.cfg.stage == "teacher":
             modules += [self.encoder_teacher, self.from_teacher, self.actor_teacher]
         elif self.cfg.stage == "student":

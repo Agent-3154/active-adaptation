@@ -20,7 +20,8 @@ Keep skills separate from each other and from `TEACHME.md` (shared style only).
 | `ppo_symaug.py` | **Primary template** — sym aug in learner, SPO/PPO, Muon, aux |
 | `ppo.py` | Baseline PPO on `PPOBase`; `symnet` / `symaug` flags |
 | `ppo_base.py` | Legacy shared base — do not subclass for new algos |
-| `common.py` | Keys (`OBS_KEY`, `CMD_KEY`, …), GAE, `ppo_clipped_loss`, `spo_loss`, `make_batch` |
+| `common.py` | Keys, GAE, PPO/SPO losses, `make_batch`, **`hard_copy_` / `soft_copy_`** (strict) |
+| `ppo_teacher_student.py` | Two-stage TS; twin actors via `make_actor()` ×2 (not `deepcopy`) |
 | `fpo.py` | Flow-matching PPO++ (CFM ratio tensors at rollout) |
 | `ppo_rnn.py`, `ppo_him.py`, … | Specialized — read before editing |
 

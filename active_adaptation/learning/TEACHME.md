@@ -44,6 +44,28 @@ This doc is WIP. Refine it as we add algorithms.
 - Expose stabilization knobs in config with safe defaults (advantage clamp, log-ratio clamp, etc.); keep them easy to disable.
 - If symmetry augmentation is used, gate it with a config flag and ensure metrics still work when it is off.
 
+### Cloning modules (`hard_copy_` / `soft_copy_` / `deepcopy`)
+
+Use `hard_copy_` / `soft_copy_` from `learning/ppo/common.py` (also used by off-policy EMA targets). They validate matching **named** parameters/buffers, reject the same module object, reject **shared storage** (`is` / `data_ptr`), and reject still-lazy `Uninitialized*` tensors.
+
+**Do not use `copy.deepcopy` to build twin actors** (e.g. teacher/student heads in `ppo_teacher_student.py`). Prefer calling the same `make_actor()` factory twice. Deepcopy of graphs that still contain `nn.LazyLinear` / `Lazy*` (including `Actor`’s mean head) is a common footgun: the copy carries `UninitializedParameter`s; the first forward on each side materializes **separate** weights (so storage checks pass), but init/`hard_copy_` timing becomes easy to get wrong and failures look like “mysteriously broken” behavior rather than shared weights.
+
+Safe patterns:
+
+```python
+# Twin policies: construct twice, warm both, then copy weights if needed
+self.actor_teacher = make_actor()
+self.actor_student = make_actor()
+# ... fake forward on both ...
+hard_copy_(self.actor_teacher, self.actor_student)
+
+# EMA targets (off-policy): deepcopy only AFTER a warm-up forward has materialized Lazy params
+self.Q_target = copy.deepcopy(self.Q)
+soft_copy_(self.Q, self.Q_target, tau=...)
+```
+
+**Future:** we should and will **deprecate lazy initialization** (`nn.LazyLinear`, lazy MLP input sizes, etc.) in favor of explicit dims from observation/action specs at construct time. New code should prefer eager sizes when practical; when touching `Actor` / `MLP`, avoid adding new Lazy dependencies.
+
 ---
 
 ## On-policy algorithms (`train_ppo.py`)

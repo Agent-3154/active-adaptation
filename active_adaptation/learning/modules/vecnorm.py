@@ -185,10 +185,11 @@ class VecNorm(nn.Module):
 
     class freeze(_DecoratorContextManager):
         def __enter__(self):
+            self.prev_state = VecNorm.FROZEN
             VecNorm.FROZEN = True
         
         def __exit__(self, exc_type, exc_value, traceback):
-            VecNorm.FROZEN = False
+            VecNorm.FROZEN = self.prev_state
 
 
 class VecNormRMS(VecNorm):
