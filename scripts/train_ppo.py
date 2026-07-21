@@ -93,6 +93,8 @@ class TrainConfig:
     total_frames: int = 150_000_000
     """Total environment frames to collect across all ranks before stopping."""
 
+    eval: bool = True
+    """Evaluate the policy after training."""
     eval_render: bool = False
     """Render the environment during the final post-training evaluation."""
     checkpoint_interval: int = 4
@@ -232,6 +234,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     )
 
     wandb_run = None
+    run_name = None
     if aa.is_main_process():
         wandb_run = wandb.init(
             job_type=cfg.wandb.job_type,
@@ -247,7 +250,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         )
         run_idx = wandb_run.name.split("-")[-1]
         wandb_run.name = f"{run_idx}-{default_run_name}"
-        setproctitle(wandb_run.name)
+        run_name = wandb_run.name
 
         run_dir = Path(wandb_run.dir)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -255,6 +258,19 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         OmegaConf.save(cfg, cfg_save_path)
         wandb_run.save(str(cfg_save_path), policy="now")
         wandb_run.save(str(run_dir / "config.yaml"), policy="now")
+
+    if aa.is_distributed():
+        import torch.distributed as dist
+
+        name_list = [run_name]
+        dist.broadcast_object_list(name_list, src=0)
+        run_name = name_list[0]
+
+    if run_name is not None:
+        if aa.is_main_process():
+            setproctitle(run_name)
+        else:
+            setproctitle(f"{run_name}-rank{aa.get_local_rank()}")
 
     from active_adaptation.helpers import make_env_policy, evaluate
     from active_adaptation.utils.helpers import EpisodeStats
@@ -406,12 +422,13 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     run_state: dict[str, str] = {}
     if aa.is_main_process():
         ckpt_path = save(policy, "checkpoint_final")
-        policy_eval = policy.get_rollout_policy("eval")
-        info, trajs, stats = evaluate(
-            env, policy_eval, render=cfg.eval_render, seed=cfg.seed
-        )
-        info["env_frames"] = env_frames
-        wandb_run.log(info)
+        if cfg.eval:
+            policy_eval = policy.get_rollout_policy("eval")
+            eval_info, trajs, stats = evaluate(
+                env, policy_eval, render=cfg.eval_render, seed=cfg.seed
+            )
+            eval_info["env_frames"] = env_frames
+            wandb_run.log(eval_info)
         wandb.finish()
         print(f"Final checkpoint: {ckpt_path}")
         run_state = {

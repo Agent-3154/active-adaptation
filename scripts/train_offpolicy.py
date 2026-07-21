@@ -224,6 +224,17 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         stages = policy.cfg.stages
     else:
         stages = ("",)
+    
+    from tensordict import TensorDict
+    def step_and_maybe_reset(tensordict: TensorDict) -> TensorDict:
+        if tensordict.device != env.device:
+            tensordict = tensordict.to(env.device)
+        tensordict = env.step(tensordict)
+        tensordict_ = env._step_mdp(tensordict)
+        if hasattr(policy, "maybe_reset"):
+            tensordict_ = policy.maybe_reset(tensordict_)
+        tensordict_ = env.maybe_reset(tensordict_)
+        return tensordict, tensordict_
 
     for stage in stages:
         policy.on_stage_start(stage, env)
@@ -249,7 +260,8 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                     carry = rollout_policy(carry)
 
                 with ScopedTimer("env_step") as timer:
-                    td, carry = env.step_and_maybe_reset(carry)
+                    # td, carry = env.step_and_maybe_reset(carry)
+                    td, carry = step_and_maybe_reset(carry)
                     if not private_keys:
                         private_keys = [
                             key
