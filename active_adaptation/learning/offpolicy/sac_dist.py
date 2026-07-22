@@ -70,7 +70,7 @@ clip_grad_norm_ = nn.utils.clip_grad_norm_
 class SACConfig:
     """Soft Actor-Critic with twin **distributional (C51)** critics (``train_offpolicy`` API)."""
 
-    _target_: str = "active_adaptation.learning.offpolicy.sac_dist.SAC"
+    _target_: str = "active_adaptation.learning.offpolicy.sac_dist.SACConfig"
     name: str = "sac_dist"
     train_every: int = 4
     buffer_size: int = 2000
@@ -122,6 +122,8 @@ class SACConfig:
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
+    def get_class(self):
+        return SAC
 
 cs.store(name="sac_dist", node=SACConfig, group="algo")
 

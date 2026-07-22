@@ -71,7 +71,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 @dataclass
 class PPOConfig:
-    _target_: str = "active_adaptation.learning.ppo.ppo.PPOPolicy"
+    _target_: str = "active_adaptation.learning.ppo.ppo.PPOConfig"
     name: str = "ppo"
     train_every: int = 32
     ppo_epochs: int = 4
@@ -99,6 +99,9 @@ class PPOConfig:
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY,)
 
+    def get_class(self):
+        return PPOPolicy
+
 
 cs = ConfigStore.instance()
 cs.store("ppo", node=PPOConfig, group="algo")
@@ -121,7 +124,7 @@ class PPOPolicy(PPOBase):
         env=None,
     ):
         super().__init__()
-        self.cfg = PPOConfig(**cfg)
+        self.cfg = cfg
         self.device = device
 
         self.max_grad_norm = 1.0

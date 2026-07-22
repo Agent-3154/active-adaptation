@@ -30,7 +30,28 @@ This doc is WIP. Refine it as we add algorithms.
 
 - Keep a dedicated algorithm file and register a dataclass config via `ConfigStore` in the same file (`algo=<name>`).
 - Avoid `Literal[...]` on Hydra dataclass fields; use `str` / primitives in the schema and validate allowed values at runtime.
-- Set `_target_` to the policy class (e.g. `active_adaptation.learning.offpolicy.sac.SAC`).
+- **`_target_` points to the config dataclass**, not the policy class. Implement `get_class()` on the config so `helpers.make_env_policy` can resolve the policy after `hydra.utils.instantiate` (this runs `__post_init__`):
+
+```python
+@dataclass
+class PPOConfig:
+    _target_: str = "active_adaptation.learning.ppo.ppo_symaug.PPOConfig"
+    # ... fields ...
+    in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY)
+
+    def __post_init__(self):
+        # derive / normalize fields here (Hydra-safe types: tuple/list, not set)
+        self.in_keys = tuple(self.in_keys)
+
+    def get_class(self):
+        return PPOPolicy
+
+cs.store("ppo_symaug", node=PPOConfig, group="algo")
+```
+
+`make_env_policy` does `cfg = instantiate(algo_cfg); policy_cls = cfg.get_class(); policy_cls.from_env(cfg, ...)`. Legacy configs with `_target_` = policy class still work via a try/except fallback during migration.
+
+Derived fields (e.g. `in_keys` from `teacher_keys` ∪ `student_keys`) **must** be filled in `__post_init__` as tuples/lists — never assign a bare `set` (OmegaConf rejects it).
 
 ### TorchRL / TensorDict
 

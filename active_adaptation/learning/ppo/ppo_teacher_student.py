@@ -109,9 +109,8 @@ def _normed_key(key: str) -> str:
 
 @dataclass
 class PPOTSCfg:
-    _target_: str = (
-        "active_adaptation.learning.ppo.ppo_teacher_student.PPOTeacherStudentPolicy"
-    )
+    _target_: str = "active_adaptation.learning.ppo.ppo_teacher_student.PPOTSCfg"
+    
     name: str = "ppo_ts"
     train_every: int = 32
     ppo_epochs: int = 4
@@ -144,7 +143,16 @@ class PPOTSCfg:
     #   teacher=(command_teacher, policy), student=(command_student, policy)
     teacher_keys: Tuple[str, ...] = (OBS_KEY, OBS_PRIV_KEY)
     student_keys: Tuple[str, ...] = (OBS_KEY,)
-    in_keys: Tuple[str, ...] = tuple(set((*teacher_keys, *student_keys)))
+    # Filled in ``__post_init__`` (Hydra-safe tuple, order-preserving unique).
+    in_keys: Tuple[str, ...] = ()
+
+    def __post_init__(self):
+        self.teacher_keys = tuple(self.teacher_keys)
+        self.student_keys = tuple(self.student_keys)
+        self.in_keys = tuple(set(self.teacher_keys + self.student_keys))
+
+    def get_class(self):
+        return PPOTeacherStudentPolicy
 
 
 cs = ConfigStore.instance()
@@ -221,7 +229,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         act_transform: Optional[SymmetryTransform] = None,
     ):
         super().__init__()
-        self.cfg = PPOTSCfg(**cfg) if not isinstance(cfg, PPOTSCfg) else cfg
+        self.cfg = cfg
         if self.cfg.stage not in ("teacher", "student"):
             raise ValueError(f"Invalid stage: {self.cfg.stage!r}")
         self.device = device
@@ -404,7 +412,6 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
 
     @classmethod
     def from_env(cls, cfg: PPOTSCfg, env: _EnvBase, device: str):
-        cfg = PPOTSCfg(**cfg) if not isinstance(cfg, PPOTSCfg) else cfg
         observation_spec = env.observation_spec
         action_spec = env.action_spec
         reward_spec = env.reward_spec

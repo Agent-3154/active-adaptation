@@ -117,9 +117,19 @@ def make_env_policy(
     env.set_seed(seed)
     
     # setup policy
-    policy_cls = hydra.utils.get_class(algo_cfg._target_)
+    # New pattern: ``_target_`` is the *config* dataclass (so ``__post_init__`` runs
+    # via ``hydra.utils.instantiate``); ``cfg.get_class()`` returns the policy class.
+    # Legacy: ``_target_`` was the policy class — keep a fallback during migration.
+    try:
+        cfg = hydra.utils.instantiate(algo_cfg)
+        policy_cls = cfg.get_class()
+    except Exception:
+        # raise a warning
+        cfg = algo_cfg
+        policy_cls = hydra.utils.get_class(algo_cfg._target_)
+
     print(f"Creating policy {policy_cls} on device {device}")
-    policy = policy_cls.from_env(algo_cfg, env, device=device)
+    policy = policy_cls.from_env(cfg, env, device=device)
     
     if "policy" in state_dict.keys():
         print(colored("[Info]: Load policy from checkpoint.", "green"))

@@ -251,11 +251,25 @@ def make_env_teacher_student(
     env.set_seed(seed)
 
     # --- Teacher (frozen expert; no shared params with student) ---
-    teacher_cls = hydra.utils.get_class(teacher_cfg._target_)
-    print(f"Creating teacher {teacher_cls} on device {device}")
+    # Config ``_target_`` + ``get_class()`` so ``__post_init__`` runs; legacy fallback.
+    try:
+        teacher_algo_cfg = hydra.utils.instantiate(teacher_cfg)
+        teacher_cls = teacher_algo_cfg.get_class()
+    except Exception:
+        teacher_cls = hydra.utils.get_class(teacher_cfg._target_)
+        teacher_algo_cfg = OmegaConf.create(
+            OmegaConf.to_container(teacher_cfg, resolve=True)
+        )
     # ``checkpoint_path`` is script-only; strip before policy construction.
-    teacher_algo_cfg = OmegaConf.create(OmegaConf.to_container(teacher_cfg, resolve=True))
-    teacher_algo_cfg.pop("checkpoint_path", None)
+    if hasattr(teacher_algo_cfg, "checkpoint_path"):
+        teacher_algo_cfg.checkpoint_path = None
+    elif OmegaConf.is_config(teacher_algo_cfg):
+        teacher_algo_cfg = OmegaConf.create(
+            OmegaConf.to_container(teacher_algo_cfg, resolve=True)
+        )
+        teacher_algo_cfg.pop("checkpoint_path", None)
+
+    print(f"Creating teacher {teacher_cls} on device {device}")
     teacher = teacher_cls.from_env(teacher_algo_cfg, env, device=device)
     if "policy" in teacher_state:
         print(colored("[Info]: Load teacher from checkpoint.", "green"))
@@ -267,9 +281,14 @@ def make_env_teacher_student(
         teacher.on_stage_start("eval", env)
 
     # --- Student ---
-    student_cls = hydra.utils.get_class(student_cfg._target_)
+    try:
+        student_cfg_obj = hydra.utils.instantiate(student_cfg)
+        student_cls = student_cfg_obj.get_class()
+    except Exception:
+        student_cfg_obj = student_cfg
+        student_cls = hydra.utils.get_class(student_cfg._target_)
     print(f"Creating student {student_cls} on device {device}")
-    student = student_cls.from_env(student_cfg, env, device=device)
+    student = student_cls.from_env(student_cfg_obj, env, device=device)
     if "policy" in student_state:
         print(colored("[Info]: Load student from checkpoint.", "green"))
         student.load_state_dict(student_state["policy"])

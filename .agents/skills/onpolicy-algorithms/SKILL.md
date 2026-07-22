@@ -41,6 +41,12 @@ PPO is often stage 1 in RLPD recipes (`cfg/recipe/*_rlpd.yaml`) before `rollout.
 
 ---
 
+## Hydra config pattern
+
+`_target_` is the **config dataclass**; `get_class()` returns the policy. `helpers.make_env_policy` instantiates the config (runs `__post_init__`) then calls `from_env`. See `TEACHME.md` (Hydra config). Example: `ppo_symaug.PPOConfig`, `ppo_teacher_student.PPOTSCfg`.
+
+---
+
 ## `ppo.py` vs `ppo_symaug.py`
 
 | | `ppo.py` | `ppo_symaug.py` (preferred template) |
@@ -77,8 +83,9 @@ No replay buffer. All training tensors come from the collected rollout batch.
 ### 1. File + Hydra
 
 - Add `learning/ppo/<name>.py`
-- Dataclass: `_target_`, `name`, `cs.store(name="<name>", node=..., group="algo")`
+- Dataclass: `_target_` = **config class path**, `get_class()` → policy class, `name`, `cs.store(..., group="algo")`
 - No `Literal[...]` in Hydra fields — validate at runtime
+- Derived fields (e.g. union `in_keys`) in `__post_init__` as **tuple/list**, never `set`
 - `ppo/__init__.py` auto-imports `*.py`
 
 ### 2. Network stack

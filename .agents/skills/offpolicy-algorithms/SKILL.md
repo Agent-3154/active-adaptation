@@ -39,6 +39,10 @@ Multi-stage pipelines: see `cfg/recipe/*_rlpd.yaml` (PPO → rollout → `train_
 
 Hydra configs live under `cfg/`; algorithms register via `ConfigStore` in their own file (`algo=<name>`).
 
+### Hydra config pattern
+
+`_target_` → **config dataclass** (not the policy). Add `get_class(self)` returning the policy class so `helpers.make_env_policy` can `instantiate` the config (runs `__post_init__`) then `from_env`. See `TEACHME.md`. Canonical: `sac.SACConfig.get_class() → SAC`.
+
 ---
 
 ## Algorithm variants (pick one, don't fork blindly)

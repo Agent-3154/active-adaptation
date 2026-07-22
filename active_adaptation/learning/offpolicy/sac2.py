@@ -84,7 +84,7 @@ def _init_sac_linear(m: nn.Module, gain: float = 1.0):
 
 @dataclass
 class SACConfig:
-    _target_: str = "active_adaptation.learning.offpolicy.sac2.SAC"
+    _target_: str = "active_adaptation.learning.offpolicy.sac2.SACConfig"
     name: str = "sac2"
     train_every: int = 4
     buffer_size: int = 2000
@@ -138,6 +138,8 @@ class SACConfig:
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
+    def get_class(self):
+        return SAC
 
 cs.store(name="sac2", node=SACConfig, group="algo")
 

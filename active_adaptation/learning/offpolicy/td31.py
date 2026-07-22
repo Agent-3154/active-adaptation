@@ -63,7 +63,7 @@ clip_grad_norm_ = nn.utils.clip_grad_norm_
 class TD3Config:
     """TD3 config for :mod:`train_offpolicy` (``step`` / ``train_op`` API)."""
 
-    _target_: str = "active_adaptation.learning.offpolicy.td31.TD3"
+    _target_: str = "active_adaptation.learning.offpolicy.td31.TD3Config"
     name: str = "td31"
     delayed: int = 2
     train_every: int = 4
@@ -116,6 +116,8 @@ class TD3Config:
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
+    def get_class(self):
+        return TD3
 
 cs.store(name="td31", node=TD3Config, group="algo")
 cs.store(name="td31_pink", node=TD3Config(noise_type="approx_pink"), group="algo")

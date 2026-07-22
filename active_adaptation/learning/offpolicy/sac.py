@@ -104,7 +104,7 @@ def quantile_mse_loss(
 class SACConfig:
     """Soft Actor-Critic with twin **scalar** critics (``train_offpolicy`` API)."""
 
-    _target_: str = "active_adaptation.learning.offpolicy.sac.SAC"
+    _target_: str = "active_adaptation.learning.offpolicy.sac.SACConfig"
     name: str = "sac"
     train_every: int = 4
     buffer_size: int = 2000
@@ -166,6 +166,8 @@ class SACConfig:
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
+    def get_class(self):
+        return SAC
 
 cs.store(name="sac", node=SACConfig, group="algo")
 

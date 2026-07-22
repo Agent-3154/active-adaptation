@@ -54,7 +54,7 @@ from .common import *
 
 @dataclass
 class PPOConfig:
-    _target_: str = "active_adaptation.learning.ppo.ppo_amp.PPOPolicy"
+    _target_: str = "active_adaptation.learning.ppo.ppo_amp.PPOConfig"
     name: str = "ppo_amp"
     train_every: int = 32
     ppo_epochs: int = 5
@@ -77,6 +77,10 @@ class PPOConfig:
     vecnorm: Union[str, None] = None
     checkpoint_path: Union[str, None] = None
     in_keys: List[str] = field(default_factory=lambda: [CMD_KEY, OBS_KEY, OBS_PRIV_KEY])
+
+    def get_class(self):
+        return PPOPolicy
+
 
 cs = ConfigStore.instance()
 cs.store("ppo_amp_train", node=PPOConfig(phase="train", vecnorm="train"), group="algo")

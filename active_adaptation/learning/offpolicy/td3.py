@@ -52,7 +52,7 @@ class TD3Config:
     """
     TD3 Config.
     """
-    _target_: str = "active_adaptation.learning.offpolicy.td3.TD3"
+    _target_: str = "active_adaptation.learning.offpolicy.td3.TD3Config"
     name: str = "td3"
     delayed: int = 2
     train_every: int = 4
@@ -107,6 +107,9 @@ class TD3Config:
     prior_data_schedule_upper: float = 0.2
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
+
+    def get_class(self):
+        return TD3
 
 cs.store(name="td3", node=TD3Config, group="algo")
 

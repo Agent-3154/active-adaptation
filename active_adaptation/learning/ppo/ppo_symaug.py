@@ -78,7 +78,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 @dataclass
 class PPOConfig:
-    _target_: str = "active_adaptation.learning.ppo.ppo_symaug.PPOPolicy"
+    _target_: str = "active_adaptation.learning.ppo.ppo_symaug.PPOConfig"
     name: str = "ppo_symaug"
     train_every: int = 32
     ppo_epochs: int = 4
@@ -107,6 +107,10 @@ class PPOConfig:
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY,) # CMD_KEY is optional. One can embed the command into the observation.
 
+    def get_class(self):
+        return PPOPolicy
+
+
 cs = ConfigStore.instance()
 cs.store("ppo_symaug", node=PPOConfig, group="algo")
 cs.store("ppo_symaug_large", node=PPOConfig(actor_num_units=(512, 512, 512), critic_num_units=(512, 512, 512)), group="algo")
@@ -132,7 +136,7 @@ class PPOPolicy(TensorDictModuleBase):
         act_transform: Optional[SymmetryTransform] = None,
     ):
         super().__init__()
-        self.cfg = PPOConfig(**cfg)
+        self.cfg = cfg
         if self.cfg.debug and self.cfg.compile:
             raise ValueError("Debug mode and compile mode cannot be enabled together")
         self.device = device

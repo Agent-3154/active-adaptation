@@ -72,7 +72,7 @@ clip_grad_norm_ = nn.utils.clip_grad_norm_
 class SACConfig:
     """Scalar twin-critic SAC with SimbaV2 hyperspherical actor / critic."""
 
-    _target_: str = "active_adaptation.learning.offpolicy.sac_simba.SAC"
+    _target_: str = "active_adaptation.learning.offpolicy.sac_simba.SACConfig"
     name: str = "sac_simba"
     train_every: int = 4
     buffer_size: int = 2000
@@ -140,6 +140,8 @@ class SACConfig:
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
+    def get_class(self):
+        return SAC
 
 cs.store(name="sac_simba", node=SACConfig, group="algo")
 

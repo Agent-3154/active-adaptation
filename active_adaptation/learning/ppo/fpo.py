@@ -209,7 +209,7 @@ class FlowMatchingActor(nn.Module):
 
 @dataclass
 class FPOConfig:
-    _target_: str = "active_adaptation.learning.ppo.fpo.FPOPolicy"
+    _target_: str = "active_adaptation.learning.ppo.fpo.FPOConfig"
     name: str = "fpo"
     train_every: int = 32
     ppo_epochs: int = 4
@@ -246,6 +246,9 @@ class FPOConfig:
     debug: bool = False
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY)
 
+    def get_class(self):
+        return FPOPolicy
+
 
 cs = ConfigStore.instance()
 cs.store("fpo", node=FPOConfig, group="algo")
@@ -273,7 +276,7 @@ class FPOPolicy(TensorDictModuleBase):
     ):
         del reward_spec
         super().__init__()
-        self.cfg = FPOConfig(**cfg)
+        self.cfg = cfg
         if self.cfg.debug and self.cfg.compile:
             raise ValueError("Debug mode and compile mode cannot be enabled together")
         if self.cfg.trust_region_mode not in ("ppo", "spo", "aspo"):

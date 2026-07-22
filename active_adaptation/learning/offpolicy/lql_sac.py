@@ -276,7 +276,7 @@ def lql_critic_loss(
 
 @dataclass
 class LQLSACConfig:
-    _target_: str = "active_adaptation.learning.offpolicy.lql_sac.LQLSAC"
+    _target_: str = "active_adaptation.learning.offpolicy.lql_sac.LQLSACConfig"
     name: str = "lql_sac"
     train_every: int = 4
     buffer_size: int = 2000
@@ -320,6 +320,8 @@ class LQLSACConfig:
     prior_data_ratio: float = 0.4
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
+    def get_class(self):
+        return LQLSAC
 
 cs.store(name="lql_sac", node=LQLSACConfig, group="algo")
 
