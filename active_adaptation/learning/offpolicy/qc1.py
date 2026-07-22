@@ -54,12 +54,12 @@ def _init_linear(m: nn.Module, gain: float = 1.0):
         nn.init.zeros_(m.bias)
 
 @dataclass
-class QCConfig:
+class QC1Config:
     """
-    QC config.
+    QC1 config.
     """
-    _target_: str = "active_adaptation.learning.offpolicy.qc.QC"
-    name: str = "qc"
+    _target_: str = "active_adaptation.learning.offpolicy.qc.QC1"
+    name: str = "qc1"
 
     # general setting
     debug: bool = False
@@ -100,7 +100,7 @@ class QCConfig:
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
 
 
-cs.store(name="qc", node=QCConfig, group="algo")
+cs.store(name="qc1", node=QC1Config, group="algo")
 
 
 class CriticTrunk(nn.Module):
@@ -166,46 +166,58 @@ class SimpleDoubleCritic(nn.Module):
             return einops.rearrange(qs, "(batch k) fused -> batch k fused", batch=b, k=k)
         raise ValueError(f"act must be rank 2 or 3, got shape {tuple(act.shape)}")
 
+def _init_sac_linear(m: nn.Module, gain: float = 1.0):
+    if isinstance(m, nn.Linear):
+        nn.init.orthogonal_(m.weight, gain=gain)
+        nn.init.zeros_(m.bias)
 
-class ActorVectorField(nn.Module):
+import math
+class NormalActor(nn.Module):
+
     def __init__(
         self,
-        obs_dim,
-        action_dim,
-        hidden_num: int = 4,
-        hidden_dim: int = 512,
-        action_init: Literal['orthogonal', 'zeros'] = 'orthogonal'
+        obs_dim: int,
+        act_dim: int,
+        std_max: float = 1.0,
+        std_min: float = 0.001,
+        action_init: Literal["zeros", "orthogonal"] = "zeros",
     ):
         super().__init__()
-        self.in_layer = nn.Linear(obs_dim + action_dim + 1, hidden_dim)
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+
+        self.in_layer = nn.Linear(obs_dim, 384)
         self.in_layer.weight._non_muon = True
-        self.trunk = nn.Sequential()
-
-        for _ in range(hidden_num):
-            self.trunk.append(
-                ConditionalBlock(
-                    hidden_dim=hidden_dim, condition_dim=0, norm="rms"
-                )
-            )
-        self.trunk.append(nn.RMSNorm(hidden_dim))
-        self.action = nn.Linear(hidden_dim, action_dim)
+        self.trunk = nn.Sequential(
+            ConditionalBlock(hidden_dim=384, condition_dim=0, norm="rms"),
+            ConditionalBlock(hidden_dim=384, condition_dim=0, norm="rms"),
+            nn.RMSNorm(384),
+        )
+        self.action = nn.Linear(384, act_dim * 2)
         self.action.weight._non_muon = True
-        self.trunk.apply(_init_linear)
-
+        self.trunk.apply(_init_sac_linear)
+        
         if action_init == "orthogonal":
-            self.action.apply(
-                lambda m: _init_linear(m, gain=0.01)
-            )
+            self.action.apply(lambda m: _init_sac_linear(m, gain=0.01))
         elif action_init == "zeros":
-            nn.init.zeros_(self.action.weight)
-            nn.init.zeros_(self.action.bias)
+            # zero-init following FastSAC
+            nn.init.constant_(self.action.weight, 0.0) # zero-init the weight
+            nn.init.constant_(self.action.bias, 0.0) # zero-init the bias
         else:
             raise ValueError(f"Invalid action_init: {action_init}")
-        
-    def forward(self, observation, actions, time):
-        input = torch.concat([observation, actions, time], dim=-1)
-        action = self.trunk(self.in_layer(input))
-        return self.action(action)
+
+        if not std_max > 0.0:
+            raise ValueError("std_max must be positive")
+        self.log_std_max = math.log(std_max)
+        self.log_std_min = math.log(std_min)
+
+    def forward(self, obs: torch.Tensor, ):
+        feat = self.trunk(self.in_layer(obs))
+        mean, raw = self.action(feat).chunk(2, dim=-1)
+        # log_std = self.log_std_max - F.softplus(raw)
+        log_std = self.log_std_min + (self.log_std_max - self.log_std_min) * 0.5 * (1 + torch.tanh(raw))
+        return mean, torch.exp(log_std)
+
 
 
 def TwinScalarCritic(
@@ -226,10 +238,10 @@ def TwinScalarCritic(
     return ScalarCritic(module)
 
 
-class QC(TensorDictModuleBase):
+class QC1(TensorDictModuleBase):
     def __init__(
         self,
-        cfg: QCConfig,
+        cfg: QC1Config,
         observation_spec: Composite,
         action_spec: Composite,
         reward_spec: Composite,
@@ -296,12 +308,7 @@ class QC(TensorDictModuleBase):
         self.Q_target.requires_grad_(False)
         self.Q_target.eval()
 
-        self.actor = ActorVectorField(
-            obs_dim=self.obs_dim,
-            action_dim=self.full_action_dim,
-            hidden_num=len(actor_hidden_dims),
-            hidden_dim=actor_hidden_dims[0],
-        ).to(device)
+        self.actor = NormalActor(self.obs_dim, self.full_action_dim)
 
         # Pre-register timestep values for flow integration (avoids per-iteration allocations).
         ts = torch.arange(cfg.flow_steps, dtype=torch.float32, device=device) / cfg.flow_steps
@@ -322,13 +329,7 @@ class QC(TensorDictModuleBase):
             self.opt_actor = torch.optim.AdamW(self.actor.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
             self.opt_Q = torch.optim.AdamW(self.Q.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
 
-        if self.cfg.compile_flow:
-            self.compute_flow_actions = torch.compile(
-                self.compute_flow_actions, mode="reduce-overhead",
-            )
-
-        self.policy_offline_steps = 0
-        self.critic_steps = 0
+        self.offline_steps = 0
         self.online_steps = 0
 
 
@@ -358,7 +359,7 @@ class QC(TensorDictModuleBase):
         
 
     @classmethod
-    def from_env(cls, cfg: QCConfig, env, device: torch.device):
+    def from_env(cls, cfg: QC1Config, env, device: torch.device):
         """
         Create QC agent from env.
         """
