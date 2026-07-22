@@ -468,6 +468,12 @@ class SAC(TensorDictModuleBase):
             return self.train_op()
         else:
             return {}
+    
+    def maybe_reset(self, next_tensordict: TensorDict):
+        done = next_tensordict["done"]
+        if done.any():
+            pass
+        return next_tensordict
 
     @ScopedTimer("sac_train")
     @VecNorm.freeze()

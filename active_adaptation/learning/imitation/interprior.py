@@ -77,7 +77,7 @@ from active_adaptation.utils.profiling import ScopedTimer
 @dataclass
 class InterPriorCfg:
     _target_: str = (
-        "active_adaptation.learning.imitation.interprior.InterPriorPolicy"
+        "active_adaptation.learning.imitation.interprior.InterPriorCfg"
     )
     name: str = "interprior"
 
@@ -112,6 +112,9 @@ class InterPriorCfg:
 
     compile: bool = False
     debug: bool = False
+
+    def get_class(self):
+        return InterPriorPolicy
 
 
 cs = ConfigStore.instance()
@@ -203,8 +206,6 @@ class InterPriorPolicy(TensorDictModuleBase):
         device,
     ):
         super().__init__()
-        if not isinstance(cfg, InterPriorCfg):
-            cfg = InterPriorCfg(**cfg)
         self.cfg = cfg
         self.device = device
         self.observation_spec = observation_spec

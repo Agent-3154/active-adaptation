@@ -208,6 +208,12 @@ class IsaacSceneAdapter(SceneAdapter):
             device=env_ids.device,
         )
         return terrain_origins[idx]
+    
+    def reset_to(self, state: dict, env_ids: torch.Tensor):
+        self._scene.reset_to(state, env_ids=env_ids)
+    
+    def get_state(self, env_ids: torch.Tensor) -> dict:
+        return self._scene.get_state(env_ids=env_ids)
 
 
 __all__ = [
