@@ -137,3 +137,8 @@ randomization:
   reset_joint_states_scale:
     pos_scales:
       .*: [0.8, 1.2]
+  push_body:
+    body_names: "base_link"
+    force_range: [20, 60]
+    min_interval: 100
+    decay: 0.9

@@ -111,3 +111,8 @@ randomization:
     F[L,R]_thigh_joint: [-0.05, 0.05]
     R[L,R]_thigh_joint: [-0.05, 0.05]
     .*calf_joint: [-0.05, 0.05]
+  push_body:
+    body_names: "base_link"
+    force_range: [20, 60]
+    min_interval: 100
+    decay: 0.9
