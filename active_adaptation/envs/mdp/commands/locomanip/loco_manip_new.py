@@ -20,7 +20,7 @@ from active_adaptation.utils.math import (
     yaw_quat,
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
-from tensordict import TensorClass
+from tensordict import TensorClass, TensorDictBase
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -341,7 +341,7 @@ class LocoManipNew(CommandV2):
         raise ValueError(f"Invalid key: {key}")
 
     @override
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         resample = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         resample[env_ids] = True
         # always start in nominal mode

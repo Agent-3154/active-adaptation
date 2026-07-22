@@ -3,6 +3,7 @@ import numpy as np
 import einops
 from typing import Tuple, TYPE_CHECKING
 from typing_extensions import override
+from tensordict import TensorDictBase
 
 import active_adaptation
 from .base import ObservationV2
@@ -104,7 +105,7 @@ class root_angvel_b(ObservationV2):
         self.update()
 
     @override
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.buffer[env_ids] = 0.0
 
     @override

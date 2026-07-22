@@ -11,6 +11,7 @@ from active_adaptation.utils.string import resolve_matching_names_values
 from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
 
 from .base import ActionV2
+from tensordict import TensorDictBase
 
 
 if TYPE_CHECKING:
@@ -147,7 +148,7 @@ class _DelayedJointAction(ActionV2):
         return len(self.joint_ids)
 
     @override
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.delay[env_ids] = torch.randint(
             0, self.max_delay + 1, (len(env_ids), 1), device=self.device
         )
@@ -211,8 +212,8 @@ class JointPosition(_DelayedJointAction):
         return f"JointPosition(joint_names={self.joint_names}, joint_ids={self.joint_ids.tolist()})"
 
     @override
-    def reset(self, env_ids: torch.Tensor):
-        super().reset(env_ids)
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        super().reset(env_ids, tensordict)
         default_joint_pos = self.asset.data.default_joint_pos[env_ids.unsqueeze(1), self.joint_ids]
         self.default_joint_pos[env_ids] = default_joint_pos + self.offset[env_ids]
 
@@ -298,8 +299,8 @@ class JointReferenceModel(_DelayedJointAction):
         )
 
     @override
-    def reset(self, env_ids: torch.Tensor):
-        super().reset(env_ids)
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        super().reset(env_ids, tensordict)
         default_joint_pos = self.asset.data.default_joint_pos[
             env_ids.unsqueeze(1), self.joint_ids
         ]
@@ -405,8 +406,8 @@ class JointLeakyVelocityModel(_DelayedJointAction):
         )
 
     @override
-    def reset(self, env_ids: torch.Tensor):
-        super().reset(env_ids)
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        super().reset(env_ids, tensordict)
         default_joint_pos = self.asset.data.default_joint_pos[
             env_ids.unsqueeze(1), self.joint_ids
         ]
@@ -553,8 +554,8 @@ class JointPositionWithVelocityForward(_DelayedJointAction):
         self._jpos_target = self.default_joint_pos.clone()
 
     @override
-    def reset(self, env_ids: torch.Tensor):
-        super().reset(env_ids)
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        super().reset(env_ids, tensordict)
         default_joint_pos = self.asset.data.default_joint_pos[env_ids.unsqueeze(1), self.joint_ids]
         self.default_joint_pos[env_ids] = default_joint_pos + self.offset[env_ids]
         self._jpos_target[env_ids] = self.default_joint_pos[env_ids]
@@ -611,8 +612,8 @@ class JointPositionDelta(_DelayedJointAction):
         self.jpos_target = self.default_joint_pos.clone()
 
     @override
-    def reset(self, env_ids: torch.Tensor):
-        super().reset(env_ids)
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        super().reset(env_ids, tensordict)
         self.jpos_target[env_ids] = self.default_joint_pos[env_ids]
 
     @override
@@ -708,7 +709,7 @@ class CorrelatedJointPosition(ActionV2):
         )
 
     @override
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self.action_buf[env_ids] = 0.0
         self.applied_action[env_ids] = 0.0
         self.default_joint_pos[env_ids] = self.asset.data.default_joint_pos[

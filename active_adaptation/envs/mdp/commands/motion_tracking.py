@@ -1,6 +1,7 @@
 import torch
 
 from typing import TYPE_CHECKING
+from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
@@ -85,7 +86,7 @@ class MotionTrackingCommand(Command):
         init_root_state[:, 3:7] = motion.root_link_quat_w[:, 0].to(self.device)
         return init_root_state
     
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.t[env_ids] = 0
 
     @property

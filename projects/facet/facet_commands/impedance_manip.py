@@ -14,7 +14,7 @@ from active_adaptation.utils.math import (
     yaw_rotate,
 )
 
-from tensordict import TensorClass
+from tensordict import TensorClass, TensorDictBase
 from pathlib import Path
 from active_adaptation.envs.mdp.utils.forces import ConstantForce, SpringForce, ImpulseForce
 from active_adaptation.utils.symmetry import SymmetryTransform
@@ -391,7 +391,7 @@ class ImpedanceCommandManager(Command):
         )
         self.asset.has_external_wrench = True
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         root_link_pos = self.asset.data.root_link_pos_w[env_ids]
         root_link_rpy = euler_from_quat(self.asset.data.root_link_quat_w[env_ids])
         self.pos_base.pos_w[env_ids] = root_link_pos.unsqueeze(1)

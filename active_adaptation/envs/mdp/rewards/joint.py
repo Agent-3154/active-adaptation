@@ -1,5 +1,6 @@
 import torch
 from typing import TYPE_CHECKING
+from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -257,7 +258,7 @@ class joint_deviation_cum(RewardV2):
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
         self.cum_deviation = torch.zeros(self.num_envs, len(self.joint_ids), device=self.device)
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.cum_deviation[env_ids] = 0.0
 
     def update(self):

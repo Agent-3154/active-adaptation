@@ -8,6 +8,7 @@ from typing_extensions import override
 from active_adaptation.utils.symmetry import SymmetryTransform
 
 from .base import ActionV2
+from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -45,7 +46,7 @@ class UnderwaterThrottle(ActionV2):
         self.alpha = torch.ones(self.num_envs, 1, device=self.device)
 
     @override
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         alpha = torch.empty(len(env_ids), 1, device=self.device)
         alpha.uniform_(self.alpha_range[0], self.alpha_range[1])
         self.alpha[env_ids] = alpha

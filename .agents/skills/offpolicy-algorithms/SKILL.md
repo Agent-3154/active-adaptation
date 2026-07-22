@@ -14,7 +14,7 @@ Research-oriented codebase: **one algorithm file per variant**, pseudocode-shape
 
 Read `reference.md` in this skill for the algorithm catalog and shared-module map.
 
-**Related skills:** `onpolicy-algorithms` (PPO / `train_ppo.py`), future `environment-mdp` (tasks / MDP terms).
+**Related skills:** `onpolicy-algorithms` (PPO / `train_ppo.py`), `environment-mdp` (tasks / MDP terms).
 
 ---
 

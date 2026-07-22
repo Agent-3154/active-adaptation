@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Tuple
 
 import torch
 from typing_extensions import override
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 
 from active_adaptation.utils.math import (
     clamp_norm,
@@ -229,7 +229,7 @@ class LocoManipObject(_LocoManipObjectBase):
         raise ValueError(f"Invalid key: {key!r}; expected 'object'")
 
     @override
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self._sample_target(env_ids)
         self.grasp_height_per_env[env_ids] = self._sample_uniform(len(env_ids), self.grasp_height_range, self.device)
     
@@ -627,7 +627,7 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         self.cmd_eef_status[env_ids, 0] = 1
 
     @override
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self.sample_commands(env_ids)
         # compute standoff position # do not extract as method
         robot_w = self.asset.data.root_link_pos_w[env_ids]
@@ -771,7 +771,7 @@ class object_distance_progress(RewardV2[LocoManipObject]):
         self.rew = torch.zeros(self.num_envs, 1, device=self.device)
 
     @override
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self.prev_error_norm[env_ids] = self.command_manager.object_target_error_norm[
             env_ids
         ]

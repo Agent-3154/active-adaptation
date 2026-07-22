@@ -8,7 +8,7 @@ Canonical source: `.agents/skills/` (committed; Cursor discovers this path).
 .agents/skills/
 ├── onpolicy-algorithms/   # train_ppo.py, learning/ppo/
 ├── offpolicy-algorithms/  # train_offpolicy.py, learning/offpolicy/
-└── environment-mdp/       # planned — tasks, rewards, commands
+└── environment-mdp/       # tasks, rewards, commands, obs, terms
 ```
 
 Keep skills separate from each other and from `TEACHME.md` (shared style only).

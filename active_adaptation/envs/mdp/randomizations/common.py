@@ -12,6 +12,7 @@ from active_adaptation.utils.math import quat_rotate_inverse
 from active_adaptation.utils.profiling import ScopedTimer
 
 import active_adaptation.utils.string as string_utils
+from tensordict import TensorDictBase
 
 
 if active_adaptation.get_backend() == "isaac":
@@ -159,7 +160,7 @@ class motor_params(RandomizationV2):
             self.ranges["armature"] = (low, high - low)
             self.write_func["armature"] = self.asset.write_joint_armature_to_sim
         
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         for key, indices in self.indices.items():
             low, range = self.ranges[key]
             values = torch.rand(len(env_ids), len(indices), device=self.device) * range + low
@@ -356,7 +357,7 @@ class motor_params_implicit(RandomizationV2):
             )
             self.asset.write_joint_armature_to_sim(armature, self.armature_id, env_ids)
 
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         if env_ids.numel() == 0:
             return
 
@@ -432,7 +433,7 @@ class random_motor_failure(RandomizationV2):
         # hard-coded
         self._body_ids = self.asset.find_bodies(".*calf.*")[0]
         
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.motor_failure[env_ids] = -1.0
         with torch.device(self.device):
             env_ids = env_ids[torch.rand(len(env_ids)) < self.failure_prob]
@@ -830,7 +831,7 @@ class perturb_root_vel(RandomizationV2):
         rand = torch.rand((n, 6), dtype=torch.float32, device=self.device)
         return self.low.unsqueeze(0) + (self.high - self.low).unsqueeze(0) * rand
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         if env_ids.numel() == 0:
             return
         env_ids_cpu = env_ids.to(device="cpu")
@@ -892,7 +893,7 @@ class reset_joint_states_uniform(RandomizationV2):
         self.default_joint_vel = self.asset.data.default_joint_vel[:, self.joint_ids].float()
         self.joint_limits = self.asset.data.joint_pos_limits[0, self.joint_ids].float().unbind(-1)
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         shape = (len(env_ids), len(self.joint_ids))
         init_pos = sample_uniform(shape, *self.pos_ranges, self.device)
         if self.rel:
@@ -929,7 +930,7 @@ class reset_joint_states_scale(RandomizationV2):
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids]
         self.default_joint_vel = self.asset.data.default_joint_vel[:, self.joint_ids]
     
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         init_pos = random_scale(
             self.default_joint_pos[env_ids], 
             *self.pos_scales, 
@@ -966,7 +967,7 @@ class push_body(RandomizationV2):
             self.forces = torch.zeros(self.env.num_envs, len(self.body_indices), 3)
             self.torques = torch.zeros(self.env.num_envs, len(self.body_indices), 3)
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.forces[env_ids] = 0.
         self.last_push[env_ids] = 0.
 
@@ -1015,7 +1016,7 @@ class drag(RandomizationV2):
             self.forces = torch.zeros(self.env.num_envs, len(self.body_indices), 3)
             self.torques = torch.zeros(self.env.num_envs, len(self.body_indices), 3)
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.forces[env_ids] = 0.
 
     def step(self, substep):
@@ -1055,7 +1056,7 @@ class stumble(RandomizationV2):
     def startup(self):
         self.feet_height: torch.Tensor = self.asset.data.feet_height
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         friction = torch.empty(len(env_ids), 1, 1, device=self.device)
         friction.uniform_(*self.friction_range)
         self.friction_coef[env_ids] = friction
@@ -1109,7 +1110,7 @@ class pull(RandomizationV2):
             self.apply_drag = torch.zeros(self.num_envs, 1, dtype=bool)
             self.drag_magnitude = torch.zeros(self.num_envs, 1)
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.forces[env_ids] = 0.
         
         # pull direction
@@ -1150,7 +1151,7 @@ class random_joint_offset(RandomizationV2):
 
         self.action_manager = self.env.action_manager
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         if env_ids.numel() == 0:
             return
         low = self.offset_range[:, 0].unsqueeze(0)
@@ -1308,7 +1309,7 @@ class constant_force(RandomizationV2):
         full_torques_b[arange, self.body_id] = torques_b
         _set_external_wrench(self.asset, full_forces_b, full_torques_b)
     
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.force.duration.data[env_ids] = 0.
         
     def update(self):

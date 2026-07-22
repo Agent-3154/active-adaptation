@@ -6,6 +6,7 @@ from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_q
 from .base import RewardV2
 from active_adaptation.envs.mdp.commands.locomotion import Twist
 from active_adaptation.envs.utils import find_sensor_bodies
+from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
@@ -123,7 +124,7 @@ class linvel_exp(RewardV2[Twist]):
         self.linvel_w_sum = torch.zeros(self.num_envs, 3, device=self.device)
         self.count = torch.zeros(self.num_envs, 1, device=self.device)
 
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.linvel_w_sum[env_ids] = 0.0
         self.count[env_ids] = 0.0
 

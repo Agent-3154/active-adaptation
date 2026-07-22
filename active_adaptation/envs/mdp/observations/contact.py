@@ -4,6 +4,7 @@ from typing_extensions import override
 from .base import ObservationV2
 from active_adaptation.utils.math import quat_rotate_inverse
 from active_adaptation.utils.symmetry import cartesian_space_symmetry
+from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -57,7 +58,7 @@ class last_contact_pos(ObservationV2):
 
         self.update()
 
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         """Clear episodic contact flags and latched positions for ``env_ids``."""
         self.has_contact[env_ids] = False
         self.last_contact_pos_w[env_ids] = 0.0

@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from typing import TYPE_CHECKING, Any
+from tensordict import TensorDictBase
 
 
 if TYPE_CHECKING:
@@ -44,7 +45,18 @@ class MDPComponent:
     def startup(self) -> None:
         pass
 
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
+        """Reset per-env state for ``env_ids``.
+
+        Both arguments are required. Terms may read from and write into
+        ``tensordict`` (e.g. controlled / curriculum resets). Most terms leave
+        it unused.
+
+        Note:
+            Initial root/joint state is still set via ``command_manager.sample_init``
+            in ``_reset_idx`` before these callbacks run. A future change will move
+            that responsibility into ``reset``.
+        """
         pass
 
     def update(self) -> None:

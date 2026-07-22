@@ -3,6 +3,7 @@ import torch
 from active_adaptation.envs.mdp.commands.base import Command
 from active_adaptation.utils.math import quat_rotate_inverse, sample_quat_yaw
 from active_adaptation.utils.symmetry import SymmetryTransform
+from tensordict import TensorDictBase
 
 
 class Game(Command):
@@ -66,9 +67,9 @@ class Game(Command):
         init_root_state[:, 3:7] = sample_quat_yaw(len(env_ids), device=self.device)
         return init_root_state
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.target_caught_time[env_ids] = 0.0
-        return super().reset(env_ids)
+        return super().reset(env_ids, tensordict)
 
     def update(self):
         self.target_pos_w = torch.stack(

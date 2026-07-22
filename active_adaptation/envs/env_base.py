@@ -482,6 +482,9 @@ class _EnvBase(EnvBase, RegistryMixin):
             env_ids = env_mask.nonzero().squeeze(-1)
         else:
             env_ids = torch.arange(self.num_envs, device=self.device)
+            tensordict = TensorDict(
+                {}, batch_size=[self.num_envs], device=self.device
+            )
 
         if len(env_ids):
             num_envs = env_ids.numel()
@@ -493,7 +496,8 @@ class _EnvBase(EnvBase, RegistryMixin):
 
             self._reset_idx(env_ids)
             self.scene.reset(env_ids)
-            [callback(env_ids) for callback in self._reset_callbacks]
+            # MDP terms: reset(env_ids, tensordict) — may read/write tensordict
+            [callback(env_ids, tensordict) for callback in self._reset_callbacks]
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
         tensordict.update(self.observation_spec.zero())

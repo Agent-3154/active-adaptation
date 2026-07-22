@@ -49,11 +49,12 @@ git clone git@github.com:btx0424/active-adaptation.git
 cd active-adaptation
 
 # shared tooling / backend-agnostic environment
+# you may `uv python pin 3.11` to share uv's cache across backends
 uv sync
 
 # backend-specific environments
 uv sync --project venv/isaac51
-uv sync --project venv/isaac60
+# uv sync --project venv/isaac60 # not supported yet
 uv sync --project venv/mjlab
 ```
 
@@ -88,9 +89,9 @@ uv run aa-list-tasks
 uv run pyright active_adaptation
 
 # backend-specific runs
-uv run --project venv/isaac51 python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
-uv run --project venv/isaac60 python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
-uv run --project venv/mjlab python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
+uv run --project venv/isaac51 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
+# uv run --project venv/isaac60 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo # not supported yet
+uv run --project venv/mjlab scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
 
 # multi-GPU helper (DDP via torchrun)
 uv run --project venv/isaac51 ./scripts/launch_ddp.sh 0,1 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo

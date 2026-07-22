@@ -16,7 +16,7 @@ Research-oriented codebase: **one algorithm file per variant**, pseudocode-shape
 
 Read `reference.md` in this skill for file map and loop diagram.
 
-**Related skills:** `offpolicy-algorithms` (replay-based SAC/TD3), future `environment-mdp` (tasks / MDP terms).
+**Related skills:** `offpolicy-algorithms` (replay-based SAC/TD3), `environment-mdp` (tasks / MDP terms).
 
 ---
 

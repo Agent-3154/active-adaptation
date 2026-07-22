@@ -6,6 +6,7 @@ from .base import ObservationV2
 from active_adaptation.utils.math import normal_noise
 from active_adaptation.utils.symmetry import joint_space_symmetry
 from active_adaptation.envs.utils import find_joints
+from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -169,7 +170,7 @@ class joint_vel_multistep(joint_observation):
             self.joint_vel_substep = torch.zeros(shape, device=self.device)
 
     @override
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.noise_std[env_ids] = (
             torch.rand(len(env_ids), self.num_joints, device=self.device) * self.noise_std_max
         )

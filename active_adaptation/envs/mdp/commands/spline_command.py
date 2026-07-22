@@ -5,6 +5,7 @@ from ..rewards.base import Reward
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
 from active_adaptation.utils.symmetry import SymmetryTransform
 import active_adaptation.utils.spline as spline
+from tensordict import TensorDictBase
 
 
 class SplineCommand(Command):
@@ -40,7 +41,7 @@ class SplineCommand(Command):
             )
             self.control_points_marker.set_visibility(True)
     
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.spline_t[env_ids] = 0.0
         self.spline_ps[env_ids] = spline.create_from(
             self.asset.data.root_pos_w[env_ids, :2],

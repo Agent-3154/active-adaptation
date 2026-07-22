@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Tuple
 
 import torch
+from tensordict import TensorDictBase
 from typing_extensions import override
 
 from active_adaptation.utils.math import (
@@ -104,8 +105,8 @@ class LocoManipBusketScripted(LocoManipObjectScripted):
         self.grasp_height_per_env[env_ids] = self.grasp_offset_obj[2]
 
     @override
-    def reset(self, env_ids: torch.Tensor) -> None:
-        super().reset(env_ids)
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
+        super().reset(env_ids, tensordict)
         self._sample_lift_offsets(env_ids)
 
     def _sample_lift_offsets(self, env_ids: torch.Tensor) -> None:

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Tuple
 import torch
 import torch.nn.functional as F
 from typing_extensions import override
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 
 from active_adaptation.utils.math import (
     clamp_norm,
@@ -682,7 +682,7 @@ class SingleEEFLocoManip(CommandV2):
         )        
 
     @override
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self.sample_commands(env_ids)
         # self._sync_world_frames()
         self.base_pos_error[env_ids] = 0.0
@@ -943,7 +943,7 @@ class eef_pos_progress(RewardV2[SingleEEFLocoManip]):
         self.rew = torch.zeros(self.num_envs, 1, device=self.device)
 
     @override
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self.prev_pos_error_norm[env_ids] = self.command_manager.pos_error_norm[
             env_ids
         ]

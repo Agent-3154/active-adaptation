@@ -5,7 +5,7 @@ import torch.distributions as D
 import warp as wp
 from typing import TYPE_CHECKING, Sequence, Tuple
 from typing_extensions import override
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -240,7 +240,7 @@ class Twist(CommandV2):
         return super().sample_init(env_ids)
 
     @override
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.next_command_linvel[env_ids] = 0.0
         self.cmd_linvel_b[env_ids] = 0.0
         self.target_yaw[env_ids] = self.asset.data.heading_w[env_ids, None]
@@ -595,7 +595,7 @@ class PositionVelocityTracking(CommandV2):
         return super().sample_init(env_ids)
 
     @override
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.ref_pos_w[env_ids] = self.asset.data.root_link_pos_w[env_ids]
         self.ref_yaw_w[env_ids] = self.asset.data.heading_w[env_ids, None]
         self.ref_linvel_b[env_ids] = 0.0

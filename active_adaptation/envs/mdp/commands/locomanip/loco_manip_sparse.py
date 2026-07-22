@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Tuple
 import torch
 import warp as wp
 from typing_extensions import override
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 
 from active_adaptation.utils.math import (
     quat_mul,
@@ -695,7 +695,7 @@ class LocoManipSparse(LocoManipSparseBase):
         self.cmd_eef_pos_w[env_ids] = target
 
     @override
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self.eef_pos_reached[env_ids] = False
         self.sample_commands(env_ids)
         # Heading-frame EEF for newly sampled world goals (obs/reward before first update).
@@ -1115,7 +1115,7 @@ class LocoManipSparseReplay(LocoManipSparseBase):
         )
 
     @override
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self.eef_pos_reached[env_ids] = False
         self.sparse_mode[env_ids] = MODE_GOAL_REACHING
         self.sample_commands(env_ids)

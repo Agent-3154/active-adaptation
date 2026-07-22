@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import einops
 
+from tensordict import TensorDictBase
 from active_adaptation.envs.mdp.commands.base import Command
 from active_adaptation.envs.mdp.commands.locomotion import Twist
 import isaaclab.utils.math as math_utils
@@ -220,7 +221,7 @@ class Impedance(Command):
         # currently only used for smoothing the rewards
         return self.asset.data.body_lin_vel_w[:, self.body_ids].mean(1)
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.sample_command_world(env_ids)
         # self.sample_command_compliant(env_ids)
         self._cum_error[env_ids] = 0.0
@@ -642,7 +643,7 @@ class ImpedanceImpulse(Impedance):
         self.ep_id[env_ids] = self.ep_id[env_ids] + 1
         return init_root_state
 
-    def reset(self, env_ids, reward_stats=None):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.sample_command_setvel(env_ids)
         self.set_linvel[env_ids, 0] = self.X_VEL
         self.lin_kp[env_ids] = 12.
@@ -841,8 +842,8 @@ class VelocityImpulse(Twist):
         self.ep_id[env_ids] = self.ep_id[env_ids] + 1
         return init_root_state
     
-    def reset(self, env_ids, reward_stats=None):
-        super().reset(env_ids, reward_stats)
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        super().reset(env_ids, tensordict)
         self.constand_force.duration.data[env_ids] = 0.
         self.sample_vel_command(env_ids)
         self.sample_yaw_command(env_ids)
@@ -952,8 +953,8 @@ class VelocityCollision(Twist):
         # self.ep_id[env_ids] = self.ep_id[env_ids] + 1
         return init_root_state
     
-    def reset(self, env_ids, reward_stats=None):
-        super().reset(env_ids, reward_stats)
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        super().reset(env_ids, tensordict)
         self.sample_vel_command(env_ids)
         self.sample_yaw_command(env_ids)
     

@@ -7,6 +7,7 @@ from typing_extensions import override
 import active_adaptation
 from active_adaptation.envs.mdp.randomizations.base import RandomizationV2
 from active_adaptation.envs.mdp.randomizations.common import NestedRangeType
+from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -116,7 +117,7 @@ class actuator_pd_gains(RandomizationV2):
             self.kd_ctrl_ids = None
 
     @override
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         if self.env.backend == "mjlab":
             if self.kp_ctrl_ids is not None:
                 rand = torch.rand(len(env_ids), len(self.kp_ctrl_ids), device=self.device)

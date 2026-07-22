@@ -8,6 +8,7 @@ Focused playbooks for implementing RL in this repo. **Location:** `.agents/skill
 |-------|----------------|
 | [.agents/skills/onpolicy-algorithms/SKILL.md](.agents/skills/onpolicy-algorithms/SKILL.md) | PPO, `train_ppo.py`, `learning/ppo/` |
 | [.agents/skills/offpolicy-algorithms/SKILL.md](.agents/skills/offpolicy-algorithms/SKILL.md) | SAC, `train_offpolicy.py`, `learning/offpolicy/` |
+| [.agents/skills/environment-mdp/SKILL.md](.agents/skills/environment-mdp/SKILL.md) | MDP terms, `envs/mdp/`, `cfg/task/` |
 
 Usage: [.agents/skills/README.md](.agents/skills/README.md). Workspace must be this repo root (or symlink `.agents/skills` from a parent monorepo).
 
