@@ -132,17 +132,24 @@ class MjlabBackendEnv(_EnvBase):
             terrain=terrain_cfg,
         )
         scene = Scene(scene_cfg, device=str(self.device))
+        mjlab_cfg = self.cfg.sim.get("mjlab", {})
+        mujoco_kwargs = {
+            "timestep": float(mjlab_cfg.get("timestep", 0.005)),
+            "iterations": int(mjlab_cfg.get("iterations", 10)),
+            "ls_iterations": int(mjlab_cfg.get("ls_iterations", 20)),
+        }
+        if "ccd_iterations" in mjlab_cfg:
+            mujoco_kwargs["ccd_iterations"] = int(mjlab_cfg.get("ccd_iterations"))
+
         sim = Simulation(
             num_envs=scene.num_envs,
             cfg=SimulationCfg(
-                nconmax=200,
-                njmax=500,
-                contact_sensor_maxmatch=80,
-                mujoco=MujocoCfg(
-                    timestep=0.005,
-                    iterations=10,
-                    ls_iterations=20,
+                nconmax=int(mjlab_cfg.get("nconmax", 200)),
+                njmax=int(mjlab_cfg.get("njmax", 500)),
+                contact_sensor_maxmatch=int(
+                    mjlab_cfg.get("contact_sensor_maxmatch", 80)
                 ),
+                mujoco=MujocoCfg(**mujoco_kwargs),
             ),
             model=scene.compile(),
             device=str(self.device),
