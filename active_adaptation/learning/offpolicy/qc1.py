@@ -21,7 +21,7 @@ from tensordict.nn import (
 
 from torchrl.data import Composite
 
-from active_adaptation.learning.modules import VecNorm, ConditionalBlock, CatTensors
+from active_adaptation.learning.modules import VecNorm, IndependentNormal, ConditionalBlock, CatTensors
 from active_adaptation.learning.ppo.common import (
     ACTION_KEY,
     DONE_KEY,
@@ -38,6 +38,8 @@ from active_adaptation.learning.offpolicy.distributional import ScalarCritic
 from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
+from torchrl.objectives import hold_out_net
+from tensordict.nn.probabilistic import interaction_type, InteractionType
 
 cs = ConfigStore.instance()
 
@@ -64,8 +66,6 @@ class QC1Config:
     # general setting
     debug: bool = False
     use_prior_online: bool = True
-    action_clip: bool = False
-    action_bound: float = 2 * torch.pi 
     soft_bound: float = 7 * torch.pi
 
     vecnorm: bool = True
@@ -73,13 +73,9 @@ class QC1Config:
     lr: float = 3e-4
     weight_decay: float = 0.0
     muon: bool = True
-    q_agg: str = "mean"
-    actor_type: str = "best-of-n"
     actor_nums: int = 32
     gamma: float = 0.99
     horizon_length: int = 3
-    flow_steps: int = 10
-    compile_flow: bool = False
     critic_hidden_dims: tuple[int] = (512, 512)
     actor_hidden_dims: tuple[int]  = (512, 512)
     # offline stage
@@ -95,6 +91,8 @@ class QC1Config:
     # FlashSAC-style: scale rewards by running discounted-return variance.
     normalize_reward: bool = True
     reward_norm_epsilon: float = 1e-8
+    # SAC-style actor: entropy bonus coefficient (fixed; no alpha tuner).
+    entropy_bonus: float = 1.0
 
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
@@ -309,10 +307,7 @@ class QC1(TensorDictModuleBase):
         self.Q_target.eval()
 
         self.actor = NormalActor(self.obs_dim, self.full_action_dim)
-
-        # Pre-register timestep values for flow integration (avoids per-iteration allocations).
-        ts = torch.arange(cfg.flow_steps, dtype=torch.float32, device=device) / cfg.flow_steps
-        self.register_buffer("_flow_ts", ts)
+        self.DistClass = IndependentNormal
 
         if self.cfg.muon:
             self.opt_actor = MuonAdamWWrapper(
@@ -547,37 +542,37 @@ class QC1(TensorDictModuleBase):
 
     @ScopedTimer("train_actor")
     def train_actor(self, batch: TensorDict):
-        """Update actor on a preprocessed batch (``batch.select`` + ``preproc`` already applied)."""
+        """SAC-style actor update: sample action chunks from NormalActor,
+        maximize Q(s, a) + entropy_bonus * H[a] with a soft-bound regularizer.
+        """
         self.actor.train()
 
         obs = batch["_input_normed"][0]
-        batch_actions = einops.rearrange(
-            batch[ACTION_KEY], "t b a -> b (t a)"
-        ).contiguous()
-        batch_size, action_dim = batch_actions.shape
+        batch_size = obs.shape[0]
 
-        x0 = torch.randn_like(batch_actions)
-        x1 = batch_actions
-        t = torch.rand((batch_size, 1), device=batch_actions.device)
-        xt = (1 - t) * x0 + t * x1
-        v = x1 - x0
+        loc, scale = self.actor(obs)
+        dist = self.DistClass(loc, scale)
+        # Reparameterized samples: [K, B, full_action_dim]
+        action_samples = dist.rsample((self.cfg.actor_nums,))
+        # log_prob over the full chunk: [K, B]
+        log_prob = dist.log_prob(action_samples)
+        entropy_est = -log_prob.mean(dim=0)  # [B]
 
-        pred_v = self.actor(obs, xt, t)
+        with hold_out_net(self.Q):
+            # Q expects [B, K, full_action_dim] -> [B, K, 2]; mean over twin -> [B, K]
+            action_samples_bk = action_samples.permute(1, 0, 2).contiguous()
+            q = self.Q.get_values(obs, action_samples_bk).mean(dim=-1)
+        q_mean = q.mean(dim=1)  # [B] — average over K samples
+        policy_term = -q_mean  # maximize Q
 
-        soft_term = 0.01 * ((pred_v.norm().mean() / self.cfg.soft_bound) ** 6)
+        soft_term = 0.01 * ((loc / self.cfg.soft_bound) ** 6).sum(-1)  # [B]
 
-        per_element_loss = (pred_v - v) ** 2
-        # Per-timestep valid mask: action[t] is valid only when no episode
-        # boundary occurs before t within the chunk (matching reference).
-        _done = batch[DONE_KEY].squeeze(-1)  # [H, B]
-        prev_done = torch.cat([torch.zeros_like(_done[:1]), _done[:-1]], dim=0)
-        valid_t = 1.0 - prev_done.cumsum(dim=0).clamp(max=1.0)  # [H, B]
+        actor_loss = (
+            policy_term
+            + self.cfg.entropy_bonus * (-entropy_est)
+            + soft_term
+        ).mean()
 
-        per_element_loss = per_element_loss.reshape(
-            batch_size, self.cfg.horizon_length, self.action_dim,
-        )
-        actor_loss = (per_element_loss * valid_t.permute(1, 0).unsqueeze(-1)).mean()
-        actor_loss += soft_term
         self.opt_actor.zero_grad(set_to_none=True)
         actor_loss.backward()
         actor_grad_norm = nn.utils.clip_grad_norm_(
@@ -587,19 +582,13 @@ class QC1(TensorDictModuleBase):
 
         infos: dict = {
             "actor/loss": actor_loss.item(),
-            "actor/soft_term": soft_term.detach().mean().item(),
             "actor/grad_norm": actor_grad_norm.item(),
-            "actor/v_norm": v.detach().norm(dim=-1).mean().item(),
-            "actor/pred_v_norm": pred_v.detach().norm(dim=-1).mean().item(),
-            "actor/valid_frac": valid_t.mean().item(),
+            "actor/q_mean": q_mean.detach().mean().item(),
+            "actor/entropy": entropy_est.detach().mean().item(),
+            "actor/soft_term": soft_term.detach().mean().item(),
+            "actor/mean_loc": loc.detach().abs().mean().item(),
+            "actor/mean_scale": scale.detach().mean().item(),
         }
-
-        # Per-timestep flow loss breakdown.
-        with torch.no_grad():
-            loss_by_step = per_element_loss.mean(dim=(0, 2))  # [H]
-            for step_idx in range(min(self.cfg.horizon_length, loss_by_step.shape[0])):
-                infos[f"actor/flow_loss_t{step_idx}"] = loss_by_step[step_idx].item()
-
         return infos
 
 
@@ -618,51 +607,18 @@ class QC1(TensorDictModuleBase):
 
     @ScopedTimer("sample_actions")
     def sample_actions(self, next_obs: torch.Tensor):
-        batch_size = next_obs.shape[0]
-        device = next_obs.device
-
-        if self.cfg.actor_type == "best-of-n":
-            next_obss = next_obs.repeat_interleave(
-                self.cfg.actor_nums, dim=0
-            )
-
-            noise = torch.rand(
-                batch_size * self.cfg.actor_nums,
-                self.full_action_dim,
-                device=device
-            )
-
-            with ScopedTimer("compute_flow_actions"):
-                actions = self.compute_flow_actions(next_obss, noise)
-            with ScopedTimer("critic_forward"):
-                q_values = self.Q_target(next_obss, actions)
-
-            if self.cfg.q_agg == "mean":
-                q_values = q_values.mean(dim=-1)
-            elif self.cfg.q_agg == "min":
-                q_values = q_values.min(dim=-1).values
-            else:
-                raise NotImplementedError(f"Unknown q_agg: {self.cfg.q_agg}")
-            
-            q_values = q_values.view(batch_size, self.cfg.actor_nums)
-            actions = actions.view(
-                batch_size,self.cfg.actor_nums,self.full_action_dim
-            )
-
-            indices = q_values.argmax(dim=-1)
-            batch_indices = torch.arange(batch_size, device=device)
-
-            return actions[batch_indices, indices]
-        
-        elif self.cfg.actor_type == "distll-ddpg":
-            raise NotImplementedError
+        """Sample a single action chunk from NormalActor for target computation."""
+        loc, scale = self.actor(next_obs)
+        dist = self.DistClass(loc, scale)
+        return dist.sample()  # [B, full_action_dim]
 
 
     def get_rollout_policy(self, mode: str = "eval", critic: bool = False) -> TensorDictModuleBase:
         """Return a :class:`QCRolloutPolicy` for eval / rollout."""
         return QCRolloutPolicy(
             vecnorm_obs=self.vecnorm_obs,
-            sample_fn=self.sample_actions,
+            actor=self.actor,
+            DistClass=self.DistClass,
             horizon_length=self.cfg.horizon_length,
             action_dim=self.action_dim,
             obs_key=OBS_KEY,
@@ -682,32 +638,21 @@ class QC1(TensorDictModuleBase):
         if self.reward_normalizer is not None and rn_state is not None:
             self.reward_normalizer.load_state_dict(rn_state)
 
-    def compute_flow_actions(self, next_obs, noises: torch.Tensor):
-        actions = noises
-        for i in range(self.cfg.flow_steps):
-            time = self._flow_ts[i].expand(actions.shape[0], 1)
-            actions += self.actor(next_obs, actions, time) / self.cfg.flow_steps
-            if self.cfg.action_clip:
-                actions = torch.clip(
-                    actions, 
-                    min= -self.cfg.action_bound, 
-                    max= self.cfg.action_bound
-                )
-        return actions
-
 
 class QCRolloutPolicy(TensorDictModuleBase):
-    """Rollout policy for QC with action chunking.
+    """Rollout policy for QC1 with action chunking.
 
-    Samples a full H-step action chunk via flow matching and caches it.
-    Subsequent calls return the next pre-computed action from the chunk,
-    re-planning only after H steps or when an environment resets.
+    Samples a full H-step action chunk from NormalActor (mean in MODE,
+    stochastic in RANDOM) and caches it. Subsequent calls return the next
+    pre-computed action from the chunk, re-planning only after H steps or
+    when an environment resets.
     """
 
     def __init__(
         self,
         vecnorm_obs: nn.Module,
-        sample_fn: Callable[[torch.Tensor], torch.Tensor],
+        actor: nn.Module,
+        DistClass: type,
         horizon_length: int,
         action_dim: int,
         obs_key: str = "policy",
@@ -715,7 +660,8 @@ class QCRolloutPolicy(TensorDictModuleBase):
     ):
         super().__init__()
         self.vecnorm_obs = vecnorm_obs
-        self.sample_fn = sample_fn
+        self.actor = actor
+        self.DistClass = DistClass
         self.horizon_length = horizon_length
         self.action_dim = action_dim
         self.obs_key = obs_key
@@ -755,17 +701,20 @@ class QCRolloutPolicy(TensorDictModuleBase):
 
         if need_replan.any():
             replan_idx = need_replan.nonzero(as_tuple=True)[0]
-            if need_replan.all():
-                new_chunk = self.sample_fn(obs)
+            obs_replan = obs[replan_idx]
+            loc, scale = self.actor(obs_replan)
+            if interaction_type() == InteractionType.MODE:
+                new_actions = loc
             else:
-                obs_replan = obs[replan_idx]
-                new_chunk = self._action_chunk.clone()
-                new_chunk[replan_idx] = self.sample_fn(obs_replan).view(
-                    replan_idx.shape[0], self.horizon_length, self.action_dim
-                )
-            self._action_chunk = new_chunk.view(
-                batch_size, self.horizon_length, self.action_dim
+                dist = self.DistClass(loc, scale)
+                new_actions = dist.sample()
+            new_chunk = new_actions.view(
+                -1, self.horizon_length, self.action_dim,
             )
+            if need_replan.all():
+                self._action_chunk = new_chunk
+            else:
+                self._action_chunk[replan_idx] = new_chunk
             self._chunk_step[replan_idx] = 0
 
         idx = self._chunk_step.clamp(max=self.horizon_length - 1)
