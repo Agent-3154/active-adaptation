@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, Sequence, TYPE_CHECKING
 
 import torch
+from tensordict import TensorDictBase
 
 from active_adaptation.utils.math import euler_from_quat, quat_rotate, quat_rotate_inverse
 try:
@@ -208,12 +209,7 @@ class UnderwaterRobot:
             flow_velocity_gaussian_noise, device=self.device, dtype=torch.float32
         )
 
-    def reset(self, env_ids: Sequence[int] | torch.Tensor | None = None) -> None:
-        if env_ids is None:
-            env_ids = slice(None)
-        elif not isinstance(env_ids, torch.Tensor):
-            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self.data.prev_body_vels[env_ids] = 0.0
         self.data.prev_body_acc[env_ids] = 0.0
         self.data.flow_vels[env_ids] = (

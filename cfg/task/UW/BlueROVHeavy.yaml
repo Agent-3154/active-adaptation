@@ -1,5 +1,5 @@
 # @package task
-name: BlueROV
+name: BlueROVHeavy
 
 viewer:
   resolution: [1280, 720]
@@ -7,7 +7,7 @@ viewer:
   eye: [4.0, 4.0, 4.0]
 
 robot:
-  name: bluerov
+  name: bluerov_heavy
 
 terrain: plane
 
@@ -37,8 +37,6 @@ observation:
   policy:
     command:  {}
     gravity_multistep: {steps: 4, noise_std: 0.05}
-    # root_linvel_b:    {yaw_only: true}
-    # root_angvel_b:    {}
     underwater.baro_pressure: {body_name: base_link}
     underwater.dvl_linvel:    {body_name: base_link}
 

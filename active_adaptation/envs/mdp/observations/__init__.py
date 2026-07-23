@@ -6,3 +6,4 @@ from . import common
 from . import contact
 from . import extero
 from . import joint
+from . import underwater
