@@ -64,9 +64,14 @@ class TrainConfig:
     discard_unused_obs: bool = True
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
+    offline_eval_interval: int = 500
+    # qc
     offline_policy_iters: int = 0
     offline_critic_iters: int = 0
-    offline_eval_interval: int = 500
+    # qc1
+    offline_iters: int = 0
+    delay: int = 2
+    
 
     online_iters: int = 10_000
 
@@ -177,32 +182,43 @@ def main(cfg: TrainConfig):
     policy.on_stage_start(stage="offline", env=env) # maybe load dataset.
     ckpt_path = None
 
-    # policy BC
-    if cfg.offline_policy_iters > 0:
-        pbar = tqdm(range(cfg.offline_policy_iters), desc="offline_policy", unit="step")
-        for i in pbar:
-            info = policy.update_flow_policy()
-            if aa.is_main_process():
-                if i % log_interval and len(info) > 0:
-                    run.log(info, step=i)
+    if cfg.algo.name == "qc":
+        # policy BC
+        if cfg.offline_policy_iters > 0:
+            pbar = tqdm(range(cfg.offline_policy_iters), desc="offline_policy", unit="step")
+            for i in pbar:
+                info = policy.update_flow_policy()
+                if aa.is_main_process():
+                    if i % log_interval and len(info) > 0:
+                        run.log(info, step=i)
 
-    # critic update
-    if cfg.offline_critic_iters > 0:
-        pbar = tqdm(range(cfg.offline_critic_iters), desc="offline_critic", unit="step")
-        for i in pbar:
-            info = policy.update_critic()
-            if aa.is_main_process():
-                if i % log_interval and len(info) > 0:
-                    run.log(info, step=i+cfg.offline_policy_iters)
+        # critic update
+        if cfg.offline_critic_iters > 0:
+            pbar = tqdm(range(cfg.offline_critic_iters), desc="offline_critic", unit="step")
+            for i in pbar:
+                info = policy.update_critic()
+                if aa.is_main_process():
+                    if i % log_interval and len(info) > 0:
+                        run.log(info, step=i+cfg.offline_policy_iters)
 
-                # if i % cfg.offline_eval_interval == 0:
-                #     policy_eval = policy.get_rollout_policy("eval")
-                #     info, _, _ = evaluate(
-                #         env, policy_eval, render=cfg.eval_render, seed=cfg.seed,
-                #     )
-                #     run.log(info, step=i+cfg.offline_policy_iters)
+                    # if i % cfg.offline_eval_interval == 0:
+                    #     policy_eval = policy.get_rollout_policy("eval")
+                    #     info, _, _ = evaluate(
+                    #         env, policy_eval, render=cfg.eval_render, seed=cfg.seed,
+                    #     )
+                    #     run.log(info, step=i+cfg.offline_policy_iters)
+    elif cfg.algo.name == "qc1":
+        if cfg.offline_iters > 0:
+            pbar = tqdm(range(cfg.offline_iters), desc="offline", unit="step")
+            for i in pbar:
+                info = policy.update_critic()
+                if i % cfg.delay == 0:
+                    info.update(policy.update_policy())
 
-    
+                if aa.is_main_process():
+                    if i % log_interval and len(info) > 0:
+                        run.log(info, step=i)
+        
     # save offline checkpoint
     if cfg.offline_policy_iters > 0 or cfg.offline_critic_iters > 0:
         ckpt_path = save(f"checkpoint_offline_{cfg.offline_policy_iters}_{cfg.offline_critic_iters}")
@@ -249,7 +265,7 @@ def main(cfg: TrainConfig):
             # ===========================
             # online update
             policy.update_rb(td)
-            info = policy.update_online()
+            info = policy.update_online(i % cfg.delay == 0)
             # ===========================
 
             if aa.is_main_process():

@@ -60,7 +60,7 @@ class QC1Config:
     """
     QC1 config.
     """
-    _target_: str = "active_adaptation.learning.offpolicy.qc.QC1"
+    _target_: str = "active_adaptation.learning.offpolicy.qc1.QC1"
     name: str = "qc1"
 
     # general setting
@@ -306,7 +306,7 @@ class QC1(TensorDictModuleBase):
         self.Q_target.requires_grad_(False)
         self.Q_target.eval()
 
-        self.actor = NormalActor(self.obs_dim, self.full_action_dim)
+        self.actor = NormalActor(self.obs_dim, self.full_action_dim).to(device)
         self.DistClass = IndependentNormal
 
         if self.cfg.muon:
@@ -325,7 +325,9 @@ class QC1(TensorDictModuleBase):
             self.opt_Q = torch.optim.AdamW(self.Q.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
 
         self.offline_steps = 0
+        self.critic_steps = 0
         self.online_steps = 0
+        self.policy_offline_steps = 0
 
 
     def on_stage_start(self, stage: str, env: _EnvBase):
@@ -368,7 +370,7 @@ class QC1(TensorDictModuleBase):
 
 
     @ScopedTimer("update_flow_policy")
-    def update_flow_policy(self):
+    def update_policy(self):
         batch = self.rb.sample(
             batch_size=self.cfg.batch_size,
             steps=self.cfg.horizon_length,
@@ -431,7 +433,7 @@ class QC1(TensorDictModuleBase):
 
         return infos
     
-    def update_online(self):
+    def update_online(self, update_policy: bool = True):
         if self.online_steps < self.cfg.warm_up_steps:
             return {}
 
@@ -448,7 +450,8 @@ class QC1(TensorDictModuleBase):
             self.preproc(batch["next"])
 
             infos.update(self.train_actor(batch))
-            infos.update(self.train_critic(batch))
+            if update_policy:
+                infos.update(self.train_critic(batch))
 
         return dict(sorted(infos.items()))
 
