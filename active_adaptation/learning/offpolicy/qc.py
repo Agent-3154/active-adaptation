@@ -83,7 +83,7 @@ class QCConfig:
     critic_hidden_dims: tuple[int] = (512, 512)
     actor_hidden_dims: tuple[int]  = (512, 512)
     # offline stage
-    prior_data_path: str | None = '/home/cv/zjx/active-adaptation/scripts/rollout/G1LocoFlat-sac/2026-07-08-20-32-07/rollout_1000_4096.pt'
+    prior_data_path: str | None = None
     bootstrap_observation_keys: Tuple[str, ...] = ("prev_noise", "rho")
     batch_size: int = 256
     tau_critic: float = 5e-3
@@ -168,6 +168,7 @@ class SimpleDoubleCritic(nn.Module):
 
 
 class ActorVectorField(nn.Module):
+    """From https://github.com/ColinQiyangLi/qc/blob/48283b4f662bd1c127ec9fa80647b49759f10653/utils/networks.py#L217"""
     def __init__(
         self,
         obs_dim,
