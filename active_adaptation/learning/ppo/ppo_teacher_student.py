@@ -95,6 +95,7 @@ from active_adaptation.learning.ppo.common import (
     make_mlp,
     Actor,
     Critic,
+    soft_copy_,
 )
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.utils.profiling import ScopedTimer
@@ -406,6 +407,9 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         self.actor_teacher.apply(init_)
         self.critic.apply(init_)
 
+        self.encoder_student_ema = copy.deepcopy(self.encoder_student)
+        self.encoder_student_ema.requires_grad_(False)
+
         self.opt_ppo: Optional[torch.optim.Optimizer] = None
         self.opt_distill: Optional[torch.optim.Optimizer] = None
         self.update = self._update
@@ -471,6 +475,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             )
             self.critic.requires_grad_(False)
             # copy to initialize student actor
+            hard_copy_(self.encoder_student, self.encoder_student_ema)
             hard_copy_(self.actor_teacher, self.actor_student)
         else:
             raise ValueError(f"Invalid stage: {self.cfg.stage}")
@@ -485,7 +490,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             modules += [self.encoder_teacher, self.from_teacher, self.actor_teacher]
         elif self.cfg.stage == "student":
             # Collect with student GRU (DAgger); carries adapt_hx via primer.
-            modules += [self.encoder_student, self.from_student, self.actor_student]
+            modules += [self.encoder_student_ema, self.from_student, self.actor_student]
         else:
             raise ValueError(f"Invalid stage: {self.cfg.stage}")
         if critic:
@@ -591,6 +596,8 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
                         else torch.tensor(grad_norm),
                     }
                 )
+        
+        soft_copy_(self.encoder_student, self.encoder_student_ema, tau=0.04)
 
         return pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
 
