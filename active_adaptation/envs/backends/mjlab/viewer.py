@@ -8,6 +8,13 @@ from active_adaptation.envs.env_base import _EnvBase
 from active_adaptation.utils.profiling import ScopedTimer
 
 
+def _rgba_to_rgb255(color: tuple[float, ...] | list[float]) -> tuple[int, int, int]:
+    r, g, b = float(color[0]), float(color[1]), float(color[2])
+    if max(r, g, b) <= 1.0:
+        return (int(r * 255), int(g * 255), int(b * 255))
+    return (int(r), int(g), int(b))
+
+
 class MjLabViewer:
     """
     Different from `mjlab.viewer.viser.viewer.ViserPlayViewer`, this
@@ -21,6 +28,15 @@ class MjLabViewer:
 
         self._server = viser.ViserServer(label="mjlab")
         self._is_setup = False
+
+        self._cameras: dict[str, viser.CameraFrustumHandle] = {}
+        self._line_handle = None
+        self._point_handle = None
+        self._debug_line_pts: list[np.ndarray] = []
+        self._debug_line_cols: list[np.ndarray] = []
+        self._debug_point_pts: list[np.ndarray] = []
+        self._debug_point_cols: list[np.ndarray] = []
+        self._debug_point_size: float = 0.02
 
     def setup(self):
         if self._is_setup:
@@ -81,6 +97,139 @@ class MjLabViewer:
             return
         self._scene.clear()
 
+    # ------------------------------------------------------------------
+    # MDP debug primitives (vectors / points), synced in update()
+    # ------------------------------------------------------------------
+
+    def clear_debug(self) -> None:
+        self._debug_line_pts.clear()
+        self._debug_line_cols.clear()
+        self._debug_point_pts.clear()
+        self._debug_point_cols.clear()
+
+    def vector(
+        self,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (0.0, 1.0, 1.0, 1.0),
+    ) -> None:
+        del size
+        x_np = x.detach().cpu().reshape(-1, 3).numpy().astype(np.float32)
+        v_np = v.detach().cpu().reshape(-1, 3).numpy().astype(np.float32)
+        if x_np.shape != v_np.shape:
+            raise ValueError(f"x and v must match, got {x_np.shape} and {v_np.shape}")
+        seg = np.stack([x_np, x_np + v_np], axis=1)
+        rgb = np.array(_rgba_to_rgb255(color), dtype=np.uint8)
+        cols = np.broadcast_to(rgb, (seg.shape[0], 2, 3)).copy()
+        self._debug_line_pts.append(seg)
+        self._debug_line_cols.append(cols)
+
+    def point(
+        self,
+        x: torch.Tensor,
+        color: tuple[float, ...] = (1.0, 0.0, 0.0, 1.0),
+        size: float = 10.0,
+    ) -> None:
+        pts = x.detach().cpu().reshape(-1, 3).numpy().astype(np.float32)
+        rgb = np.array(_rgba_to_rgb255(color), dtype=np.uint8)
+        cols = np.broadcast_to(rgb, (pts.shape[0], 3)).copy()
+        self._debug_point_pts.append(pts)
+        self._debug_point_cols.append(cols)
+        self._debug_point_size = max(float(size) * 0.002, 0.005)
+
+    def plot(
+        self,
+        x: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0),
+    ) -> None:
+        del size
+        x_np = x.detach().cpu().reshape(-1, 3).numpy().astype(np.float32)
+        if x_np.shape[0] < 2:
+            return
+        seg = np.stack([x_np[:-1], x_np[1:]], axis=1)
+        rgb = np.array(_rgba_to_rgb255(color), dtype=np.uint8)
+        cols = np.broadcast_to(rgb, (seg.shape[0], 2, 3)).copy()
+        self._debug_line_pts.append(seg)
+        self._debug_line_cols.append(cols)
+
+    def _sync_debug_geometry(self) -> None:
+        if self._debug_line_pts:
+            points = np.concatenate(self._debug_line_pts, axis=0)
+            colors = np.concatenate(self._debug_line_cols, axis=0)
+        else:
+            points = np.zeros((0, 2, 3), dtype=np.float32)
+            colors = np.zeros((0, 2, 3), dtype=np.uint8)
+
+        if self._line_handle is None:
+            init_pts = points if points.shape[0] > 0 else np.zeros((1, 2, 3), dtype=np.float32)
+            init_cols = colors if colors.shape[0] > 0 else np.zeros((1, 2, 3), dtype=np.uint8)
+            self._line_handle = self._server.scene.add_line_segments(
+                "/debug/mdp_lines",
+                init_pts,
+                init_cols,
+                line_width=2.0,
+                visible=points.shape[0] > 0,
+            )
+        elif points.shape[0] == 0:
+            self._line_handle.visible = False
+        else:
+            self._line_handle.points = points
+            self._line_handle.colors = colors
+            self._line_handle.visible = True
+
+        if self._debug_point_pts:
+            pts = np.concatenate(self._debug_point_pts, axis=0)
+            cols = np.concatenate(self._debug_point_cols, axis=0)
+        else:
+            pts = np.zeros((0, 3), dtype=np.float32)
+            cols = np.zeros((0, 3), dtype=np.uint8)
+
+        if self._point_handle is None:
+            init_pts = pts if pts.shape[0] > 0 else np.zeros((1, 3), dtype=np.float32)
+            init_cols = cols if cols.shape[0] > 0 else np.zeros((1, 3), dtype=np.uint8)
+            self._point_handle = self._server.scene.add_point_cloud(
+                "/debug/mdp_points",
+                init_pts,
+                init_cols,
+                point_size=self._debug_point_size,
+                visible=pts.shape[0] > 0,
+            )
+        elif pts.shape[0] == 0:
+            self._point_handle.visible = False
+        else:
+            self._point_handle.points = pts
+            self._point_handle.colors = cols
+            self._point_handle.point_size = self._debug_point_size
+            self._point_handle.visible = True
+
+    # ------------------------------------------------------------------
+    # Camera frustums
+    # ------------------------------------------------------------------
+
+    def register_camera(
+        self,
+        name: str,
+        *,
+        fov_y: float,
+        aspect: float,
+        scale: float = 0.15,
+    ):
+        """Create a Viser camera frustum (OpenCV +Z forward)."""
+        if name in self._cameras:
+            return self._cameras[name]
+        handle = self._server.scene.add_camera_frustum(
+            f"/cameras/{name}",
+            fov=float(fov_y),
+            aspect=float(aspect),
+            scale=float(scale),
+            color=(200, 200, 200),
+            format="jpeg",
+        )
+        self._cameras[name] = handle
+        return handle
+
     def _update_selected_env(self):
         scene = self._scene
         if scene is None:
@@ -127,6 +276,7 @@ class MjLabViewer:
     def update(self):
         if self._scene is None:
             raise RuntimeError("MjLab viewer is not set up.")
+        self._sync_debug_geometry()
         if self._scene.show_only_selected and self.env.num_envs > 1:
             with ScopedTimer("viewer.update.selected_fast_path", sync=False):
                 self._update_selected_env()

@@ -517,13 +517,13 @@ class ImpedanceCommandManager(Command):
         self.setpoint_b[:, 3:] = wrap_to_pi(self.setpoint_w[:, 3:] - self.root_link_rpy_w)
 
     def debug_draw(self):
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_link_pos_w,
             self.setpoint_w[:, :3] - self.asset.data.root_link_pos_w,
             color=(1.0, 0.0, 0.0, 1.0),
             size=5.0,
         )
-        self.env.debug_draw.vector( # reference lin vel, green
+        self.env.scene.draw_vector( # reference lin vel, green
             self.asset.data.root_link_pos_w,
             self.pos_base.vel_w[:, -2],
             color=(0.0, 1.0, 0.0, 1.0),
@@ -542,20 +542,20 @@ class ImpedanceCommandManager(Command):
                 + yaw_rotate(self.asset.data.heading_w, self.setpoint_eef_b)
             )
             self.setpoint_eef_marker.visualize(setpoint_eef_w)
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 self.asset.data.body_pos_w[:, self.eef_body_id],
                 setpoint_eef_w - self.asset.data.body_pos_w[:, self.eef_body_id],
                 color=(1.0, 0.0, 0.0, 1.0),
                 size=5.0,
             )
-            self.env.debug_draw.vector( # reference lin vel, green
+            self.env.scene.draw_vector( # reference lin vel, green
                 self.asset.data.body_pos_w[:, self.eef_body_id],
                 self.pos_eef.vel_w[:, -2],
                 color=(0.0, 1.0, 0.0, 1.0),
                 size=5.0,
             )
         # external forces
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_link_pos_w,
             self.force_impulse.get_force(None, None) / 9.81,
             color=(1.0, 0.6, 0.0, 1.0), # orange

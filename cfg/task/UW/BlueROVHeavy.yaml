@@ -39,6 +39,12 @@ observation:
     gravity_multistep: {steps: 4, noise_std: 0.05}
     underwater.baro_pressure: {body_name: base_link}
     underwater.dvl_linvel:    {body_name: base_link}
+  extero:
+    underwater.uw_camera:
+      body_name: base_link
+      clipping_range: [0.2, 10.0]
+      offset_pos: [0.1, 0.0, 0.0]
+      debug_vis: true
 
 reward:
   navi:

@@ -135,6 +135,8 @@ class MjlabBackendEnv(_EnvBase):
         viewer = MjLabViewer(self, sim) if not self.headless else None
         self.scene = MjlabSceneAdapter(scene, sim, viewer=viewer)
         self.sim = MjlabSimAdapter(sim, viewer, viewer_cfg=viewer_cfg, scene=scene)
+        if viewer is not None:
+            self._debug_draw_callbacks.insert(0, self.scene.clear_debug)
 
     def _make_viewer_cfg(self, viewer_config_cls):
         lookat = tuple(float(v) for v in self.cfg.viewer.lookat)

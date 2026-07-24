@@ -524,6 +524,9 @@ class _EnvBase(EnvBase, RegistryMixin):
                 return True
         return False
 
+    def _should_debug_draw(self) -> bool:
+        return self.sim.has_gui()
+
     @ScopedTimer("env._step", sync=PROFILE_SYNC_TIMERS)
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
         with ScopedTimer("simulation", sync=False):
@@ -558,23 +561,14 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict = self._compute_termination(tensordict)
         with ScopedTimer("command.update", sync=False):
             self.command_manager.update()
-
-        # if self._should_render():
-        #     self.sim.render()
     
         tensordict = self._compute_observation(tensordict)
 
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()
 
-        if self.sim.has_gui():
-            if self.backend == "isaac":
-                self.debug_draw.clear()
-            elif self.backend == "mjlab":
-                self.sim.viewer.clear()
+        if self._should_debug_draw():
             [callback() for callback in self._debug_draw_callbacks]
-            if self.backend == "mjlab":
-                self.sim.viewer.update()
 
         return tensordict
 

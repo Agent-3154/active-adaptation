@@ -5,6 +5,7 @@ viewer:
   resolution: [1280, 720]
   lookat: [0., 0., 0.]
   eye: [4.0, 4.0, 4.0]
+  viser: true
 
 robot:
   name: bluerov
@@ -41,6 +42,12 @@ observation:
     # root_angvel_b:    {}
     underwater.baro_pressure: {body_name: base_link}
     underwater.dvl_linvel:    {body_name: base_link}
+  extero:
+    underwater.uw_camera:
+      body_name: base_link
+      clipping_range: [0.2, 10.0]
+      offset_pos: [0.1, 0.0, 0.0]
+      debug_vis: true
 
 reward:
   navi:

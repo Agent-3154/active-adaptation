@@ -96,7 +96,7 @@ class Game(Command):
         )
 
     def debug_draw(self):
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_pos_w[::2],
             self.target_diff[::2],
             color=(1, 0, 0, 1),

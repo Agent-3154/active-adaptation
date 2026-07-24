@@ -446,7 +446,7 @@ class random_motor_failure(RandomizationV2):
     def debug_draw(self):
         x = self.asset.data.body_link_pos_w[:, self._body_ids]
         x = x[self.motor_failure > 0.]
-        self.env.debug_draw.point(x, color=(0.1, 1.0, 0.1, 0.8), size=20)
+        self.env.scene.draw_point(x, color=(0.1, 1.0, 0.1, 0.8), size=20)
 
 
 class perturb_body_materials(RandomizationV2):
@@ -992,7 +992,7 @@ class push_body(RandomizationV2):
         
     def debug_draw(self):
         if self.env.backend == "isaac":
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 self.asset.data.body_link_pos_w[:, self.body_indices],
                 self.forces / 9.81,
                 color=(1., 0.8, .4, 1.)
@@ -1026,7 +1026,7 @@ class drag(RandomizationV2):
         self.asset.set_external_force_and_torque(self.forces, self.torques, body_ids=self.body_indices)
 
     def debug_draw(self):
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.body_link_pos_w[:, self.body_indices],
             self.forces / self.default_mass_total * 100,
             color=(0.6, 0.8, 0.6, 1.)
@@ -1082,7 +1082,7 @@ class stumble(RandomizationV2):
         )
 
     def debug_draw(self):
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.body_link_pos_w[:, self.body_ids],
             self.forces_w * self.env.physics_dt,
             color=(1., 0.6, 0., 1.)
@@ -1130,7 +1130,7 @@ class pull(RandomizationV2):
             torch.zeros_like(force).unsqueeze(1), [0])
 
     def debug_draw(self):
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_pos_w, 
             self.forces / self.default_mass_total, 
             color=(0.6, 0.8, 0.6, 1.)
@@ -1211,7 +1211,7 @@ class spring_grf(RandomizationV2):
 
     def debug_draw(self):
         feet_pos = self.asset.data.body_link_pos_w[:, self.feet_ids]
-        self.env.debug_draw.vector(feet_pos, self.forces / 9.81, color=(0.8, 0.6, 0.6, 1.))
+        self.env.scene.draw_vector(feet_pos, self.forces / 9.81, color=(0.8, 0.6, 0.6, 1.))
 
 
 from active_adaptation.envs.mdp.utils.forces import ImpulseForce, ConstantForce
@@ -1261,7 +1261,7 @@ class random_impulse(RandomizationV2):
         self.impulse_force = impulse_force.where(resample, self.impulse_force)
 
     def debug_draw(self):
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.body_link_pos_w[:, self.body_id],
             self.impulse_force.get_force(None, None) /  9.81,
             color=(1.0, 0.6, 0.0, 1.0),
@@ -1323,7 +1323,7 @@ class constant_force(RandomizationV2):
         self.body_id = torch.where(resample, body_id, self.body_id)
     
     def debug_draw(self):
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.body_link_pos_w[torch.arange(self.num_envs, device=self.device), self.body_id],
             self.force.get_force() /  9.81,
             color=(1.0, 0.6, 0.0, 1.0),

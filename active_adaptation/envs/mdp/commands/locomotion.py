@@ -433,12 +433,12 @@ class Twist(CommandV2):
             1,
         )
         if self.env.backend == "isaac":
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 start,
                 self.cmd_linvel_w,
                 color=(1.0, 1.0, 1.0, 1.0),
             )
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 start,
                 yaw_vec,
                 color=(0.2, 0.2, 1.0, 1.0),

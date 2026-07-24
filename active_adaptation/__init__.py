@@ -161,6 +161,8 @@ def init(cfg: DictConfig, auto_rank: bool):
 
     if get_backend() == "isaac":
         from isaaclab.app import AppLauncher
+        # viser and isaac have some conflicts, so we need to import viser here
+        import viser
 
         app_config = OmegaConf.to_container(cfg.app, resolve=True)
         app_config = _apply_default_isaaclab_kit_args(app_config)

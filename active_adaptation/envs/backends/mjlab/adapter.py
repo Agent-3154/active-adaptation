@@ -8,7 +8,7 @@ import torch
 
 from typing_extensions import override
 
-from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
+from active_adaptation.envs.adapters import SimAdapter, SceneAdapter, CameraFrustumHandle
 
 if TYPE_CHECKING:
     from active_adaptation.envs.backends.mjlab.viewer import MjLabViewer
@@ -244,6 +244,8 @@ class MjlabSimAdapter(SimAdapter):
 
     def step(self, render: bool = False) -> None:
         self._sim.step()
+        if render and self.viewer is not None:
+            self.viewer.update()
 
     def sense(self) -> None:
         self._sim.sense()
@@ -403,7 +405,7 @@ class MjlabSceneAdapter(SceneAdapter):
         if self._viewer is None:
             return _NoopSphereMarker()
         return _MjlabSphereMarker(self._viewer, name=name, color=color, radius=radius)
-    
+
     def create_frame_marker(
         self,
         name: str,
@@ -412,6 +414,57 @@ class MjlabSceneAdapter(SceneAdapter):
         if self._viewer is None:
             return _NoopSphereMarker()
         return _MjlabFrameMarker(self._viewer, name=name, scale=scale)
+
+    def create_camera_frustum(
+        self,
+        name: str,
+        *,
+        fov_y: float,
+        aspect: float,
+        scale: float = 0.15,
+    ) -> CameraFrustumHandle:
+        if self._viewer is None:
+            raise RuntimeError("`create_camera_frustum` requires a Viser viewer.")
+        handle = self._viewer.register_camera(
+            name,
+            fov_y=fov_y,
+            aspect=aspect,
+            scale=scale,
+        )
+        return CameraFrustumHandle(handle)
+
+    def clear_debug(self) -> None:
+        if self._viewer is not None:
+            self._viewer.clear_debug()
+            # self._viewer.clear() # not needed
+
+    def draw_vector(
+        self,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (0.0, 1.0, 1.0, 1.0),
+    ):
+        if self._viewer is not None:
+            self._viewer.vector(x, v, size, color)
+
+    def draw_point(
+        self,
+        x: torch.Tensor,
+        color: tuple[float, ...] = (1.0, 0.0, 0.0, 1.0),
+        size: float = 10.0,
+    ):
+        if self._viewer is not None:
+            self._viewer.point(x, color=color, size=size)
+
+    def draw_plot(
+        self,
+        x: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0),
+    ):
+        if self._viewer is not None:
+            self._viewer.plot(x, size=size, color=color)
 
 
 __all__ = [

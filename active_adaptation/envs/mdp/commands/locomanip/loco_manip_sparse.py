@@ -275,7 +275,7 @@ class LocoManipSparseBase(CommandV2):
 
     @override
     def debug_draw(self) -> None:
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.eef_pos_w,
             self.cmd_eef_pos_w - self.eef_pos_w,
             color=(0.0, 0.0, 1.0, 1.0),

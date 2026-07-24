@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Optional, Sequence, Tuple
 from typing_extensions import override
 
 import active_adaptation
-from active_adaptation.utils.math import quat_from_euler_xyz, quat_rotate, quat_rotate_inverse
+from active_adaptation.utils.math import quat_from_euler_xyz, quat_mul, quat_rotate, quat_rotate_inverse
 from active_adaptation.utils.symmetry import SymmetryTransform
 
 from .base import ObservationV2
@@ -180,9 +180,7 @@ class _JanusDvlMixin:
 
     def _debug_draw_beams(self) -> None:
         """Draw Janus beams: cyan on hit (to measured range), red on miss (to ``max_range``)."""
-        if self.env.backend != "isaac" or not self.env.sim.has_gui():
-            return
-        if not hasattr(self.env, "debug_draw"):
+        if not self.env.sim.has_gui():
             return
         origin_w, quat_w = self._dvl_pose_w()
         dirs_w = quat_rotate(
@@ -201,14 +199,14 @@ class _JanusDvlMixin:
         vecs_f = vecs.reshape(-1, 3)
         hit_f = hit.reshape(-1)
         if hit_f.any():
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 starts_f[hit_f],
                 vecs_f[hit_f],
                 color=(0.1, 0.85, 0.95, 1.0),
                 size=2.0,
             )
         if (~hit_f).any():
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 starts_f[~hit_f],
                 vecs_f[~hit_f],
                 color=(0.95, 0.25, 0.2, 0.7),
@@ -535,6 +533,9 @@ class uw_camera(ObservationV2):
             ``"opengl"``).
         normalize: If True, return RGB in ``[0, 1]``; else ``[0, 255]``.
         flatten: If True, flatten spatial/channel dims for MLP policies.
+        debug_vis: If True, register a camera frustum via ``scene.create_camera_frustum``
+            and push RGB each ``debug_draw`` (requires a Viser viewer).
+        debug_vis_every: Push frustum image every N debug_draw calls.
 
     Faithfulness notes
     ------------------
@@ -576,6 +577,8 @@ class uw_camera(ObservationV2):
         offset_convention: str = "world",
         normalize: bool = True,
         flatten: bool = False,
+        debug_vis: bool = False,
+        debug_vis_every: int = 1,
     ) -> None:
         self.body_name = body_name
         self.resolution = (int(resolution[0]), int(resolution[1]))
@@ -591,6 +594,9 @@ class uw_camera(ObservationV2):
         self.offset_convention = offset_convention
         self.normalize = bool(normalize)
         self.flatten = bool(flatten)
+        self.debug_vis = bool(debug_vis)
+        self.debug_vis_every = max(int(debug_vis_every), 1)
+        self._debug_vis_step = 0
 
         if sensor_name is None:
             uw_camera._instance_count += 1
@@ -628,7 +634,6 @@ class uw_camera(ObservationV2):
             ),
             width=self.resolution[0],
             height=self.resolution[1],
-            update_latest_camera_pose=True,
         )
         setattr(scene_config, self.sensor_name, cfg)
 
@@ -636,9 +641,34 @@ class uw_camera(ObservationV2):
     def _initialize(self, env: "_EnvBase") -> None:
         super()._initialize(env)
         self.env.render_enabled = True
-        from isaaclab.sensors import TiledCamera
 
         self.camera: TiledCamera = self.env.scene.sensors[self.sensor_name]
+        self.asset: Articulation = self.env.scene.articulations["robot"]
+        body_ids = self.asset.find_bodies(self.body_name)[0]
+        if len(body_ids) != 1:
+            raise ValueError(
+                f"uw_camera: expected exactly one body matching '{self.body_name}', "
+                f"found {len(body_ids)}."
+            )
+        self.body_id = int(body_ids[0])
+        # Offset in parent/body frame; orientation converted to ROS (+Z fwd, +Y down)
+        # so composed world quat matches Viser/OpenCV frustum convention.
+        self._offset_pos_t = torch.tensor(
+            self.offset_pos, device=self.device, dtype=torch.float32
+        )
+        offset_quat = torch.tensor(
+            self.offset_rot, device=self.device, dtype=torch.float32
+        ).unsqueeze(0)
+        if self.offset_convention != "ros":
+            from isaaclab.utils.math import convert_camera_frame_orientation_convention
+
+            offset_quat = convert_camera_frame_orientation_convention(
+                offset_quat,
+                origin=self.offset_convention,  # type: ignore[arg-type]
+                target="ros",
+            )
+        self._offset_quat_ros_t = offset_quat.squeeze(0)
+
         # (1, 1, 1, 3) for broadcast over NHWC
         self._backscatter_value_t = torch.tensor(
             self.backscatter_value, device=self.device, dtype=torch.float32
@@ -651,6 +681,22 @@ class uw_camera(ObservationV2):
         ).view(1, 1, 1, 3)
         w, h = self.resolution
         self._image = torch.zeros(self.num_envs, 3, h, w, device=self.device)
+
+        self.camera_handle = None
+        if self.debug_vis:
+            try:
+                # Vertical FOV from pinhole horizontal aperture / focal length (mm).
+                fov_x = 2.0 * math.atan(0.5 * self.horizontal_aperture / self.focal_length)
+                aspect = w / max(h, 1)
+                fov_y = 2.0 * math.atan(math.tan(fov_x * 0.5) / aspect)
+                self.camera_handle = self.env.scene.create_camera_frustum(
+                    self.sensor_name,
+                    fov_y=fov_y,
+                    aspect=aspect,
+                )
+            except Exception as e:
+                print(f"Error creating camera frustum: {e}")
+                self.camera_handle = None
 
     def _apply_uw_render(self, rgb: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
         """Batched OceanSim ``UW_render`` (torch).
@@ -696,6 +742,35 @@ class uw_camera(ObservationV2):
         width = self.resolution[0]
         perm = torch.arange(width - 1, -1, -1, dtype=torch.long)
         return SymmetryTransform(perm, torch.ones(width))
+
+    def _image_hwc_uint8(self, env_idx: int):
+        img = self._image[env_idx].detach()
+        if self.normalize:
+            img = img * 255.0
+        return (
+            img.clamp(0, 255)
+            .byte()
+            .permute(1, 2, 0)
+            .cpu()
+            .numpy()
+        )
+
+    @override
+    def debug_draw(self) -> None:
+        if not self.debug_vis or self.camera_handle is None:
+            return
+        self._debug_vis_step += 1
+        if (self._debug_vis_step - 1) % self.debug_vis_every != 0:
+            return
+        env_idx = 0
+        # ROS camera frame (+Z forward, +Y down) matches Viser/OpenCV frustum.
+        body_pos = self.asset.data.body_link_pos_w[env_idx, self.body_id]
+        body_quat = self.asset.data.body_link_quat_w[env_idx, self.body_id]
+        pos = body_pos + quat_rotate(body_quat, self._offset_pos_t)
+        quat = quat_mul(body_quat, self._offset_quat_ros_t)
+        self.camera_handle.position = pos
+        self.camera_handle.wxyz = quat
+        self.camera_handle.image = self._image_hwc_uint8(env_idx)
 
 
 class imaging_sonar(ObservationV2):

@@ -2,6 +2,7 @@ from active_adaptation import ROBOT_MODEL_DIR
 from active_adaptation.envs.backends.isaac.adapter import (
     IsaacSceneAdapter,
     IsaacSimAdapter,
+    IsaacDebugDraw
 )
 from active_adaptation.envs.env_base import _EnvBase
 from active_adaptation.assets.asset_cfg import AssetSpec
@@ -34,11 +35,10 @@ class IsaacBackendEnv(_EnvBase):
         super().__init__(cfg, device, headless)
         self.robot = self.scene.articulations["robot"]
 
-        if self.sim.has_gui():
+        if self.sim._sim.has_gui():
             from isaaclab.envs import ViewerCfg
             from isaaclab.envs.ui import BaseEnvWindow, ViewportCameraController
 
-            from active_adaptation.utils.debug import DebugDraw
 
             self.cfg.viewer.env_index = 0
             self.manager_visualizers = {}
@@ -47,7 +47,6 @@ class IsaacBackendEnv(_EnvBase):
                 self,
                 ViewerCfg(self.cfg.viewer.eye, self.cfg.viewer.lookat, origin_type="env"),
             )
-            self.debug_draw = DebugDraw()
 
     def setup_scene(self):
         import isaaclab.sim as sim_utils
@@ -154,10 +153,24 @@ class IsaacBackendEnv(_EnvBase):
         except ModuleNotFoundError:
             print("Set enable_cameras=true to use cameras.")
 
-        self.sim = IsaacSimAdapter(sim)
-        self.scene = IsaacSceneAdapter(self.scene)
+        if self.cfg.viewer.get("viser", False):
+            from active_adaptation.envs.backends.isaac.viewer import IsaacViserViewer
+            viser_viewer = IsaacViserViewer(self)
+            viser_viewer.setup()
+        else:
+            viser_viewer = None
+        
+        if sim.has_gui(): # native isaac gui
+            debug_draw = IsaacDebugDraw()
+        else:
+            debug_draw = None
+
+        self.sim = IsaacSimAdapter(sim, viser_viewer)
+        self.scene = IsaacSceneAdapter(self.scene, viser_viewer, debug_draw)
         self.terrain_type = self.scene.terrain.cfg.terrain_type
         self.robot = self.scene.articulations["robot"]
+
+        self._debug_draw_callbacks.insert(0, self.scene.clear_debug)
 
         if asset_spec.wrapper is not None:
             self.robot_wrapper = asset_spec.wrapper

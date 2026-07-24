@@ -169,3 +169,64 @@ Terms may read/write `tensordict`. Most leave it unused.
 **Order:** `_reset_idx` (`sample_init`) → `scene.reset` → `reset` callbacks.
 
 **Future:** drop `sample_init`; `reset` decides initial state.
+
+---
+
+## Raycasting / USD meshes
+
+External package: [`simple-raycaster`](https://github.com/btx0424/simple-raycaster) (installed into the uv env with active-adaptation; not a workspace-local path). Public exports: `MultiMeshRaycaster`, `MultiMeshRaycasterV2`. Authoritative notes: upstream `AGENTS.md`.
+
+### Package modules (import paths)
+
+```
+simple_raycaster.raycaster       # MultiMeshRaycaster — caller supplies mesh_pos_w / mesh_quat_w
+simple_raycaster.raycaster_v2    # MultiMeshRaycasterV2 — Isaac entity poses auto-gathered
+simple_raycaster.proximity       # MeshProximitySensor — closest-point / signed-distance queries
+simple_raycaster.kernels         # Warp raycast + fused transform + proximity kernels
+simple_raycaster.helpers         # trimesh2wp, quat_rotate_inverse, voxelize_*
+simple_raycaster.utils_usd       # find_matching_prims, get_trimesh_from_prim, usd2trimesh, usd2wp
+simple_raycaster.utils_mjc       # get_trimesh_from_body (MuJoCo)
+```
+
+### USD extraction pipeline (`utils_usd`)
+
+```
+stage / prim_path regex
+  → find_matching_prims
+  → get_mesh_prims_subtree (Mesh + Cube; resolve Usd instances → prototypes)
+  → usd2trimesh per mesh prim
+  → transform = mesh_world * parent_world⁻¹  (skip for prototype meshes)
+  → concatenate + merge_vertices
+  → body-local trimesh.Trimesh
+```
+
+- **Dynamic bodies:** mesh vertices stay in the body/parent frame; runtime pose is `body_link_pose_w` (`[pos(3), quat_wxyz(4)]`).
+- **Static world geometry** (`add_isaac_static`): combine matching visuals once; bake world transform into the trimesh; raycast pose is identity.
+- Prim path for Isaac articulations: template `entity.root_physx_view.prim_paths[0]`, then `{template with body_name}/visuals` per `entity.body_names`. Count must equal `entity.num_bodies`.
+
+### Raycast call shape
+
+- Inputs: `ray_starts_w`, `ray_dirs_w` as `[N, n_rays, 3]` (dirs normalized); optional `enabled [N]`, `mesh_indices [N, n_subset]`.
+- Outputs: `hit_positions_w [N, n_rays, 3]`, `hit_distances [N, n_rays]` (closest hit across meshes; misses → `max_dist`).
+- Prefer `raycast_fused` (single Warp kernel). Non-fused `raycast` is for parity/debug.
+- Conventions: quats **WXYZ** in Python (fused kernel reorders to XYZW for Warp); `wp.init()` once; CUDA device for production.
+
+### active-adaptation touchpoints
+
+| Location | Role |
+|----------|------|
+| `IsaacSceneAdapter.ground_mesh` | Warp mesh for `/World/ground` (plane or USD) |
+| `env.ground_mesh` | Proxy onto scene adapter |
+| `observations/extero.raycast_camera` | **Canonical V2** usage: static ground + `add_isaac_entity` targets |
+| `observations/extero.height_scan` | V1 + `ground_mesh` (+ optional `add_from_path` targets with manual root poses) |
+| `observations/underwater` DVL | IsaacLab `raycast_mesh` on `ground_mesh` only (not multi-mesh V2 yet) |
+
+### Viser (Isaac) — reuse the same meshes
+
+When building an Isaac Viser viewer (mjlab-parity: robot mesh + camera frustums):
+
+1. Extract body visuals the same way as `MultiMeshRaycasterV2.add_isaac_entity` / `get_trimesh_from_prim`.
+2. Upload once (`add_batched_meshes_*` or equivalent); do not re-parse USD every step.
+3. Each viewer update: write `entity.data.body_link_pose_w` (pos + WXYZ→Viser wxyz) for all envs or the selected env.
+4. Camera obs debug: attach images to Viser **camera frustum** helpers (pose from sensor/body offset), not only flat GUI image panels.
+5. Keep Omniverse Kit viewport optional; Viser is the headless/browser path analogous to `MjLabViewer`.
