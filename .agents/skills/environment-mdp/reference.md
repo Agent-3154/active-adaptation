@@ -5,6 +5,16 @@
 ```
 active_adaptation/envs/
 ├── env_base.py              # _EnvBase: create / init / step / reset wiring
+├── adapters.py              # SimAdapter, SceneAdapter, CameraFrustumHandle
+├── backends/
+│   ├── isaac/
+│   │   ├── adapter.py       # Omni DebugDraw + Viser draw_*/frustum
+│   │   ├── viewer.py        # IsaacViserViewer (meshes, lines, frustums)
+│   │   └── env.py           # viewer.viser, clear_debug callback
+│   └── mjlab/
+│       ├── adapter.py       # Viser draw_*/frustum
+│       ├── viewer.py        # MjLabViewer
+│       └── env.py
 └── mdp/
     ├── base.py              # MDPComponent, is_method_implemented
     ├── __init__.py          # re-exports V1+V2 bases + subpackages
@@ -16,7 +26,7 @@ active_adaptation/envs/
     │   └── *.py             # e.g. Twist
     ├── observations/
     │   ├── base.py          # Observation, ObservationV2
-    │   ├── common.py, joint.py, …
+    │   ├── common.py, joint.py, underwater.py, …
     │   └── __init__.py      # explicit submodule imports
     ├── rewards/
     │   ├── base.py          # Reward (deprecated), RewardV2
@@ -65,8 +75,11 @@ _step(tensordict)
   ├─ _compute_termination
   ├─ command.update()
   ├─ _compute_observation
-  └─ debug_draw callbacks (if GUI)
+  └─ if sim.has_gui(): debug_draw callbacks
+       (backends insert scene.clear_debug as first callback)
 ```
+
+`sim.has_gui()` is true for: Isaac Omni Kit **or** `viewer.viser`; mjlab when a `MjLabViewer` exists (non-headless).
 
 ---
 
@@ -221,12 +234,57 @@ stage / prim_path regex
 | `observations/extero.height_scan` | V1 + `ground_mesh` (+ optional `add_from_path` targets with manual root poses) |
 | `observations/underwater` DVL | IsaacLab `raycast_mesh` on `ground_mesh` only (not multi-mesh V2 yet) |
 
-### Viser (Isaac) — reuse the same meshes
+---
 
-When building an Isaac Viser viewer (mjlab-parity: robot mesh + camera frustums):
+## Debug visualization
 
-1. Extract body visuals the same way as `MultiMeshRaycasterV2.add_isaac_entity` / `get_trimesh_from_prim`.
-2. Upload once (`add_batched_meshes_*` or equivalent); do not re-parse USD every step.
-3. Each viewer update: write `entity.data.body_link_pose_w` (pos + WXYZ→Viser wxyz) for all envs or the selected env.
-4. Camera obs debug: attach images to Viser **camera frustum** helpers (pose from sensor/body offset), not only flat GUI image panels.
-5. Keep Omniverse Kit viewport optional; Viser is the headless/browser path analogous to `MjLabViewer`.
+Cross-backend API in `envs/adapters.py`. MDP terms call **`env.scene`**, never `env.debug_draw`.
+
+### SceneAdapter surface
+
+```python
+scene.clear_debug()
+scene.draw_vector(x, v, size=2.0, color=(…,))   # x,v: (..., 3)
+scene.draw_point(x, color=(…,), size=10.0)
+scene.draw_plot(x, size=2.0, color=(…,))         # polyline
+handle = scene.create_camera_frustum(name, fov_y=…, aspect=…, scale=0.15)
+handle.position = pos_w      # torch or numpy
+handle.wxyz = quat_wxyz
+handle.image = hwc_uint8
+```
+
+Env backends register `scene.clear_debug` as the **first** `debug_draw` callback so each frame starts empty, then term callbacks append primitives; viewers sync on `sim.step(render=True)` / `viewer.update()`.
+
+### Backend behavior
+
+| Backend | Primitives | Camera frustum | Enable |
+|---------|------------|----------------|--------|
+| Isaac Omni | `IsaacDebugDraw` (Kit) | — | Native GUI |
+| Isaac Viser | `IsaacViserViewer` lines/points | `register_camera` → `CameraFrustumHandle` | `viewer.viser: true` |
+| mjlab | `MjLabViewer` MDP buffers | same | non-headless |
+
+Isaac adapter may fan out `draw_*` to **both** Omni and Viser when both exist. `IsaacSimAdapter.has_gui()` is true if either is present; Omniverse window setup must check the **native** sim (`sim._sim.has_gui()`), not the adapter.
+
+### Viser mesh path (viewer internals)
+
+Same extraction as raycasting (`utils_usd.get_trimesh_from_prim` / `{body}/visuals`):
+
+1. Upload body meshes once at viewer `setup()`.
+2. Each update: write `body_link_pose_w` into batched mesh handles (park non-selected envs far away rather than rebuilding handles).
+3. Camera obs: frustum pose = body × mount offset (WXYZ); push RGB as HWC uint8.
+4. Example term: `observations/underwater.uw_camera` with `debug_vis: true`.
+
+### Example task knobs
+
+```yaml
+viewer:
+  eye: [4.0, 4.0, 4.0]
+  lookat: [0., 0., 0.]
+  viser: true   # Isaac only; mjlab uses headless=false
+
+observation:
+  policy:
+    underwater.uw_camera:
+      body_name: base_link
+      debug_vis: true
+```
