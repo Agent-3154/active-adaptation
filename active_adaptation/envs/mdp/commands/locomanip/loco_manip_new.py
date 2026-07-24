@@ -686,12 +686,12 @@ class LocoManipNew(CommandV2):
         cmd_eef_rot_w = quat_mul(root_yaw_q, self.cmd_eef_rot_b)
 
         if self.env.backend == "isaac":
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 root_pos_w,
                 self.cmd_linvel_w,
                 color=(1.0, 1.0, 1.0, 1.0),
             )
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 self.eef_pos_w,
                 cmd_eef_pos_w - self.eef_pos_w,
                 color=(0.0, 0.0, 1.0, 1.0),

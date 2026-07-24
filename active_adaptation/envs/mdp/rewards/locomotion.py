@@ -143,7 +143,7 @@ class linvel_exp(RewardV2[Twist]):
     def debug_draw(self):
         if self.env.backend == "isaac":
             linvel_w = self.linvel_w_sum / self.count.clamp_min(1.0)
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 self.asset.data.root_link_pos_w
                 + torch.tensor([0.0, 0.0, 0.2], device=self.device),
                 linvel_w,

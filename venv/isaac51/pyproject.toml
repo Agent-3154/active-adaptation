@@ -6,6 +6,7 @@ dependencies = [
     "active-adaptation",
     # Keep this pinned to the Isaac 5.1-compatible version.
     "isaacsim[all,extscache]==5.1.0",
+    "viser>=1.0.30",
     "warp-lang < 1.13",
 ]
 
@@ -41,6 +42,9 @@ override-dependencies = [
     "torch==2.11",
     "torchaudio==2.11",
     "torchvision==0.26.0",
+    # isaacsim-kernel pins websockets==12.0; viser>=1.0 needs >=13.1. Override so
+    # latest viser resolves (Isaac runtime is expected to tolerate newer websockets).
+    "websockets>=13.1,<=16.0",
 ]
 required-environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'"

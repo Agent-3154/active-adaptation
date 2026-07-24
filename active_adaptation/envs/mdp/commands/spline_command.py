@@ -91,7 +91,7 @@ class SplineCommand(Command):
                 translations=torch.cat([ctps, wps]),
                 marker_indices=[0] * ctps.shape[0] + [1] * wps.shape[0],
             )
-            self.env.debug_draw.plot(
+            self.env.scene.draw_plot(
                 torch.cat([self.traj_vis, torch.ones(self.traj_vis.shape[0], 1) * 0.5], dim=-1),
                 color=(1., 1., 1., 1.),
             )

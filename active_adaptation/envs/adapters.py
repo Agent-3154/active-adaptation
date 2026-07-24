@@ -1,10 +1,9 @@
 """Common adapter protocols shared by all environment backends."""
 from __future__ import annotations
 
-from typing import Dict, Protocol, TYPE_CHECKING, Union
+from typing import Dict, Protocol, TYPE_CHECKING, Union, Any
 
 import torch
-import warp as wp
 import numpy as np
 
 if TYPE_CHECKING:
@@ -12,6 +11,53 @@ if TYPE_CHECKING:
     from isaaclab.scene import InteractiveScene
     from mjlab.entity import Entity
     from mjlab.scene import Scene
+
+
+class CameraFrustumHandle:
+    """Backend-agnostic camera frustum for debug visualization.
+
+    Wraps a Viser ``CameraFrustumHandle`` (or compatible object) and accepts
+    torch / numpy assignments for pose and image.
+    """
+
+    def __init__(self, handle: Any):
+        self._handle = handle
+
+    @staticmethod
+    def _as_numpy(value: torch.Tensor | np.ndarray, shape: tuple[int, ...] | None = None):
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().numpy()
+        arr = np.asarray(value)
+        if shape is not None:
+            arr = arr.reshape(shape)
+        return arr
+
+    @property
+    def position(self) -> np.ndarray:
+        return self._handle.position
+
+    @position.setter
+    def position(self, value: torch.Tensor | np.ndarray) -> None:
+        self._handle.position = self._as_numpy(value, (3,)).astype(np.float32)
+
+    @property
+    def wxyz(self) -> np.ndarray:
+        return self._handle.wxyz
+
+    @wxyz.setter
+    def wxyz(self, value: torch.Tensor | np.ndarray) -> None:
+        self._handle.wxyz = self._as_numpy(value, (4,)).astype(np.float32)
+
+    @property
+    def image(self):
+        return self._handle.image
+
+    @image.setter
+    def image(self, value: torch.Tensor | np.ndarray) -> None:
+        self._handle.image = self._as_numpy(value)
+
+    def __getattr__(self, name: str):
+        return getattr(self._handle, name)
 
 
 class SimAdapter(Protocol):
@@ -46,7 +92,7 @@ class SceneAdapter(Protocol):
         raise NotImplementedError(
             f"Zero external wrenches is not implemented for {self.__class__.__name__}."
         )
-    
+
     def get(self, name, default=None):
         raise NotImplementedError
 
@@ -76,13 +122,51 @@ class SceneAdapter(Protocol):
 
     def get_spawn_origins(self, env_ids: torch.Tensor) -> torch.Tensor:
         return self.env_origins[env_ids]
-    
-    def create_sphere_marker(self, prim_path: str, color: tuple[float, float, float], radius: float): ...
 
-    def create_arrow_marker(self, prim_path: str, color: tuple[float, float, float], scale: tuple[float, float, float]): ...
+    def create_sphere_marker(
+        self, prim_path: str, color: tuple[float, float, float], radius: float
+    ): ...
+
+    def create_arrow_marker(
+        self,
+        prim_path: str,
+        color: tuple[float, float, float],
+        scale: tuple[float, float, float],
+    ): ...
+
+    def create_camera_frustum(
+        self, name: str, *, fov_y: float, aspect: float, scale: float = 0.15
+    ) -> CameraFrustumHandle: ...
+
+    def clear_debug(self) -> None:
+        """Clear per-step debug primitives (vectors / points / plots)."""
+        ...
+
+    def draw_vector(
+        self,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0),
+    ): ...
+
+    def draw_point(
+        self,
+        x: torch.Tensor,
+        color: tuple[float, ...] = (1.0, 0.0, 0.0, 1.0),
+        size: float = 10.0,
+    ): ...
+
+    def draw_plot(
+        self,
+        x: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0),
+    ): ...
 
 
 __all__ = [
     "SimAdapter",
     "SceneAdapter",
+    "CameraFrustumHandle",
 ]

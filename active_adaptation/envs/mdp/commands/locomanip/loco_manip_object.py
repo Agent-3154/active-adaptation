@@ -289,18 +289,18 @@ class LocoManipObject(_LocoManipObjectBase):
 
     @override
     def debug_draw(self) -> None:
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.object_pos_w,
             self.object_target_diff_w,
             color=(0.0, 0.0, 1.0, 1.0),
         )
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.object_pos_w,
             self.cmd_object_vel_w,
             color=(1.0, 0.0, 0.0, 1.0),
         )
         self.grasp_point_marker.visualize(self.grasp_point_w)
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.eef_pos_w,
             self.grasp_point_diff_w,
             color=(0.0, 1.0, 0.0, 1.0),
@@ -735,15 +735,15 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
 
     @override
     def debug_draw(self) -> None:
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_link_pos_w,
             self.cmd_linvel_w,
             color=(1.0, 1.0, 1.0, 1.0),
         )
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.eef_pos_w, self.eef_forward_w, color=(1.0, 0.0, 0.0, 1.0)
         )
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.eef_pos_w,
             self.cmd_eef_pos_w - self.eef_pos_w,
             color=(0.0, 0.0, 1.0, 1.0),

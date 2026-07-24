@@ -91,7 +91,7 @@ class last_contact_pos(ObservationV2):
     def debug_draw(self) -> None:
         """Draw a vector from each body link to its latched last-contact marker and show spheres."""
         if self.env.sim.has_gui() and self.env.backend == "isaac":
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 self.body_link_pos_w,
                 self.last_contact_pos_w - self.body_link_pos_w,
                 color=(0, 0, 1, 1),

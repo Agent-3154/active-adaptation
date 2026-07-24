@@ -157,12 +157,12 @@ class MotionTrackingCommand(Command):
 
     def debug_draw(self):
         target_keypoints_w = self._motion.body_link_pos_w[:, 0] + self.env.scene.env_origins.cpu().unsqueeze(1)
-        self.env.debug_draw.point(target_keypoints_w.reshape(-1, 3), color=(1, 0, 0, 1))
+        self.env.scene.draw_point(target_keypoints_w.reshape(-1, 3), color=(1, 0, 0, 1))
 
         robot_keypoints_w = self.asset.data.body_link_pos_w[:, self.keypoint_idx_asset].cpu()
-        self.env.debug_draw.point(robot_keypoints_w.reshape(-1, 3), color=(0, 1, 0, 1))
+        self.env.scene.draw_point(robot_keypoints_w.reshape(-1, 3), color=(0, 1, 0, 1))
 
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             robot_keypoints_w.reshape(-1, 3),
             target_keypoints_w[:, self.keypoint_idx_motion].reshape(-1, 3) - robot_keypoints_w.reshape(-1, 3),
             color=(0, 0, 1, 1)
@@ -171,7 +171,7 @@ class MotionTrackingCommand(Command):
         in_contact = self.contact_forces.data.current_contact_time[:, self.feet_ids_sensor] > 0.01
         diff = self.target_feet_pos_w - self.asset.data.body_link_pos_w[:, self.feet_ids_asset]
         
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.body_link_pos_w[:, self.feet_ids_asset].reshape(-1, 3),
             (diff * in_contact.unsqueeze(-1)).reshape(-1, 3),
             color=(0, 1, 0, 1),

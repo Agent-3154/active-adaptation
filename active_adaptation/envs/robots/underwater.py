@@ -350,7 +350,7 @@ class UnderwaterRobot:
             rotor_quat_w = self.robot.data.body_link_quat_w[:, self.rotor_indices]
             v = torch.tensor([[[1.0, 0.0, 0.0]]], device=self.device)
             thrust_w = quat_rotate(rotor_quat_w, v)
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 rotor_pos_w.reshape(-1, 3),
                 thrust_w.reshape(-1, 3),
                 color=(0.2, 0.8, 1.0, 1.0),

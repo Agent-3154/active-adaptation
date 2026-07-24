@@ -729,12 +729,12 @@ class SingleEEFLocoManip(CommandV2):
     @override
     def debug_draw(self) -> None:
         if self.env.backend == "isaac":
-            self.env.debug_draw.vector(
+            self.env.scene.draw_vector(
                 self.asset.data.root_link_pos_w,
                 self.cmd_linvel_w,
                 color=(1.0, 1.0, 1.0, 1.0),
             )
-            # self.env.debug_draw.vector(
+            # self.env.scene.draw_vector(
             #     self.eef_pos_w,
             #     self.payload_force_w / 9.81,
             #     color=(0.0, 0.0, 1.0, 1.0),

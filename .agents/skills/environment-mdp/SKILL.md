@@ -1,6 +1,6 @@
 ---
 name: environment-mdp
-description: Implement and wire MDP terms in active-adaptation (observations, rewards, terminations, actions, commands, randomizations) using the V2 deferred-init API. Use when adding or modifying classes under envs/mdp/, editing cfg/task/ observation/reward/termination/input/command/randomization blocks, or debugging env_base step/reset callbacks.
+description: Implement and wire MDP terms in active-adaptation (observations, rewards, terminations, actions, commands, randomizations) using the V2 deferred-init API. Use when adding or modifying classes under envs/mdp/, editing cfg/task/ observation/reward/termination/input/command/randomization blocks, debugging env_base step/reset callbacks, or working on Warp/simple-raycaster raycasting, USD mesh extraction, or Isaac Viser mesh visualization.
 ---
 
 # Environment / MDP terms (active-adaptation)
@@ -12,8 +12,9 @@ Implement MDP terms as **V2** classes: construct from Hydra kwargs **without** a
 - Shared hooks: `active_adaptation/envs/mdp/base.py` (`MDPComponent`)
 - Term bases: `envs/mdp/{observations,rewards,terminations,actions,commands,randomizations}/base.py`
 - Task configs: `cfg/task/**/*.yaml`
+- Raycasting / USD meshes: installed package `simple-raycaster` (see section below + [reference.md](reference.md))
 
-Read [reference.md](reference.md) for the step-loop diagram, callback registration, and file map.
+Read [reference.md](reference.md) for the step-loop diagram, callback registration, file map, and raycast/mesh details.
 
 **Related skills:** `onpolicy-algorithms`, `offpolicy-algorithms`.
 
@@ -25,6 +26,7 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 - Porting a legacy `Reward`/`Observation`/… term to V2
 - Wiring or renaming terms in `cfg/task/`
 - Debugging missing callbacks, wrong step order, or registry lookup failures
+- Isaac multi-mesh raycasting, USD → trimesh/Warp extraction, or browser Viser robot meshes / camera frustums
 
 ---
 
@@ -162,6 +164,68 @@ For PPO symaug, override `symmetry_transform()` on observation and action terms 
 ## Backends
 
 Set `supported_backends = ("isaac", "mjlab", …)` on the class when the term is backend-specific. `RegistryMixin.make` returns `None` (and warns) if the active backend is unsupported — the env skips that term.
+
+---
+
+## Raycasting and USD mesh extraction
+
+For Isaac range / depth / occupancy sensing (and for extracting robot visual meshes for Viser), use the installed package **`simple-raycaster`** ([btx0424/simple-raycaster](https://github.com/btx0424/simple-raycaster)) — not Isaac Lab’s single-mesh `RayCaster`. Assume it is available in the uv environment after installing active-adaptation; import as `from simple_raycaster import …`. Package docs: upstream `readme.md` / `AGENTS.md`.
+
+### Which API
+
+| Class | When |
+|-------|------|
+| `MultiMeshRaycasterV2` | Inside Isaac Lab: register static + entity meshes once; poses come from `entity.data.body_link_pose_w` |
+| `MultiMeshRaycaster` | Manual poses, offline USD/MJCF, or incremental `add_from_path` |
+
+Prefer **`raycast_fused`** in training loops. Quaternions are **WXYZ**. Call `wp.init()` once per process before the first Warp launch. Use `device="cuda"`.
+
+### Isaac registration (V2)
+
+In `_initialize` (scene must exist):
+
+```python
+from simple_raycaster import MultiMeshRaycasterV2
+
+self.raycaster = MultiMeshRaycasterV2(device=self.device)
+self.raycaster.add_isaac_static("/World/ground")          # world-baked static mesh, identity pose
+self.raycaster.add_isaac_entity(self.env.scene.articulations["robot"])  # one mesh per body
+# hit_pos, hit_dist = self.raycaster.raycast_fused(ray_starts_w, ray_dirs_w, min_dist=..., max_dist=...)
+```
+
+- `add_isaac_entity` loads `{body}/visuals` under `entity.root_physx_view.prim_paths[0]`; matched visual count **must** equal `entity.num_bodies`.
+- Batch `N` on rays must equal `entity.num_instances` (`num_envs`).
+- Do not call V2’s private `_add_mesh` / `_add_from_path` without updating `entities` (registration validation will fail).
+
+### USD → trimesh (body-local visuals)
+
+Extraction lives in `simple_raycaster.utils_usd` (also used by Viser mesh upload):
+
+1. `find_matching_prims(regex, stage)` — stage traverse with anchored regex.
+2. `get_trimesh_from_prim(prim)` — collect `Mesh`/`Cube` under the prim (follows instance prototypes), convert via `usd2trimesh`, apply **local** transform relative to the parent prim (`world * parent⁻¹`), concatenate + `merge_vertices`.
+3. Result is in **body / parent frame**; at runtime multiply by `body_link_pose_w` (or let V2 do it).
+
+Static terrain: combine under e.g. `/World/ground` and keep identity pose (geometry already world-framed).
+
+MuJoCo counterpart: `utils_mjc.get_trimesh_from_body` + `MultiMeshRaycaster.from_MjModel`.
+
+### In-repo usage patterns
+
+| Pattern | Where | Notes |
+|---------|--------|------|
+| V2 entity + static | `observations/extero.py` → `raycast_camera` | Preferred for robots/objects |
+| V1 + `env.ground_mesh` | `height_scan`, DVL in `underwater.py` | Ground-only or manual poses; DVL still uses IsaacLab `raycast_mesh` on `ground_mesh` |
+| Scene ground Warp mesh | `IsaacSceneAdapter.ground_mesh` | Plane or USD mesh at `/World/ground` |
+
+For **Isaac Viser** robot meshes: reuse the same body-visual extraction (`get_trimesh_from_prim` / paths from `add_isaac_entity`), upload once as Viser batched meshes, and each `debug_draw`/`viewer.update` write `body_link_pose_w` — same pose source as raycasting. Camera image debug should use Viser camera frustums (not only GUI image panels). Details in [reference.md](reference.md#raycasting--usd-meshes).
+
+### Anti-patterns (raycast / mesh)
+
+- Using Isaac Lab `RayCaster` when multiple dynamic meshes are needed
+- Passing world-space meshes into V2 entity slots (entity meshes must be body-local)
+- Extracting USD before `AppLauncher` / stage exists (`from pxr import Usd` needs Isaac or standalone `usd-core`)
+- CPU Warp device for batched training raycasts
+- Forgetting `wp.init()` or re-adding meshes without re-`initialize()` (mesh-id array stale)
 
 ---
 

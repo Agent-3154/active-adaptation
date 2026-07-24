@@ -3,25 +3,67 @@ from typing import TYPE_CHECKING
 import torch
 from typing_extensions import override
 
-from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
+from active_adaptation.envs.adapters import SimAdapter, SceneAdapter, CameraFrustumHandle
+from active_adaptation.envs.backends.isaac.viewer import IsaacViserViewer
+
 
 if TYPE_CHECKING:
     from isaaclab.scene import InteractiveScene
     from isaaclab.sim import SimulationContext
 
+class IsaacDebugDraw:
+    def __init__(self):
+        from isaacsim.util.debug_draw import _debug_draw
+        self._draw = _debug_draw.acquire_debug_draw_interface()
+    
+    def clear(self):
+        self._draw.clear_lines()
+        self._draw.clear_points()
+
+    def plot(self, x: torch.Tensor, size=2.0, color=(1., 1., 1., 1.)):
+        if not (x.ndim == 2) and (x.shape[1] == 3):
+            raise ValueError("x must be a tensor of shape (N, 3).")
+        x = x.cpu()
+        point_list_0 = x[:-1].tolist()
+        point_list_1 = x[1:].tolist()
+        sizes = [size] * len(point_list_0)
+        colors = [color] * len(point_list_0)
+        self._draw.draw_lines(point_list_0, point_list_1, colors, sizes)
+        
+    def vector(self, x: torch.Tensor, v: torch.Tensor, size=2.0, color=(0., 1., 1., 1.)):
+        x = x.cpu().reshape(-1, 3)
+        v = v.cpu().reshape(-1, 3)
+        if not (x.shape == v.shape):
+            raise ValueError("x and v must have the same shape, got {} and {}.".format(x.shape, v.shape))
+        point_list_0 = x.tolist()
+        point_list_1 = (x + v).tolist()
+        sizes = [size] * len(point_list_0)
+        colors = [color] * len(point_list_0)
+        self._draw.draw_lines(point_list_0, point_list_1, colors, sizes)
+    
+    def point(self, x: torch.Tensor, color=(1., 0., 0., 1.), size=10.0):
+        point_list = x.cpu().reshape(-1, 3).tolist()
+        sizes = [size] * len(point_list)
+        colors = [color] * len(point_list)
+        self._draw.draw_points(point_list, colors, sizes)
+
 
 class IsaacSimAdapter(SimAdapter):
-    def __init__(self, sim: "SimulationContext"):
+    def __init__(self, sim: "SimulationContext", viser_viewer: IsaacViserViewer = None):
         self._sim = sim
+        self._viser_viewer = viser_viewer
 
     def get_physics_dt(self) -> float:
         return self._sim.get_physics_dt()
 
     def has_gui(self) -> bool:
-        return self._sim.has_gui()
+        # True for Omniverse GUI *or* browser Viser (debug callbacks / mesh sync).
+        return self._sim.has_gui() or self._viser_viewer is not None
 
     def step(self, render: bool = False) -> None:
         self._sim.step(render=render)
+        if render and self._viser_viewer is not None:
+            self._viser_viewer.update()
 
     def render(self) -> None:
         self._sim.render()
@@ -35,8 +77,14 @@ class IsaacSimAdapter(SimAdapter):
 
 
 class IsaacSceneAdapter(SceneAdapter):
-    def __init__(self, scene: "InteractiveScene"):
+    def __init__(
+        self, scene: "InteractiveScene",
+        viser_viewer: IsaacViserViewer = None,
+        debug_draw: IsaacDebugDraw = None,
+    ):
         self._scene: "InteractiveScene" = scene
+        self._viser_viewer = viser_viewer
+        self._debug_draw = debug_draw
 
     @override
     def zero_external_wrenches(self) -> None:
@@ -49,6 +97,25 @@ class IsaacSceneAdapter(SceneAdapter):
                 asset._external_force_b.zero_()
                 asset._external_torque_b.zero_()
                 asset.has_external_wrench = False
+
+    @override
+    def create_camera_frustum(
+        self,
+        name: str,
+        *,
+        fov_y: float,
+        aspect: float,
+        scale: float = 0.15,
+    ) -> CameraFrustumHandle:
+        if self._viser_viewer is None:
+            raise RuntimeError("`create_camera_frustum` requires a Viser viewer.")
+        handle = self._viser_viewer.register_camera(
+            name,
+            fov_y=fov_y,
+            aspect=aspect,
+            scale=scale,
+        )
+        return CameraFrustumHandle(handle)
 
     @property
     def ground_mesh(self):
@@ -194,6 +261,46 @@ class IsaacSceneAdapter(SceneAdapter):
         )
         marker.set_visibility(True)
         return marker
+    
+    def clear_debug(self) -> None:
+        if self._debug_draw is not None:
+            self._debug_draw.clear()
+        if self._viser_viewer is not None:
+            self._viser_viewer.clear()
+
+    def draw_vector(
+        self,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (0.0, 1.0, 1.0, 1.0),
+    ):
+        if self._debug_draw is not None:
+            self._debug_draw.vector(x, v, size, color)
+        if self._viser_viewer is not None:
+            self._viser_viewer.vector(x, v, size, color)
+
+    def draw_point(
+        self,
+        x: torch.Tensor,
+        color: tuple[float, ...] = (1.0, 0.0, 0.0, 1.0),
+        size: float = 10.0,
+    ):
+        if self._debug_draw is not None:
+            self._debug_draw.point(x, color=color, size=size)
+        if self._viser_viewer is not None:
+            self._viser_viewer.point(x, color=color, size=size)
+
+    def draw_plot(
+        self,
+        x: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0),
+    ):
+        if self._debug_draw is not None:
+            self._debug_draw.plot(x, size=size, color=color)
+        if self._viser_viewer is not None:
+            self._viser_viewer.plot(x, size=size, color=color)
 
     @override
     def get_spawn_origins(self, env_ids: torch.Tensor) -> torch.Tensor:
