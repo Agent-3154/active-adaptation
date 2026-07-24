@@ -64,6 +64,18 @@ def make_env_policy(
     # Parse checkpoint in parallel with environment creation.
     with ThreadPoolExecutor(max_workers=1) as executor:
         checkpoint_future = executor.submit(parse_checkpoint, checkpoint_path)
+
+        # setup policy
+        # New pattern: ``_target_`` is the *config* dataclass (so ``__post_init__`` runs
+        # via ``hydra.utils.instantiate``); ``cfg.get_class()`` returns the policy class.
+        # Legacy: ``_target_`` was the policy class — keep a fallback during migration.
+        try:
+            algo_cfg = hydra.utils.instantiate(algo_cfg)
+            policy_cls = algo_cfg.get_class()
+        except Exception:
+            # raise a warning
+            algo_cfg = algo_cfg
+            policy_cls = hydra.utils.get_class(algo_cfg._target_)
         
         _ensure_backend_env_imported(backend)
         if backend == "isaac":
@@ -83,8 +95,9 @@ def make_env_policy(
         else:
             raise ValueError(f"Unknown backend: {backend}")
         
-        policy_in_keys = algo_cfg.get("in_keys", None)
-        if policy_in_keys is None:
+        try:
+            policy_in_keys = algo_cfg.in_keys
+        except AttributeError:
             raise ValueError("Specify `in_keys` (e.g., `policy`, `priv`) in `cfg.algo`.")
 
         if discard_unused_obs:
@@ -115,21 +128,9 @@ def make_env_policy(
 
     env = TransformedEnv(base_env, transform)
     env.set_seed(seed)
-    
-    # setup policy
-    # New pattern: ``_target_`` is the *config* dataclass (so ``__post_init__`` runs
-    # via ``hydra.utils.instantiate``); ``cfg.get_class()`` returns the policy class.
-    # Legacy: ``_target_`` was the policy class — keep a fallback during migration.
-    try:
-        cfg = hydra.utils.instantiate(algo_cfg)
-        policy_cls = cfg.get_class()
-    except Exception:
-        # raise a warning
-        cfg = algo_cfg
-        policy_cls = hydra.utils.get_class(algo_cfg._target_)
 
     print(f"Creating policy {policy_cls} on device {device}")
-    policy = policy_cls.from_env(cfg, env, device=device)
+    policy = policy_cls.from_env(algo_cfg, env, device=device)
     
     if "policy" in state_dict.keys():
         print(colored("[Info]: Load policy from checkpoint.", "green"))
