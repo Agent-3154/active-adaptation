@@ -4,7 +4,7 @@ import colorsys
 import math
 import torch
 import einops
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
 
 from typing_extensions import override
 
@@ -13,6 +13,7 @@ from jaxtyping import Float
 from .base import ObservationV2
 from active_adaptation.utils.math import (
     quat_rotate,
+    quat_rotate_inverse,
     yaw_quat,
     quat_from_euler_xyz,
     root_pose_from_view_z_up,
@@ -860,3 +861,127 @@ class camera_mjlab(ObservationV2):
         width = self.resolution[0]
         perm = torch.arange(width - 1, -1, -1, dtype=torch.long)
         return SymmetryTransform(perm, torch.ones(width))
+
+
+class closest_points(ObservationV2):
+    """Closest surface points on target meshes from selected robot bodies.
+
+    Probe positions are the link origins of ``body_names``. Each name may be a
+    regex (Isaac ``find_bodies``). ``targets`` are scene entity keys whose
+    visuals are registered with :class:`~simple_raycaster.MeshProximitySensor`.
+
+    ``clipping_range=(near, far)`` sets the query radius to ``far``. Hits closer
+    than ``near`` are clamped to ``near``. Misses (no surface within ``far``)
+    report ``far`` when ``distance_only``, else a zero vector.
+
+    Returns:
+
+    * ``distance_only=True``: clamped distances ``[N, n_bodies]``.
+    * ``distance_only=False``: flattened closest-point positions
+      ``[N, n_bodies * 3]`` —
+      * ``frame="body"``: each point in its body frame
+        (``R_bodyᵀ (p* − p_body)``).
+      * ``frame="root"``: each point relative to the robot root in the root
+        frame (``R_rootᵀ (p* − p_root)``).
+    """
+
+    supported_backends = ("isaac",)
+
+    def __init__(
+        self,
+        body_names: str | List[str],
+        clipping_range: Tuple[float, float],
+        targets: List[str],
+        frame: Literal["root", "body"] = "body",
+        distance_only: bool = False,
+    ) -> None:
+        super().__init__()
+        if frame not in ("root", "body"):
+            raise ValueError(f"frame must be 'root' or 'body', got {frame!r}")
+        near, far = float(clipping_range[0]), float(clipping_range[1])
+        if far <= near:
+            raise ValueError(f"clipping_range far ({far}) must be > near ({near})")
+        self.body_names_cfg = body_names
+        self.clipping_range = (near, far)
+        self.targets = list(targets)
+        self.frame = frame
+        self.distance_only = distance_only
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.asset: Articulation = self.env.scene.articulations["robot"]
+        self.body_ids, self.body_names = self.asset.find_bodies(
+            self.body_names_cfg, preserve_order=True
+        )
+        if len(self.body_ids) == 0:
+            raise ValueError(f"No bodies matched {self.body_names_cfg!r}")
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
+        self.num_bodies = len(self.body_ids)
+        self.near, self.far = self.clipping_range
+
+        from simple_raycaster import MeshProximitySensor
+
+        self.sensor = MeshProximitySensor(device=self.device)
+        if len(self.targets) == 0:
+            raise ValueError("closest_points requires at least one target entity")
+        for target in self.targets:
+            self.sensor.add_isaac_entity(self.env.scene[target])
+
+        if self.env.backend == "isaac" and self.env.sim.has_gui():
+            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+
+            scene: IsaacSceneAdapter = self.env.scene
+            self.marker_query = scene.create_sphere_marker(
+                "/Visuals/Command/closest_points_query",
+                (0.2, 0.8, 0.2),
+                radius=0.01,
+            )
+            self.marker_hit = scene.create_sphere_marker(
+                "/Visuals/Command/closest_points_hit",
+                (0.9, 0.2, 0.1),
+                radius=0.01,
+            )
+
+    @override
+    def compute(self) -> torch.Tensor:
+        body_pos_w = self.asset.data.body_link_pos_w[:, self.body_ids]  # [N, B, 3]
+        closest_w, dist = self.sensor.query(body_pos_w, max_dist=self.far)
+        self.body_pos_w = body_pos_w
+        self.closest_pos_w = closest_w
+        self.distances = dist
+
+        dist_c = dist.clamp(self.near, self.far)
+        if self.distance_only:
+            return dist_c
+
+        hit = dist < self.far
+        # Length-clamp hits into [near, far]; misses stay zero after masking.
+        length = (closest_w - body_pos_w).norm(dim=-1).clamp_min(1e-8)
+        closest_w = body_pos_w + (closest_w - body_pos_w) * (dist_c / length).unsqueeze(-1)
+        closest_w = torch.where(hit.unsqueeze(-1), closest_w, body_pos_w)
+
+        if self.frame == "body":
+            body_quat_w = self.asset.data.body_link_quat_w[:, self.body_ids]
+            closest_f = quat_rotate_inverse(body_quat_w, closest_w - body_pos_w)
+        else:
+            root_pos_w = self.asset.data.root_link_pos_w.unsqueeze(1)
+            root_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
+            closest_f = quat_rotate_inverse(root_quat_w, closest_w - root_pos_w)
+            closest_f = torch.where(hit.unsqueeze(-1), closest_f, torch.zeros_like(closest_f))
+
+        return closest_f.reshape(self.num_envs, -1)
+
+    def debug_draw(self) -> None:
+        if self.env.backend == "isaac" and hasattr(self, "marker_query"):
+            self.marker_query.visualize(self.body_pos_w[0].reshape(-1, 3))
+            hit = self.distances[0] < self.far
+            if hit.any():
+                self.marker_hit.visualize(self.closest_pos_w[0][hit].reshape(-1, 3))
+
+    @override
+    def symmetry_transform(self) -> SymmetryTransform:
+        if self.distance_only:
+            return cartesian_space_symmetry(self.asset, self.body_names, sign=(1,))
+        # TODO: figure out `frame=body` and `distance_only=False`
+        return cartesian_space_symmetry(self.asset, self.body_names)
