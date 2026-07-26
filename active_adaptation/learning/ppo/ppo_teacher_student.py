@@ -150,7 +150,8 @@ class PPOTSCfg:
     def __post_init__(self):
         self.teacher_keys = tuple(self.teacher_keys)
         self.student_keys = tuple(self.student_keys)
-        self.in_keys = tuple(set(self.teacher_keys + self.student_keys))
+        # set is unordered, so we need to sort the keys to ensure the order is consistent.
+        self.in_keys = tuple(sorted(set(self.teacher_keys + self.student_keys)))
 
     def get_class(self):
         return PPOTeacherStudentPolicy
@@ -748,11 +749,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         failed_keys = []
         for name, module in self.named_children():
             _state_dict = state_dict.get(name, {})
-            try:
-                module.load_state_dict(_state_dict, strict=strict)
-                succeed_keys.append(name)
-            except Exception as e:
-                warnings.warn(f"Failed to load state dict for {name}: {str(e)}")
-                failed_keys.append(name)
+            module.load_state_dict(_state_dict, strict=strict)
+            succeed_keys.append(name)
         print(f"Successfully loaded {succeed_keys}.")
         return failed_keys
