@@ -381,16 +381,6 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             Mod(Critic(1), ["_critic_feature"], ["state_value"]),
         ).to(self.device)
 
-        self.training_keys = [
-            "action_log_prob",
-            "adv",
-            "ret",
-            "is_init",
-            "adapt_hx",
-            ACTION_KEY,
-            *self.in_keys,
-        ]
-
         # Lazy init / shape check (GRU needs is_init + adapt_hx).
         with torch.device(self.device):
             fake_input["is_init"] = torch.ones(fake_input.shape[0], 1, dtype=torch.bool)
@@ -448,6 +438,14 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
 
     def on_stage_start(self, _stage: str, _env: _EnvBase):
         # One stage per run for now; ``cfg.stage`` selects teacher vs student.
+        self.training_keys = [
+            "action_log_prob",
+            "adv",
+            "ret",
+            "is_init",
+            ACTION_KEY,
+            *self.in_keys,
+        ]
         if self.cfg.stage == "teacher":
             if self.cfg.muon:
                 self.opt_ppo = MuonAdamWWrapper(
@@ -485,6 +483,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             hard_copy_(self.encoder_student, self.encoder_student_ema)
             hard_copy_(self.actor_teacher, self.actor_student)
         elif self.cfg.stage == "student2":
+            self.training_keys.append("adapt_hx")
             self.opt_ppo = torch.optim.AdamW(
                 [
                     {"params": self.actor_student.parameters()},
