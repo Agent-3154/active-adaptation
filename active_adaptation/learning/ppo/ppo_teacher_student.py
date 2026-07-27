@@ -563,7 +563,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             actor = self.actor_teacher.requires_grad_(True)
         elif self.cfg.stage == "student2":
             self.encoder_student.requires_grad_(False) # trained by distillation
-            encoder = Seq(self.encoder_student, self.from_student)
+            encoder = Seq(self.encoder_student_ema, self.from_student)
             actor = self.actor_student.requires_grad_(True)
         else:
             raise ValueError(f"Invalid stage: {self.cfg.stage}")
@@ -715,7 +715,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         log_probs_data = tensordict["action_log_prob"]
 
         tensordict = self.vecnorm(tensordict)
-        tensordict = encoder(tensordict).detach()
+        tensordict = encoder(tensordict)
         tensordict = actor(tensordict)
         dist = IndependentNormal(tensordict["loc"], tensordict["scale"])
         log_probs = dist.log_prob(action_data)
