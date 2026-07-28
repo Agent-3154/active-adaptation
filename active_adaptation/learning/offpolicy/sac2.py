@@ -745,7 +745,7 @@ class SAC(TensorDictModuleBase):
     def get_rollout_policy(self, mode: str = "train", critic: bool = False) -> TensorDictModuleBase:
         """Train: optional AR(1) pre-tanh rollout noise; eval/deploy: deterministic squash of the Gaussian mean."""
         policy = SACRolloutPolicy(
-            self.preproc,
+            self.preproc if mode == "train" else VecNorm.freeze()(self.preproc),
             self.actor,
             self.DistClass,
             use_correlated=self.cfg.use_correlated,

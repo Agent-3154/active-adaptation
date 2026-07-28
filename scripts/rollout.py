@@ -39,8 +39,8 @@ from active_adaptation.rollout_io import (
 
 
 DEFAULTS = [
-    {"task": "Velocity"},
-    {"algo": "ppo"},
+    {"task": "???"},
+    {"algo": "from_checkpoint"},
     "_self_",
 ]
 
@@ -78,7 +78,11 @@ class RolloutConfig:
     run_critic: bool = True
     """Run the critic during rollout (adds value estimates to the policy path)."""
     checkpoint_path: Optional[str] = None
-    """Path or WandB URI to a policy checkpoint; ``null`` starts from scratch."""
+    """Path or WandB URI to a policy checkpoint.
+
+    Required when ``algo=from_checkpoint`` (the default): ``algo`` is loaded from
+    the run's sidecar ``cfg.yaml``. Pass an explicit ``algo=...`` to override.
+    """
     output_dir: Optional[str] = None
     """Optional rollout output directory; defaults to ``scripts/rollout/<task>-<algo>/<timestamp>``."""
     discard_unused_obs: bool = False
@@ -169,7 +173,6 @@ def run(cfg: RolloutConfig) -> dict[str, str]:
     aa.init(cfg, auto_rank=True)
 
     from active_adaptation.helpers import make_env_policy
-
     env, policy = make_env_policy(
         task_cfg=cfg.task,
         algo_cfg=cfg.algo,

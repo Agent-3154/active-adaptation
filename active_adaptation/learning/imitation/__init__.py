@@ -23,43 +23,9 @@
 
 import os
 import importlib
-from dataclasses import dataclass
-from typing import Optional
-
-from hydra.core.config_store import ConfigStore
-
-# Side-effect: register ``algo=*`` configs so we can mirror them under ``teacher``.
-import active_adaptation.learning.ppo  # noqa: F401
-from active_adaptation.learning.ppo.ppo_symaug import PPOConfig as SymaugCfg
-from active_adaptation.learning.ppo.ppo_teacher_student import PPOTSCfg
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
 for file in os.listdir(dir_path):
     if file.endswith(".py") and not file.startswith("_"):
         importlib.import_module(f".{file[:-3]}", __package__)
 
-
-@dataclass
-class TeacherSymaugCfg(SymaugCfg):
-    """``teacher=ppo_symaug`` — PPO symaug as a frozen expert."""
-
-    _target_: str = "active_adaptation.learning.imitation.TeacherSymaugCfg"
-    checkpoint_path: Optional[str] = None
-
-
-@dataclass
-class TeacherTSCfg(PPOTSCfg):
-    """``teacher=ppo_teacher`` — privileged teacher–student recipe as expert."""
-
-    _target_: str = "active_adaptation.learning.imitation.TeacherTSCfg"
-    checkpoint_path: Optional[str] = None
-
-
-def _register_teacher_aliases() -> None:
-    """Expose common PPO algos as ``teacher=<name>`` with ``checkpoint_path``."""
-    cs = ConfigStore.instance()
-    cs.store(name="ppo_symaug", node=TeacherSymaugCfg, group="teacher")
-    cs.store(name="ppo_teacher", node=TeacherTSCfg(stage="teacher"), group="teacher")
-
-
-_register_teacher_aliases()

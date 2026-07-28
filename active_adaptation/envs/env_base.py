@@ -86,6 +86,10 @@ class ObsGroup:
     @property
     def shapes(self):
         return self._shapes
+    
+    @property
+    def split(self):
+        return [shape[-1] for shape in self._shapes.values()]
 
     def compute(self, tensordict: TensorDictBase, timestamp: int) -> TensorDictBase:
         tensors = [func.compute() for func in self.funcs.values()]

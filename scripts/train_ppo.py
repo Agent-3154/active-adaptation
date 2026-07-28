@@ -38,7 +38,7 @@ torch.backends.cudnn.benchmark = False
 
 
 DEFAULTS = [
-    {"task": "Velocity"},
+    {"task": "???"},
     {"algo": "ppo"},
     "_self_",
 ]
