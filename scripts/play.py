@@ -27,8 +27,8 @@ from active_adaptation.learning.modules.vecnorm import VecNorm
 
 
 DEFAULTS = [
-    {"task": "Velocity"},
-    {"algo": "ppo"},
+    {"task": "???"},
+    {"algo": "from_checkpoint"},
     "_self_",
 ]
 
@@ -72,7 +72,11 @@ class PlayConfig:
     seed: int = 42
     """Random seed (offset by local rank in distributed runs)."""
     checkpoint_path: Optional[str] = None
-    """Path or WandB URI to a policy checkpoint; ``null`` starts from scratch."""
+    """Path or WandB URI to a policy checkpoint.
+
+    Required when ``algo=from_checkpoint`` (the default): ``algo`` is loaded from
+    the run's sidecar ``cfg.yaml``. Pass an explicit ``algo=...`` to override.
+    """
     export_policy: bool = False
     """Export the deploy policy to ONNX after loading."""
     discard_unused_obs: bool = True

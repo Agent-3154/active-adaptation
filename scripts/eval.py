@@ -20,8 +20,8 @@ import active_adaptation as aa
 
 
 DEFAULTS = [
-    {"task": "Velocity"},
-    {"algo": "ppo"},
+    {"task": "???"},
+    {"algo": "from_checkpoint"},
     "_self_",
 ]
 
@@ -80,7 +80,11 @@ class EvalConfig:
     seed: int = 0
     """Random seed for environment resets during evaluation."""
     checkpoint_path: Optional[str] = None
-    """Path or WandB URI to a policy checkpoint; ``null`` starts from scratch."""
+    """Path or WandB URI to a policy checkpoint.
+
+    Required when ``algo=from_checkpoint`` (the default): ``algo`` is loaded from
+    the run's sidecar ``cfg.yaml``. Pass an explicit ``algo=...`` to override.
+    """
     discard_unused_obs: bool = True
     """Drop observation groups not listed in ``algo.in_keys``."""
     task: EvalTaskOverride = field(default_factory=EvalTaskOverride)

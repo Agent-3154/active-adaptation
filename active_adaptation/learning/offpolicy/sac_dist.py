@@ -403,7 +403,7 @@ class SAC(TensorDictModuleBase):
     def get_rollout_policy(self, mode: str = "train", critic: bool = False) -> TensorDictModuleBase:
         """Train: optional AR(1) pre-tanh rollout noise; eval/deploy: deterministic squash of the Gaussian mean."""
         policy = SACRolloutPolicy(
-            self.preproc,
+            self.preproc if mode == "train" else VecNorm.freeze()(self.preproc),
             self.actor,
             self.DistClass,
             use_correlated=self.cfg.use_correlated,
@@ -826,7 +826,7 @@ class SAC(TensorDictModuleBase):
             }
             if self.rb_prior is not None:
                 # Online π vs prior MC return-to-go (no entropy): positive ⇒ π beats demo.
-                # baseline = G + γ^H Q(s_term, a~π) with G/Q in the critic's reward scale.
+                # baseline = G + γ^H Q(s_term, a~π), logged in critic/q_value scale.
                 assert prior_obs is not None
                 loc_p, scale_p = self.actor(prior_obs)
                 dist_p = self.DistClass(loc_p, scale_p)
@@ -843,12 +843,14 @@ class SAC(TensorDictModuleBase):
                 a_t = self.DistClass(loc_t, scale_t).rsample()
                 q_term = self.Q.get_values(term_in, a_t).mean(dim=-1)
 
+                # Map to the same log scale as critic/q_value (PPO effective horizon).
+                # G is raw MC return; Q is critic-scale (r/S or r*(1-γ)).
+                G_log = G.squeeze(-1) * (1.0 - self.cfg.gamma)
                 if self.reward_normalizer is not None:
-                    G_scaled = self.reward_normalizer.normalize_rewards(G)
-                else:
-                    G_scaled = G * (1.0 - self.cfg.gamma)
+                    online_q = self.reward_normalizer.denormalize_return_values(online_q)
+                    q_term = self.reward_normalizer.denormalize_return_values(q_term)
                 H = steps_to_go.to(dtype=online_q.dtype).squeeze(-1)
-                baseline = G_scaled.squeeze(-1) + torch.pow(float(self.cfg.gamma), H) * q_term
+                baseline = G_log + torch.pow(float(self.cfg.gamma), H) * q_term
                 advantage = online_q - baseline
                 infos["actor/online_advantage"] = advantage.mean().item()
 

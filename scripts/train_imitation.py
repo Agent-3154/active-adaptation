@@ -54,8 +54,6 @@ from torchrl.envs.utils import set_exploration_type, ExplorationType
 from tensordict.nn import TensorDictModuleBase
 
 import active_adaptation as aa
-# Registers ``student=*`` and ``teacher=*`` ConfigStore nodes (via learning.imitation).
-import active_adaptation.learning.imitation  # noqa: F401
 from active_adaptation.pipeline_io import (
     RUN_STATE_FILENAME,
     get_run_state_dir,
@@ -72,8 +70,8 @@ torch.backends.cudnn.benchmark = False
 
 DEFAULTS = [
     {"task": "A2/A2LocoManip"},
-    {"teacher": "ppo_symaug"},
-    {"student": "interprior"},
+    {"algo@teacher": "ppo_symaug"},
+    {"algo@student": "interprior"},
     "_self_",
 ]
 
@@ -151,6 +149,9 @@ def _union_in_keys(teacher_cfg: DictConfig, student_cfg: DictConfig) -> list[str
             if k not in keys:
                 keys.append(str(k))
         for k in cfg.get("aux_keys", ()) or ():
+            if k not in keys:
+                keys.append(str(k))
+        for k in cfg.get("future_keys", ()) or ():
             if k not in keys:
                 keys.append(str(k))
         for k in cfg.get("teacher_keys", ()) or ():

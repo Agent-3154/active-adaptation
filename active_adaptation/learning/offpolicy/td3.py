@@ -437,7 +437,7 @@ class TD3(TensorDictModuleBase):
     
     def get_rollout_policy(self, mode: str = "train", critic: bool = False) -> TensorDictModuleBase:
         return TD3RolloutPolicy(
-            preproc=self.preproc,
+            preproc=self.preproc if mode == "train" else VecNorm.freeze()(self.preproc),
             actor=self.actor,
             Q=self.Q,
             noise_type=self.cfg.noise_type,
