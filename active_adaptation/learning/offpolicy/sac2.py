@@ -45,7 +45,11 @@ from active_adaptation.learning.offpolicy.distributional import (
     cvar_from_logits,
     project_categorical_bellman,
 )
-from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
+from active_adaptation.learning.offpolicy.objectives import (
+    MultiStepReturn,
+    prior_bc_loss,
+    resolve_bc_coef,
+)
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
 from active_adaptation.learning.offpolicy.distribution import FasterTransformedDistribution
 from active_adaptation.learning.offpolicy.sac import AlphaModule
@@ -135,8 +139,21 @@ class SACConfig:
     # path to prior data for RLPD
     prior_data: str | None = None
     prior_data_ratio: float = 0.4
+    # Gated BC toward prior actions when online Q < MC return-to-go (0 disables).
+    bc_loss: str = "mse"  # "mse" | "nll"
+    bc_coef: float = 0.0
+    bc_coef_mse: float = 1.0
+    bc_coef_nll: float = 0.05
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
+
+    def __post_init__(self):
+        if self.bc_loss == "mse":
+            self.bc_coef = self.bc_coef_mse
+        elif self.bc_loss == "nll":
+            self.bc_coef = self.bc_coef_nll
+        else:
+            raise ValueError(f"Unknown bc_loss={self.bc_loss!r}; expected 'mse' or 'nll'.")
 
     def get_class(self):
         return SAC
@@ -503,6 +520,7 @@ class SAC(TensorDictModuleBase):
         self.observation_spec = observation_spec
         self.action_spec = action_spec
         self.reward_spec = reward_spec
+        self.eff_horizon = 1 / (1 - self.cfg.gamma)
 
         self.obs_transform = obs_transform.to(device) if obs_transform is not None else None
         self.act_transform = act_transform.to(device) if act_transform is not None else None
@@ -776,6 +794,9 @@ class SAC(TensorDictModuleBase):
                 self.cfg.prior_data,
                 fake_bootstrap=True,
                 observation_keys=list(observation_keys),
+            )
+            self.rb_prior.compute_return(
+                gamma=self.cfg.gamma, reward_collate_fn=self.reward_collate_fn
             )
             print("Prior data buffer:")
             print(self.rb_prior)
@@ -1067,25 +1088,25 @@ class SAC(TensorDictModuleBase):
             .to(self.device)
             .select(*self.train_keys, strict=False) # [N,]
         )
+        B_online = batch.shape[0]
         if self.rb_prior is not None:
             batch_prior = self.rb_prior.sample(
                 batch_size=int(self.cfg.actor_batch_size * self.cfg.prior_data_ratio),
                 steps=1,
-            ).select(*self.train_keys, strict=False).to(self.device)
+                next_obs=False,
+            ).to(self.device)
+            B_prior = batch_prior.shape[0]
+            G = batch_prior["G"]
+            steps_to_go = batch_prior["steps_to_go"]
+            batch_prior = batch_prior.select(*self.train_keys, strict=False)
             batch = torch.cat([batch, batch_prior], dim=0)
-            # we will see if the prior action gives larger Q(s, a)
-            prior_action = batch_prior[ACTION_KEY]
+        else:
+            B_prior = 0
 
         self.preproc(batch)
         obs = batch["_input_normed"]
         act = batch[ACTION_KEY]
         is_init = batch["is_init"]
-        n_unaug = obs.shape[0]
-        prior_obs = None
-        prior_count = 0
-        if self.rb_prior is not None:
-            prior_count = batch_prior.shape[0]
-            prior_obs = obs[-prior_count:]
 
         if self.cfg.sym_aug:
             obs_mirror = self.obs_transform(obs)
@@ -1107,11 +1128,38 @@ class SAC(TensorDictModuleBase):
             q = self.Q.soft_q(q_task_v, q_ent_v, clip=True).squeeze(-1)
             policy_term = -q.mean(dim=1)
 
+            bc_term = torch.zeros_like(policy_term)
+            bc_gate = None
+            advantage = None
+            horizon_mask = None
+            if self.rb_prior is not None:
+                # Gate on task Q (hard-return scale) vs demo MC; entropy stream is tiny.
+                prior_sl = slice(B_online, B_online + B_prior)
+                horizon_mask = steps_to_go > self.eff_horizon
+                q_prior = q_task_v.detach()[prior_sl].min(dim=-1).values.mean(
+                    dim=-1, keepdim=True
+                )
+                if self.reward_normalizer is not None:
+                    q_prior = self.reward_normalizer.denormalize_return_values(q_prior)
+                G_log = G * (1.0 - self.cfg.gamma)
+                assert q_prior.shape == G_log.shape, f"{q_prior.shape} != {G_log.shape}"
+                advantage = q_prior - G_log
+                bc_gate = torch.relu(-advantage).clamp_max(1.0) * horizon_mask.float()
+                prior_dist = self.DistClass(loc[prior_sl], scale[prior_sl])
+                bc = prior_bc_loss(
+                    self.cfg.bc_loss,
+                    action_pred=action_update[:, prior_sl],
+                    action_demo=batch_prior[ACTION_KEY],
+                    dist=prior_dist,
+                )
+                bc_term[prior_sl] = bc * bc_gate.squeeze(-1)
+
         alpha = self.alpha()
         actor_loss = (
             policy_term
             + alpha.detach() * (-entropy_est.reshape_as(policy_term) * self.entropy_scale)
             + 0.01 * ((loc/self.cfg.soft_bound)**6).sum(-1).reshape_as(policy_term)
+            + self.cfg.bc_coef * bc_term
         )
         valid = (1.0 - is_init.float()).reshape_as(actor_loss)
         denom = valid.sum().clamp_min(1e-8)
@@ -1173,12 +1221,13 @@ class SAC(TensorDictModuleBase):
                 "actor/mean_scale": scale.mean().item(),
             }
             if self.rb_prior is not None:
-                # compare soft Q(s, a_prior) with mean_k soft Q(s, a_k)
-                q_prior = self.Q.get_values(prior_obs, prior_action, clip=True).squeeze(-1)
-                q_policy_prior = q[:n_unaug][-prior_count:].mean(dim=1)
-                advantage = q_policy_prior - q_prior
-                # whether the online policy is better than the offline policy
-                infos["actor/online_advantage"] = advantage.mean().item()
+                assert advantage is not None and bc_gate is not None and horizon_mask is not None
+                infos["rlpd/bc_term"] = bc_term[B_online: B_online + B_prior].mean().item()
+                infos["rlpd/bc_frac"] = bc_gate.float().mean().item()
+                if horizon_mask.any():
+                    infos["rlpd/online_advantage"] = advantage[horizon_mask].mean().item()
+                else:
+                    infos["rlpd/online_advantage"] = float("nan")
 
         if self.has_symmetry:
             with torch.no_grad():

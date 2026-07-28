@@ -40,7 +40,11 @@ from active_adaptation.learning.ppo.common import (
 
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.learning.offpolicy.distributional import C51Critic
-from active_adaptation.learning.offpolicy.objectives import MultiStepReturn
+from active_adaptation.learning.offpolicy.objectives import (
+    MultiStepReturn,
+    prior_bc_loss,
+    resolve_bc_coef,
+)
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import (
@@ -119,8 +123,22 @@ class SACConfig:
     # path to prior data for RLPD
     prior_data: str | None = None
     prior_data_ratio: float = 0.4
+    # Gated BC toward prior actions when online Q < MC return-to-go (0 disables).
+    # NLL (summed over act dims) is typically much larger than mean MSE → smaller default.
+    bc_loss: str = "mse"
+    bc_coef: float = 0.0
+    bc_coef_mse: float = 1.0
+    bc_coef_nll: float = 0.05
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY, ACTION_KEY)
+
+    def __post_init__(self):
+        if self.bc_loss == "mse":
+            self.bc_coef = self.bc_coef_mse
+        elif self.bc_loss == "nll":
+            self.bc_coef = self.bc_coef_nll
+        else:
+            raise ValueError(f"Unknown bc_loss={self.bc_loss!r}; expected 'mse' or 'nll'.")
 
     def get_class(self):
         return SAC
@@ -177,6 +195,7 @@ class SAC(TensorDictModuleBase):
         self.observation_spec = observation_spec
         self.action_spec = action_spec
         self.reward_spec = reward_spec
+        self.eff_horizon = 1 / (1 - self.cfg.gamma)
 
         self.obs_transform = obs_transform.to(device) if obs_transform is not None else None
         self.act_transform = act_transform.to(device) if act_transform is not None else None
@@ -720,28 +739,25 @@ class SAC(TensorDictModuleBase):
             .to(self.device)
             .select(*self.train_keys, strict=False) # [N,]
         )
+        B_online = batch.shape[0]
         if self.rb_prior is not None:
             batch_prior = self.rb_prior.sample(
                 batch_size=int(self.cfg.actor_batch_size * self.cfg.prior_data_ratio),
                 steps=1,
                 next_obs=False,
-                term_obs=True,
             ).to(self.device)
+            B_prior = batch_prior.shape[0]
             G = batch_prior["G"]
             steps_to_go = batch_prior["steps_to_go"]
-            term_obs = batch_prior["term_obs"]
             batch_prior = batch_prior.select(*self.train_keys, strict=False)
             batch = torch.cat([batch, batch_prior], dim=0)
+        else:
+            B_prior = 0
 
         self.preproc(batch)
         obs = batch["_input_normed"]
         act = batch[ACTION_KEY]
         is_init = batch["is_init"]
-        prior_obs = None
-        prior_count = 0
-        if self.rb_prior is not None:
-            prior_count = batch_prior.shape[0]
-            prior_obs = obs[-prior_count:]
 
         if self.cfg.sym_aug:
             obs_mirror = self.obs_transform(obs)
@@ -759,16 +775,42 @@ class SAC(TensorDictModuleBase):
                 obs,
                 einops.rearrange(action_update, "k n d -> n k d"),
             ).mean(dim=-1)
-            policy_term = -q.mean(dim=1)
+            policy_term = -q.mean(dim=1)  # average over K action samples
+
+            bc_term = torch.zeros_like(policy_term)
+            bc_gate = None
+            advantage = None
+            horizon_mask = None
+            if self.rb_prior is not None:
+                # Gate BC when π loses to demo MC return on long horizons.
+                # Q is denormalized to the same (1-γ) log scale as G.
+                prior_sl = slice(B_online, B_online + B_prior)
+                horizon_mask = steps_to_go > self.eff_horizon
+                q_prior = q.detach()[prior_sl].mean(dim=-1, keepdim=True)
+                if self.reward_normalizer is not None:
+                    q_prior = self.reward_normalizer.denormalize_return_values(q_prior)
+                G_log = G * (1.0 - self.cfg.gamma)
+                assert q_prior.shape == G_log.shape, f"{q_prior.shape} != {G_log.shape}"
+                advantage = q_prior - G_log
+                bc_gate = torch.relu(-advantage).clamp_max(1.0) * horizon_mask.float()
+                prior_dist = self.DistClass(loc[prior_sl], scale[prior_sl])
+                bc = prior_bc_loss(
+                    self.cfg.bc_loss,
+                    action_pred=action_update[:, prior_sl],
+                    action_demo=batch_prior[ACTION_KEY],
+                    dist=prior_dist,
+                )
+                bc_term[prior_sl] = bc * bc_gate.squeeze(-1)
 
         alpha = self.alpha()
         actor_loss = (
             policy_term
             + alpha.detach() * (-entropy_est.reshape_as(policy_term) * self.entropy_scale)
             + 0.01 * ((loc/self.cfg.soft_bound)**6).sum(-1).reshape_as(policy_term)
+            + self.cfg.bc_coef * bc_term
         )
         valid = (1.0 - is_init.float()).reshape_as(actor_loss)
-        denom = valid.sum().clamp_min(1e-8)
+        denom = valid.sum().clamp_min(1.0)
         actor_loss = (actor_loss * valid).sum() / denom
 
         q_action_grad_norm: torch.Tensor | None = None
@@ -825,34 +867,13 @@ class SAC(TensorDictModuleBase):
                 "actor/mean_scale": scale.mean().item(),
             }
             if self.rb_prior is not None:
-                # Online π vs prior MC return-to-go (no entropy): positive ⇒ π beats demo.
-                # baseline = G + γ^H Q(s_term, a~π), logged in critic/q_value scale.
-                assert prior_obs is not None
-                loc_p, scale_p = self.actor(prior_obs)
-                dist_p = self.DistClass(loc_p, scale_p)
-                a_p = dist_p.rsample((4,))
-                online_q = self.Q.get_values(
-                    prior_obs,
-                    einops.rearrange(a_p, "k n d -> n k d"),
-                ).mean(dim=-1).mean(dim=1)
-
-                term_td = term_obs.clone()
-                self.preproc(term_td)
-                term_in = term_td["_input_normed"]
-                loc_t, scale_t = self.actor(term_in)
-                a_t = self.DistClass(loc_t, scale_t).rsample()
-                q_term = self.Q.get_values(term_in, a_t).mean(dim=-1)
-
-                # Map to the same log scale as critic/q_value (PPO effective horizon).
-                # G is raw MC return; Q is critic-scale (r/S or r*(1-γ)).
-                G_log = G.squeeze(-1) * (1.0 - self.cfg.gamma)
-                if self.reward_normalizer is not None:
-                    online_q = self.reward_normalizer.denormalize_return_values(online_q)
-                    q_term = self.reward_normalizer.denormalize_return_values(q_term)
-                H = steps_to_go.to(dtype=online_q.dtype).squeeze(-1)
-                baseline = G_log + torch.pow(float(self.cfg.gamma), H) * q_term
-                advantage = online_q - baseline
-                infos["actor/online_advantage"] = advantage.mean().item()
+                assert advantage is not None and bc_gate is not None and horizon_mask is not None
+                infos["rlpd/bc_term"] = bc_term[B_online: B_online + B_prior].mean().item()
+                infos["rlpd/bc_frac"] = bc_gate.float().mean().item()
+                if horizon_mask.any():
+                    infos["rlpd/online_advantage"] = advantage[horizon_mask].mean().item()
+                else:
+                    infos["rlpd/online_advantage"] = float("nan")
 
         if self.has_symmetry:
             with torch.no_grad():
