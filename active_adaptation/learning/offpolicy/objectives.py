@@ -16,6 +16,52 @@ def _policy_dist(actor: nn.Module, obs: torch.Tensor) -> Any:
     return ScaledTanhNormal(loc, scale, upscale=actor.upscale)
 
 
+def prior_bc_mse(
+    action_pred: torch.Tensor,
+    action_demo: torch.Tensor,
+) -> torch.Tensor:
+    """Per-row MSE BC loss.
+
+    ``action_pred``: ``[N, D]`` or ``[K, N, D]`` (mean over K if present).
+    ``action_demo``: ``[N, D]``.
+    Returns ``[N]``.
+    """
+    err = (action_pred - action_demo).square().mean(dim=-1)
+    if err.ndim == 2:
+        err = err.mean(dim=0)
+    return err
+
+
+def prior_bc_nll(
+    dist: Any,
+    action_demo: torch.Tensor,
+) -> torch.Tensor:
+    """Per-row negative log-likelihood BC loss. Returns ``[N]``."""
+    lp = dist.log_prob(action_demo)
+    if lp.shape == action_demo.shape:
+        lp = lp.sum(dim=-1)
+    elif lp.shape != action_demo.shape[:-1]:
+        lp = lp.reshape(action_demo.shape[0], -1).sum(dim=-1)
+    return -lp
+
+
+def prior_bc_loss(
+    kind: str,
+    *,
+    action_pred: torch.Tensor,
+    action_demo: torch.Tensor,
+    dist: Any | None = None,
+) -> torch.Tensor:
+    """Dispatch prior BC loss (``mse`` or ``nll``). Returns ``[N]``."""
+    if kind == "mse":
+        return prior_bc_mse(action_pred, action_demo)
+    if kind == "nll":
+        if dist is None:
+            raise ValueError("prior_bc_loss(kind='nll') requires dist.")
+        return prior_bc_nll(dist, action_demo)
+    raise ValueError(f"Unknown bc_loss={kind!r}; expected 'mse' or 'nll'.")
+
+
 class MultiStepReturn(nn.Module):
     """Compute n-step return and fixed-horizon action stacks.
 
