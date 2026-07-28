@@ -48,7 +48,6 @@ from active_adaptation.learning.offpolicy.distributional import (
 from active_adaptation.learning.offpolicy.objectives import (
     MultiStepReturn,
     prior_bc_loss,
-    resolve_bc_coef,
 )
 from active_adaptation.learning.offpolicy.reward_normalization import RewardNormalizer
 from active_adaptation.learning.offpolicy.distribution import FasterTransformedDistribution

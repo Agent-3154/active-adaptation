@@ -75,7 +75,6 @@ class ObsGroup:
     def __getitem__(self, key: str) -> mdp.ObservationV2:
         return self.funcs[key]
 
-    @property
     def keys(self):
         return self.funcs.keys()
 

@@ -30,6 +30,8 @@ import torch.utils._pytree as pytree
 
 from torchrl.data import Composite, TensorSpec
 from torchrl.modules import ProbabilisticActor
+from torchrl.objectives import hold_out_net
+
 from tensordict import TensorDict
 from tensordict.nn import (
     TensorDictModuleBase,
@@ -39,8 +41,9 @@ from tensordict.nn import (
 
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
-from typing import Union, Tuple, Optional, Any, TYPE_CHECKING
+from typing import Union, Tuple, Optional, Any, List, TYPE_CHECKING
 from collections import OrderedDict
+import numpy as np
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -67,7 +70,7 @@ from active_adaptation.learning.ppo.common import (
     Critic,
 )
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
-from active_adaptation.learning.utils.distributed import check_parameters
+from active_adaptation.learning.utils.distributed import check_parameters, unwrap_ddp
 from active_adaptation.learning.utils.dormancy import DormancyTracker
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.symmetry import SymmetryTransform
@@ -216,7 +219,11 @@ class PPOPolicy(TensorDictModuleBase):
         self.critic.apply(init_)
 
         self._rollout_dormancy_tracker: Union[DormancyTracker, None] = None
-    
+        self.obs_func_keys: List[str]
+        self.obs_split: List[int]
+        self._obs_importance_interval: int = 8
+        self._obs_importance_step: int = 0
+
     @classmethod
     def from_env(cls, cfg: PPOConfig, env: _EnvBase, device: str):
         observation_spec = env.observation_spec
@@ -238,6 +245,10 @@ class PPOPolicy(TensorDictModuleBase):
             obs_transform=obs_transform,
             act_transform=act_transform,
         )
+        obs_group = env.observation_groups.get(OBS_KEY)
+        if obs_group is not None:
+            policy.obs_func_keys = list(obs_group.keys())
+            policy.obs_split = obs_group.split
         return policy
 
     @classmethod
@@ -321,10 +332,13 @@ class PPOPolicy(TensorDictModuleBase):
 
         td = tensordict.select(*self.training_keys)
         for epoch in range(self.cfg.ppo_epochs):
+            compute_diagnostics = epoch == self.cfg.ppo_epochs - 1
             batch = make_batch(td, self.cfg.num_minibatches)
             for minibatch in batch:
                 minibatch = self._augment_symmetry(minibatch)
-                infos.append(self.update(minibatch))
+                info = self.update(minibatch, compute_diagnostics)
+                if compute_diagnostics:
+                    infos.append(info)
                 
                 if self.desired_kl is not None: # adaptive learning rate
                     kl = infos[-1]["actor/kl"]
@@ -376,6 +390,17 @@ class PPOPolicy(TensorDictModuleBase):
                 critic_diff = check_parameters(self.critic)
                 infos["actor/diff"] = actor_diff
                 infos["critic/diff"] = critic_diff
+        
+        self._obs_importance_step += 1
+        if (
+            self._obs_importance_step % self._obs_importance_interval == 0 and
+            aa.is_main_process()
+        ):
+            value_grad, policy_grad = self.compute_grad_diagnostics(tensordict)
+            if value_grad is not None:
+                infos["obs_importance"] = plot_obs_importance(
+                    value_grad, policy_grad, self.obs_func_keys, self.obs_split,
+                )
         return dict(sorted(infos.items()))
 
     @torch.no_grad()
@@ -420,6 +445,77 @@ class PPOPolicy(TensorDictModuleBase):
         tensordict.set(ret_key, ret)
         return tensordict
 
+    @ScopedTimer("compute_grad_diagnostics")
+    def compute_grad_diagnostics(
+        self,
+        tensordict: TensorDict,
+        *,
+        max_samples: int = 256,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Per-observation-dimension gradient magnitudes for critic and policy.
+
+        Returns CPU tensors ``(value_grad, policy_grad)`` of shape ``[obs_dim]``,
+        or ``(None, None)`` when the minibatch has no valid transitions.
+
+        Careful about GPU memory: works on a small *cloned* subsample (never
+        mutates the rollout batch), unwraps DDP, freezes params via
+        ``hold_out_net``, and drops the autograd graph before returning.
+        """
+        keys = list(self.training_keys)
+        flat = tensordict.select(*keys).reshape(-1)
+        valid_all = (~flat["is_init"]).reshape(-1)
+        n_valid = int(valid_all.sum().item())
+        if n_valid == 0:
+            return None, None
+
+        # Subsample valid rows only, then clone so we never alias the collector buffer.
+        valid_idx = valid_all.nonzero(as_tuple=False).squeeze(-1)
+        if valid_idx.numel() > max_samples:
+            valid_idx = valid_idx[torch.randperm(valid_idx.numel(), device=valid_idx.device)[:max_samples]]
+        td = flat[valid_idx].clone()
+        del flat, valid_all, valid_idx
+
+        n = td.shape[0]
+        weight = td["is_init"].new_ones(n, dtype=torch.float32) / float(n)
+        adv = td["adv"].detach().reshape(n)
+        actions = td[ACTION_KEY].detach()
+
+        # Bypass DDP hooks: forward the underlying modules only.
+        critic = unwrap_ddp(self.critic)
+        actor_body = unwrap_ddp(self.actor).module[0]
+        vecnorm = self.vecnorm
+
+        with hold_out_net(critic), hold_out_net(vecnorm):
+            td_value = vecnorm(td.copy())
+            obs_normed = td_value["_obs_normed"].detach().clone().requires_grad_(True)
+            td_value["_obs_normed"] = obs_normed
+            values = critic(td_value)["state_value"].reshape(n)
+            value_obj = (values * weight).sum()
+            (grad_value,) = torch.autograd.grad(
+                value_obj, obs_normed, retain_graph=False, create_graph=False
+            )
+            grad_value_per_dim = grad_value.detach().abs().mean(0).cpu()
+            del obs_normed, td_value, values, value_obj, grad_value
+
+        with hold_out_net(actor_body), hold_out_net(vecnorm):
+            td_policy = vecnorm(td.copy())
+            obs_normed = td_policy["_obs_normed"].detach().clone().requires_grad_(True)
+            td_policy["_obs_normed"] = obs_normed
+            actor_body(td_policy)
+            dist = IndependentNormal(td_policy["loc"], td_policy["scale"])
+            log_probs = dist.log_prob(actions).reshape(n)
+            policy_obj = (log_probs * adv * weight).sum()
+            (grad_policy,) = torch.autograd.grad(
+                policy_obj, obs_normed, retain_graph=False, create_graph=False
+            )
+            grad_policy_per_dim = grad_policy.detach().abs().mean(0).cpu()
+            del obs_normed, td_policy, dist, log_probs, policy_obj, grad_policy
+
+        del td, weight, adv, actions
+        # Clear any param .grad that a DDP-wrapped path may have touched.
+        self.opt.zero_grad(set_to_none=True)
+        return grad_value_per_dim, grad_policy_per_dim
+
     def _augment_symmetry(self, tensordict: TensorDict) -> TensorDict:
         symmetry = tensordict.empty()
         symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
@@ -433,7 +529,7 @@ class PPOPolicy(TensorDictModuleBase):
         return torch.cat([tensordict, symmetry])
 
     @ScopedTimer("ppo_update")
-    def _update(self, tensordict: TensorDict):
+    def _update(self, tensordict: TensorDict, compute_diagnostics: bool = False):
         bsize = tensordict.shape[0] // 2
 
         self.vecnorm(tensordict)
@@ -488,12 +584,17 @@ class PPOPolicy(TensorDictModuleBase):
         critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.opt.step()
         
+        if not compute_diagnostics:
+            return
+
         with torch.no_grad():
             explained_var = 1 - F.mse_loss(values, ret) / ret.var()
             approx_kl = ((ratio - 1.0) - log_ratio).mean()
             symmetry_loss = F.mse_loss(dist.mean[bsize:], self.act_transform(dist.mean[:bsize]))
             actor_feature_norm = torch.norm(tensordict["_actor_feature"], dim=-1).mean()
             critic_feature_norm = torch.norm(tensordict["_critic_feature"], dim=-1).mean()
+
+        
         return {
             "actor/policy_loss": policy_loss.detach(),
             "actor/entropy": entropy.detach(),
@@ -557,3 +658,59 @@ def effective_rank(X: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
     p = S2 / S2.sum().clamp_min(eps)
     entropy = -(p * (p + eps).log()).sum()
     return entropy.exp()
+
+
+import matplotlib
+matplotlib.use("Agg")  # must be before pyplot
+import matplotlib.pyplot as plt
+import wandb
+
+@ScopedTimer("plot_obs_importance")
+def plot_obs_importance(
+    value_grad: torch.Tensor,
+    policy_grad: torch.Tensor,
+    obs_func_keys: list[str],
+    obs_split: list[int],
+):
+    """Bar chart of per-obs-dim |grads|, colored by observation component.
+
+    ``obs_labels[i]`` is the ObsGroup term name for dimension ``i`` (repeated
+    for multi-dim terms). Value and policy gradients share the same color map
+    and are shown in stacked subplots.
+    """
+
+    value_grad = value_grad.numpy()
+    policy_grad = policy_grad.numpy()
+    n = len(value_grad)
+
+    # Preserve first-seen order of observation components.
+    cmap = plt.get_cmap("tab20" if len(obs_func_keys) > 10 else "tab10")
+    colors = []
+    for i in range(len(obs_func_keys)):
+        colors.extend([cmap(i)] * obs_split[i])
+
+    x = np.arange(n)
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=(max(10, n * 0.18), 6),
+        dpi=120,
+        sharex=True,
+        constrained_layout=True,
+    )
+    series = [
+        (axes[0], value_grad, r"$|\partial V / \partial \mathrm{obs}|$"),
+        (axes[1], policy_grad, r"$|\partial (\log\pi \cdot A) / \partial \mathrm{obs}|$"),
+    ]
+    for ax, grads, title in series:
+        ax.bar(x, grads, width=0.9, color=colors, edgecolor="none")
+        ax.set_ylabel("mean |gradient|")
+        ax.set_title(title)
+        ax.grid(axis="y", alpha=0.3)
+
+    axes[1].set_xticks(np.cumsum(obs_split))
+    axes[1].set_xticklabels(obs_func_keys, rotation=45, ha="right", fontsize=8)
+
+    image = wandb.Image(fig)
+    plt.close(fig)
+    return image
