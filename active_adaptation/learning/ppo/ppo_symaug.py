@@ -708,7 +708,7 @@ def plot_obs_importance(
         ax.set_title(title)
         ax.grid(axis="y", alpha=0.3)
 
-    axes[1].set_xticks(np.cumsum(obs_split))
+    axes[1].set_xticks(np.cumsum([0] + obs_split)[:-1])
     axes[1].set_xticklabels(obs_func_keys, rotation=45, ha="right", fontsize=8)
 
     image = wandb.Image(fig)

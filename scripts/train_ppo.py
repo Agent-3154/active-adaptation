@@ -234,7 +234,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     )
 
     wandb_run = None
-    run_name = None
+    proc_name = None # process name for `setproctitle`
     if aa.is_main_process():
         wandb_run = wandb.init(
             job_type=cfg.wandb.job_type,
@@ -242,15 +242,14 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             mode=cfg.wandb.mode,
             tags=cfg.wandb.tags,
         )
+        run_idx = wandb_run.name.split("-")[-1]
+
         wandb_run.config.update(OmegaConf.to_container(cfg))
         wandb_run.config["world_size"] = aa.get_world_size()
 
-        default_run_name = (
-            f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
-        )
-        run_idx = wandb_run.name.split("-")[-1]
-        wandb_run.name = f"{run_idx}-{default_run_name}"
-        run_name = wandb_run.name
+        timestr = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')
+        wandb_run.name = f"{run_idx}-{cfg.exp_name}-{timestr}"
+        proc_name = f"{run_idx}-{cfg.exp_name}" # shorter for better display
 
         run_dir = Path(wandb_run.dir)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -262,15 +261,15 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     if aa.is_distributed():
         import torch.distributed as dist
 
-        name_list = [run_name]
+        name_list = [proc_name]
         dist.broadcast_object_list(name_list, src=0)
-        run_name = name_list[0]
+        proc_name = name_list[0]
 
-    if run_name is not None:
+    if proc_name is not None:
         if aa.is_main_process():
-            setproctitle(run_name)
+            setproctitle(proc_name)
         else:
-            setproctitle(f"{run_name}-rank{aa.get_local_rank()}")
+            setproctitle(f"{proc_name}-rank{aa.get_local_rank()}")
 
     from active_adaptation.helpers import make_env_policy, evaluate
     from active_adaptation.utils.helpers import EpisodeStats
@@ -359,6 +358,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         else:
             progress = range(total_iters)
 
+        t0 = time.time()
         for i in progress:
             rollout_start = time.perf_counter()
             with ScopedTimer("rollout") as rollout_timer:
@@ -408,6 +408,8 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                 ckpt_path = save(policy, checkpoint_name, upload_to_wandb=should_upload)
 
             if aa.is_main_process():
+                remaining = (time.time() - t0) / (i + 1) * (total_iters - i)
+                setproctitle(f"{proc_name} ETA {tqdm.format_interval(remaining)}")
                 ScopedTimer.print_summary(clear=True, depth=3)
                 print(
                     OmegaConf.to_yaml(
