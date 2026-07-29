@@ -94,7 +94,7 @@ class TrainConfig:
 
     eval_render: bool = False
     """Render the environment during the final post-training evaluation."""
-    log_interval: int = 32
+    log_interval: int = 64
     """Log statistics every N training iterations."""
     checkpoint_interval: int = 400
     """Save a local checkpoint every N training iterations."""
@@ -246,6 +246,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             progress = range(total_iters)
 
         last_log_episode_stats = 0
+        t0 = time.time()
 
         for i in progress:
             if hasattr(policy, "step_schedule"):
@@ -281,12 +282,14 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                 checkpoint_name = f"checkpoint_{i}" if should_upload else "checkpoint_temp"
                 ckpt_path = save(policy, checkpoint_name, upload_to_wandb=should_upload)
 
-            if aa.is_main_process() and (i % log_interval == 0 or len(train_info) > 0):
+            if aa.is_main_process() and ((i % log_interval == 0) or len(train_info) > 0):
                 info = {**train_info}
                 info["env_frames"] = env_frames * aa.get_world_size()
                 info["performance/rollout_fps"] = (1 / timer.last_time) * new_frames * aa.get_world_size()
+                remaining = (time.time() - t0) / (i + 1) * (total_iters - i)
+                setproctitle(f"{wandb_run.name} ETA {tqdm.format_interval(remaining)}")
 
-                if i - last_log_episode_stats >= max_episode_length and len(episode_stats) > 0:
+                if (i - last_log_episode_stats >= max_episode_length) and len(episode_stats) > 0:
                     for k, v in sorted(episode_stats.pop().items(True, True)):
                         key = "train/" + ("/".join(k) if isinstance(k, tuple) else k)
                         info[key] = torch.mean(v.float()).item()
