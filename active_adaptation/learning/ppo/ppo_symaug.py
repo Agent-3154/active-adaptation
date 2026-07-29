@@ -223,6 +223,10 @@ class PPOPolicy(TensorDictModuleBase):
         self.obs_split: List[int]
         self._obs_importance_interval: int = 8
         self._obs_importance_step: int = 0
+        # Running EMA of return std for scale-invariant value loss normalization.
+        # Initialized conservatively at 1.0 so early training uses a larger (not smaller)
+        # value gradient — the EMA ramps up to the true scale within the first few rollouts.
+        self.ret_std_ema: float = 1.0
 
     @classmethod
     def from_env(cls, cfg: PPOConfig, env: _EnvBase, device: str):
@@ -332,6 +336,18 @@ class PPOPolicy(TensorDictModuleBase):
             adv_std = adv.std()
             adv = (adv - adv_mean) / adv_std.clamp_min(1e-7)
             tensordict["adv"] = adv
+        
+        # Update EMA of return std from the full rollout before the PPO epoch loop,
+        # so every minibatch update for this rollout uses the same normalization factor.
+        # In distributed training, synchronize the local ret_std across ranks first so
+        # all ranks update their EMA with the same global value — matching the scale of
+        # gradients that DDP will average.
+        ret_std_t = tensordict["ret"].std()
+        if aa.is_distributed():
+            distr.all_reduce(ret_std_t, op=distr.ReduceOp.SUM)
+            ret_std_t = ret_std_t / aa.get_world_size()
+        m = 0.99
+        self.ret_std_ema = m * self.ret_std_ema + (1.0 - m) * ret_std_t.item()
 
         td = tensordict.select(*self.training_keys)
         for epoch in range(self.cfg.ppo_epochs):
@@ -569,7 +585,7 @@ class PPOPolicy(TensorDictModuleBase):
             aux_weight = clamped.float() * valid
             aux_loss = (tensordict["aux_pred"].reshape_as(ret) - ret).square() * aux_weight
             aux_loss = aux_loss.sum() / aux_weight.sum().clamp_min(1.0)
-            loss += self.cfg.aux_coef * aux_loss
+            loss += self.cfg.aux_coef * aux_loss / max(self.ret_std_ema, 1.0) ** 2
         else:
             aux_loss = ret.new_zeros(())
         self.opt.zero_grad()
@@ -625,6 +641,7 @@ class PPOPolicy(TensorDictModuleBase):
             state_dict["cmd_transform"] = self.cmd_transform.state_dict()
         state_dict["obs_transform"] = self.obs_transform.state_dict()
         state_dict["act_transform"] = self.act_transform.state_dict()
+        state_dict["ret_std_ema"] = self.ret_std_ema
         return state_dict
     
     def load_state_dict(self, state_dict, strict=True):
@@ -641,6 +658,7 @@ class PPOPolicy(TensorDictModuleBase):
                 warnings.warn(f"Failed to load state dict for {name}: {str(e)}")
                 failed_keys.append(name)
         print(f"Successfully loaded {succeed_keys}.")
+        self.ret_std_ema = state_dict.get("ret_std_ema", 1.0)
         return failed_keys
 
 
