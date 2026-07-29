@@ -961,14 +961,13 @@ class closest_points(ObservationV2):
         closest_w = body_pos_w + (closest_w - body_pos_w) * (dist_c / length).unsqueeze(-1)
         closest_w = torch.where(hit.unsqueeze(-1), closest_w, body_pos_w)
 
+        displacement = closest_w - body_pos_w
         if self.frame == "body":
             body_quat_w = self.asset.data.body_link_quat_w[:, self.body_ids]
-            closest_f = quat_rotate_inverse(body_quat_w, closest_w - body_pos_w)
+            closest_f = quat_rotate_inverse(body_quat_w, displacement)
         else:
-            root_pos_w = self.asset.data.root_link_pos_w.unsqueeze(1)
             root_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
-            closest_f = quat_rotate_inverse(root_quat_w, closest_w - root_pos_w)
-            closest_f = torch.where(hit.unsqueeze(-1), closest_f, torch.zeros_like(closest_f))
+            closest_f = quat_rotate_inverse(root_quat_w, displacement)
 
         return closest_f.reshape(self.num_envs, -1)
 
@@ -983,5 +982,6 @@ class closest_points(ObservationV2):
     def symmetry_transform(self) -> SymmetryTransform:
         if self.distance_only:
             return cartesian_space_symmetry(self.asset, self.body_names, sign=(1,))
-        # TODO: figure out `frame=body` and `distance_only=False`
+        if self.frame == "body":
+            raise NotImplementedError("Symmetry transform is not implemented for frame=body and distance_only=False")
         return cartesian_space_symmetry(self.asset, self.body_names)
