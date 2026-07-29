@@ -229,8 +229,13 @@ class PPOPolicy(TensorDictModuleBase):
         observation_spec = env.observation_spec
         action_spec = env.action_spec
         reward_spec = env.reward_spec
+        obs_func_keys = list(env.observation_groups[OBS_KEY].keys())
+        obs_split = env.observation_groups[OBS_KEY].split
+        # CMD_KEY precedes OBS_KEY in the observation
         if CMD_KEY in observation_spec.keys(True, True):
             cmd_transform = env.observation_groups[CMD_KEY].symmetry_transform()
+            obs_func_keys = list(env.observation_groups[CMD_KEY].keys()) + obs_func_keys
+            obs_split = env.observation_groups[CMD_KEY].split + obs_split
         else:
             cmd_transform = None
         obs_transform = env.observation_groups[OBS_KEY].symmetry_transform()
@@ -245,10 +250,8 @@ class PPOPolicy(TensorDictModuleBase):
             obs_transform=obs_transform,
             act_transform=act_transform,
         )
-        obs_group = env.observation_groups.get(OBS_KEY)
-        if obs_group is not None:
-            policy.obs_func_keys = list(obs_group.keys())
-            policy.obs_split = obs_group.split
+        policy.obs_func_keys = obs_func_keys
+        policy.obs_split = obs_split
         return policy
 
     @classmethod
