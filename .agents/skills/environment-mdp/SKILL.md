@@ -125,11 +125,11 @@ Env construction: `_create_mdp_terms()` (instantiate from cfg) → `_setup_simul
 
 Per `_step` (after physics substeps):
 
-1. `command_manager.sync_state()` — refresh intermediates; **do not** change commands
+1. `command_manager.sync_state()` — refresh intermediates from the active command; **do not** change next-step targets
 2. `update` callbacks (obs/reward/rand/… that override `update`)
-3. rewards → terminations
-4. `command_manager.update()` — may resample / change commands
-5. observations
+3. rewards → terminations (read last step’s next-step command as this step’s target)
+4. `command_manager.update()` — may resample; write **next-step** targets
+5. observations (see post-`update` command)
 
 Inside each physics substep: `process_action` (once) → `apply_action` → `pre_step` → sim → `post_step`.
 
@@ -137,7 +137,28 @@ First `_reset`: run `startup` callbacks once, then for reset envs: `_reset_idx` 
 
 ### Command timing
 
-Rewards/terminations that depend on command-derived state must read values produced in `sync_state` (or earlier). Observations may see post-`update` commands. Do not put reward-critical refreshes only in `update`.
+`sync_state` and `update` are intentionally asymmetric:
+
+| Hook | Role |
+|------|------|
+| `sync_state` | Refresh **intermediates** derived from the **already active** command (errors, caches) for rewards/terminations. **Do not** change the command or write next-step targets. |
+| `update` | May resample / advance the command. Write **next-step** targets that observations will see. |
+
+**Next-step targets:** Command buffers used by observations (and by the *following* step's rewards) are written in `update` only. Rewards in the current step read whatever `update` produced on the **previous** step — that previous "next-step" command is now the target for the state just simulated. Do **not** recompute those targets in `sync_state` or `reset` just to make the post-reset observation look valid.
+
+**First observation is discarded:** Training treats the first transition after reset as invalid via `is_init` (PPO/off-policy mask with `~is_init`). That avoids paying for a second command/obs evaluation on reset: leave next-step targets to the first `update` after the episode starts.
+
+Pattern for look-ahead / trajectory commands:
+
+```python
+def sync_state(self):
+    # optional: error stats from last update's targets vs current state
+    ...
+
+def update(self):
+    # write targets for the upcoming obs / next reward step
+    ...
+```
 
 ---
 
@@ -314,7 +335,8 @@ Isaac/mjlab **Viser** robot meshes (viewer internals, not MDP terms): same body-
 
 - Accessing `env.scene` / assets in `__init__` (scene does not exist yet)
 - Subclassing legacy `Reward` / `Observation` / …
-- Putting command resampling in `sync_state`
+- Putting command resampling or next-step target writes in `sync_state` (use `update`)
+- Re-evaluating next-step command/obs targets in `reset` “to fix” the first obs (that obs is discarded via `is_init`)
 - Forgetting to import the module (class never enters the registry)
 - Returning unbatched reward/obs tensors
 - Registering empty `update`/`reset` overrides unintentionally (they still run every step/reset)

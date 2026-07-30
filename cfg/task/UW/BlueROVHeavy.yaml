@@ -1,5 +1,6 @@
 # @package task
 name: BlueROVHeavy
+project: underwater
 
 viewer:
   resolution: [1280, 720]
@@ -24,21 +25,24 @@ input:
     _target_: UnderwaterThrottle
 
 command:
-  _target_: Twist
-  linvel_x_range: [-1.0, 1.6]
-  linvel_y_range: [-0.8, 0.8]
-  angvel_range:   [-2.0, 2.0]
-  yaw_stiffness_range: [0.5, 1.1]
-  use_stiffness_ratio: 0.99
-  resample_prob: 0.5
-  stand_prob: 0.08
+  _target_: TrajTracking
+  target_range: [[-4.0, 4.0], [-4.0, 4.0], [-1.0, 1.0]]
+  future_steps: [1, 4]
+  vel_range: [[-1.0, 1.0], [-1.0, 1.0], [0.0, 0.0]]
+  duration_range: [10.0, 20.0]
+  look_at_goal_prob: 0.5
+  resample_interval: 200
+  resample_prob: 0.2
 
 observation:
+  command:
+    command: {}
   policy:
-    command:  {}
+    root_linvel_b: {yaw_only: true}
+    root_angvel_b: {}
     gravity_multistep: {steps: 4, noise_std: 0.05}
-    underwater.baro_pressure: {body_name: base_link}
-    underwater.dvl_linvel:    {body_name: base_link}
+    # underwater.baro_pressure: {body_name: base_link}
+    # underwater.dvl_linvel:    {body_name: base_link}
   extero:
     underwater.uw_camera:
       body_name: base_link
@@ -48,7 +52,11 @@ observation:
 
 reward:
   navi:
+    position_tracking: {weight: 1.5, sigma: 0.25}
+    velocity_tracking: {weight: 1.0, sigma: 0.25}
+    orientation_tracking: {weight: 1.0, sigma: 0.5}
     survival: {weight: 1.0}
 
 termination:
   max_episode_length: {}
+  position_error_exceeding: {threshold: 1.0}
