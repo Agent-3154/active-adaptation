@@ -69,11 +69,11 @@ _step(tensordict)
   │     write_data_to_sim → sim.step → scene.update
   │     post_step(substep)
   ├─ episode_length_buf += 1
-  ├─ command.sync_state()
+  ├─ command.sync_state()   # intermediates for rewards; do not change next-step targets
   ├─ update callbacks
   ├─ _compute_reward
   ├─ _compute_termination
-  ├─ command.update()
+  ├─ command.update()       # may resample; write next-step targets for obs
   ├─ _compute_observation
   └─ if sim.has_gui(): debug_draw callbacks
        (backends insert scene.clear_debug as first callback)
@@ -162,6 +162,9 @@ Optional: `namespace = "foo"` on the class → registry key `foo.ClassName`; YAM
 - Abstract `sync_state` and `update` (must override both, even if `pass`).
 - `sample_init(env_ids)` provides root (and optionally joint) state for `_reset_idx`.
 - No teleop on V2 (legacy `Command` had `teleop`).
+- **`sync_state`:** refresh intermediates for rewards from the *current* command; do not change commands / next-step targets.
+- **`update`:** may change commands; write next-step targets for observations (rewards on the *next* step read these).
+- **First obs discarded:** post-reset observation is invalid (`is_init`); do not recompute next-step targets in `reset` solely to validate it. See SKILL.md “Command timing”.
 
 ---
 
