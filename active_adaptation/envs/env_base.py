@@ -529,20 +529,20 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
 
-        with ScopedTimer("command_update", sync=False):
+        with ScopedTimer("command_update", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.update()
-        with ScopedTimer("update_callbacks", sync=False):
+        with ScopedTimer("update_callbacks", sync=PROFILE_SYNC_TIMERS):
             [callback() for callback in self._update_callbacks]
             # for callback in self._update_callbacks:
             #     with ScopedTimer(f"{callback.__self__.__class__.__name__}", sync=False):
             #         callback()
-        with ScopedTimer("reward", sync=False):
+        with ScopedTimer("reward", sync=PROFILE_SYNC_TIMERS):
             tensordict = self._compute_reward(tensordict)
-        with ScopedTimer("termination", sync=False):
+        with ScopedTimer("termination", sync=PROFILE_SYNC_TIMERS):
             tensordict = self._compute_termination(tensordict)
-        with ScopedTimer("command_step", sync=False):
+        with ScopedTimer("command_step", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.step()
-        with ScopedTimer("observation", sync=False):
+        with ScopedTimer("observation", sync=PROFILE_SYNC_TIMERS):
             tensordict = self._compute_observation(tensordict)
 
         tensordict.set("episode_id", self.episode_id.clone())

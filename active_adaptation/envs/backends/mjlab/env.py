@@ -145,7 +145,7 @@ class MjlabBackendEnv(_EnvBase):
             num_envs=scene.num_envs,
             cfg=SimulationCfg(
                 nconmax=int(mjlab_cfg.get("nconmax", 200)),
-                njmax=int(mjlab_cfg.get("njmax", 500)),
+                njmax=int(mjlab_cfg.get("njmax", 1000)),
                 contact_sensor_maxmatch=int(
                     mjlab_cfg.get("contact_sensor_maxmatch", 80)
                 ),

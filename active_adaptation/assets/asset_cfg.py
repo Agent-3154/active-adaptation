@@ -15,7 +15,7 @@ import active_adaptation as aa
 
 if aa.get_backend() == "isaaclab":
     import isaaclab.sim as sim_utils
-    from isaaclab.actuators import ImplicitActuatorCfg
+    from isaaclab.actuators import IdealPDActuatorCfg, ImplicitActuatorCfg
     from isaaclab.assets import (
         ArticulationCfg as _ArticulationCfg,
         RigidObjectCfg as IsaaclabRigidObjectCfg,
@@ -33,7 +33,7 @@ if aa.get_backend() == "isaaclab":
 elif aa.get_backend() == "mjlab":
     import mujoco
     from mjlab.entity import EntityCfg as _EntityCfg, EntityArticulationInfoCfg
-    from mjlab.actuator import BuiltinPositionActuatorCfg
+    from mjlab.actuator import BuiltinPositionActuatorCfg, IdealPdActuatorCfg
     from mjlab.utils.spec_config import CollisionCfg
     from mjlab.sensor import ContactSensorCfg as MjlabContactSensorCfg, ContactMatch
 
@@ -105,6 +105,8 @@ class ActuatorCfg:
     
     Attributes:
         joint_names_expr: Regex pattern used to match joints. Defaults to ".*" (all joints).
+        mode: Whether PD control runs in the simulator ("implicit") or in the
+            actuator model ("explicit"). Defaults to "implicit".
         effort_limit: Dictionary mapping joint name patterns to maximum effort/torque limits.
             Required field.
         velocity_limit: Dictionary mapping joint name patterns to maximum velocity limits.
@@ -119,6 +121,7 @@ class ActuatorCfg:
             Required field. Note: Not used in mjlab backend.
     """
     joint_names_expr: str | List[str] = ".*"
+    mode: Literal["implicit", "explicit"] = "implicit"
     effort_limit: float | Dict[str, float] = MISSING
     velocity_limit: float | Dict[str, float] = MISSING
     stiffness: float | Dict[str, float] = MISSING
@@ -126,32 +129,49 @@ class ActuatorCfg:
     friction: float | Dict[str, float] = MISSING
     armature: float | Dict[str, float] = MISSING
 
+    def __post_init__(self):
+        if self.mode not in ("implicit", "explicit"):
+            raise ValueError(
+                f"ActuatorCfg.mode must be 'implicit' or 'explicit', got {self.mode!r}"
+            )
+
     def isaaclab(self):
         """Convert to Isaac Sim actuator configuration.
         
         Returns:
-            ImplicitActuatorCfg: Isaac Sim compatible actuator configuration.
+            ImplicitActuatorCfg or IdealPDActuatorCfg: Isaac Sim compatible
+            actuator configuration selected by ``mode``.
         """
         joint_expr = (
             "|".join(self.joint_names_expr)
             if isinstance(self.joint_names_expr, list)
             else self.joint_names_expr
         )
-        return ImplicitActuatorCfg(
-            joint_names_expr=joint_expr,
-            effort_limit_sim=self.effort_limit,
-            velocity_limit_sim=self.velocity_limit,
-            stiffness=self.stiffness,
-            damping=self.damping,
-            friction=self.friction,
-            armature=self.armature,
+        actuator_cfg_type = (
+            ImplicitActuatorCfg if self.mode == "implicit" else IdealPDActuatorCfg
+        )
+        kwargs = {
+            "joint_names_expr": joint_expr,
+            "effort_limit_sim": self.effort_limit,
+            "velocity_limit_sim": self.velocity_limit,
+            "stiffness": self.stiffness,
+            "damping": self.damping,
+            "friction": self.friction,
+            "armature": self.armature,
+        }
+        if self.mode == "explicit":
+            kwargs["effort_limit"] = self.effort_limit
+            kwargs["velocity_limit"] = self.velocity_limit
+        return actuator_cfg_type(
+            **kwargs,
         )
     
     def mjlab(self):
         """Convert to MuJoCo Lab actuator configuration.
                 
         Returns:
-            BuiltinPositionActuatorCfg: MuJoCo Lab compatible actuator configuration.
+            BuiltinPositionActuatorCfg or IdealPdActuatorCfg: MuJoCo Lab
+            compatible actuator configuration selected by ``mode``.
         """
         def _assert_scalar(name: str, value):
             if not isinstance(value, (float, int)):
@@ -171,14 +191,20 @@ class ActuatorCfg:
             if isinstance(self.joint_names_expr, list)
             else (self.joint_names_expr,)
         )
-        return BuiltinPositionActuatorCfg(
-            target_names_expr=target_names_expr,
-            effort_limit=float(self.effort_limit),
-            stiffness=float(self.stiffness),
-            damping=float(self.damping),
-            frictionloss=float(self.friction),
-            armature=float(self.armature),
+        kwargs = {
+            "target_names_expr": target_names_expr,
+            "effort_limit": float(self.effort_limit),
+            "stiffness": float(self.stiffness),
+            "damping": float(self.damping),
+            "frictionloss": float(self.friction),
+            "armature": float(self.armature),
+        }
+        actuator_cfg_type = (
+            BuiltinPositionActuatorCfg
+            if self.mode == "implicit"
+            else IdealPdActuatorCfg
         )
+        return actuator_cfg_type(**kwargs)
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -259,7 +285,9 @@ class AssetCfg:
             non-``.urdf`` suffix) uses USD spawn; ``.urdf`` uses URDF spawn. Required field.
         init_state: Initial state configuration for the asset. Required field.
         actuators: Dictionary mapping actuator names to their configurations. Required field.
-        self_collisions: Whether to enable self-collisions for the asset. Defaults to True.
+        self_collisions: Whether robot collision geoms can collide with each other.
+            In MJLab this selects ``contype=1, conaffinity=1`` when enabled and
+            ``contype=0, conaffinity=1`` when disabled. Defaults to True.
         joint_symmetry_mapping: Optional dictionary mapping joint names to symmetry information.
             Format: {joint_name: (symmetry_group_id, symmetric_joint_name)}. Defaults to None.
         spatial_symmetry_mapping: Optional dictionary mapping spatial elements for symmetry.
@@ -389,17 +417,9 @@ class AssetCfg:
                 - Collision properties (contact/rest offsets)
                 - Initial state and actuator configurations
         """
-        merged = self._merge_actuator_dicts()
         actuators = {
-            "all": ImplicitActuatorCfg(
-                joint_names_expr=merged["joint_names_expr"],
-                effort_limit_sim=merged["effort_limit"],
-                velocity_limit_sim=merged["velocity_limit"],
-                stiffness=merged["stiffness"],
-                damping=merged["damping"],
-                friction=merged["friction"],
-                armature=merged["armature"],
-            )
+            actuator_name: actuator.isaaclab()
+            for actuator_name, actuator in self.actuators.items()
         }
 
         rigid_props = sim_utils.RigidBodyPropertiesCfg(
@@ -491,17 +511,18 @@ class AssetCfg:
         
         Creates a MuJoCo Lab EntityCfg with initial state and actuator configurations.
         Uses the MJCF file path (specified via mjcf_path) for loading the model.
-        
         Returns:
             EntityCfg: MuJoCo Lab compatible asset configuration with:
                 - Initial state configuration
                 - Articulation info with actuator configurations
-                - Empty collisions tuple (collisions handled by MJCF)
+                - Collision masks derived from ``self_collisions``
         """
-        collisions = tuple(
-            CollisionCfg(**asdict(collision_cfg))
-            for collision_cfg in self.mjlab_collisions
-        )
+        collisions = []
+        for collision_cfg in self.mjlab_collisions:
+            fields = asdict(collision_cfg)
+            fields["contype"] = 1 if self.self_collisions else 0
+            fields["conaffinity"] = 1
+            collisions.append(CollisionCfg(**fields))
         
         spec = mujoco.MjSpec.from_file(str(self.mjcf_path))
 
@@ -515,7 +536,7 @@ class AssetCfg:
                 ),
                 soft_joint_pos_limit_factor=0.9,
             ),
-            collisions=collisions,
+            collisions=tuple(collisions),
             joint_symmetry_mapping=self.joint_symmetry_mapping,
             spatial_symmetry_mapping=self.spatial_symmetry_mapping,
             joint_names_simulation=self.joint_names_simulation,
@@ -566,14 +587,6 @@ class MjlabCollisionCfg:
 
     geom_names_expr: tuple[str, ...]
     """Tuple of regex patterns to match geom names."""
-    contype: int | dict[str, int] = 1
-    """Collision type (int or dict mapping patterns to values). Must be non-negative."""
-    conaffinity: int | dict[str, int] = 1
-    """Collision affinity (int or dict mapping patterns to values). Must be
-    non-negative."""
-    condim: int | dict[str, int] = 3
-    """Contact dimension (int or dict mapping patterns to values). Must be one
-    of {1, 3, 4, 6}."""
     priority: int | dict[str, int] = 0
     """Collision priority (int or dict mapping patterns to values). Must be
     non-negative."""
