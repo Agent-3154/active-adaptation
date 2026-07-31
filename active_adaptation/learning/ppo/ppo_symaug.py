@@ -302,11 +302,12 @@ class PPOPolicy(TensorDictModuleBase):
         if self._rollout_dormancy_tracker is not None:
             self._rollout_dormancy_tracker.close()
             self._rollout_dormancy_tracker = None
-
+        # VecNorm is frozen in eval mode to avoid unexpected updates
+        vecnorm = self.vecnorm if mode == "train" else VecNorm.freeze()(self.vecnorm)
         if critic:
-            policy = Seq(self.vecnorm, self.actor, self.critic)
+            policy = Seq(vecnorm, self.actor, self.critic)
         else:
-            policy = Seq(self.vecnorm, self.actor)
+            policy = Seq(vecnorm, self.actor)
         if self.cfg.compile:
             policy = torch.compile(policy)
         if self.cfg.debug:

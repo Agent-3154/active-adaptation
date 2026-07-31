@@ -29,15 +29,17 @@ Codebase adaptations vs. the paper
 - Goal ``G_t`` maps to **command** observation groups in our MDPs.
 - Observation tensors are assumed to **already include history**, so there is
   no separate history length / RNN — prior & decoder are MLPs on ``in_keys``.
-- Future references ``y_{t:t+H}`` / ``y_{t+L}`` are merged into optional
-  ``aux_keys`` (privileged / dense future) consumed only by the encoder.
+- Future references ``y_{t+k}`` for encoder conditioning are built at train time by
+  sampling ``k ∈ future_offsets`` from the replay ring (paper short-horizon
+  preview ``K = {1,2,4,16}``). Keys are listed in ``future_keys`` (e.g. dense
+  teacher command). Optional static ``aux_keys`` add privileged context at ``t``.
 - Student post-training / RL finetuning (Stage III) is out of scope.
 - Teacher and student are separate modules (no weight sharing).
 
 Model (paper Sec. 3.3, adapted)
 -------------------------------
 - Prior:   ``p_ψ(z_t | x_t, G_t)``
-- Encoder: ``q_ϕ(z_t | x_t, G_t, y_aux)``  (training only)
+- Encoder: ``q_ϕ(z_t | x_t, G_t, y_{t+K})``  (training only; ``K = future_offsets``)
 - Decoder: ``f_θ(a_t | x_t, G_t, z_t)``
 
 Residual posterior: ``N(μ_p + μ_q, Σ_q)``. Latents are L2-normalized after
@@ -82,9 +84,9 @@ class InterPriorCfg:
     name: str = "interprior"
 
     # Prior / decoder conditioning: ``G_t`` ≈ command, ``x_t`` ≈ policy (w/ history).
-    in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY)
-    # Encoder-only privileged / future keys (merged y). Empty → same as prior.
-    aux_keys: Tuple[str, ...] = ()
+    prior_in_keys: Tuple[str, ...] = ("goal", "policy")
+    encoder_in_keys: Tuple[str, ...] = ("goal", "policy", "future")
+    in_keys: Tuple[str, ...] = ("goal", "policy", "future")
 
     latent_dim: int = 64
     num_units: Tuple[int, ...] = (1024, 1024, 512)
@@ -95,7 +97,7 @@ class InterPriorCfg:
     batch_size: int = 512
     train_every: int = 32
     warm_up_steps: int = 32
-    updates_per_train: int = 1
+    updates_per_train: int = 4
 
     # DAgger: fraction of steps / envs controlled by the student.
     # Annealed via ``step_schedule`` from 0 → ``student_frac_end``.
@@ -105,7 +107,7 @@ class InterPriorCfg:
 
     # Loss weights (paper Sec. D.2)
     beta_kl: float = 1e-3
-    beta_kl_end: float = 1.0
+    beta_kl_end: float = 1e-2
     lambda_scale: float = 1e-3
     lambda_tc: float = 1e-3
     lambda_goal: float = 0.0  # optional cmd reconstruction; off by default
@@ -118,7 +120,7 @@ class InterPriorCfg:
 
 
 cs = ConfigStore.instance()
-cs.store(name="interprior", node=InterPriorCfg, group="student")
+cs.store(name="interprior", node=InterPriorCfg, group="algo")
 
 
 class DiagGaussianHead(nn.Module):
@@ -174,8 +176,7 @@ class InterPriorRolloutPolicy(TensorDictModuleBase):
 
     def forward(self, tensordict: TensorDict) -> TensorDict:
         self.vecnorm(tensordict)
-        feat = tensordict["_obs_normed"]
-        mu_p, std_p = self.prior(feat)
+        mu_p, std_p = self.prior(tensordict["prior_inp"])
         tensordict["mu_p"] = mu_p
         tensordict["std_p"] = std_p
 
@@ -187,7 +188,7 @@ class InterPriorRolloutPolicy(TensorDictModuleBase):
         z = F.normalize(z, dim=-1, eps=1e-6)
         tensordict["z"] = z
 
-        action = self.decoder(torch.cat([feat, z], dim=-1))
+        action = self.decoder(torch.cat([tensordict["_policy_normed"], z], dim=-1))
         tensordict[ACTION_KEY] = action
         # Keep episode-constant ε for the next step (primer resets on done).
         tensordict["next", "prior_eps"] = eps
@@ -218,71 +219,53 @@ class InterPriorPolicy(TensorDictModuleBase):
         self.beta_kl = float(cfg.beta_kl)
 
         fake = observation_spec.zero().to(self.device)
-        for key in list(cfg.in_keys) + list(cfg.aux_keys):
-            if key not in observation_spec.keys(True, True):
-                raise KeyError(
-                    f"Expected observation key {key!r}; "
-                    f"got {list(observation_spec.keys(True, True))}"
-                )
 
         Activation = getattr(nn, cfg.activation)
-        in_dim = sum(fake[k].shape[-1] for k in cfg.in_keys)
-        aux_dim = sum(fake[k].shape[-1] for k in cfg.aux_keys) if cfg.aux_keys else 0
+        prior_in_dim = fake["goal"].shape[-1] + fake["policy"].shape[-1]
+        encoder_in_dim = fake["goal"].shape[-1] + fake["policy"].shape[-1] + fake["future"].shape[-1]
         hidden = list(cfg.num_units)
         trunk_out = hidden[-1]
 
         self.vecnorm = Seq(
-            CatTensors(list(cfg.in_keys), "_raw_inp", del_keys=False, sort=False),
-            Mod(VecNorm((in_dim,), decay=1.0), ["_raw_inp"], ["_obs_normed"]),
+            Mod(VecNorm(fake["goal"].shape[-1]), ["goal"], ["_goal_normed"]),
+            Mod(VecNorm(fake["policy"].shape[-1]), ["policy"], ["_policy_normed"]),
+            Mod(VecNorm(fake["future"].shape[-1]), ["future"], ["_future_normed"]),
+            CatTensors(["_goal_normed", "_policy_normed"], "prior_inp", sort=False),
+            CatTensors(["_goal_normed", "_policy_normed", "_future_normed"], "encoder_inp", sort=False)
         ).to(self.device)
-
-        self.vecnorm_aux: Optional[Seq] = None
-        if cfg.aux_keys:
-            self.vecnorm_aux = Seq(
-                CatTensors(list(cfg.aux_keys), "_raw_aux", del_keys=False, sort=False),
-                Mod(VecNorm((aux_dim,), decay=1.0), ["_raw_aux"], ["_aux_normed"]),
-            ).to(self.device)
 
         self.prior = nn.Sequential(
-            MLP(num_units=[in_dim, *hidden], activation=Activation, first_non_muon=True),
+            MLP(num_units=[prior_in_dim, *hidden], activation=Activation, first_non_muon=True),
             DiagGaussianHead(trunk_out, self.latent_dim),
         ).to(self.device)
 
-        enc_in_dim = in_dim + aux_dim
         self.encoder = nn.Sequential(
-            MLP(num_units=[enc_in_dim, *hidden], activation=Activation, first_non_muon=True),
+            MLP(num_units=[encoder_in_dim, *hidden], activation=Activation, first_non_muon=True),
             DiagGaussianHead(trunk_out, self.latent_dim),
         ).to(self.device)
 
-        self.decoder = nn.Sequential(
+        decoder_in_dim = fake["policy"].shape[-1] + self.latent_dim
+        self.decoder_trunk = nn.Sequential(
             MLP(
-                num_units=[in_dim + self.latent_dim, *hidden],
+                num_units=[decoder_in_dim, *hidden],
                 activation=Activation,
                 first_non_muon=True,
             ),
-            nn.Linear(trunk_out, self.action_dim),
         ).to(self.device)
+        self.decoder_action = nn.Linear(trunk_out, self.action_dim).to(self.device)
+        self.decoder_goal = nn.Linear(trunk_out, fake["goal"].shape[-1]).to(self.device)
 
-        # Optional: reconstruct command from (obs, z); independent of decoder trunk.
-        self.goal_head: Optional[nn.Module] = None
-        if cfg.lambda_goal > 0.0 and CMD_KEY in cfg.in_keys:
-            cmd_dim = fake[CMD_KEY].shape[-1]
-            self.goal_head = nn.Sequential(
-                nn.Linear(in_dim + self.latent_dim, trunk_out),
-                Activation(),
-                nn.Linear(trunk_out, cmd_dim),
-            ).to(self.device)
-
-        # Lazy / shape init
-        self.vecnorm(fake)
-        if self.vecnorm_aux is not None:
-            self.vecnorm_aux(fake)
-        self.prior(fake["_obs_normed"])
-        self.encoder(self._encoder_input(fake))
-        z0 = F.normalize(
-            torch.zeros(fake.shape[0], self.latent_dim, device=self.device), dim=-1
-        )
-        self.decoder(torch.cat([fake["_obs_normed"], z0], dim=-1))
+        # test run
+        with torch.no_grad():
+            self.vecnorm(fake)
+            self.prior(fake["prior_inp"])
+            self.encoder(fake["encoder_inp"])
+            z0 = F.normalize(
+                torch.zeros(fake.shape[0], self.latent_dim, device=self.device), dim=-1
+            )
+            feat = self.decoder_trunk(torch.cat([fake["_policy_normed"], z0], dim=-1))
+            self.decoder_action(feat)
+            self.decoder_goal(feat)
 
         def init_(module: nn.Module):
             if isinstance(module, nn.Linear):
@@ -290,9 +273,10 @@ class InterPriorPolicy(TensorDictModuleBase):
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
 
-        self.apply(init_)
-        nn.init.orthogonal_(self.decoder[-1].weight, 0.01)
-        nn.init.constant_(self.decoder[-1].bias, 0.0)
+        self.prior.apply(init_)
+        self.encoder.apply(init_)
+        self.decoder_trunk.apply(init_)
+        
 
         self.train_keys: List[str] = [
             ACTION_KEY,
@@ -300,19 +284,11 @@ class InterPriorPolicy(TensorDictModuleBase):
             "prior_eps",
             "is_init",
             *cfg.in_keys,
-            *cfg.aux_keys,
         ]
 
         self.global_step = 0
         self.rb: Optional[ReplayBuffer] = None
         self.opt: Optional[torch.optim.Optimizer] = None
-
-    def _encoder_input(self, tensordict: TensorDict) -> torch.Tensor:
-        obs = tensordict["_obs_normed"]
-        if self.vecnorm_aux is None:
-            return obs
-        self.vecnorm_aux(tensordict)
-        return torch.cat([obs, tensordict["_aux_normed"]], dim=-1)
 
     # ------------------------------------------------------------------
     # Construction
@@ -369,10 +345,10 @@ class InterPriorPolicy(TensorDictModuleBase):
         params = (
             list(self.prior.parameters())
             + list(self.encoder.parameters())
-            + list(self.decoder.parameters())
+            + list(self.decoder_trunk.parameters())
+            + list(self.decoder_action.parameters())
+            + list(self.decoder_goal.parameters())
         )
-        if self.goal_head is not None:
-            params += list(self.goal_head.parameters())
         self.opt = torch.optim.Adam(params, lr=self.cfg.lr)
 
     # ------------------------------------------------------------------
@@ -380,11 +356,12 @@ class InterPriorPolicy(TensorDictModuleBase):
     # ------------------------------------------------------------------
 
     def get_rollout_policy(self, mode: str = "train", critic: bool = False):
-        del critic
+        if critic:
+            raise NotImplementedError("Critic is not supported for InterPriorPolicy.")
         policy = InterPriorRolloutPolicy(
             vecnorm=self.vecnorm,
             prior=self.prior,
-            decoder=self.decoder,
+            decoder=nn.Sequential(self.decoder_trunk, self.decoder_action),
             in_keys=self.cfg.in_keys,
             mode=mode,
         )
@@ -423,9 +400,7 @@ class InterPriorPolicy(TensorDictModuleBase):
                 "Missing teacher_action; label it in train_imitation rollout_policy."
             )
 
-        td = tensordict.select(
-            *[k for k in self.train_keys if k in tensordict.keys(True, True)]
-        )
+        td = tensordict.exclude(("next", "stats"), "collector")
         self.rb.push(td)
 
         if (
@@ -453,41 +428,29 @@ class InterPriorPolicy(TensorDictModuleBase):
         return out
 
     def _update(self) -> dict:
-        # steps=2 for temporal consistency between consecutive prior Gaussians.
         need_tc = self.cfg.lambda_tc > 0.0
-        steps = 2 if need_tc else 1
-        batch = self.rb.sample(self.cfg.batch_size, steps=steps)
+        batch = self.rb.sample(self.cfg.batch_size, next_obs=True)
 
-        if steps == 2:
-            # batch: [2, B, ...]
-            td = batch[0]
-            td_next = batch[1]
-        else:
-            td = batch
-            td_next = None
-
-        self.vecnorm(td)
-        feat = td["_obs_normed"]
-        mu_p, std_p = self.prior(feat)
-
-        enc_in = self._encoder_input(td)
-        mu_q, std_q = self.encoder(enc_in)
+        self.vecnorm(batch)
+        mu_p, std_p = self.prior(batch["prior_inp"])
+        mu_q, std_q = self.encoder(batch["encoder_inp"])
 
         # Residual posterior q(z) = N(μ_p + μ_q, Σ_q), prior p(z) = N(μ_p, Σ_p)
         mu_post = mu_p + mu_q
-        eps = td.get("prior_eps", torch.randn_like(mu_post))
-        z = mu_post + std_q * eps
-        z_proj = F.normalize(z, dim=-1, eps=1e-6)
+        eps = batch["prior_eps"]
+        z = F.normalize(mu_post + std_q * eps, dim=-1, eps=1e-6)
 
-        dec_in = torch.cat([feat, z_proj], dim=-1)
-        action_pred = self.decoder(dec_in)
+        feat = self.decoder_trunk(torch.cat([batch["_policy_normed"], z], dim=-1))
+        action_pred = self.decoder_action(feat)
+        goal_pred = self.decoder_goal(feat)
 
-        teacher_action = td["teacher_action"]
-        valid = (~td["is_init"]).float().reshape(-1)
+        valid = (~batch["is_init"].bool()).float().reshape(-1)
         valid_cnt = valid.sum().clamp_min(1.0)
 
-        act_err = (action_pred - teacher_action).square().mean(dim=-1)
+        act_err = (action_pred - batch["teacher_action"]).square().mean(dim=-1)
         loss_act = (act_err * valid).sum() / valid_cnt
+        g_err = (goal_pred - batch["goal"]).square().mean(dim=-1)
+        loss_goal = (g_err * valid).sum() / valid_cnt
 
         # KL(q ‖ p) with q=N(mu_post, std_q), p=N(mu_p, std_p)
         kl = IndependentNormal.kl(mu_post, std_q, mu_p, std_p)
@@ -497,20 +460,14 @@ class InterPriorPolicy(TensorDictModuleBase):
         loss_scale = (loss_scale * valid).sum() / valid_cnt
 
         loss_tc = action_pred.new_zeros(())
-        if need_tc and td_next is not None:
-            self.vecnorm(td_next)
-            mu_p1, std_p1 = self.prior(td_next["_obs_normed"])
+        if need_tc and batch["next"] is not None:
+            self.vecnorm(batch["next"])
+            mu_p1, std_p1 = self.prior(batch["next", "prior_inp"])
             # Skip pairs that cross episode boundaries.
-            cont = (~td_next["is_init"]).float().reshape(-1)
+            cont = (~batch["next", "is_init"].bool()).float().reshape(-1)
             w2 = _wasserstein2_diag(mu_p.detach(), std_p.detach(), mu_p1, std_p1)
             cont_cnt = cont.sum().clamp_min(1.0)
             loss_tc = (w2 * cont).sum() / cont_cnt
-
-        loss_goal = action_pred.new_zeros(())
-        if self.goal_head is not None and CMD_KEY in td.keys(True, True):
-            goal_pred = self.goal_head(dec_in)
-            g_err = (goal_pred - td[CMD_KEY]).square().mean(dim=-1)
-            loss_goal = (g_err * valid).sum() / valid_cnt
 
         loss = (
             loss_act
@@ -529,6 +486,7 @@ class InterPriorPolicy(TensorDictModuleBase):
 
         with torch.no_grad():
             return {
+                "distill/beta_kl": float(self.beta_kl),
                 "distill/action_loss": float(loss_act.detach()),
                 "distill/kl": float(loss_kl.detach()),
                 "distill/scale_loss": float(loss_scale.detach()),

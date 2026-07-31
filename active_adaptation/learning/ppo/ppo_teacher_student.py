@@ -508,7 +508,9 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             self.update = torch.compile(self.update)
 
     def get_rollout_policy(self, mode: str = "train", critic: bool = False):
-        modules = [self.vecnorm if self.cfg.stage == "teacher" else VecNorm.freeze()(self.vecnorm)]
+        # VecNorm is frozen in eval mode to avoid unexpected updates
+        vecnorm = self.vecnorm if mode == "train" else VecNorm.freeze()(self.vecnorm)
+        modules = [vecnorm]
         if self.cfg.stage == "teacher":
             modules += [self.encoder_teacher, self.from_teacher, self.actor_teacher]
         elif self.cfg.stage in ("student1", "student2"):

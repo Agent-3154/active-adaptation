@@ -70,7 +70,7 @@ torch.backends.cudnn.benchmark = False
 
 DEFAULTS = [
     {"task": "A2/A2LocoManip"},
-    {"algo@teacher": "ppo_symaug"},
+    {"algo@teacher": "from_checkpoint"},
     {"algo@student": "interprior"},
     "_self_",
 ]
@@ -115,7 +115,9 @@ class TrainConfig:
     upload_interval: int = 3200
 
     seed: int = 42
-    # Optional resume path for the *student* (teacher uses ``teacher.checkpoint_path``).
+    # Optional resume path for the *teacher* (student uses ``checkpoint_path``).
+    teacher_checkpoint_path: Optional[str] = None
+    # Optional resume path for the *student* (teacher uses ``teacher_checkpoint_path``).
     checkpoint_path: Optional[str] = None
     discard_unused_obs: bool = True
     wandb: WandbConfig = field(default_factory=WandbConfig)
@@ -142,27 +144,6 @@ FILE_PATH = Path(__file__).resolve().parent
 CONFIG_PATH = FILE_PATH.parent / "cfg"
 
 
-def _union_in_keys(teacher_cfg: DictConfig, student_cfg: DictConfig) -> list[str]:
-    keys: list[str] = []
-    for cfg in (teacher_cfg, student_cfg):
-        for k in cfg.get("in_keys", ()) or ():
-            if k not in keys:
-                keys.append(str(k))
-        for k in cfg.get("aux_keys", ()) or ():
-            if k not in keys:
-                keys.append(str(k))
-        for k in cfg.get("future_keys", ()) or ():
-            if k not in keys:
-                keys.append(str(k))
-        for k in cfg.get("teacher_keys", ()) or ():
-            if k not in keys:
-                keys.append(str(k))
-        for k in cfg.get("student_keys", ()) or ():
-            if k not in keys:
-                keys.append(str(k))
-    return keys
-
-
 def make_env_teacher_student(
     task_cfg: DictConfig,
     teacher_cfg: DictConfig,
@@ -171,10 +152,10 @@ def make_env_teacher_student(
     headless: bool,
     device: str,
     discard_unused_obs: bool = True,
+    teacher_checkpoint_path: str | None = None,
     student_checkpoint_path: str | None = None,
 ) -> tuple[TransformedEnv, TensorDictModuleBase, TensorDictModuleBase]:
     """Build env + frozen teacher + student (disjoint parameters)."""
-    from concurrent.futures import ThreadPoolExecutor
     from termcolor import colored
     from active_adaptation.envs.env_base import _EnvBase
     from active_adaptation.helpers import _ensure_backend_env_imported
@@ -183,113 +164,90 @@ def make_env_teacher_student(
     seed = seed + aa.get_local_rank()
     backend = active_adaptation.get_backend()
 
-    teacher_ckpt_path = teacher_cfg.get("checkpoint_path", None)
-    if teacher_ckpt_path is None:
+    teacher_checkpoint = parse_checkpoint(teacher_checkpoint_path)
+    student_checkpoint = parse_checkpoint(student_checkpoint_path)
+
+    _ensure_backend_env_imported(backend)
+    if backend == "isaac":
+        env_cls = _EnvBase.registry[task_cfg.get("env_class", "IsaacBackendEnv")]
+        env_device = str(device)
+    elif backend == "mujoco":
+        env_cls = _EnvBase.registry[task_cfg.get("env_class", "MujocoBackendEnv")]
+        task_cfg.num_envs = 1
+        task_cfg.reward = {}
+        env_device = "cpu"
+    elif backend == "mjlab":
+        env_cls = _EnvBase.registry[task_cfg.get("env_class", "MjlabBackendEnv")]
+        env_device = str(device)
+    elif backend == "motrix":
+        env_cls = _EnvBase.registry[task_cfg.get("env_class", "MotrixBackendEnv")]
+        env_device = "cpu"
+    else:
+        raise ValueError(f"Unknown backend: {backend}")
+    
+    # --- Teacher (frozen expert; no shared params with student) ---
+    from active_adaptation.utils.checkpoint_cfg import (
+        is_from_checkpoint_algo,
+        load_algo_cfg_from_local_pt,
+    )
+    if is_from_checkpoint_algo(teacher_cfg):
+        teacher_checkpoint.update()
+        teacher_cfg = load_algo_cfg_from_local_pt(teacher_checkpoint.get_path())
+    teacher_cfg = hydra.utils.instantiate(teacher_cfg)
+    student_cfg = hydra.utils.instantiate(student_cfg)
+
+    policy_in_keys = set(teacher_cfg.in_keys + student_cfg.in_keys)
+    if not policy_in_keys:
         raise ValueError(
-            "teacher.checkpoint_path is required "
-            "(frozen expert used for DAgger labels / mixed control)."
+            "Specify `in_keys` on teacher and/or student configs "
+            "(e.g. `command`, `policy`)."
         )
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        teacher_ckpt_fut = executor.submit(parse_checkpoint, teacher_ckpt_path)
-        student_ckpt_fut = executor.submit(parse_checkpoint, student_checkpoint_path)
-
-        _ensure_backend_env_imported(backend)
-        if backend == "isaac":
-            env_cls = _EnvBase.registry[task_cfg.get("env_class", "IsaacBackendEnv")]
-            env_device = str(device)
-        elif backend == "mujoco":
-            env_cls = _EnvBase.registry[task_cfg.get("env_class", "MujocoBackendEnv")]
-            task_cfg.num_envs = 1
-            task_cfg.reward = {}
-            env_device = "cpu"
-        elif backend == "mjlab":
-            env_cls = _EnvBase.registry[task_cfg.get("env_class", "MjlabBackendEnv")]
-            env_device = str(device)
-        elif backend == "motrix":
-            env_cls = _EnvBase.registry[task_cfg.get("env_class", "MotrixBackendEnv")]
-            env_device = "cpu"
-        else:
-            raise ValueError(f"Unknown backend: {backend}")
-
-        policy_in_keys = _union_in_keys(teacher_cfg, student_cfg)
-        if not policy_in_keys:
-            raise ValueError(
-                "Specify `in_keys` on teacher and/or student configs "
-                "(e.g. `command`, `policy`)."
-            )
-
-        if discard_unused_obs:
-            for obs_group_key in list(task_cfg.observation.keys()):
-                if obs_group_key not in policy_in_keys and not str(obs_group_key).endswith("_"):
-                    task_cfg.observation.pop(obs_group_key)
-                    print(
-                        colored(
-                            f"Discard obs group {obs_group_key} as it is not used.",
-                            "yellow",
-                        )
+    if discard_unused_obs:
+        for obs_group_key in list(task_cfg.observation.keys()):
+            if obs_group_key not in policy_in_keys and not str(obs_group_key).endswith("_"):
+                task_cfg.observation.pop(obs_group_key)
+                print(
+                    colored(
+                        f"Discard obs group {obs_group_key} as it is not used.",
+                        "yellow",
                     )
+                )
 
-        base_env = env_cls(task_cfg, env_device, headless=headless)
-        teacher_checkpoint = teacher_ckpt_fut.result()
-        student_checkpoint = student_ckpt_fut.result()
+    base_env = env_cls(task_cfg, env_device, headless=headless)
 
     if teacher_checkpoint is not None:
         teacher_checkpoint.update()
-    teacher_path = teacher_checkpoint.get_path() if teacher_checkpoint else None
-    print(f"[Info]: Using teacher checkpoint from: {teacher_path}")
-    teacher_state = torch.load(teacher_path, weights_only=False) if teacher_path else {}
+        teacher_path = teacher_checkpoint.get_path()
+        print(f"[Info]: Using teacher checkpoint from: {teacher_path}")
+        teacher_state = torch.load(teacher_path, weights_only=False) if teacher_path else {}
+    else:
+        teacher_state = {}
 
-    student_path = None
     if student_checkpoint is not None:
         student_checkpoint.update()
         student_path = student_checkpoint.get_path()
-    print(f"[Info]: Using student checkpoint from: {student_path}")
-    student_state = torch.load(student_path, weights_only=False) if student_path else {}
+        print(f"[Info]: Using student checkpoint from: {student_path}")
+        student_state = torch.load(student_path, weights_only=False) if student_path else {}
+    else:
+        student_state = {}
 
     transform = Compose(InitTracker(), StepCounter())
     env = TransformedEnv(base_env, transform)
     env.set_seed(seed)
 
-    # --- Teacher (frozen expert; no shared params with student) ---
-    # Config ``_target_`` + ``get_class()`` so ``__post_init__`` runs; legacy fallback.
-    try:
-        teacher_algo_cfg = hydra.utils.instantiate(teacher_cfg)
-        teacher_cls = teacher_algo_cfg.get_class()
-    except Exception:
-        teacher_cls = hydra.utils.get_class(teacher_cfg._target_)
-        teacher_algo_cfg = OmegaConf.create(
-            OmegaConf.to_container(teacher_cfg, resolve=True)
-        )
-    # ``checkpoint_path`` is script-only; strip before policy construction.
-    if hasattr(teacher_algo_cfg, "checkpoint_path"):
-        teacher_algo_cfg.checkpoint_path = None
-    elif OmegaConf.is_config(teacher_algo_cfg):
-        teacher_algo_cfg = OmegaConf.create(
-            OmegaConf.to_container(teacher_algo_cfg, resolve=True)
-        )
-        teacher_algo_cfg.pop("checkpoint_path", None)
-
+    teacher_cls = teacher_cfg.get_class()
     print(f"Creating teacher {teacher_cls} on device {device}")
-    teacher = teacher_cls.from_env(teacher_algo_cfg, env, device=device)
+    teacher = teacher_cls.from_env(teacher_cfg, env, device=device)
     if "policy" in teacher_state:
         print(colored("[Info]: Load teacher from checkpoint.", "green"))
         teacher.load_state_dict(teacher_state["policy"])
-    teacher.requires_grad_(False)
     teacher.eval()
-    # Build teacher rollout modules / optimizers if the policy expects it.
-    if hasattr(teacher, "on_stage_start"):
-        teacher.on_stage_start("eval", env)
 
     # --- Student ---
-    try:
-        student_cfg_obj = hydra.utils.instantiate(student_cfg)
-        student_cls = student_cfg_obj.get_class()
-    except Exception:
-        student_cfg_obj = student_cfg
-        student_cls = hydra.utils.get_class(student_cfg._target_)
+    student_cls = student_cfg.get_class()
     print(f"Creating student {student_cls} on device {device}")
-    student = student_cls.from_env(student_cfg_obj, env, device=device)
+    student = student_cls.from_env(student_cfg, env, device=device)
     if "policy" in student_state:
         print(colored("[Info]: Load student from checkpoint.", "green"))
         student.load_state_dict(student_state["policy"])
@@ -353,6 +311,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         headless=cfg.headless,
         device=cfg.device,
         discard_unused_obs=cfg.discard_unused_obs,
+        teacher_checkpoint_path=cfg.teacher_checkpoint_path,
         student_checkpoint_path=cfg.checkpoint_path,
     )
 
@@ -393,6 +352,11 @@ def run(cfg: TrainConfig) -> dict[str, str]:
 
     ckpt_path = None
     carry = env.reset()
+    # teacher and student may each be stateful, e.g., running RNNs
+    carry_teacher, carry_student = carry.copy(), carry.copy()
+    # 0: teacher, 1: student
+    policy_selection = torch.zeros(env.num_envs, dtype=bool, device=env.device)
+    
     env_frames = 0
     private_keys = None
     observation_keys = list(env.observation_spec.keys(True, True))
@@ -400,21 +364,6 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     student.on_stage_start("train", env)
     teacher_rollout = teacher.get_rollout_policy(mode="eval")
     student_rollout = student.get_rollout_policy(mode="train")
-
-    def rollout_policy(tensordict):
-        # For now we assume teacher is memoryless so we do not need to carry additional states.
-        # The student can be memory-based. So we pass student_td as output.
-        # Teacher-student mixing may be added here later via a `torch.where` operation.
-        from active_adaptation.learning.modules import VecNorm
-
-        with VecNorm.freeze():
-            teacher_td = teacher_rollout(tensordict.copy())
-        teacher_action = teacher_td.pop("action")
-        student_td = student_rollout(tensordict.copy())
-        student_action = student_td.pop("action")
-        student_td.set("teacher_action", teacher_action)
-        student_td.set("action", student_action)
-        return student_td
 
     if aa.is_main_process():
         progress = tqdm(range(total_iters), desc="imitation")
@@ -426,16 +375,33 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     for i in progress:
         if hasattr(student, "step_schedule"):
             student.step_schedule(i / max(total_iters, 1))
+        
+        # resample policy selection upon episode start
+        if (is_init := carry["is_init"]).any(): 
+            is_init_ids = is_init.reshape(-1).nonzero().squeeze(1)
+            student_frac = student.student_frac # TODO: refactor to a more general way
+            policy_selection[is_init_ids] = torch.rand(len(is_init_ids), device=env.device) < student_frac
 
         with torch.no_grad():
             with (
                 set_exploration_type(ExplorationType.RANDOM),
                 ScopedTimer("policy_inference"),
             ):
-                carry = rollout_policy(carry)
+                carry_teacher = teacher_rollout(carry_teacher)
+                carry_student = student_rollout(carry_student)
+                teacher_action = carry_teacher["action"]
+                carry["policy_selection"] = policy_selection.clone()
+                carry["teacher_action"] = teacher_action
+                carry["action"] = torch.where(
+                    policy_selection.unsqueeze(1),
+                    carry_student["action"],
+                    teacher_action,
+                )
 
             with ScopedTimer("env_step") as timer:
                 td, carry = env.step_and_maybe_reset(carry)
+                carry_teacher.update(carry)
+                carry_student.update(carry)
                 if not private_keys:
                     private_keys = [
                         key
@@ -459,7 +425,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                 student, checkpoint_name, upload_to_wandb=should_upload
             )
 
-        if aa.is_main_process() and (i % log_interval == 0 or len(train_info) > 0):
+        if aa.is_main_process() and ((i % log_interval == 0) or len(train_info) > 0):
             info = {**train_info}
             info["env_frames"] = env_frames * aa.get_world_size()
             info["performance/rollout_fps"] = (
