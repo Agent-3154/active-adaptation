@@ -4,9 +4,8 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "active-adaptation",
-    "mjlab>=1.4.0",
+    "mjlab==1.5.3",
     "motrixsim>=0.8.2",
-    "mujoco>=3.7.0",
 ]
 
 [tool.uv.sources]
