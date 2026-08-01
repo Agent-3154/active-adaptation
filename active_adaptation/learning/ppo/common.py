@@ -77,7 +77,7 @@ def ppo_clipped_loss(
     eps_neg, eps_pos = clip_param
     surr1 = adv * ratio
     surr2 = adv * ratio.clamp(1.0 - eps_neg, 1.0 + eps_pos)
-    return -torch.min(surr1, surr2).mean()
+    return -torch.min(surr1, surr2)
 
 
 def spo_loss(
@@ -97,8 +97,28 @@ def spo_loss(
     else:
         eps = torch.where(ratio >= 1.0, ratio.new_full((), eps_pos), ratio.new_full((), eps_neg))
     obj = ratio * adv - adv.abs() / (2.0 * eps) * (ratio - 1.0).square()
-    return -obj.mean()
+    return -obj
 
+
+def aspo_loss(
+    ratio: torch.Tensor, adv: torch.Tensor, clip_param: Tuple[float, float]
+) -> torch.Tensor:
+    """
+    Asymmetric Simple Policy Optimization Loss from https://arxiv.org/pdf/2401.16025.
+    Loss to minimize; negates the ASPO objective so gradient descent maximizes it.
+    """
+    return torch.where(
+        adv >= 0.0,
+        ppo_clipped_loss(ratio, adv, clip_param),
+        spo_loss(ratio, adv, clip_param),
+    )
+
+
+PPO_LOSS_MAP = {
+    "ppo": ppo_clipped_loss,
+    "spo": spo_loss,
+    "aspo": aspo_loss,
+}
 
 
 class DtypeConversion(nn.Module):
