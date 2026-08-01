@@ -55,8 +55,7 @@ from active_adaptation.learning.modules import (
     CatTensors,
 )
 from active_adaptation.learning.ppo.common import (
-    ppo_clipped_loss,
-    spo_loss,
+    PPO_LOSS_MAP,
     resolve_clip_param,
     CMD_KEY,
     OBS_KEY,
@@ -100,7 +99,7 @@ class PPOConfig:
     actor_num_units: Tuple[int, ...] = (256, 256, 256)
     critic_num_units: Tuple[int, ...] = (512, 256, 256)
     activation: str = "Mish"
-    spo: bool = False # use Simple Policy Optimization Loss
+    loss_fn: str = "ppo" # "ppo", "spo", "aspo"
     muon: bool = False # use Muon optimizer
     aux_coef: float = 0.0 # loss coefficient for auxiliary prediction loss
     
@@ -148,7 +147,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.max_grad_norm = 1.0
         self.desired_kl = self.cfg.desired_kl
         self.clip_param = resolve_clip_param(self.cfg.clip_param)
-        self.actor_loss_fn = spo_loss if self.cfg.spo else ppo_clipped_loss
+        self.actor_loss_fn = PPO_LOSS_MAP[self.cfg.loss_fn]
         self.critic_loss_fn = nn.MSELoss(reduction="none")
         self.gae = GAE(0.99, 0.95)  
 
@@ -575,6 +574,7 @@ class PPOPolicy(TensorDictModuleBase):
         clamped = (clamped_pos | clamped_neg).reshape_as(ret)
 
         policy_loss = self.actor_loss_fn(ratio, adv, self.clip_param)
+        policy_loss = (policy_loss.reshape_as(valid) * valid).sum() / valid_cnt
         entropy_loss = - self.entropy_coef * entropy
 
         values = self.critic(tensordict)["state_value"]
