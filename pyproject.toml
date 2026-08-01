@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "active_adaptation"
-version = "0.8.0"
+version = "0.8.1"
 authors = [
     {name = "btx0424@SUSTech"}
 ]
@@ -29,7 +29,6 @@ dependencies = [
     "pdbpp",
     "scipy",
     "trimesh",
-    "mujoco<3.9.0",
     "matplotlib>=3.11.1",
 ]
 
