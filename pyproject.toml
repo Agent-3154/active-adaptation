@@ -15,11 +15,8 @@ dependencies = [
     "hydra-core",
     "omegaconf",
     "wandb",
-    "moviepy",
-    "av",
     "einops",
     "termcolor",
-    "pygame",
     "onnxruntime",
     "onnxscript",
     "jaxtyping",
@@ -33,6 +30,7 @@ dependencies = [
     "scipy",
     "trimesh",
     "mujoco<3.9.0",
+    "matplotlib>=3.11.1",
 ]
 
 [project.scripts]
