@@ -42,8 +42,9 @@ Model (paper Sec. 3.3, adapted)
 - Encoder: ``q_ϕ(z_t | x_t, G_t, y_{t+K})``  (training only; ``K = future_offsets``)
 - Decoder: ``f_θ(a_t | x_t, G_t, z_t)``
 
-Residual posterior: ``N(μ_p + μ_q, Σ_q)``. Latents are L2-normalized after
-sampling; KL uses the pre-projection Gaussians. Online distillation uses
+Residual posterior: ``N(μ_p + μ_q, Σ_q)``. Latents are optionally L2-normalized
+after sampling (``normalize_z``); KL uses the pre-projection Gaussians and
+supports per-dim free bits (``free_bits``). Online distillation uses
 ``L = L_ELBO + λ_scale L_scale + λ_tc L_tc``. Teacher action labels and any
 DAgger control mixing are provided by ``train_imitation.py``, not this module.
 """
@@ -70,7 +71,7 @@ from collections import OrderedDict
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
-from active_adaptation.learning.modules import VecNorm, IndependentNormal, MLP, CatTensors
+from active_adaptation.learning.modules import VecNorm, MLP, CatTensors
 from active_adaptation.learning.ppo.common import OBS_KEY, CMD_KEY, ACTION_KEY
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.utils.profiling import ScopedTimer
@@ -91,6 +92,11 @@ class InterPriorCfg:
     latent_dim: int = 64
     num_units: Tuple[int, ...] = (1024, 1024, 512)
     activation: str = "ReLU"
+    # L2-normalize z after sampling (paper projects latents onto the unit sphere).
+    normalize_z: bool = True
+    # Per-dim free bits: latent dims whose KL is below this threshold contribute
+    # no KL gradient (prevents posterior collapse). 0 disables.
+    free_bits: float = 0.0
 
     lr: float = 2e-5
     buffer_size: int = 500  # ring length in steps; storage is [buffer_size, num_envs]
@@ -121,6 +127,11 @@ class InterPriorCfg:
 
 cs = ConfigStore.instance()
 cs.store(name="interprior", node=InterPriorCfg, group="algo")
+cs.store(
+    name="interprior_vanilla", 
+    node=InterPriorCfg(normalize_z=False, lambda_scale=0.0,),
+    group="algo"
+)
 
 
 class DiagGaussianHead(nn.Module):
@@ -160,12 +171,14 @@ class InterPriorRolloutPolicy(TensorDictModuleBase):
         decoder: nn.Module,
         in_keys: Tuple[str, ...],
         mode: str = "train",
+        normalize_z: bool = True,
     ):
         super().__init__()
         self.vecnorm = vecnorm
         self.prior = prior
         self.decoder = decoder
         self.mode = mode
+        self.normalize_z = normalize_z
         self.in_keys = list(in_keys) + ["prior_eps", "is_init"]
         self.out_keys = [
             ACTION_KEY,
@@ -185,7 +198,8 @@ class InterPriorRolloutPolicy(TensorDictModuleBase):
             z = mu_p + std_p * eps
         else:
             z = mu_p
-        z = F.normalize(z, dim=-1, eps=1e-6)
+        if self.normalize_z:
+            z = F.normalize(z, dim=-1, eps=1e-6)
         tensordict["z"] = z
 
         action = self.decoder(torch.cat([tensordict["_policy_normed"], z], dim=-1))
@@ -364,6 +378,7 @@ class InterPriorPolicy(TensorDictModuleBase):
             decoder=nn.Sequential(self.decoder_trunk, self.decoder_action),
             in_keys=self.cfg.in_keys,
             mode=mode,
+            normalize_z=self.cfg.normalize_z,
         )
         if self.cfg.compile:
             policy = torch.compile(policy)
@@ -438,7 +453,9 @@ class InterPriorPolicy(TensorDictModuleBase):
         # Residual posterior q(z) = N(μ_p + μ_q, Σ_q), prior p(z) = N(μ_p, Σ_p)
         mu_post = mu_p + mu_q
         eps = batch["prior_eps"]
-        z = F.normalize(mu_post + std_q * eps, dim=-1, eps=1e-6)
+        z = mu_post + std_q * eps
+        if self.cfg.normalize_z:
+            z = F.normalize(z, dim=-1, eps=1e-6)
 
         feat = self.decoder_trunk(torch.cat([batch["_policy_normed"], z], dim=-1))
         action_pred = self.decoder_action(feat)
@@ -452,9 +469,24 @@ class InterPriorPolicy(TensorDictModuleBase):
         g_err = (goal_pred - batch["goal"]).square().mean(dim=-1)
         loss_goal = (g_err * valid).sum() / valid_cnt
 
-        # KL(q ‖ p) with q=N(mu_post, std_q), p=N(mu_p, std_p)
-        kl = IndependentNormal.kl(mu_post, std_q, mu_p, std_p)
-        loss_kl = (kl * valid).sum() / valid_cnt
+        # Per-dim KL(q ‖ p) with q=N(mu_post, std_q), p=N(mu_p, std_p)
+        kl_dim = (
+            torch.log(std_p) - torch.log(std_q)
+            + (std_q.square() + (mu_p - mu_post).square()) / (2.0 * std_p.square())
+            - 0.5
+        )
+        kl_true = kl_dim.sum(-1)
+        if self.cfg.free_bits > 0.0:
+            # Free bits: dims whose KL is already below the threshold get no
+            # KL gradient. Diagnostics still report the true (unmasked) KL.
+            fb_mask = (kl_dim > self.cfg.free_bits).detach()
+            kl_obj = (kl_dim * fb_mask).sum(-1)
+            kl_active_frac = fb_mask.float().mean()
+        else:
+            kl_obj = kl_true
+            kl_active_frac = kl_dim.new_ones(())
+        loss_kl = (kl_obj * valid).sum() / valid_cnt
+        kl_diag = (kl_true * valid).sum() / valid_cnt
 
         loss_scale = (mu_p.norm(dim=-1).square() - 1.0).square()
         loss_scale = (loss_scale * valid).sum() / valid_cnt
@@ -488,7 +520,9 @@ class InterPriorPolicy(TensorDictModuleBase):
             return {
                 "distill/beta_kl": float(self.beta_kl),
                 "distill/action_loss": float(loss_act.detach()),
-                "distill/kl": float(loss_kl.detach()),
+                "distill/kl": float(kl_diag.detach()),
+                "distill/kl_loss": float(loss_kl.detach()),
+                "distill/kl_active_frac": float(kl_active_frac.detach()),
                 "distill/scale_loss": float(loss_scale.detach()),
                 "distill/tc_loss": float(loss_tc.detach()),
                 "distill/goal_loss": float(loss_goal.detach()),
