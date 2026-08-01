@@ -42,7 +42,8 @@ Model (paper Sec. 3.3, adapted)
 - Encoder: ``q_ϕ(z_t | x_t, G_t, y_{t+K})``  (training only; ``K = future_offsets``)
 - Decoder: ``f_θ(a_t | x_t, G_t, z_t)``
 
-Residual posterior: ``N(μ_p + μ_q, Σ_q)``. Latents are optionally L2-normalized
+Residual posterior: ``N(μ_p + μ_q, Σ_q)`` (or non-residual ``N(μ_q, Σ_q)`` via
+``residual_posterior=False``). Latents are optionally L2-normalized
 after sampling (``normalize_z``); KL uses the pre-projection Gaussians and
 supports per-dim free bits (``free_bits``). Online distillation uses
 ``L = L_ELBO + λ_scale L_scale + λ_tc L_tc``. Teacher action labels and any
@@ -97,10 +98,13 @@ class InterPriorCfg:
     # Per-dim free bits: latent dims whose KL is below this threshold contribute
     # no KL gradient (prevents posterior collapse). 0 disables.
     free_bits: float = 0.0
+    # Residual posterior q = N(μ_p + μ_q, Σ_q) (paper); if False the encoder
+    # predicts the posterior mean directly: q = N(μ_q, Σ_q).
+    residual_posterior: bool = True
 
     lr: float = 2e-5
     buffer_size: int = 500  # ring length in steps; storage is [buffer_size, num_envs]
-    batch_size: int = 512
+    batch_size: int = 1024
     train_every: int = 32
     warm_up_steps: int = 32
     updates_per_train: int = 4
@@ -129,7 +133,7 @@ cs = ConfigStore.instance()
 cs.store(name="interprior", node=InterPriorCfg, group="algo")
 cs.store(
     name="interprior_vanilla", 
-    node=InterPriorCfg(normalize_z=False, lambda_scale=0.0,),
+    node=InterPriorCfg(normalize_z=False, lambda_scale=0.0, residual_posterior=False),
     group="algo"
 )
 
@@ -450,8 +454,9 @@ class InterPriorPolicy(TensorDictModuleBase):
         mu_p, std_p = self.prior(batch["prior_inp"])
         mu_q, std_q = self.encoder(batch["encoder_inp"])
 
-        # Residual posterior q(z) = N(μ_p + μ_q, Σ_q), prior p(z) = N(μ_p, Σ_p)
-        mu_post = mu_p + mu_q
+        # Posterior q(z) = N(μ_post, Σ_q), prior p(z) = N(μ_p, Σ_p).
+        # Residual (paper): μ_post = μ_p + μ_q; non-residual: μ_post = μ_q.
+        mu_post = mu_p + mu_q if self.cfg.residual_posterior else mu_q
         eps = batch["prior_eps"]
         z = mu_post + std_q * eps
         if self.cfg.normalize_z:
@@ -532,6 +537,7 @@ class InterPriorPolicy(TensorDictModuleBase):
                 ),
                 "distill/z_norm": float(z.norm(dim=-1).mean().detach()),
                 "distill/mu_p_norm": float(mu_p.norm(dim=-1).mean().detach()),
+                "distill/mu_q_norm": float(mu_q.norm(dim=-1).mean().detach()),
             }
 
     # ------------------------------------------------------------------

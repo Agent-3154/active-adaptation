@@ -120,10 +120,10 @@ class CommandV2(MDPComponent, RegistryMixin):
     
     # for relabeling
     def get_state(self) -> TensorDict:
-        raise NotImplementedError()
+        raise NotImplementedError(f"Method `get_state` is not implemented for {self.__class__.__name__}")
 
     def relabel_command(self, tensordict: TensorDict) -> TensorDict:
-        raise NotImplementedError()
+        raise NotImplementedError(f"Method `relabel_command` is not implemented for {self.__class__.__name__}")
 
 
 __all__ = ["Command", "CommandV2"]
