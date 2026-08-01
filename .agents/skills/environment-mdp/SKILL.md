@@ -11,11 +11,12 @@ Implement MDP terms as **V2** classes: construct from Hydra kwargs **without** a
 - Env wiring + step/reset: `active_adaptation/envs/env_base.py`
 - Shared hooks: `active_adaptation/envs/mdp/base.py` (`MDPComponent`)
 - Term bases: `envs/mdp/{observations,rewards,terminations,actions,commands,randomizations}/base.py`
+- Name / index helpers: `active_adaptation/envs/utils/api.py` (`find_joints`, `find_bodies`, `find_sensor_bodies`)
 - Task configs: `cfg/task/**/*.yaml`
 - Debug viz API: `active_adaptation/envs/adapters.py` (`SceneAdapter`, `CameraFrustumHandle`)
 - Raycasting / USD meshes: installed package `simple-raycaster` (see section below + [reference.md](reference.md))
 
-Read [reference.md](reference.md) for the step-loop diagram, callback registration, file map, viz backends, and raycast/mesh details.
+Read [reference.md](reference.md) for the step-loop diagram, callback registration, file map, viz backends, name-order / contact-index rules, and raycast/mesh details.
 
 **Related skills:** `onpolicy-algorithms`, `offpolicy-algorithms`.
 
@@ -39,6 +40,8 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 3. **Register by subclassing** — subclassing a V2 base auto-registers under the class name (or `namespace.ClassName`). Import the module so registration runs (see package `__init__.py` auto-import patterns).
 4. **Shape convention** — tensors are batched `(num_envs, …)`. Rewards/terminations usually return `(num_envs, 1)`.
 5. **Override only what you need** — `_add_mdp_component` registers `startup` / `reset` / `update` / `pre_step` / `post_step` / `debug_draw` only when the subclass **overrides** the base method (`is_method_implemented`). Empty overrides still register.
+6. **Simulation name order** — Isaac and MuJoCo/mjlab typically use different joint/body orders. Resolve names via `asset.cfg.joint_names_simulation` / `asset.cfg.body_names_simulation` (helpers `find_joints` / `find_bodies` in `envs/utils/api.py`), **not** `asset.find_joints` / `asset.find_bodies`. Critical for action and observation terms so trained policies transfer across backends.
+7. **Contact sensor indices** — mjlab’s contact sensor has no `find_bodies`. Use `find_sensor_bodies(asset, contact_sensor, pattern)` so articulation and sensor indices stay aligned in simulation order.
 
 ---
 
@@ -50,6 +53,8 @@ Task Progress:
 - [ ] Implement class in the matching envs/mdp/<family>/ module
 - [ ] __init__: config kwargs only (no env / asset access)
 - [ ] _initialize: super()._initialize(env); then asset/sensor/buffer setup
+- [ ] Joint/body indices: `find_joints` / `find_bodies` (simulation order), not `asset.find_*`
+- [ ] Contact indices: `find_sensor_bodies` (not `contact_sensor.find_bodies`)
 - [ ] Implement the type-specific compute / apply / sync API
 - [ ] Optional lifecycle: update, reset(env_ids, tensordict), pre_step, post_step, startup, debug_draw
 - [ ] If `debug_draw`: use `env.scene.draw_*` / `create_camera_frustum` (not `env.debug_draw`)
@@ -57,6 +62,42 @@ Task Progress:
 - [ ] Ensure module is imported (auto-import or explicit in package __init__)
 - [ ] Wire into cfg/task/ YAML
 - [ ] Smoke: instantiate env and step once (or train a few iters)
+```
+
+---
+
+## Cross-backend name / index resolution
+
+Isaac and MuJoCo/mjlab often disagree on joint and body ordering (and contact sensors may list bodies in yet another order). Policies must see a **stable layout** across backends, so asset configs declare authoritative lists:
+
+| Config field | Purpose |
+|--------------|---------|
+| `asset.cfg.joint_names_simulation` | Canonical joint order for MDP tensors |
+| `asset.cfg.body_names_simulation` | Canonical body order for MDP tensors |
+
+**Helpers** (`active_adaptation.envs.utils` / `envs/utils/api.py`):
+
+| Helper | Use for | Notes |
+|--------|---------|-------|
+| `find_joints(asset, pattern)` | Articulation joint indices | Matches against `joint_names_simulation`, then maps to `asset.joint_names` indices |
+| `find_bodies(asset, pattern)` | Articulation body indices | Same for `body_names_simulation` |
+| `find_sensor_bodies(asset, contact_sensor, pattern)` | Contact-sensor body indices | Resolves names via `find_bodies` first; Isaac uses `contact_sensor.find_bodies(..., preserve_order=True)`, mjlab indexes `contact_sensor.primary_names` |
+
+**Especially for action and observation terms:** slicing joint/body features in backend-native order silently breaks sim-to-sim / Isaac↔mjlab transfer. Prefer the helpers (or resolve against `*_names_simulation` then `asset.*.index(name)` as in `actions/joint.py`).
+
+Example (reward with feet + contact — see `rewards/gait.py`):
+
+```python
+from active_adaptation.envs.utils import find_bodies, find_sensor_bodies
+
+def _initialize(self, env):
+    super()._initialize(env)
+    self.asset = self.env.scene.articulations["robot"]
+    self.contact_sensor = self.env.scene.sensors["contact_forces"]
+    self.body_ids, self.body_names = find_bodies(self.asset, self.body_names_pattern)
+    self.body_contact_ids = find_sensor_bodies(
+        self.asset, self.contact_sensor, self.body_names_pattern
+    )[0]
 ```
 
 ---
@@ -188,6 +229,8 @@ For PPO symaug, override `symmetry_transform()` on observation and action terms 
 ## Backends
 
 Set `supported_backends = ("isaac", "mjlab", …)` on the class when the term is backend-specific. `RegistryMixin.make` returns `None` (and warns) if the active backend is unsupported — the env skips that term.
+
+Cross-backend terms that index joints, bodies, or contacts must still use simulation-order helpers (above); `supported_backends` alone does not fix ordering.
 
 ---
 
@@ -341,3 +384,5 @@ Isaac/mjlab **Viser** robot meshes (viewer internals, not MDP terms): same body-
 - Returning unbatched reward/obs tensors
 - Registering empty `update`/`reset` overrides unintentionally (they still run every step/reset)
 - Using `env.debug_draw` instead of `env.scene.draw_*` / `create_camera_frustum`
+- Using `asset.find_joints` / `asset.find_bodies` for MDP feature layout (backend-native order; breaks Isaac↔mjlab transfer) — use `find_joints` / `find_bodies` / `*_names_simulation`
+- Calling `contact_sensor.find_bodies` directly (missing on mjlab; may disagree with articulation order even on Isaac) — use `find_sensor_bodies`

@@ -10,30 +10,6 @@ and ordering that match the asset, not an arbitrary backend layout.
 from active_adaptation.utils.string import resolve_matching_names
 
 
-def _get_contact_sensor_primary_names(contact_sensor) -> list[str]:
-    """Return primary body names across Isaac Lab and mjlab contact sensors."""
-    primary_names = getattr(contact_sensor, "primary_names", None)
-    if primary_names is not None:
-        return list(primary_names)
-
-    slots = getattr(contact_sensor, "_slots", None)
-    if slots is not None:
-        names: list[str] = []
-        seen: set[str] = set()
-        for slot in slots:
-            name = getattr(slot, "primary_name", None)
-            if name is None or name in seen:
-                continue
-            names.append(name)
-            seen.add(name)
-        if names:
-            return names
-
-    raise AttributeError(
-        "Contact sensor does not expose primary_names or mjlab _slots.primary_name"
-    )
-
-
 def find_sensor_bodies(
     asset,
     contact_sensor,
@@ -63,7 +39,7 @@ def find_sensor_bodies(
         )[0]
     else:
         # MjLab API
-        names = _get_contact_sensor_primary_names(contact_sensor)
+        names = contact_sensor.primary_names
         body_ids = []
         for name in body_names:
             try:

@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from active_adaptation.utils.string import resolve_matching_names_values
 from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
+from active_adaptation.envs.utils import find_joints
 
 from .base import ActionV2
 from tensordict import TensorDictBase
@@ -680,7 +681,7 @@ class CorrelatedJointPosition(ActionV2):
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
-        joint_ids, self.joint_names = self.asset.find_joints(self.joint_names_expr)
+        joint_ids, self.joint_names = find_joints(self.asset, self.joint_names_expr)
         self.joint_ids = torch.tensor(joint_ids, device=self.device)
 
         coeffs = torch.tensor(self._matrix, dtype=torch.float32, device=self.device)
