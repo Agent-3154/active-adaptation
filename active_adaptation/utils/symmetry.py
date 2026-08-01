@@ -7,18 +7,36 @@ if TYPE_CHECKING:
 
 
 class SymmetryTransform(nn.Module):
-    def __init__(self, perm, signs):
+    """Mirror transform applied to the last dim: ``x[..., perm] * signs``.
+
+    For image observations of shape ``[..., C, H, W]``, an optional
+    ``channel_signs`` of length ``C`` additionally multiplies dim ``-3``
+    (e.g. to negate the lateral component of a normal map while the
+    perm/signs realize the horizontal flip on the width dim).
+    """
+
+    def __init__(self, perm: torch.Tensor, signs: torch.Tensor, channel_signs: Optional[torch.Tensor] = None):
         super().__init__()
         self.perm: torch.Tensor
         self.signs: torch.Tensor
+        self.channel_signs: Optional[torch.Tensor]
         if not len(perm) == len(signs) > 0:
             raise ValueError("perm and signs must have the same length and be non-empty.")
         
         self.register_buffer("perm", torch.as_tensor(perm))
         self.register_buffer("signs", torch.as_tensor(signs, dtype=torch.float32))
+        if channel_signs is not None:
+            self.register_buffer(
+                "channel_signs", torch.as_tensor(channel_signs, dtype=torch.float32)
+            )
+        else:
+            self.channel_signs = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x[..., self.perm] * self.signs
+        out = x[..., self.perm] * self.signs
+        if self.channel_signs is not None:
+            out = out * self.channel_signs.reshape(-1, 1, 1)
+        return out
     
     def repeat(self, n: int) -> "SymmetryTransform":
         return SymmetryTransform.cat([self] * n)
@@ -27,6 +45,16 @@ class SymmetryTransform(nn.Module):
     def cat(transforms: Sequence["SymmetryTransform"]) -> "SymmetryTransform":
         if not all(isinstance(t, SymmetryTransform) for t in transforms):
             raise ValueError("All transforms must be SymmetryTransform instances.")
+        if any(t.channel_signs is not None for t in transforms):
+            # Channel signs act on dim -3, which is not preserved by last-dim
+            # concatenation. Image terms must be alone in their group anyway
+            # (group compute cats along the last dim).
+            if len(transforms) > 1:
+                raise ValueError(
+                    "A SymmetryTransform with channel_signs cannot be concatenated "
+                    "with other transforms."
+                )
+            return transforms[0]
         perm = []
         signs = []
         num = 0
@@ -38,7 +66,8 @@ class SymmetryTransform(nn.Module):
     
     def permutation(self):
         """
-        Return the permutation part of the symmetry transform.
+        Return the permutation part of the symmetry transform (all sign
+        flips, including channel signs, are dropped).
         """
         return SymmetryTransform(self.perm.clone(), torch.ones_like(self.signs))
 

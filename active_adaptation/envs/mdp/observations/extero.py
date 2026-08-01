@@ -12,6 +12,7 @@ import active_adaptation
 from jaxtyping import Float
 from .base import ObservationV2
 from active_adaptation.utils.math import (
+    quat_mul,
     quat_rotate,
     quat_rotate_inverse,
     yaw_quat,
@@ -21,6 +22,7 @@ from active_adaptation.utils.math import (
 from active_adaptation.utils.symmetry import SymmetryTransform, cartesian_space_symmetry
 
 if TYPE_CHECKING:
+    import numpy as np
     from isaaclab.assets import Articulation, RigidObject
     from isaaclab.sensors import TiledCamera
     from isaaclab.scene import InteractiveSceneCfg
@@ -42,6 +44,11 @@ def raymap(width: int, height: int, fov: float) -> Float[torch.Tensor, "height w
     The raymap represents normalized ray directions for a perspective camera model.
     Each pixel corresponds to a ray direction pointing from the camera center through
     that pixel. The rays are in camera space, where +X is forward, +Y is left, and +Z is up.
+
+    Pixel layout: row ``h=0`` is the top of the image (rays tilt towards +Z) and
+    column ``w=0`` is the left of the image (rays tilt towards +Y). Consequently a
+    left-right mirror of the world corresponds to flipping the raymap along the
+    width (last spatial) dim.
 
     Args:
         width: The width of the raymap in pixels.
@@ -67,7 +74,8 @@ def raymap(width: int, height: int, fov: float) -> Float[torch.Tensor, "height w
     v_camera = v_ndc * tan_fov_half / aspect_ratio
 
     x_camera = torch.ones_like(u_camera)
-    directions = torch.stack([x_camera, v_camera, u_camera], dim=-1)
+    # +Y is left (u_ndc grows to the right), +Z is up (v_ndc grows upwards)
+    directions = torch.stack([x_camera, -u_camera, v_camera], dim=-1)
 
     directions = directions / directions.norm(dim=-1, keepdim=True)
 
@@ -241,7 +249,7 @@ class height_scan(ObservationV2):
             mesh_pos_w = self.ground_mesh_pos_w
             mesh_quat_w = self.ground_mesh_quat_w
 
-        hit_pos_w, _ = self.raycaster.raycast_fused(
+        hit_pos_w, _, _ = self.raycaster.raycast_fused(
             mesh_pos_w=mesh_pos_w,
             mesh_quat_w=mesh_quat_w,
             ray_starts_w=self.scan_pos_w.reshape(self.num_envs, self.n_rays, 3),
@@ -354,6 +362,45 @@ class forward_scan(ObservationV2):
 
 
 class raycast_camera(ObservationV2):
+    """Depth (and optionally surface-normal) image rendered by GPU raycasting.
+
+    Rays are generated with a pinhole model (:func:`raymap`), mounted on a robot
+    body with a fixed rotation/translation offset, and cast against the ground
+    plus optional dynamic entities via ``simple_raycaster``.
+
+    Output shape:
+
+    * ``normal=False`` — ``[num_envs, 1, H, W]`` ray-hit distances in
+      ``[0, far]``.
+    * ``normal=True`` — ``[num_envs, 1 + 3, H, W]``: the distance channel
+      concatenated with the hit surface normal expressed in the **camera frame**
+      (+X forward, +Y left, +Z up, mount rotation included). Normals are
+      oriented to face the camera (``n · ray_dir <= 0``) and are zero for rays
+      that miss.
+
+    Args:
+        resolution: Image size as ``(width, height)``.
+        fov_deg: Horizontal field of view in degrees (vertical follows from the
+            aspect ratio).
+        rpy_deg: Fixed roll/pitch/yaw mount rotation of the camera relative to
+            the body frame, in degrees.
+        pos_offset: Fixed camera position offset in the body frame.
+        body_name: Body to mount the camera on. Defaults to the root link.
+        near: Rays start ``near`` meters along the ray direction (avoids
+            self-hits with the mounting body).
+        far: Maximum ray distance; misses return ``far``.
+        normal: If True, append camera-frame surface normals as 3 extra
+            channels.
+        dtype: Output dtype (``float32`` or ``float16``).
+        targets: Optional scene entity names to raycast against in addition to
+            ``/World/ground``.
+
+    Debug visualization (GUI / Viser): hit points are drawn as sphere markers,
+    and a camera frustum shows the depth image (``normal=False``, near = bright)
+    or the normal map (``normal=True``, RGB = camera-frame ``n * 0.5 + 0.5``)
+    for env 0.
+    """
+
     supported_backends = ("isaac",)
     _debug_instance_count = 0
 
@@ -371,6 +418,7 @@ class raycast_camera(ObservationV2):
         body_name: Optional[str] = None,
         near: float = 0.01,
         far: float = 100.0,
+        normal: bool = False,
         dtype: torch.dtype | str = torch.float16,
         targets: Optional[List[str]] = None,
     ):
@@ -382,6 +430,7 @@ class raycast_camera(ObservationV2):
         self.near = near
         self.far = far
         self.dtype = dtype
+        self.normal = normal
         self.targets = targets
 
     @override
@@ -397,8 +446,9 @@ class raycast_camera(ObservationV2):
         width, height = self.resolution
         self.raymap = raymap(width, height, self.fov_deg / 180.0 * torch.pi).to(self.device)
         euler = torch.tensor(self.rpy_deg, device=self.device) / 180.0 * torch.pi
-        quat = quat_from_euler_xyz(euler)
-        self.raymap = quat_rotate(quat.reshape(1, 1, 4), self.raymap)
+        # body → camera mount rotation; also needed to express normals in the camera frame
+        self.mount_quat = quat_from_euler_xyz(euler).reshape(1, 1, 4)
+        self.raymap = quat_rotate(self.mount_quat, self.raymap)
         self.pos_offset = torch.tensor(self.pos_offset, device=self.device)
 
         self.shape = self.raymap.shape[:2]
@@ -421,6 +471,7 @@ class raycast_camera(ObservationV2):
         else:
             self.body_id = None
 
+        self.camera_handle = None
         if self.env.backend == "isaac" and self.env.sim.has_gui():
             from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
 
@@ -434,7 +485,31 @@ class raycast_camera(ObservationV2):
                 radius=0.02,
             )
 
+            # Viser frustum showing the depth (or normal) image. The frustum
+            # uses the ROS camera convention (+Z forward, +Y down); compose the
+            # mount rotation with the fixed ROS → raymap-frame rotation.
+            fov_x = self.fov_deg / 180.0 * math.pi
+            aspect = width / max(height, 1)
+            fov_y = 2.0 * math.atan(math.tan(fov_x * 0.5) / aspect)
+            ros_to_cam = torch.tensor([0.5, -0.5, 0.5, -0.5], device=self.device)
+            self._frustum_quat = quat_mul(self.mount_quat.reshape(4), ros_to_cam)
+            try:
+                self.camera_handle = self.env.scene.create_camera_frustum(
+                    f"raycast_camera_{self.instance_id}",
+                    fov_y=fov_y,
+                    aspect=aspect,
+                )
+            except Exception as e:
+                print(f"Error creating camera frustum: {e}")
+                self.camera_handle = None
+
     def compute(self) -> torch.Tensor:
+        """Cast the ray bundle and assemble the image observation.
+
+        Returns:
+            ``[num_envs, 1, H, W]`` hit distances, or ``[num_envs, 4, H, W]``
+            with camera-frame normals appended when ``normal=True``.
+        """
         if self.body_id is not None:
             body_pos_w = self.asset.data.body_link_pos_w[:, self.body_id]
             body_quat = self.asset.data.body_link_quat_w[:, self.body_id]
@@ -451,7 +526,7 @@ class raycast_camera(ObservationV2):
             + self.ray_dirs_w * self.near
         )
 
-        hit_pos_w, hit_distance = self.raycaster.raycast_fused(
+        hit_pos_w, hit_distance, hit_normal_w = self.raycaster.raycast_fused(
             ray_starts_w=self.ray_starts_w,
             ray_dirs_w=self.ray_dirs_w,
             min_dist=0.0,
@@ -460,20 +535,84 @@ class raycast_camera(ObservationV2):
         self.ray_hits_w = hit_pos_w
 
         hit_distance = hit_distance.nan_to_num(posinf=self.far).to(self.dtype)
-        return hit_distance.reshape(self.num_envs, 1, self.shape[0], self.shape[1])
+        depth = hit_distance.reshape(self.num_envs, 1, self.shape[0], self.shape[1])
+        if not self.normal:
+            self._image = depth
+            return depth
+
+        # Raw face normals have winding-dependent sign; orient them towards the
+        # camera so n · ray_dir <= 0. Misses stay zero.
+        flip = (hit_normal_w * self.ray_dirs_w).sum(-1, keepdim=True) > 0
+        hit_normal_w = torch.where(flip, -hit_normal_w, hit_normal_w)
+        # world → body → camera frame
+        hit_normal_b = quat_rotate_inverse(body_quat.unsqueeze(1), hit_normal_w)
+        hit_normal_c = quat_rotate_inverse(self.mount_quat, hit_normal_b)
+        hit_normal_c = (
+            hit_normal_c.reshape(self.num_envs, self.shape[0], self.shape[1], 3)
+            .permute(0, 3, 1, 2)
+            .to(self.dtype)
+        )
+        self._image = torch.cat([depth, hit_normal_c], dim=1)
+        return self._image
+
+    def _debug_image_hwc_uint8(self, env_idx: int) -> "np.ndarray":
+        """Render the latest observation of one env as an HWC uint8 RGB image."""
+        img = self._image[env_idx].float()  # [C, H, W]
+        if self.normal:
+            # camera-frame normals in [-1, 1] → RGB; misses (zero normals) → gray
+            rgb = img[1:4] * 0.5 + 0.5
+        else:
+            # near = bright, far / miss = dark
+            rgb = (1.0 - img[0] / self.far).clamp(0.0, 1.0).unsqueeze(0).expand(3, -1, -1)
+        return (rgb * 255.0).byte().permute(1, 2, 0).cpu().numpy()
 
     def debug_draw(self) -> None:
-        if self.env.backend == "isaac":
-            pos = self.ray_hits_w[0].reshape(-1, 3)
-            self.marker.visualize(pos)
+        if self.env.backend != "isaac":
+            return
+        pos = self.ray_hits_w[0].reshape(-1, 3)
+        self.marker.visualize(pos)
+
+        if self.camera_handle is None:
+            return
+        env_idx = 0
+        if self.body_id is not None:
+            body_pos = self.asset.data.body_link_pos_w[env_idx, self.body_id]
+            body_quat = self.asset.data.body_link_quat_w[env_idx, self.body_id]
+        else:
+            body_pos = self.asset.data.root_link_pos_w[env_idx]
+            body_quat = self.asset.data.root_link_quat_w[env_idx]
+        self.camera_handle.position = body_pos + quat_rotate(body_quat, self.pos_offset)
+        self.camera_handle.wxyz = quat_mul(body_quat, self._frustum_quat)
+        self.camera_handle.image = self._debug_image_hwc_uint8(env_idx)
 
     def symmetry_transform(self):
+        """Mirror transform for the image observation.
+
+        Under the left-right (xz-plane) mirror of the world, the camera sees
+        the horizontally flipped image: the raymap places +Y (left) along
+        decreasing width, so the transform permutes the width (last) dim.
+        Distance is invariant per mirrored pixel; camera-frame normals keep
+        their forward/up components but negate the lateral (y) component,
+        expressed via per-channel signs on ``[.., C, H, W]``.
+
+        Only valid for a mirror-symmetric mount: zero roll/yaw and zero
+        lateral position offset.
+        """
+        roll, _, yaw = self.rpy_deg
+        if roll != 0.0 or yaw != 0.0 or self.pos_offset[1].item() != 0.0:
+            raise NotImplementedError(
+                "raycast_camera symmetry requires a mirror-symmetric mount: "
+                f"roll=yaw=0 and zero lateral offset, got rpy_deg={self.rpy_deg}, "
+                f"pos_offset={self.pos_offset.tolist()}"
+            )
         perm = torch.arange(self.shape[1]).flip(0)
         signs = torch.ones(self.shape[1])
         x = torch.arange(self.shape[0] * self.shape[1]).reshape(1, 1, *self.shape)
         y = x.flip(3)
         assert torch.all(y == x[..., perm]), "raycast_camera symmetry permutation mismatch"
-        return SymmetryTransform(perm=perm, signs=signs)
+        # channels: (distance, nx, ny, nz) — negate the lateral normal component
+        channel_signs = torch.tensor([1.0, 1.0, -1.0, 1.0]) if self.normal else None
+        return SymmetryTransform(perm=perm, signs=signs, channel_signs=channel_signs)
 
 
 class feet_height_map(ObservationV2):
