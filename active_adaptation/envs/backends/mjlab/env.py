@@ -89,7 +89,6 @@ class MjlabBackendEnv(_EnvBase):
         
         self.terrain_type = terrain
 
-        env_spacing = 2.5
         if terrain == "plane":
             terrain_cfg = TerrainEntityCfg(terrain_type="plane")
         else:
@@ -99,7 +98,7 @@ class MjlabBackendEnv(_EnvBase):
 
         scene_cfg = SceneCfg(
             num_envs=self.cfg.num_envs,
-            env_spacing=env_spacing,
+            env_spacing=self.cfg.get("env_spacing", 2.5),
             entities={"robot": asset_cfg},
             sensors=tuple(sensors),
             terrain=terrain_cfg,
@@ -117,7 +116,7 @@ class MjlabBackendEnv(_EnvBase):
                 njmax=self.cfg.sim.get("njmax", 500),
                 contact_sensor_maxmatch=80,
                 mujoco=MujocoCfg(
-                    timestep=0.005,
+                    timestep=self.cfg.sim.get("mujoco_physics_dt", 0.005),
                     iterations=10,
                     ls_iterations=20,
                 ),

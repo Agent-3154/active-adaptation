@@ -6,6 +6,9 @@
 active_adaptation/envs/
 ├── env_base.py              # _EnvBase: create / init / step / reset wiring
 ├── adapters.py              # SimAdapter, SceneAdapter, CameraFrustumHandle
+├── utils/
+│   ├── api.py               # find_joints / find_bodies / find_sensor_bodies (simulation order)
+│   └── ground.py
 ├── backends/
 │   ├── isaac/
 │   │   ├── adapter.py       # Omni DebugDraw + Viser draw_*/frustum
@@ -153,7 +156,45 @@ Optional: `namespace = "foo"` on the class → registry key `foo.ClassName`; YAM
 - `_initialize` sets `self.asset = scene.articulations["robot"]`.
 - Must define `action_dim` before specs are built.
 - Optional `names` / `find_names` for joint subsets.
+- Joint layout must follow `asset.cfg.joint_names_simulation` (see `actions/joint.py`: `resolve_matching_names_values` on that list, then `asset.joint_names.index`). Do not use bare `asset.find_joints` for the policy action vector.
 - `diagnostics()` optional dict for logging.
+
+---
+
+## Cross-backend name / index resolution
+
+Isaac Lab and MuJoCo/mjlab typically expose **different joint and body orders**. Contact sensors may use yet another order (e.g. articulation BFS vs sensor DFS). Asset configs therefore declare user-specified canonical lists on the articulation cfg:
+
+- `joint_names_simulation`
+- `body_names_simulation`
+
+Defined per robot under `active_adaptation/assets/**` (and project assets). MDP terms must resolve names against these lists so obs/action tensors keep a stable layout across backends; otherwise a policy trained on one backend cannot transfer.
+
+### Helpers (`envs/utils/api.py`)
+
+```python
+from active_adaptation.envs.utils import find_joints, find_bodies, find_sensor_bodies
+
+joint_ids, joint_names = find_joints(asset, ".*_hip_.*")
+body_ids, body_names = find_bodies(asset, ".*_foot")
+contact_ids, body_names = find_sensor_bodies(asset, contact_sensor, ".*_foot")
+```
+
+| Helper | Resolves against | Returns indices into |
+|--------|------------------|----------------------|
+| `find_joints` | `asset.cfg.joint_names_simulation` | `asset.joint_names` (articulation joint tensors) |
+| `find_bodies` | `asset.cfg.body_names_simulation` | `asset.body_names` (articulation body tensors) |
+| `find_sensor_bodies` | same body names as `find_bodies` | contact sensor body arrays |
+
+`find_sensor_bodies` is required for contact terms: Isaac has `contact_sensor.find_bodies(..., preserve_order=True)`; mjlab does **not** — it falls back to `contact_sensor.primary_names.index(name)`. Never call `contact_sensor.find_bodies` directly in shared MDP code.
+
+Canonical call sites: `mdp/observations/joint.py` (`find_joints`), `mdp/actions/joint.py` (`joint_names_simulation`), `mdp/rewards/gait.py` (`find_bodies` + `find_sensor_bodies`).
+
+### Anti-patterns (indices)
+
+- `asset.find_joints` / `asset.find_bodies` for obs/action feature order
+- `contact_sensor.find_bodies(...)` without going through `find_sensor_bodies`
+- Assuming articulation body index == contact-sensor body index for the same name
 
 ---
 
