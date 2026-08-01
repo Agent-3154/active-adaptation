@@ -295,10 +295,13 @@ class PPOPolicy(PPOBase):
             log_probs_before = tensordict["action_log_prob"]
             tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
 
+        # Full-rollout return variance for explained_var (not per-minibatch).
+        ret_var = tensordict["ret"][~tensordict["is_init"]].var().clamp_min(1e-7)
+
         for epoch in range(self.cfg.ppo_epochs):
             batch = make_batch(tensordict, self.cfg.num_minibatches)
             for minibatch in batch:
-                infos.append(self.update(minibatch))
+                infos.append(self.update(minibatch, ret_var))
 
                 if self.cfg.desired_kl is not None: # adaptive learning rate
                     kl = infos[-1]["actor/approx_kl"]
@@ -344,7 +347,7 @@ class PPOPolicy(PPOBase):
         return dict(sorted(infos.items()))
 
     @ScopedTimer("ppo_update")
-    def _update(self, tensordict: TensorDict):
+    def _update(self, tensordict: TensorDict, ret_var: torch.Tensor):
         action_data = tensordict[ACTION_KEY]
         log_probs_data = tensordict["action_log_prob"]
         
@@ -394,7 +397,8 @@ class PPOPolicy(PPOBase):
             "critic/grad_norm": critic_grad_norm,
         }
         with torch.no_grad():
-            info["critic/explained_var"] = 1 - value_loss / b_returns[valid].var()
+            # value_loss is masked MSE; ret_var is full-rollout masked Var(ret).
+            info["critic/explained_var"] = 1 - value_loss / ret_var
             info["actor/clamp_pos"] = (ratio > 1.0 + self.clip_param[1]).float().mean()
             info["actor/clamp_neg"] = (ratio < 1.0 - self.clip_param[0]).float().mean()
             info["actor/approx_kl"] = ((ratio - 1.0) - log_ratio).mean()

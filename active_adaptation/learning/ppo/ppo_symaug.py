@@ -349,13 +349,18 @@ class PPOPolicy(TensorDictModuleBase):
         m = 0.99
         self.ret_std_ema = m * self.ret_std_ema + (1.0 - m) * ret_std_t.item()
 
+        # Full-rollout return variance for explained_var (not per-minibatch).
+        # Mask is_init so the denominator matches the masked value_loss numerator.
+        ret_valid = tensordict["ret"][~tensordict["is_init"]]
+        ret_var = ret_valid.var().clamp_min(1e-7)
+
         td = tensordict.select(*self.training_keys)
         for epoch in range(self.cfg.ppo_epochs):
             compute_diagnostics = epoch == self.cfg.ppo_epochs - 1
             batch = make_batch(td, self.cfg.num_minibatches)
             for minibatch in batch:
                 minibatch = self._augment_symmetry(minibatch)
-                info = self.update(minibatch, compute_diagnostics)
+                info = self.update(minibatch, compute_diagnostics, ret_var)
                 if compute_diagnostics:
                     infos.append(info)
                 
@@ -548,7 +553,12 @@ class PPOPolicy(TensorDictModuleBase):
         return torch.cat([tensordict, symmetry])
 
     @ScopedTimer("ppo_update")
-    def _update(self, tensordict: TensorDict, compute_diagnostics: bool = False):
+    def _update(
+        self,
+        tensordict: TensorDict,
+        compute_diagnostics: bool = False,
+        ret_var: torch.Tensor | None = None,
+    ):
         bsize = tensordict.shape[0] // 2
 
         self.vecnorm(tensordict)
@@ -608,7 +618,8 @@ class PPOPolicy(TensorDictModuleBase):
             return
 
         with torch.no_grad():
-            explained_var = 1 - F.mse_loss(values, ret) / ret.var()
+            # value_loss is masked MSE; ret_var is full-rollout masked Var(ret).
+            explained_var = 1 - value_loss / ret_var
             approx_kl = ((ratio - 1.0) - log_ratio).mean()
             symmetry_loss = F.mse_loss(dist.mean[bsize:], self.act_transform(dist.mean[:bsize]))
             actor_feature_norm = torch.norm(tensordict["_actor_feature"], dim=-1).mean()

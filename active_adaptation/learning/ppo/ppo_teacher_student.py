@@ -555,6 +555,10 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             adv_mean = adv.mean()
             adv_std = adv.std()
             tensordict["adv"] = (adv - adv_mean) / adv_std.clamp_min(1e-7)
+
+        # Full-rollout return variance for explained_var (not per-minibatch).
+        # Mask is_init so the denominator matches the masked value_loss numerator.
+        ret_var = tensordict["ret"][~tensordict["is_init"]].var().clamp_min(1e-7)
         
         td = tensordict.select(*self.training_keys)
         if self.cfg.stage == "teacher":
@@ -573,7 +577,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
             for minibatch in make_batch(td, self.cfg.num_minibatches, self.cfg.train_every):
                 if self.cfg.symaug:
                     minibatch = self._augment_symmetry(minibatch)
-                info = self.update(minibatch, encoder, actor)
+                info = self.update(minibatch, encoder, actor, ret_var)
                 infos.append(info)
 
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
@@ -706,6 +710,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         tensordict: TensorDict,
         encoder: nn.Module,
         actor: ProbabilisticActor,
+        ret_var: torch.Tensor,
     ):
         assert self.cfg.stage in ("teacher", "student2")
         bsize = tensordict.shape[0] // 2 if self.cfg.symaug else tensordict.shape[0]
@@ -753,7 +758,8 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         self.opt_ppo.step()
 
         with torch.no_grad():
-            explained_var = 1 - F.mse_loss(values, ret) / ret.var().clamp_min(1e-7)
+            # value_loss is masked MSE; ret_var is full-rollout masked Var(ret).
+            explained_var = 1 - value_loss / ret_var
             approx_kl = ((ratio - 1.0) - log_ratio).mean()
             if self.cfg.symaug and self.act_transform is not None:
                 symmetry_loss = F.mse_loss(
