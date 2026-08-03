@@ -33,7 +33,8 @@ Codebase adaptations vs. the paper
   sampling ``k ∈ future_offsets`` from the replay ring (paper short-horizon
   preview ``K = {1,2,4,16}``). Keys are listed in ``future_keys`` (e.g. dense
   teacher command). Optional static ``aux_keys`` add privileged context at ``t``.
-- Student post-training / RL finetuning (Stage III) is out of scope.
+- Student post-training / RL finetuning (Stage III): critic + GAE are in place;
+  PPO actor update over the prior latent is still scaffolding.
 - Teacher and student are separate modules (no weight sharing).
 
 Model (paper Sec. 3.3, adapted)
@@ -73,7 +74,17 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 from active_adaptation.learning.modules import VecNorm, MLP, CatTensors
-from active_adaptation.learning.ppo.common import OBS_KEY, CMD_KEY, ACTION_KEY
+from active_adaptation.learning.ppo.common import (
+    OBS_KEY,
+    CMD_KEY,
+    ACTION_KEY,
+    REWARD_KEY,
+    TERM_KEY,
+    DONE_KEY,
+    Critic,
+    GAE,
+    make_batch,
+)
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.utils.profiling import ScopedTimer
 
@@ -121,6 +132,15 @@ class InterPriorCfg:
     lambda_scale: float = 1e-3
     lambda_tc: float = 1e-3
     lambda_goal: float = 0.0  # optional cmd reconstruction; off by default
+
+    # Critic / GAE (Stage III scaffolding; value head trains alongside distillation)
+    critic_num_units: Tuple[int, ...] = (1024, 1024, 512)
+    gamma: float = 0.99
+    lmbda: float = 0.95
+    clamp_reward: bool = False
+    value_loss_coef: float = 1.0
+    ppo_epochs: int = 4
+    num_minibatches: int = 4
 
     compile: bool = False
     debug: bool = False
@@ -273,11 +293,26 @@ class InterPriorPolicy(TensorDictModuleBase):
         self.decoder_action = nn.Linear(trunk_out, self.action_dim).to(self.device)
         self.decoder_goal = nn.Linear(trunk_out, fake["goal"].shape[-1]).to(self.device)
 
+        # Critic on privileged encoder input (goal + policy + future), paper Sec. E.
+        critic_hidden = list(cfg.critic_num_units)
+        critic_mlp = MLP(
+            num_units=[encoder_in_dim, *critic_hidden],
+            activation=Activation,
+            first_non_muon=True,
+        )
+        self.critic = Seq(
+            Mod(critic_mlp, ["encoder_inp"], ["_critic_feature"]),
+            Mod(Critic(1), ["_critic_feature"], ["state_value"]),
+        ).to(self.device)
+        self.gae = GAE(cfg.gamma, cfg.lmbda)
+        self.critic_loss_fn = nn.MSELoss(reduction="none")
+
         # test run
         with torch.no_grad():
             self.vecnorm(fake)
             self.prior(fake["prior_inp"])
             self.encoder(fake["encoder_inp"])
+            self.critic(fake)
             z0 = F.normalize(
                 torch.zeros(fake.shape[0], self.latent_dim, device=self.device), dim=-1
             )
@@ -294,6 +329,7 @@ class InterPriorPolicy(TensorDictModuleBase):
         self.prior.apply(init_)
         self.encoder.apply(init_)
         self.decoder_trunk.apply(init_)
+        self.critic.apply(init_)
         
 
         self.train_keys: List[str] = [
@@ -303,10 +339,18 @@ class InterPriorPolicy(TensorDictModuleBase):
             "is_init",
             *cfg.in_keys,
         ]
+        # Keys needed for critic (and later latent-PPO) minibatch updates.
+        self.ppo_keys: List[str] = [
+            "is_init",
+            "adv",
+            "ret",
+            *cfg.in_keys,
+        ]
 
         self.global_step = 0
         self.rb: Optional[ReplayBuffer] = None
         self.opt: Optional[torch.optim.Optimizer] = None
+        self.observation_keys: List[str] = []
 
     # ------------------------------------------------------------------
     # Construction
@@ -351,31 +395,35 @@ class InterPriorPolicy(TensorDictModuleBase):
 
         observation_keys = set(env.observation_spec.keys(True, True))
         observation_keys -= {"prior_eps"}
+        self.observation_keys = list(observation_keys)
         self.rb = ReplayBuffer.from_fake(
             self.cfg.buffer_size,
             fake_rb,
             fake_bootstrap=True,
-            observation_keys=list(observation_keys),
+            observation_keys=self.observation_keys,
         )
         print("InterPrior buffer:")
         print(self.rb)
 
-        params = (
+        distill_params = (
             list(self.prior.parameters())
             + list(self.encoder.parameters())
             + list(self.decoder_trunk.parameters())
             + list(self.decoder_action.parameters())
             + list(self.decoder_goal.parameters())
         )
-        self.opt = torch.optim.Adam(params, lr=self.cfg.lr)
+        self.opt = torch.optim.Adam(
+            [
+                {"params": distill_params, "lr": self.cfg.lr},
+                {"params": self.critic.parameters(), "lr": self.cfg.lr},
+            ]
+        )
 
     # ------------------------------------------------------------------
     # Rollout / inference
     # ------------------------------------------------------------------
 
     def get_rollout_policy(self, mode: str = "train", critic: bool = False):
-        if critic:
-            raise NotImplementedError("Critic is not supported for InterPriorPolicy.")
         policy = InterPriorRolloutPolicy(
             vecnorm=self.vecnorm,
             prior=self.prior,
@@ -384,6 +432,9 @@ class InterPriorPolicy(TensorDictModuleBase):
             mode=mode,
             normalize_z=self.cfg.normalize_z,
         )
+        if critic:
+            # vecnorm inside the rollout policy writes ``encoder_inp`` for the critic.
+            policy = Seq(policy, self.critic)
         if self.cfg.compile:
             policy = torch.compile(policy)
         return policy
@@ -435,18 +486,61 @@ class InterPriorPolicy(TensorDictModuleBase):
     def train_op(self) -> dict:
         infos = []
         for _ in range(self.cfg.updates_per_train):
-            infos.append(self._update())
-        # Average metrics
+            infos.append(self._update_distillation())
+
+        critic_info = self._update_ppo()
+        if critic_info:
+            infos.append(critic_info)
+
+        # Average metrics (union of keys across updates)
         out = {}
-        keys = infos[0].keys()
+        keys = set().union(*(d.keys() for d in infos))
         for k in keys:
-            out[k] = sum(d[k] for d in infos) / len(infos)
+            vals = [d[k] for d in infos if k in d]
+            out[k] = sum(vals) / len(vals)
         out["train/student_frac"] = self.student_frac
         out["train/beta_kl"] = self.beta_kl
         out["train/buffer_size"] = float(len(self.rb))
         return out
 
-    def _update(self) -> dict:
+    @torch.no_grad()
+    def compute_advantage(
+        self,
+        tensordict: TensorDict,
+        critic: Mod,
+        adv_key: str = "adv",
+        ret_key: str = "ret",
+        clamp_reward: bool = False,
+    ):
+        """GAE on a trajectory batch shaped ``[N, T, …]`` (same recipe as ``ppo_symaug``)."""
+        keys = tensordict.keys(True, True)
+        if not ("state_value" in keys and ("next", "state_value") in keys):
+            with tensordict.view(-1) as flat:
+                critic(self.vecnorm(flat))
+                critic(self.vecnorm(flat["next"]))
+
+        values = tensordict["state_value"]
+        next_values = tensordict["next", "state_value"]
+
+        rewards = tensordict[REWARD_KEY]
+        if isinstance(rewards, TensorDict):
+            rewards = torch.concat(list(rewards.values()), dim=-1)
+        rewards = rewards.sum(-1, keepdim=True)
+        tensordict["next", "reward_aggregated"] = rewards
+        if clamp_reward:
+            rewards = rewards.clamp_min(0.0)
+        rewards = rewards * (1.0 - self.gae.gamma)
+
+        discount = tensordict.get(("next", "discount"), None)
+        terms = tensordict[TERM_KEY]
+        dones = tensordict[DONE_KEY]
+
+        adv, ret = self.gae(rewards, terms, dones, values, next_values, discount)
+        tensordict.set(adv_key, adv)
+        tensordict.set(ret_key, ret)
+        return tensordict
+
+    def _update_distillation(self) -> dict:
         need_tc = self.cfg.lambda_tc > 0.0
         batch = self.rb.sample(self.cfg.batch_size, next_obs=True)
 
@@ -538,6 +632,77 @@ class InterPriorPolicy(TensorDictModuleBase):
                 "distill/z_norm": float(z.norm(dim=-1).mean().detach()),
                 "distill/mu_p_norm": float(mu_p.norm(dim=-1).mean().detach()),
                 "distill/mu_q_norm": float(mu_q.norm(dim=-1).mean().detach()),
+            }
+
+    def _update_ppo(self) -> dict:
+        """GAE on the latest on-policy segment, then minibatch critic updates."""
+        if len(self.rb) < self.cfg.train_every + 1:
+            return {}
+
+        # [T, N, ...] with next obs reconstructed; transpose to [N, T, ...] for GAE.
+        batch = self.rb.last(self.cfg.train_every, next_obs=True).transpose(0, 1)
+
+        with ScopedTimer("compute_advantage"):
+            self.compute_advantage(
+                batch,
+                self.critic,
+                "adv",
+                "ret",
+                clamp_reward=self.cfg.clamp_reward,
+            )
+            adv = batch["adv"]
+            adv_mean = adv.mean()
+            adv_std = adv.std().clamp_min(1e-7)
+            batch["adv"] = (adv - adv_mean) / adv_std
+
+        ret_valid = batch["ret"][~batch["is_init"].bool()]
+        ret_var = ret_valid.var().clamp_min(1e-7)
+
+        td = batch.select(*self.ppo_keys)
+        infos = []
+        for _ in range(self.cfg.ppo_epochs):
+            for minibatch in make_batch(td, self.cfg.num_minibatches):
+                infos.append(self._update_critic(minibatch, ret_var))
+
+        out = {}
+        keys = infos[0].keys()
+        for k in keys:
+            out[k] = sum(d[k] for d in infos) / len(infos)
+        out["critic/adv_mean"] = float(adv_mean.detach())
+        out["critic/adv_std"] = float(adv_std.detach())
+        out["critic/value_mean"] = float(batch["ret"].mean().detach())
+        out["critic/value_std"] = float(batch["ret"].std().detach())
+        return out
+
+    def _update_critic(
+        self, minibatch: TensorDict, ret_var: torch.Tensor
+    ) -> dict:
+        """One critic minibatch; actor PPO over the prior latent comes later."""
+        self.vecnorm(minibatch)
+        values = self.critic(minibatch)["state_value"]
+        valid = (~minibatch["is_init"].bool()).float().reshape_as(values)
+        valid_cnt = valid.sum().clamp_min(1.0)
+        value_loss = self.critic_loss_fn(minibatch["ret"], values)
+        value_loss = (value_loss * valid).sum() / valid_cnt
+        loss = self.cfg.value_loss_coef * value_loss
+
+        self.opt.zero_grad(set_to_none=True)
+        loss.backward()
+        critic_grad_norm = nn.utils.clip_grad_norm_(
+            self.opt.param_groups[1]["params"], 1.0
+        )
+        self.opt.step()
+
+        with torch.no_grad():
+            explained_var = 1.0 - value_loss / ret_var
+            return {
+                "critic/value_loss": float(value_loss.detach()),
+                "critic/grad_norm": float(
+                    critic_grad_norm.detach()
+                    if torch.is_tensor(critic_grad_norm)
+                    else critic_grad_norm
+                ),
+                "critic/explained_var": float(explained_var.detach()),
             }
 
     # ------------------------------------------------------------------

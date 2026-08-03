@@ -168,18 +168,47 @@ class ReplayBuffer:
 
     append = push
 
-    def last(self, steps: int) -> TensorDict:
+    def last(self, steps: int, next_obs: bool = False) -> TensorDict:
+        """Return the last ``steps`` ring rows (logical oldest→newest in the window).
+
+        Args:
+            steps: Number of transitions to return along ring time.
+            next_obs: If ``fake_bootstrap`` is set, reconstruct ``next`` observations
+                from the following ring row (repeat current obs when ``done``),
+                requiring one additional stored row beyond ``steps``. If
+                ``fake_bootstrap`` is false, ``next`` observations are assumed to
+                already be stored on each row and are returned as-is.
         """
-        Returns the last `steps` samples from the buffer.
-        """
-        assert len(self) > steps, "Not enough samples in buffer"
-        if self._ptr > steps:
-            samples = self._td[self._ptr - steps : self._ptr].clone()
+        if steps < 1:
+            raise ValueError(f"steps must be positive, got {steps}.")
+        rows_needed = steps + int(bool(next_obs) and self.fake_bootstrap)
+        if len(self) < rows_needed:
+            raise RuntimeError(
+                f"Need at least {rows_needed} stored rows for last({steps}, "
+                f"next_obs={next_obs}), but the buffer contains {len(self)}."
+            )
+
+        if self._ptr >= rows_needed:
+            samples = self._td[self._ptr - rows_needed : self._ptr].clone()
         else:
-            part1 = self._td[-(steps - self._ptr) :]
+            # Buffer is full and the write pointer wrapped near the start.
+            part1 = self._td[-(rows_needed - self._ptr) :]
             part2 = self._td[: self._ptr]
-            samples = torch.cat([part1, part2], dim=0)
-        assert samples.shape[0] == steps, "Not enough samples in buffer"
+            samples = torch.cat([part1, part2], dim=0).clone()
+        assert samples.shape[0] == rows_needed
+
+        if self.fake_bootstrap and next_obs:
+            observations = samples.select(*self.observation_keys)
+            observations_t = observations[:steps]
+            observations_t1 = observations[1:]
+            tensordict_next = torch.where(
+                samples[:steps]["next", "done"].squeeze(-1),
+                observations_t,
+                observations_t1,
+            )
+            samples = samples[:steps]
+            samples["next"].update(tensordict_next)
+
         return samples
 
     @property
