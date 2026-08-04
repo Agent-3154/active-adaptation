@@ -33,22 +33,28 @@ Codebase adaptations vs. the paper
   sampling ``k ∈ future_offsets`` from the replay ring (paper short-horizon
   preview ``K = {1,2,4,16}``). Keys are listed in ``future_keys`` (e.g. dense
   teacher command). Optional static ``aux_keys`` add privileged context at ``t``.
-- Student post-training / RL finetuning (Stage III): critic + GAE are in place;
-  PPO actor update over the prior latent is still scaffolding.
+- Student post-training / RL finetuning (Stage III): a separate ``student``
+  network (initialized from ``prior`` via trunk+loc copy) is the latent-space
+  PPO actor; critic + GAE + clipped surrogate. By default the student uses a
+  state-independent ``actor_std`` (``student_pred_std=False``, regular PPO);
+  set ``student_pred_std=True`` to keep a state-dependent scale head.
+  Rollout stochasticity is controlled by TorchRL ``interaction_type()``
+  (not a ``mode`` flag).
 - Teacher and student are separate modules (no weight sharing).
 
 Model (paper Sec. 3.3, adapted)
 -------------------------------
-- Prior:   ``p_ψ(z_t | x_t, G_t)``
+- Prior:   ``p_ψ(z_t | x_t, G_t)``   (Stage II / distill)
+- Student: ``π_student(z_t | x_t, G_t)``  (Stage III / rl; copy of prior)
 - Encoder: ``q_ϕ(z_t | x_t, G_t, y_{t+K})``  (training only; ``K = future_offsets``)
 - Decoder: ``f_θ(a_t | x_t, G_t, z_t)``
 
 Residual posterior: ``N(μ_p + μ_q, Σ_q)`` (or non-residual ``N(μ_q, Σ_q)`` via
 ``residual_posterior=False``). Latents are optionally L2-normalized
-after sampling (``normalize_z``); KL uses the pre-projection Gaussians and
-supports per-dim free bits (``free_bits``). Online distillation uses
-``L = L_ELBO + λ_scale L_scale + λ_tc L_tc``. Teacher action labels and any
-DAgger control mixing are provided by ``train_imitation.py``, not this module.
+after sampling (``normalize_z``); KL / PPO log-probs use the pre-projection
+Gaussians. KL supports per-dim free bits (``free_bits``). Online distillation
+uses ``L = L_ELBO + λ_scale L_scale + λ_tc L_tc``. Teacher action labels and
+any DAgger control mixing are provided by ``train_imitation.py``, not this module.
 """
 from __future__ import annotations
 
@@ -64,16 +70,17 @@ from tensordict.nn import (
     TensorDictModule as Mod,
     TensorDictSequential as Seq,
 )
+from tensordict.nn.probabilistic import interaction_type, InteractionType
 
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
-from typing import Tuple, Optional, List, TYPE_CHECKING
+from typing import Tuple, Optional, List, Any, TYPE_CHECKING
 from collections import OrderedDict
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
-from active_adaptation.learning.modules import VecNorm, MLP, CatTensors
+from active_adaptation.learning.modules import IndependentNormal, VecNorm, MLP, CatTensors
 from active_adaptation.learning.ppo.common import (
     OBS_KEY,
     CMD_KEY,
@@ -83,7 +90,10 @@ from active_adaptation.learning.ppo.common import (
     DONE_KEY,
     Critic,
     GAE,
+    hard_copy_,
     make_batch,
+    ppo_clipped_loss,
+    resolve_clip_param,
 )
 from active_adaptation.learning.offpolicy.buffer import ReplayBuffer
 from active_adaptation.utils.profiling import ScopedTimer
@@ -95,6 +105,9 @@ class InterPriorCfg:
         "active_adaptation.learning.imitation.interprior.InterPriorCfg"
     )
     name: str = "interprior"
+    # ``distill``: Stage II variational distillation. ``rl``: Stage III latent PPO
+    # finetuning with a separate student actor (initialized from prior).
+    stage: str = "distill"
 
     # Prior / decoder conditioning: ``G_t`` ≈ command, ``x_t`` ≈ policy (w/ history).
     prior_in_keys: Tuple[str, ...] = ("goal", "policy")
@@ -133,7 +146,7 @@ class InterPriorCfg:
     lambda_tc: float = 1e-3
     lambda_goal: float = 0.0  # optional cmd reconstruction; off by default
 
-    # Critic / GAE (Stage III scaffolding; value head trains alongside distillation)
+    # Critic / GAE / latent PPO (Stage III)
     critic_num_units: Tuple[int, ...] = (1024, 1024, 512)
     gamma: float = 0.99
     lmbda: float = 0.95
@@ -141,6 +154,11 @@ class InterPriorCfg:
     value_loss_coef: float = 1.0
     ppo_epochs: int = 4
     num_minibatches: int = 4
+    clip_param: Any = (0.2, 0.2)
+    entropy_coef: float = 0.0
+    # Stage-III student scale: False → learned state-independent ``actor_std``
+    # (regular PPO); True → state-dependent softplus head (same as prior).
+    student_pred_std: bool = False
 
     compile: bool = False
     debug: bool = False
@@ -152,24 +170,55 @@ class InterPriorCfg:
 cs = ConfigStore.instance()
 cs.store(name="interprior", node=InterPriorCfg, group="algo")
 cs.store(
-    name="interprior_vanilla", 
+    name="interprior_vanilla",
     node=InterPriorCfg(normalize_z=False, lambda_scale=0.0, residual_posterior=False),
-    group="algo"
+    group="algo",
+)
+cs.store(
+    name="interprior_rl",
+    node=InterPriorCfg(stage="rl", student_frac=1.0, student_frac_end=1.0, dagger_warmup=0.0),
+    group="algo",
+)
+cs.store(
+    name="interprior_vanilla_rl",
+    node=InterPriorCfg(stage="rl", student_frac=1.0, student_frac_end=1.0, dagger_warmup=0.0, normalize_z=False, lambda_scale=0.0, residual_posterior=False),
+    group="algo",
 )
 
 
 class DiagGaussianHead(nn.Module):
-    """Linear head → diagonal Gaussian ``(loc, scale)`` with softplus scale."""
+    """Linear head → diagonal Gaussian ``(loc, scale)``.
 
-    def __init__(self, in_dim: int, out_dim: int, scale_lb: float = 1e-4):
+    If ``predict_std`` is True (prior / encoder), the linear outputs ``2 * out_dim``
+    and scale is ``softplus(raw) + scale_lb``. If False (PPO-style student), only
+    ``loc`` is predicted and scale is a learned state-independent ``actor_std``.
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        *,
+        predict_std: bool = True,
+        scale_lb: float = 1e-4,
+    ):
         super().__init__()
         self.out_dim = out_dim
+        self.predict_std = predict_std
         self.scale_lb = scale_lb
-        self.linear = nn.Linear(in_dim, out_dim * 2)
+        if predict_std:
+            self.linear = nn.Linear(in_dim, out_dim * 2)
+        else:
+            self.linear = nn.Linear(in_dim, out_dim)
+            self.actor_std = nn.Parameter(torch.ones(out_dim))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        loc, raw_scale = self.linear(x).chunk(2, dim=-1)
-        scale = F.softplus(raw_scale) + self.scale_lb
+        if self.predict_std:
+            loc, raw_scale = self.linear(x).chunk(2, dim=-1)
+            scale = F.softplus(raw_scale) + self.scale_lb
+        else:
+            loc = self.linear(x)
+            scale = torch.ones_like(loc) * self.actor_std
         return loc, scale
 
 
@@ -186,50 +235,56 @@ def _wasserstein2_diag(
 
 
 class InterPriorRolloutPolicy(TensorDictModuleBase):
-    """Prior → sample z → decode action (student only; teacher labeling is in the script)."""
+    """Latent Gaussian actor → decode action.
+
+    Stochasticity is controlled by TorchRL ``interaction_type()`` (MODE vs
+    RANDOM), matching SAC rollout policies — not by a ``mode`` string.
+    """
 
     def __init__(
         self,
         vecnorm: nn.Module,
-        prior: nn.Module,
+        actor: nn.Module,
         decoder: nn.Module,
         in_keys: Tuple[str, ...],
-        mode: str = "train",
         normalize_z: bool = True,
     ):
         super().__init__()
         self.vecnorm = vecnorm
-        self.prior = prior
+        self.actor = actor
         self.decoder = decoder
-        self.mode = mode
         self.normalize_z = normalize_z
         self.in_keys = list(in_keys) + ["prior_eps", "is_init"]
         self.out_keys = [
             ACTION_KEY,
-            "mu_p",
-            "std_p",
+            "z",
+            "action_log_prob",
+            "loc",
+            "scale",
             ("next", "prior_eps"),
         ]
 
     def forward(self, tensordict: TensorDict) -> TensorDict:
         self.vecnorm(tensordict)
-        mu_p, std_p = self.prior(tensordict["prior_inp"])
-        tensordict["mu_p"] = mu_p
-        tensordict["std_p"] = std_p
+        loc, scale = self.actor(tensordict["prior_inp"])
+        tensordict["loc"] = loc
+        tensordict["scale"] = scale
+        dist = IndependentNormal(loc, scale)
 
-        eps = tensordict["prior_eps"]
-        if self.mode == "train":
-            z = mu_p + std_p * eps
+        if interaction_type() == InteractionType.MODE:
+            z = loc.clone()
         else:
-            z = mu_p
-        if self.normalize_z:
-            z = F.normalize(z, dim=-1, eps=1e-6)
+            z = dist.rsample()
+        # PPO / KL use pre-projection latents; decoder may see the unit vector.
+        tensordict["action_log_prob"] = dist.log_prob(z).unsqueeze(-1)
+        z_dec = F.normalize(z, dim=-1, eps=1e-6) if self.normalize_z else z
         tensordict["z"] = z
 
-        action = self.decoder(torch.cat([tensordict["_policy_normed"], z], dim=-1))
+        action = self.decoder(torch.cat([tensordict["_policy_normed"], z_dec], dim=-1))
         tensordict[ACTION_KEY] = action
-        # Keep episode-constant ε for the next step (primer resets on done).
-        tensordict["next", "prior_eps"] = eps
+        # Keep episode-constant ε for the next step when the primer is present.
+        if "prior_eps" in tensordict.keys(True, True):
+            tensordict["next", "prior_eps"] = tensordict["prior_eps"]
         return tensordict
 
 
@@ -255,6 +310,8 @@ class InterPriorPolicy(TensorDictModuleBase):
 
         self.student_frac = float(cfg.student_frac)
         self.beta_kl = float(cfg.beta_kl)
+        self.clip_param = resolve_clip_param(cfg.clip_param)
+        self.entropy_coef = float(cfg.entropy_coef)
 
         fake = observation_spec.zero().to(self.device)
 
@@ -272,14 +329,25 @@ class InterPriorPolicy(TensorDictModuleBase):
             CatTensors(["_goal_normed", "_policy_normed", "_future_normed"], "encoder_inp", sort=False)
         ).to(self.device)
 
-        self.prior = nn.Sequential(
-            MLP(num_units=[prior_in_dim, *hidden], activation=Activation, first_non_muon=True),
-            DiagGaussianHead(trunk_out, self.latent_dim),
-        ).to(self.device)
+        def make_latent_actor(*, predict_std: bool) -> nn.Sequential:
+            return nn.Sequential(
+                MLP(
+                    num_units=[prior_in_dim, *hidden],
+                    activation=Activation,
+                    first_non_muon=True,
+                ),
+                DiagGaussianHead(
+                    trunk_out, self.latent_dim, predict_std=predict_std
+                ),
+            ).to(self.device)
+
+        self.prior = make_latent_actor(predict_std=True)
+        # Separate RL actor (Stage III); trunk+loc synced from prior in on_stage_start.
+        self.student = make_latent_actor(predict_std=bool(cfg.student_pred_std))
 
         self.encoder = nn.Sequential(
             MLP(num_units=[encoder_in_dim, *hidden], activation=Activation, first_non_muon=True),
-            DiagGaussianHead(trunk_out, self.latent_dim),
+            DiagGaussianHead(trunk_out, self.latent_dim, predict_std=True),
         ).to(self.device)
 
         decoder_in_dim = fake["policy"].shape[-1] + self.latent_dim
@@ -311,6 +379,7 @@ class InterPriorPolicy(TensorDictModuleBase):
         with torch.no_grad():
             self.vecnorm(fake)
             self.prior(fake["prior_inp"])
+            self.student(fake["prior_inp"])
             self.encoder(fake["encoder_inp"])
             self.critic(fake)
             z0 = F.normalize(
@@ -327,10 +396,10 @@ class InterPriorPolicy(TensorDictModuleBase):
                     nn.init.constant_(module.bias, 0.0)
 
         self.prior.apply(init_)
+        self.student.apply(init_)
         self.encoder.apply(init_)
         self.decoder_trunk.apply(init_)
         self.critic.apply(init_)
-        
 
         self.train_keys: List[str] = [
             ACTION_KEY,
@@ -339,11 +408,13 @@ class InterPriorPolicy(TensorDictModuleBase):
             "is_init",
             *cfg.in_keys,
         ]
-        # Keys needed for critic (and later latent-PPO) minibatch updates.
+        # Keys needed for latent-PPO minibatch updates.
         self.ppo_keys: List[str] = [
             "is_init",
             "adv",
             "ret",
+            "z",
+            "action_log_prob",
             *cfg.in_keys,
         ]
 
@@ -351,6 +422,7 @@ class InterPriorPolicy(TensorDictModuleBase):
         self.rb: Optional[ReplayBuffer] = None
         self.opt: Optional[torch.optim.Optimizer] = None
         self.observation_keys: List[str] = []
+        self._student_loaded = False
 
     # ------------------------------------------------------------------
     # Construction
@@ -392,6 +464,14 @@ class InterPriorPolicy(TensorDictModuleBase):
             fake_rb["prior_eps"] = torch.zeros(
                 fake_rb.shape[0], self.latent_dim, device=fake_rb.device
             )
+        if "z" not in fake_rb.keys(True, True):
+            fake_rb["z"] = torch.zeros(
+                fake_rb.shape[0], self.latent_dim, device=fake_rb.device
+            )
+        if "action_log_prob" not in fake_rb.keys(True, True):
+            fake_rb["action_log_prob"] = torch.zeros(
+                fake_rb.shape[0], 1, device=fake_rb.device
+            )
 
         observation_keys = set(env.observation_spec.keys(True, True))
         observation_keys -= {"prior_eps"}
@@ -405,31 +485,72 @@ class InterPriorPolicy(TensorDictModuleBase):
         print("InterPrior buffer:")
         print(self.rb)
 
-        distill_params = (
-            list(self.prior.parameters())
-            + list(self.encoder.parameters())
-            + list(self.decoder_trunk.parameters())
-            + list(self.decoder_action.parameters())
-            + list(self.decoder_goal.parameters())
-        )
-        self.opt = torch.optim.Adam(
-            [
-                {"params": distill_params, "lr": self.cfg.lr},
-                {"params": self.critic.parameters(), "lr": self.cfg.lr},
-            ]
-        )
+        if self.cfg.stage == "distill":
+            distill_params = (
+                list(self.prior.parameters())
+                + list(self.encoder.parameters())
+                + list(self.decoder_trunk.parameters())
+                + list(self.decoder_action.parameters())
+                + list(self.decoder_goal.parameters())
+            )
+            self.opt = torch.optim.Adam(
+                [
+                    {"params": distill_params, "lr": self.cfg.lr},
+                    {"params": self.critic.parameters(), "lr": self.cfg.lr},
+                ]
+            )
+        elif self.cfg.stage == "rl":
+            # Sync from distilled prior unless a finetuned student was already loaded.
+            if not self._student_loaded:
+                self._init_student_from_prior()
+            # the action decoder is freezed
+            self.opt = torch.optim.Adam(
+                [
+                    {"params": self.student.parameters(), "lr": self.cfg.lr},
+                    {"params": self.critic.parameters(), "lr": self.cfg.lr},
+                ]
+            )
+        else:
+            raise ValueError(f"Unknown stage {self.cfg.stage!r}; expected 'distill' or 'rl'.")
+
+    def _init_student_from_prior(self) -> None:
+        """Copy distilled prior into the Stage-III student.
+
+        When ``student_pred_std`` matches the prior (state-dependent), a full
+        ``hard_copy_`` works. With a state-independent student head, only the
+        MLP trunk and loc weights are copied; ``actor_std`` keeps its PPO-style
+        ones init.
+        """
+        if self.cfg.student_pred_std:
+            hard_copy_(self.prior, self.student)
+            return
+
+        hard_copy_(self.prior[0], self.student[0])
+        src_head: DiagGaussianHead = self.prior[1]
+        tgt_head: DiagGaussianHead = self.student[1]
+        d = self.latent_dim
+        with torch.no_grad():
+            tgt_head.linear.weight.copy_(src_head.linear.weight[:d])
+            if tgt_head.linear.bias is not None and src_head.linear.bias is not None:
+                tgt_head.linear.bias.copy_(src_head.linear.bias[:d])
 
     # ------------------------------------------------------------------
     # Rollout / inference
     # ------------------------------------------------------------------
 
     def get_rollout_policy(self, mode: str = "train", critic: bool = False):
+        # Sampling vs mean is controlled by interaction_type / set_exploration_type;
+        # ``mode`` only selects whether VecNorm stats keep updating.
+        actor = self.student if self.cfg.stage == "rl" else self.prior
+        if self.cfg.stage == "rl" or mode != "train":
+            vecnorm = VecNorm.freeze()(self.vecnorm)
+        else:
+            vecnorm = self.vecnorm
         policy = InterPriorRolloutPolicy(
-            vecnorm=self.vecnorm,
-            prior=self.prior,
+            vecnorm=vecnorm,
+            actor=actor,
             decoder=nn.Sequential(self.decoder_trunk, self.decoder_action),
             in_keys=self.cfg.in_keys,
-            mode=mode,
             normalize_z=self.cfg.normalize_z,
         )
         if critic:
@@ -463,12 +584,17 @@ class InterPriorPolicy(TensorDictModuleBase):
     # ------------------------------------------------------------------
 
     def step(self, tensordict: TensorDict) -> dict:
-        """Push one transition; expects ``teacher_action`` from the training script."""
+        """Push one transition; train when due.
+
+        Distill stage expects ``teacher_action`` from the training script.
+        RL stage collects on-policy latent actions from the student rollout.
+        """
         self.global_step += 1
-        if "teacher_action" not in tensordict.keys(True, True):
-            raise KeyError(
-                "Missing teacher_action; label it in train_imitation rollout_policy."
-            )
+        if self.cfg.stage == "distill":
+            if "teacher_action" not in tensordict.keys(True, True):
+                raise KeyError(
+                    "Missing teacher_action; label it in train_imitation rollout."
+                )
 
         td = tensordict.exclude(("next", "stats"), "collector")
         self.rb.push(td)
@@ -485,12 +611,26 @@ class InterPriorPolicy(TensorDictModuleBase):
     @VecNorm.freeze()
     def train_op(self) -> dict:
         infos = []
-        for _ in range(self.cfg.updates_per_train):
-            infos.append(self._update_distillation())
+        if self.cfg.stage == "distill":
+            for _ in range(self.cfg.updates_per_train):
+                infos.append(self._update_distillation())
+            # Warm the critic on recent on-policy segments (no actor updates).
+            ppo_info = self._update_ppo(actor=False, critic=True)
+            if ppo_info:
+                infos.append(ppo_info)
+        elif self.cfg.stage == "rl":
+            ppo_info = self._update_ppo(actor=True, critic=True)
+            if ppo_info:
+                infos.append(ppo_info)
+        else:
+            raise ValueError(f"Unknown stage {self.cfg.stage!r}")
 
-        critic_info = self._update_ppo()
-        if critic_info:
-            infos.append(critic_info)
+        if not infos:
+            return {
+                "train/student_frac": self.student_frac,
+                "train/beta_kl": self.beta_kl,
+                "train/buffer_size": float(len(self.rb)),
+            }
 
         # Average metrics (union of keys across updates)
         out = {}
@@ -501,6 +641,7 @@ class InterPriorPolicy(TensorDictModuleBase):
         out["train/student_frac"] = self.student_frac
         out["train/beta_kl"] = self.beta_kl
         out["train/buffer_size"] = float(len(self.rb))
+        out["train/stage"] = 0.0 if self.cfg.stage == "distill" else 1.0
         return out
 
     @torch.no_grad()
@@ -634,13 +775,23 @@ class InterPriorPolicy(TensorDictModuleBase):
                 "distill/mu_q_norm": float(mu_q.norm(dim=-1).mean().detach()),
             }
 
-    def _update_ppo(self) -> dict:
-        """GAE on the latest on-policy segment, then minibatch critic updates."""
+    def _update_ppo(self, actor: bool = True, critic: bool = True) -> dict:
+        """GAE on the latest on-policy segment, then minibatch PPO updates.
+
+        Args:
+            actor: If True, apply the clipped latent-policy surrogate (Stage III).
+            critic: If True, fit the value head to GAE returns. Use
+                ``actor=False, critic=True`` during distillation to warm the
+                critic without moving the policy.
+        """
+        if not (actor or critic):
+            return {}
         if len(self.rb) < self.cfg.train_every + 1:
             return {}
 
         # [T, N, ...] with next obs reconstructed; transpose to [N, T, ...] for GAE.
         batch = self.rb.last(self.cfg.train_every, next_obs=True).transpose(0, 1)
+        batch = batch.contiguous() # to make `view` happy
 
         with ScopedTimer("compute_advantage"):
             self.compute_advantage(
@@ -658,11 +809,18 @@ class InterPriorPolicy(TensorDictModuleBase):
         ret_valid = batch["ret"][~batch["is_init"].bool()]
         ret_var = ret_valid.var().clamp_min(1e-7)
 
-        td = batch.select(*self.ppo_keys)
+        keys = list(self.ppo_keys)
+        if not actor:
+            keys = [k for k in keys if k not in ("z", "action_log_prob")]
+        td = batch.select(*keys)
         infos = []
         for _ in range(self.cfg.ppo_epochs):
             for minibatch in make_batch(td, self.cfg.num_minibatches):
-                infos.append(self._update_critic(minibatch, ret_var))
+                infos.append(
+                    self._update_actor_critic(
+                        minibatch, ret_var, update_actor=actor, update_critic=critic
+                    )
+                )
 
         out = {}
         keys = infos[0].keys()
@@ -674,36 +832,92 @@ class InterPriorPolicy(TensorDictModuleBase):
         out["critic/value_std"] = float(batch["ret"].std().detach())
         return out
 
-    def _update_critic(
-        self, minibatch: TensorDict, ret_var: torch.Tensor
+    def _update_actor_critic(
+        self,
+        minibatch: TensorDict,
+        ret_var: torch.Tensor,
+        *,
+        update_actor: bool = True,
+        update_critic: bool = True,
     ) -> dict:
-        """One critic minibatch; actor PPO over the prior latent comes later."""
+        """One minibatch; actor and/or critic controlled by flags."""
         self.vecnorm(minibatch)
-        values = self.critic(minibatch)["state_value"]
-        valid = (~minibatch["is_init"].bool()).float().reshape_as(values)
+        valid = (~minibatch["is_init"].bool()).float()
         valid_cnt = valid.sum().clamp_min(1.0)
-        value_loss = self.critic_loss_fn(minibatch["ret"], values)
-        value_loss = (value_loss * valid).sum() / valid_cnt
-        loss = self.cfg.value_loss_coef * value_loss
+
+        loss = minibatch["ret"].new_zeros(())
+        info: dict = {}
+
+        if update_actor:
+            loc, scale = self.student(minibatch["prior_inp"])
+            dist = IndependentNormal(loc, scale)
+            z = minibatch["z"]
+            log_probs = dist.log_prob(z).unsqueeze(-1)
+            log_probs_data = minibatch["action_log_prob"]
+
+            adv = minibatch["adv"]
+            log_ratio = (log_probs - log_probs_data).reshape_as(adv)
+            ratio = torch.exp(log_ratio)
+            policy_loss = ppo_clipped_loss(ratio, adv, self.clip_param)
+            policy_loss = (policy_loss.reshape_as(valid) * valid).sum() / valid_cnt
+
+            entropy = dist.entropy().reshape_as(valid)
+            entropy = (entropy * valid).sum() / valid_cnt
+            entropy_loss = -self.entropy_coef * entropy
+
+            loss = loss + policy_loss + entropy_loss
+            with torch.no_grad():
+                eps_neg, eps_pos = self.clip_param
+                ratio_det = ratio.detach()
+                info.update(
+                    {
+                        "actor/policy_loss": float(policy_loss.detach()),
+                        "actor/entropy": float(entropy.detach()),
+                        "actor/approx_kl": float(
+                            ((ratio_det - 1.0) - log_ratio.detach()).mean()
+                        ),
+                        "actor/clamp_pos": float(
+                            (ratio_det > 1.0 + eps_pos).float().mean()
+                        ),
+                        "actor/clamp_neg": float(
+                            (ratio_det < 1.0 - eps_neg).float().mean()
+                        ),
+                    }
+                )
+
+        if update_critic:
+            values = self.critic(minibatch)["state_value"]
+            value_loss = self.critic_loss_fn(minibatch["ret"], values)
+            value_loss = (value_loss.reshape_as(valid) * valid).sum() / valid_cnt
+            loss = loss + self.cfg.value_loss_coef * value_loss
+            with torch.no_grad():
+                info["critic/value_loss"] = float(value_loss.detach())
+                info["critic/explained_var"] = float(
+                    (1.0 - value_loss / ret_var).detach()
+                )
 
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
-        critic_grad_norm = nn.utils.clip_grad_norm_(
-            self.opt.param_groups[1]["params"], 1.0
-        )
+        if update_actor:
+            actor_grad_norm = nn.utils.clip_grad_norm_(
+                self.opt.param_groups[0]["params"], 1.0
+            )
+            info["actor/grad_norm"] = float(
+                actor_grad_norm.detach()
+                if torch.is_tensor(actor_grad_norm)
+                else actor_grad_norm
+            )
+        if update_critic:
+            critic_grad_norm = nn.utils.clip_grad_norm_(
+                self.opt.param_groups[1]["params"], 1.0
+            )
+            info["critic/grad_norm"] = float(
+                critic_grad_norm.detach()
+                if torch.is_tensor(critic_grad_norm)
+                else critic_grad_norm
+            )
         self.opt.step()
-
-        with torch.no_grad():
-            explained_var = 1.0 - value_loss / ret_var
-            return {
-                "critic/value_loss": float(value_loss.detach()),
-                "critic/grad_norm": float(
-                    critic_grad_norm.detach()
-                    if torch.is_tensor(critic_grad_norm)
-                    else critic_grad_norm
-                ),
-                "critic/explained_var": float(explained_var.detach()),
-            }
+        return info
 
     # ------------------------------------------------------------------
     # Checkpointing
@@ -728,6 +942,8 @@ class InterPriorPolicy(TensorDictModuleBase):
             try:
                 module.load_state_dict(_sd, strict=strict)
                 succeed_keys.append(name)
+                if name == "student":
+                    self._student_loaded = True
             except Exception as e:
                 warnings.warn(f"Failed to load state dict for {name}: {str(e)}")
                 failed_keys.append(name)

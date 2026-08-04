@@ -135,6 +135,7 @@ Pattern in `ppo_symaug._update`:
 - `ProbabilisticActor` must set `return_log_prob=True` so collector stores `action_log_prob`
 - `get_rollout_policy`: `Seq(self.vecnorm, self.actor)` — no sym aug at rollout (aug only in learner)
 - Eval: `train_ppo.py` uses `ExplorationType.MODE` for eval rollouts
+- **Stochasticity:** prefer TorchRL `interaction_type()` / `set_exploration_type` (`InteractionType.MODE` vs `RANDOM`) inside the rollout module — same pattern as SAC (`learning/offpolicy/sac.py`). Do **not** branch on a custom `mode="train"|"eval"` string for sampling vs mean; the training script already wraps rollouts with `set_exploration_type`. Custom rollout modules (e.g. InterPrior latent actor) should check `interaction_type() == InteractionType.MODE` then use `loc`, else `rsample()` / `sample()`.
 
 ### 7. Symmetry augmentation (`ppo_symaug` style)
 

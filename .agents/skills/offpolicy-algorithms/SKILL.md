@@ -139,6 +139,7 @@ See `learning/offpolicy/buffer.py` (`from_fake`, `push`, `sample`) and `sac.py` 
 
 - `self.preproc`: concat CMD+OBS → `VecNorm` → `_input_normed`
 - Store `loc` in tensordict when useful for RLPD / diagnostics
+- **Stochasticity via `interaction_type()`** (canonical `SACRolloutPolicy`): `InteractionType.MODE` → deterministic `loc`; otherwise `sample` / correlated noise. Training scripts wrap inference with `set_exploration_type(ExplorationType.RANDOM|MODE)`. Do not invent a parallel `mode="train"|"eval"` flag on the rollout module for the same purpose.
 - Correlated exploration: primer keys `prev_noise`, `rho`; target policy uses uncorrelated noise in `_compute_target`
 - `reward_normalizer`: update on raw rewards in `step`; normalize in `train_critic`; denormalize Q for logging
 

@@ -97,10 +97,10 @@ class TrainConfig:
     """Evaluate the policy after training."""
     eval_render: bool = False
     """Render the environment during the final post-training evaluation."""
-    checkpoint_interval: int = 4
-    """Save a local checkpoint every N training iterations."""
+    checkpoint_interval: int = 50
+    """Overwrite ``checkpoint_latest.pt`` every N training iterations (local only)."""
     upload_interval: int = 100
-    """Upload a checkpoint to WandB every N training iterations."""
+    """Also write/upload a versioned ``checkpoint_{i}.pt`` every N iterations."""
 
     seed: int = 42
     """Random seed (offset by local rank in distributed runs)."""
@@ -255,6 +255,8 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         run_dir.mkdir(parents=True, exist_ok=True)
         cfg_save_path = run_dir / "cfg.yaml"
         OmegaConf.save(cfg, cfg_save_path)
+        OmegaConf.save(cfg.task, run_dir / "cfg_task.yaml")
+        OmegaConf.save(cfg.algo, run_dir / "cfg_algo.yaml")
         wandb_run.save(str(cfg_save_path), policy="now")
         wandb_run.save(str(run_dir / "config.yaml"), policy="now")
 
@@ -304,32 +306,54 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
 
-    def save(policy, checkpoint_name: str, *, upload_to_wandb: bool = True):
+    def save(
+        policy,
+        *,
+        archive_name: str | None = None,
+        upload_to_wandb: bool = False,
+    ) -> tuple[str, str | None]:
+        """Refresh local ``checkpoint_latest.pt``; optionally archive + upload a versioned copy.
+
+        Returns ``(latest_path, archived_path_or_None)``.
+        """
         run_dir = Path(wandb_run.dir)
-        ckpt_path = run_dir / f"{checkpoint_name}.pt"
         state_dict = OrderedDict()
         state_dict["wandb"] = {"name": wandb_run.name, "id": wandb_run.id}
         state_dict["policy"] = policy.state_dict()
-        
-        torch.save(state_dict, ckpt_path)
-        if upload_to_wandb:
-            wandb_run.save(str(ckpt_path), policy="now", base_path=wandb_run.dir)
-        
-        latest_link = run_dir / "checkpoint_latest.pt"
-        if latest_link.exists() or latest_link.is_symlink():
-            latest_link.unlink()
-        latest_link.symlink_to(ckpt_path.name)
-        logging.info(f"Saved checkpoint to {ckpt_path}" + (" (wandb)" if upload_to_wandb else ""))
-        return str(ckpt_path)
+
+        latest_path = run_dir / "checkpoint_latest.pt"
+        if latest_path.exists() or latest_path.is_symlink():
+            latest_path.unlink()
+        torch.save(state_dict, latest_path)
+
+        archived_path = None
+        if archive_name is not None:
+            archived_path = run_dir / f"{archive_name}.pt"
+            if archived_path.resolve() != latest_path.resolve():
+                torch.save(state_dict, archived_path)
+            if upload_to_wandb:
+                wandb_run.save(
+                    str(archived_path), policy="now", base_path=wandb_run.dir
+                )
+
+        return str(latest_path), (
+            str(archived_path) if archived_path is not None else None
+        )
 
     assert env.training
 
-    def should_save(i):
+    def should_save(i: int) -> bool:
         if not aa.is_main_process():
             return False
-        return i % checkpoint_interval == 0 or i % upload_interval == 0
+        if checkpoint_interval > 0 and i % checkpoint_interval == 0:
+            return True
+        if upload_interval > 0 and i % upload_interval == 0:
+            return True
+        return False
 
-    ckpt_path = None
+    local_ckpt_path = None
+    local_ckpt_iter: int | None = None
+    uploaded_ckpt_path = None
     carry = env.reset()
     transitions = cfg.algo.get("store_transitions", True)
     collector = StackingCollector(
@@ -403,9 +427,15 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             info["performance/iter_time"] = time.perf_counter() - rollout_start
 
             if should_save(i):
-                should_upload = i % upload_interval == 0
-                checkpoint_name = f"checkpoint_{i}" if should_upload else "checkpoint_temp"
-                ckpt_path = save(policy, checkpoint_name, upload_to_wandb=should_upload)
+                should_upload = upload_interval > 0 and i % upload_interval == 0
+                local_ckpt_path, archived = save(
+                    policy,
+                    archive_name=f"checkpoint_{i}" if should_upload else None,
+                    upload_to_wandb=should_upload,
+                )
+                if archived is not None:
+                    uploaded_ckpt_path = archived
+                local_ckpt_iter = i
 
             if aa.is_main_process():
                 remaining = (time.time() - t0) / (i + 1) * (total_iters - i)
@@ -416,14 +446,24 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                         {k: v for k, v in info.items() if isinstance(v, (float, int))}
                     )
                 )
-                print(f"Latest checkpoint: {ckpt_path}")
+                if local_ckpt_path is not None:
+                    if local_ckpt_iter is not None:
+                        print(
+                            f"Local checkpoint (iter {local_ckpt_iter}): {local_ckpt_path}"
+                        )
+                    else:
+                        print(f"Local checkpoint: {local_ckpt_path}")
+                if uploaded_ckpt_path is not None:
+                    print(f"Last uploaded checkpoint: {uploaded_ckpt_path}")
                 info.update(env.extra)
                 info.update(env.stats_ema)  # step-wise exponential moving average of stats
                 wandb_run.log(info)
 
     run_state: dict[str, str] = {}
     if aa.is_main_process():
-        ckpt_path = save(policy, "checkpoint_final")
+        local_ckpt_path, uploaded_ckpt_path = save(
+            policy, archive_name="checkpoint_final", upload_to_wandb=True
+        )
         if cfg.eval:
             policy_eval = policy.get_rollout_policy("eval")
             eval_info, trajs, stats = evaluate(
@@ -432,9 +472,9 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             eval_info["env_frames"] = env_frames
             wandb_run.log(eval_info)
         wandb.finish()
-        print(f"Final checkpoint: {ckpt_path}")
+        print(f"Final checkpoint: {uploaded_ckpt_path}")
         run_state = {
-            "checkpoint_path": ckpt_path,
+            "checkpoint_path": uploaded_ckpt_path or local_ckpt_path,
             "run_dir": str(run_dir),
             "task": str(cfg.task.name),
             "algo": str(cfg.algo.name),
