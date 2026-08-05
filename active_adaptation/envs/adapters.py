@@ -134,6 +134,12 @@ class SceneAdapter(Protocol):
         scale: tuple[float, float, float],
     ): ...
 
+    def create_frame_marker(
+        self,
+        prim_path: str,
+        scale: tuple[float, float, float] = (0.1, 0.1, 0.1),
+    ): ...
+
     def create_camera_frustum(
         self, name: str, *, fov_y: float, aspect: float, scale: float = 0.15
     ) -> CameraFrustumHandle: ...
