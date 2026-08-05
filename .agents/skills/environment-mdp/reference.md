@@ -190,11 +190,41 @@ contact_ids, body_names = find_sensor_bodies(asset, contact_sensor, ".*_foot")
 
 Canonical call sites: `mdp/observations/joint.py` (`find_joints`), `mdp/actions/joint.py` (`joint_names_simulation`), `mdp/rewards/gait.py` (`find_bodies` + `find_sensor_bodies`).
 
+### Contact sensor **data** fields (Isaac ≠ mjlab)
+
+Index resolution is shared via `find_sensor_bodies`, but **`sensor.data` field names and shapes are backend-specific**. Sources:
+
+- Isaac: `IsaacLab/.../contact_sensor/contact_sensor_data.py` → `ContactSensorData`
+- mjlab: `mjlab/sensor/contact_sensor.py` → `ContactData` (only fields requested in `ContactSensorCfg.fields` are non-`None`)
+
+| Quantity | Isaac (`ContactSensorData`) | mjlab (`ContactData`) |
+|----------|----------------------------|------------------------|
+| Net / contact force | `net_forces_w` `[N, B, 3]` (world) | `force` `[B, N, 3]` if `"force"` in `fields` (contact frame; world if `reduce="netforce"` or `global_frame=True`) |
+| Force history | `net_forces_w_history` `[N, T, B, 3]` | `force_history` `[B, N, H, 3]` (needs history) |
+| Filtered body×filter forces | `force_matrix_w` `[N, B, M, 3]` | — (use primary/secondary match instead) |
+| Contact present | infer `norm(net_forces_w) > thresh` | `found` `[B, N]` (0 = none) if `"found"` in `fields` |
+| Penetration / pose | optional `contact_pos_w`, … | `dist`, `pos`, `normal`, `tangent` if requested |
+| Air / contact time | `current_air_time`, `last_air_time`, `current_contact_time`, `last_contact_time` `[N, B]` | same names `[B, P]` when `track_air_time=True` (needs `"found"`) |
+
+**Pattern** (e.g. `object_hoi` `contact_reward`):
+
+```python
+ids = self.sensor_body_indices  # from find_sensor_bodies
+if self.env.backend == "isaac":
+    forces = self.sensor.data.net_forces_w[:, ids]
+else:
+    forces = self.sensor.data.force[:, ids]  # requires fields=("found", "force", ...)
+```
+
+Ensure the mjlab asset’s `ContactSensorCfg.fields` includes every quantity the MDP reads (`"force"`, `"found"`, …). Air-time fields exist on both once `track_air_time=True`, but force tensors do **not** share names.
+
 ### Anti-patterns (indices)
 
 - `asset.find_joints` / `asset.find_bodies` for obs/action feature order
 - `contact_sensor.find_bodies(...)` without going through `find_sensor_bodies`
 - Assuming articulation body index == contact-sensor body index for the same name
+- Reading `sensor.data.net_forces_w` on mjlab (AttributeError) or `sensor.data.force` on Isaac
+- Forgetting `"force"` / `"found"` in mjlab `ContactSensorCfg.fields` then dereferencing `None`
 
 ---
 

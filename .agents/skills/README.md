@@ -10,6 +10,7 @@ Portable playbooks for coding agents. **Canonical location:** `.agents/skills/` 
 | Off-policy (SAC) | [offpolicy-algorithms/SKILL.md](offpolicy-algorithms/SKILL.md) | `learning/offpolicy/`, `train_offpolicy.py`, replay, RLPD |
 | WandB diagnostics | [wandb-diagnostics/SKILL.md](wandb-diagnostics/SKILL.md) | Debugging/analysis from WandB run history (grad norms, losses, KL/entropy, explained variance) |
 | Environment / MDP | [environment-mdp/SKILL.md](environment-mdp/SKILL.md) | `envs/mdp/`, `cfg/task/` obs/reward/term/action/command/rand |
+| Asset definition | [asset-definition/SKILL.md](asset-definition/SKILL.md) | `assets/`, `AssetSpec`, Isaac+mjlab robots, `*_names_simulation` |
 
 Each skill has a `reference.md` with file maps and diagrams.
 
@@ -26,7 +27,7 @@ Also see [TEACHME.md](../../active_adaptation/learning/TEACHME.md) (shared style
    - Monorepo parent (`lab51/`): symlink or copy skills — see FAQ below.
 
 2. **Invocation**
-   - `/offpolicy-algorithms` or `/onpolicy-algorithms` in chat
+   - `/offpolicy-algorithms`, `/onpolicy-algorithms`, `/environment-mdp`, or `/asset-definition` in chat
    - `@.agents/skills/onpolicy-algorithms/SKILL.md`
    - “Follow the on-policy agent skill”
 
@@ -53,6 +54,7 @@ active-adaptation/
 │   ├── onpolicy-algorithms/
 │   ├── offpolicy-algorithms/
 │   ├── environment-mdp/
+│   ├── asset-definition/
 │   └── wandb-diagnostics/
 └── AGENTS.md                 # links agents here
 ```

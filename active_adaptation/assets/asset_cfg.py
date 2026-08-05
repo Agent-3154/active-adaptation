@@ -34,7 +34,7 @@ elif aa.get_backend() in ("mjlab", "motrix"):
     import mujoco
     from typing import Callable
     from mjlab.entity import EntityCfg as _EntityCfg, EntityArticulationInfoCfg
-    from mjlab.actuator import BuiltinPositionActuatorCfg
+    from mjlab.actuator import BuiltinPdActuatorCfg, BuiltinPositionActuatorCfg
     from mjlab.utils.spec_config import CollisionCfg
     from mjlab.sensor import ContactSensorCfg as MjlabContactSensorCfg, ContactMatch
 

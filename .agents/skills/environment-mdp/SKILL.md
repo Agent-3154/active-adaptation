@@ -1,6 +1,6 @@
 ---
 name: environment-mdp
-description: Implement and wire MDP terms in active-adaptation (observations, rewards, terminations, actions, commands, randomizations) using the V2 deferred-init API. Use when adding or modifying classes under envs/mdp/, editing cfg/task/ observation/reward/termination/input/command/randomization blocks, debugging env_base step/reset callbacks, cross-backend debug viz (scene.draw_*, camera frustums), Warp/simple-raycaster raycasting, USD mesh extraction, or Isaac/mjlab Viser viewers.
+description: Implement and wire MDP terms in active-adaptation (observations, rewards, terminations, actions, commands, randomizations) using the V2 deferred-init API. Use when adding or modifying classes under envs/mdp/, editing cfg/task/ observation/reward/termination/input/command/randomization blocks, debugging env_base step/reset callbacks, cross-backend contact sensor data (Isaac net_forces_w vs mjlab force), debug viz (scene.draw_*, camera frustums), Warp/simple-raycaster raycasting, USD mesh extraction, or Isaac/mjlab Viser viewers.
 ---
 
 # Environment / MDP terms (active-adaptation)
@@ -18,7 +18,7 @@ Implement MDP terms as **V2** classes: construct from Hydra kwargs **without** a
 
 Read [reference.md](reference.md) for the step-loop diagram, callback registration, file map, viz backends, name-order / contact-index rules, and raycast/mesh details.
 
-**Related skills:** `onpolicy-algorithms`, `offpolicy-algorithms`.
+**Related skills:** `onpolicy-algorithms`, `offpolicy-algorithms`, `asset-definition`.
 
 ---
 
@@ -42,6 +42,7 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 5. **Override only what you need** — `_add_mdp_component` registers `startup` / `reset` / `update` / `pre_step` / `post_step` / `debug_draw` only when the subclass **overrides** the base method (`is_method_implemented`). Empty overrides still register.
 6. **Simulation name order** — Isaac and MuJoCo/mjlab typically use different joint/body orders. Resolve names via `asset.cfg.joint_names_simulation` / `asset.cfg.body_names_simulation` (helpers `find_joints` / `find_bodies` in `envs/utils/api.py`), **not** `asset.find_joints` / `asset.find_bodies`. Critical for action and observation terms so trained policies transfer across backends.
 7. **Contact sensor indices** — mjlab’s contact sensor has no `find_bodies`. Use `find_sensor_bodies(asset, contact_sensor, pattern)` so articulation and sensor indices stay aligned in simulation order.
+8. **Contact sensor data fields differ by backend** — do **not** assume a shared `sensor.data.*` API. Isaac uses `ContactSensorData` (`net_forces_w`, …); mjlab uses `ContactData` (`force`, `found`, …) and only populates fields listed in `ContactSensorCfg.fields`. Branch on `env.backend` or use a thin helper when reading forces / air time.
 
 ---
 
@@ -386,3 +387,4 @@ Isaac/mjlab **Viser** robot meshes (viewer internals, not MDP terms): same body-
 - Using `env.debug_draw` instead of `env.scene.draw_*` / `create_camera_frustum`
 - Using `asset.find_joints` / `asset.find_bodies` for MDP feature layout (backend-native order; breaks Isaac↔mjlab transfer) — use `find_joints` / `find_bodies` / `*_names_simulation`
 - Calling `contact_sensor.find_bodies` directly (missing on mjlab; may disagree with articulation order even on Isaac) — use `find_sensor_bodies`
+- Assuming Isaac/mjlab contact `sensor.data` share field names (`net_forces_w` vs `force`) — see [reference.md](reference.md#contact-sensor-data-fields-isaac--mjlab)
