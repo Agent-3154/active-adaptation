@@ -96,10 +96,19 @@ class MjlabBackendEnv(_EnvBase):
                 f"Unsupported terrain `{terrain}`. Expected one of: `plane`, `rough`."
             )
 
+        entities = {"robot": asset_cfg}
+        for obj_name, obj_spec in self.cfg.get("objects", {}).items():
+            obj_spec = dict(obj_spec)
+            fn = registry.get("asset", obj_spec.pop("_target_"))
+            obj_cfg = fn(backend="mjlab", **obj_spec)
+            if isinstance(obj_cfg, AssetSpec):
+                obj_cfg = obj_cfg.config
+            entities[obj_name] = obj_cfg
+
         scene_cfg = SceneCfg(
             num_envs=self.cfg.num_envs,
             env_spacing=self.cfg.get("env_spacing", 2.5),
-            entities={"robot": asset_cfg},
+            entities=entities,
             sensors=tuple(sensors),
             terrain=terrain_cfg,
         )

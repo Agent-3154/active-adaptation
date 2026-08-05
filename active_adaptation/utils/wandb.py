@@ -27,17 +27,21 @@ import logging
 import math
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Union
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import urlopen, Request
 
 import wandb
 from omegaconf import OmegaConf
-from typing import Union
 
 import active_adaptation as aa
+
+# W&B run states where artifacts are immutable — safe to serve from local cache.
+_TERMINAL_RUN_STATES = frozenset({"finished", "crashed", "killed", "failed"})
+_CONFIG_FILE_NAMES = ("files/cfg.yaml", "cfg.yaml", "config.yaml")
 
 def dict_flatten(a: dict, delim="."):
     """Flatten a dict recursively.
@@ -134,6 +138,7 @@ def _upsert_run_entry(manifest: Dict[str, Any], run) -> Dict[str, Any]:
     project = getattr(run, "project", None) or ""
     name = getattr(run, "name", None) or ""
     path = f"{entity}/{project}/{run_id}" if entity and project and run_id else ""
+    state = getattr(run, "state", None)
     runs = manifest.setdefault("runs", {})
     entry = runs.get(run_id, {})
     entry.update({
@@ -147,11 +152,21 @@ def _upsert_run_entry(manifest: Dict[str, Any], run) -> Dict[str, Any]:
         "checkpoints": entry.get("checkpoints", []),
         "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
     })
+    if state:
+        entry["state"] = state
     runs[run_id] = entry
     return entry
 
 
-def _manifest_add_file(run, file_name: str, local_path: Path, kind: str, iteration: Union[int, str, None] = None) -> None:
+def _manifest_add_file(
+    run,
+    file_name: str,
+    local_path: Path,
+    kind: str,
+    iteration: Union[int, str, None] = None,
+    *,
+    selected: bool = False,
+) -> None:
     manifest = _load_manifest()
     entry = _upsert_run_entry(manifest, run)
     record: Dict[str, Any] = {
@@ -163,10 +178,285 @@ def _manifest_add_file(run, file_name: str, local_path: Path, kind: str, iterati
     if kind == "checkpoint":
         record["iteration"] = iteration
         entry.setdefault("checkpoints", []).append(record)
+        if selected:
+            entry["selected_checkpoint"] = file_name
     else:
         entry.setdefault("files", []).append(record)
+        if selected and Path(file_name).name == "cfg.yaml":
+            entry["cfg_path"] = str(local_path)
     entry["updated_at"] = datetime.datetime.utcnow().isoformat() + "Z"
     _save_manifest(manifest)
+
+
+def parse_wandb_run_spec(spec: str) -> tuple[str, int | None]:
+    """Parse ``[run:]entity/project/run_id[:iteration]`` → ``(run_path, iteration)``."""
+    rest = spec.strip()
+    if rest.startswith("run:"):
+        rest = rest[4:]
+    try:
+        run_path, iter_str = rest.split(":", 1)
+        return run_path, int(iter_str)
+    except (ValueError, TypeError):
+        return rest, None
+
+
+def _lookup_manifest_run(run_path: str) -> Dict[str, Any] | None:
+    """Find a manifest entry by full path or run id."""
+    manifest = _load_manifest()
+    runs = manifest.get("runs", {})
+    for entry in runs.values():
+        if entry.get("path") == run_path:
+            return entry
+    run_id = run_path.rstrip("/").split("/")[-1]
+    return runs.get(run_id)
+
+
+def _find_local_cfg(download_dir: Path) -> Path | None:
+    for candidate in (
+        download_dir / "files" / "cfg.yaml",
+        download_dir / "cfg.yaml",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _checkpoint_sort_key(name: str) -> float:
+    iteration_str = Path(name).stem.split("_")[-1]
+    if iteration_str == "final":
+        return math.inf
+    try:
+        return float(int(iteration_str))
+    except ValueError:
+        return -1.0
+
+
+def _find_local_checkpoint(download_dir: Path, iteration: int | None) -> Path | None:
+    if iteration is not None:
+        path = download_dir / f"checkpoint_{iteration}.pt"
+        return path if path.is_file() else None
+
+    last_ckpt_file = download_dir / "last_checkpoint.txt"
+    if last_ckpt_file.is_file():
+        name = last_ckpt_file.read_text().strip()
+        path = download_dir / name
+        if path.is_file():
+            return path
+
+    checkpoints = sorted(
+        (p for p in download_dir.glob("checkpoint_*.pt") if p.is_file()),
+        key=lambda p: _checkpoint_sort_key(p.name),
+    )
+    return checkpoints[-1] if checkpoints else None
+
+
+def _cache_is_authoritative(entry: Dict[str, Any], checkpoint_path: Path, iteration: int | None) -> bool:
+    """True if local assets can be used without contacting the W&B API."""
+    # A pinned iteration never changes once downloaded.
+    if iteration is not None:
+        return True
+    state = str(entry.get("state") or "").lower()
+    if state in _TERMINAL_RUN_STATES:
+        return True
+    # Final checkpoint on disk is a strong signal the run completed.
+    if checkpoint_path.name == "checkpoint_final.pt":
+        return True
+    return False
+
+
+@dataclass(frozen=True)
+class CachedWandbRun:
+    """Locally resolved W&B run assets (cfg + checkpoint)."""
+
+    run_path: str
+    run_id: str
+    name: str
+    download_dir: Path
+    cfg_path: Path
+    checkpoint_path: Path
+    state: str | None = None
+
+
+def try_get_cached_wandb_run(run_path: str, iteration: int | None = None) -> CachedWandbRun | None:
+    """Return local cfg/checkpoint when safe to skip the W&B API; else ``None``."""
+    run_path, parsed_iter = parse_wandb_run_spec(run_path)
+    if iteration is None:
+        iteration = parsed_iter
+    entry = _lookup_manifest_run(run_path)
+    if entry is None:
+        return None
+
+    download_dir = Path(entry.get("download_dir") or "")
+    if not download_dir.is_dir():
+        name = entry.get("name")
+        if name:
+            download_dir = _get_store_dir() / name
+    if not download_dir.is_dir():
+        return None
+
+    cfg_path = _find_local_cfg(download_dir)
+    checkpoint_path = _find_local_checkpoint(download_dir, iteration)
+    if cfg_path is None or checkpoint_path is None:
+        return None
+    if not _cache_is_authoritative(entry, checkpoint_path, iteration):
+        return None
+
+    return CachedWandbRun(
+        run_path=entry.get("path") or run_path,
+        run_id=str(entry.get("id") or run_path.rstrip("/").split("/")[-1]),
+        name=str(entry.get("name") or download_dir.name),
+        download_dir=download_dir,
+        cfg_path=cfg_path,
+        checkpoint_path=checkpoint_path,
+        state=entry.get("state"),
+    )
+
+
+def _download_wandb_run_assets(
+    run_path: str,
+    iteration: int | None = None,
+    *,
+    api: "wandb.Api | None" = None,
+) -> CachedWandbRun:
+    """Fetch run metadata/files from W&B and download cfg + selected checkpoint."""
+    if api is None:
+        print("[WandbCheckpoint] creating wandb.Api()")
+        api_start = time.perf_counter()
+        api = wandb.Api()
+        print(f"[WandbCheckpoint] wandb.Api() ready ({time.perf_counter() - api_start:.2f}s)")
+
+    print(f"[WandbCheckpoint] fetching run metadata: {run_path}")
+    run_start = time.perf_counter()
+    run = api.run(run_path)
+    print(
+        f"[WandbCheckpoint] run metadata ready "
+        f"({time.perf_counter() - run_start:.2f}s), "
+        f"run_name={run.name}, state={getattr(run, 'state', None)}"
+    )
+
+    root = _get_store_dir() / run.name
+    root.mkdir(parents=True, exist_ok=True)
+
+    checkpoints = []
+    cfg_path: Path | None = None
+    print("[WandbCheckpoint] listing run files")
+    files_start = time.perf_counter()
+    run_files = list(run.files())
+    print(
+        f"[WandbCheckpoint] listed {len(run_files)} files "
+        f"({time.perf_counter() - files_start:.2f}s)"
+    )
+    for file in run_files:
+        if "checkpoint" in file.name:
+            checkpoints.append(file)
+        elif file.name in _CONFIG_FILE_NAMES:
+            file.download(str(root), replace=True)
+            local_cfg = root / file.name
+            # Prefer training cfg.yaml over wandb config.yaml.
+            if Path(file.name).name == "cfg.yaml":
+                cfg_path = local_cfg
+                _manifest_add_file(run, file.name, local_cfg, kind="config", selected=True)
+            else:
+                _manifest_add_file(run, file.name, local_cfg, kind="config")
+
+    if cfg_path is None:
+        cfg_path = _find_local_cfg(root)
+    if cfg_path is None:
+        raise FileNotFoundError(
+            f"No cfg.yaml found for W&B run {run_path}. "
+            f"Expected one of {_CONFIG_FILE_NAMES} under {root}"
+        )
+
+    if not checkpoints:
+        raise FileNotFoundError(f"No checkpoint files found for W&B run {run_path}")
+
+    if iteration is not None:
+        checkpoint_file = next(
+            (f for f in checkpoints if f.name == f"checkpoint_{iteration}.pt"),
+            None,
+        )
+        if checkpoint_file is None:
+            raise ValueError(f"Checkpoint {iteration} not found for run {run_path}")
+    else:
+        checkpoints.sort(key=lambda f: _checkpoint_sort_key(f.name))
+        checkpoint_file = checkpoints[-1]
+
+    path = root / checkpoint_file.name
+    last_ckpt_file = root / "last_checkpoint.txt"
+    selecting_latest = iteration is None
+
+    if path.is_file() and (
+        not selecting_latest
+        or (last_ckpt_file.is_file() and last_ckpt_file.read_text().strip() == checkpoint_file.name)
+    ):
+        logging.debug("Wandb checkpoint unchanged (%s), using cache", checkpoint_file.name)
+        print(f"[WandbCheckpoint] using cached checkpoint: {checkpoint_file.name}")
+    else:
+        print(f"[WandbCheckpoint] downloading checkpoint to {path}")
+        download_start = time.perf_counter()
+        try:
+            checkpoint_file.download(str(root), exist_ok=True)
+        except Exception:
+            if path.exists():
+                path.unlink()
+            raise
+        size_mb = checkpoint_file.size / (1024 * 1024)
+        print(
+            f"[WandbCheckpoint] downloaded checkpoint to {path} "
+            f"(size: {size_mb:.2f} MB, {time.perf_counter() - download_start:.2f}s)"
+        )
+
+    if selecting_latest:
+        last_ckpt_file.write_text(checkpoint_file.name)
+
+    iteration_str = Path(checkpoint_file.name).stem.split("_")[-1]
+    iteration_val: Union[int, str] = int(iteration_str) if iteration_str.isdigit() else iteration_str
+    _manifest_add_file(
+        run,
+        checkpoint_file.name,
+        path,
+        kind="checkpoint",
+        iteration=iteration_val,
+        selected=selecting_latest,
+    )
+
+    return CachedWandbRun(
+        run_path=f"{run.entity}/{run.project}/{run.id}",
+        run_id=run.id,
+        name=run.name,
+        download_dir=root,
+        cfg_path=cfg_path,
+        checkpoint_path=path,
+        state=getattr(run, "state", None),
+    )
+
+
+def resolve_wandb_run(
+    run_path: str,
+    iteration: int | None = None,
+    *,
+    force: bool = False,
+    api: "wandb.Api | None" = None,
+) -> CachedWandbRun:
+    """Resolve cfg + checkpoint for a W&B run, preferring local cache when safe.
+
+    Cache hits skip ``wandb.Api()`` entirely for finished runs (or pinned
+    iterations) that already have assets on disk.
+    """
+    run_path, parsed_iter = parse_wandb_run_spec(run_path)
+    if iteration is None:
+        iteration = parsed_iter
+
+    if not force:
+        cached = try_get_cached_wandb_run(run_path, iteration)
+        if cached is not None:
+            print(
+                f"[WandbCheckpoint] using local cache for {cached.run_path} "
+                f"(state={cached.state}, checkpoint={cached.checkpoint_path.name}, no API)"
+            )
+            return cached
+
+    return _download_wandb_run_assets(run_path, iteration, api=api)
 
 
 def get_store_dir() -> Path:
@@ -296,134 +586,39 @@ class FileCheckpoint(CheckpointBase):
 
 
 class WandbCheckpoint(CheckpointBase):
-    """Checkpoint from wandb run: run:<entity>/<project>/<run_id>[:<iteration>]. Fetched once in update()."""
+    """Checkpoint from wandb run: run:<entity>/<project>/<run_id>[:<iteration>].
+
+    Finished (or otherwise terminal) runs with local assets skip the W&B API.
+    """
     remote: bool = True
     _DIST_WAIT_TIMEOUT_SEC = 300.0
     _DIST_POLL_INTERVAL_SEC = 0.5
 
     def __init__(self, spec: str, api: "wandb.Api | None" = None) -> None:
-        init_start = time.perf_counter()
         print(f"[WandbCheckpoint] __init__ start spec={spec}")
         self._spec = spec
-        rest = spec[4:]
-        try:
-            self._run_path, iter_str = rest.split(":", 1)
-            self._iteration: int | None = int(iter_str)
-        except (ValueError, TypeError):
-            self._run_path = rest
-            self._iteration = None
+        self._run_path, self._iteration = parse_wandb_run_spec(spec)
         print(
             f"[WandbCheckpoint] parsed run_path={self._run_path}, "
             f"iteration={self._iteration}"
         )
-        if api is None:
-            self._api = None
-            print("[WandbCheckpoint] deferring wandb.Api() creation")
-        else:
-            self._api = api
-            print("[WandbCheckpoint] using injected wandb.Api")
-        self._run: "wandb.wandb_sdk.wandb_run.Run | None" = None
+        self._api = api
         self._path: str | None = None
         self._lock = threading.Lock()
         self._refresh_interval_sec: float | None = None
         self._refresh_stop = threading.Event()
         self._refresh_thread: threading.Thread | None = None
-        print(f"[WandbCheckpoint] __init__ done ({time.perf_counter() - init_start:.2f}s)")
-
-    @property
-    def run(self) -> "wandb.wandb_sdk.wandb_run.Run":
-        if self._run is None:
-            if self._api is None:
-                print("[WandbCheckpoint] creating wandb.Api()")
-                api_start = time.perf_counter()
-                self._api = wandb.Api()
-                print(
-                    f"[WandbCheckpoint] wandb.Api() ready "
-                    f"({time.perf_counter() - api_start:.2f}s)"
-                )
-            print(f"[WandbCheckpoint] fetching run metadata: {self._run_path}")
-            run_start = time.perf_counter()
-            self._run = self._api.run(self._run_path)
-            print(
-                f"[WandbCheckpoint] run metadata ready "
-                f"({time.perf_counter() - run_start:.2f}s), run_name={self._run.name}"
-            )
-        return self._run
+        print("[WandbCheckpoint] __init__ done")
 
     def _download(self) -> str:
         print(f"[WandbCheckpoint] _download start for {self._run_path}")
-        run = self.run
-        root = _get_store_dir() / run.name
-        root.mkdir(parents=True, exist_ok=True)
-        checkpoints = []
-        print("[WandbCheckpoint] listing run files")
-        files_start = time.perf_counter()
-        run_files = list(run.files())
-        print(
-            f"[WandbCheckpoint] listed {len(run_files)} files "
-            f"({time.perf_counter() - files_start:.2f}s)"
-        )
-        for file in run_files:
-            if "checkpoint" in file.name:
-                checkpoints.append(file)
-            elif file.name in ("files/cfg.yaml", "cfg.yaml", "config.yaml"):
-                file.download(str(root), replace=True)
-                _manifest_add_file(run, file.name, root / Path(file.name).name, kind="config")
-        if self._iteration is not None:
-            checkpoint_file = None
-            for file in checkpoints:
-                if file.name == f"checkpoint_{self._iteration}.pt":
-                    checkpoint_file = file
-                    break
-            if checkpoint_file is None:
-                raise ValueError(f"Checkpoint {self._iteration} not found")
-        else:
-            def sort_by_time(file):
-                iteration_str = file.name[:-3].split("_")[-1]
-                if iteration_str == "final":
-                    return math.inf
-                try:
-                    return int(iteration_str)
-                except ValueError:
-                    return -1
-            checkpoints.sort(key=sort_by_time)
-            checkpoint_file = checkpoints[-1]
-        path = root / checkpoint_file.name
-        last_ckpt_file = root / "last_checkpoint.txt"
-        
-        if last_ckpt_file.exists() and (root / checkpoint_file.name).exists():
-            if last_ckpt_file.read_text().strip() == checkpoint_file.name:
-                logging.debug("Wandb checkpoint unchanged (%s), using cache", checkpoint_file.name)
-                print(f"[WandbCheckpoint] using cached checkpoint: {checkpoint_file.name}")
-                return str(path)
-            
-        print(f"[WandbCheckpoint] downloading checkpoint to {path}")
-        download_start = time.perf_counter()
-        try:
-            checkpoint_file.download(str(root), exist_ok=True)
-        except Exception as e:
-            # delete any partially downloaded file to avoid confusion on next attempt
-            if path.exists():
-                path.unlink()
-            raise e
-        size_mb = checkpoint_file.size / (1024 * 1024)
-        print(
-            f"[WandbCheckpoint] downloaded checkpoint to {path} "
-            f"(size: {size_mb:.2f} MB, {time.perf_counter() - download_start:.2f}s)"
-        )
-        last_ckpt_file.write_text(checkpoint_file.name)
-        iteration_str = Path(checkpoint_file.name).stem.split("_")[-1]
-        iteration_val: Union[int, str] = int(iteration_str) if iteration_str.isdigit() else iteration_str
-        
-        _manifest_add_file(
-            run,
-            checkpoint_file.name,
-            path,
-            kind="checkpoint",
-            iteration=iteration_val,
+        resolved = resolve_wandb_run(
+            self._run_path,
+            self._iteration,
+            api=self._api,
         )
         print("[WandbCheckpoint] _download done")
-        return str(path)
+        return str(resolved.checkpoint_path)
 
     def _download_rank0(self) -> str:
         world_size = aa.get_world_size()

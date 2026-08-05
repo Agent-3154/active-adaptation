@@ -1,10 +1,6 @@
-import torch
-import wandb
 import os
-import sys
-import hydra
 import argparse
-from pathlib import Path
+import hydra
 from active_adaptation.utils import wandb as aa_wandb_utils
 
 from omegaconf import OmegaConf
@@ -31,43 +27,22 @@ def main():
     parser.add_argument("-e", "--export", action="store_true", default=False)
     parser.add_argument("-v", "--video", action="store_true", default=False)
     parser.add_argument("-i", "--iterations", type=int, default=None)
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        default=False,
+        help="Force a W&B API refresh even when a finished run is cached locally.",
+    )
     args = parser.parse_args()
 
-    api = wandb.Api()
-    
-    run = api.run(args.run_path)
-    print(f"Loading run {run.name}")
+    resolved = aa_wandb_utils.resolve_wandb_run(
+        args.run_path,
+        args.iterations,
+        force=args.refresh,
+    )
+    print(f"Loading run {resolved.name}")
 
-    store_dir = aa_wandb_utils.get_store_dir()
-    root = store_dir / run.name
-    root.mkdir(parents=True, exist_ok=True)
-
-    checkpoints = []
-    for file in run.files():
-        print(file.name)
-        if "checkpoint" in file.name:
-            checkpoints.append(file)
-        elif file.name == "cfg.yaml":
-            file.download(str(root), replace=True)
-            aa_wandb_utils._manifest_add_file(run, file.name, root / "cfg.yaml", kind="config")  # internal helper
-        elif file.name == "files/cfg.yaml":
-            file.download(str(root), replace=True)
-            aa_wandb_utils._manifest_add_file(run, file.name, root / "cfg.yaml", kind="config")  # internal helper
-        elif file.name == "config.yaml":
-            file.download(str(root), replace=True)
-            aa_wandb_utils._manifest_add_file(run, file.name, root / "config.yaml", kind="config")  # internal helper
-
-    # `run.config` does not preserve order of the keys
-    # so we need to manually load the config file :(
-    # if os.path.exists(os.path.join(root, "config.yaml")):
-    #     cfg = OmegaConf.load(os.path.join(root, "config.yaml"))
-    #     for k, v in run.config.items():
-    #         cfg[k] = cfg[k]["value"]
-    # else:
-    try:
-        cfg = OmegaConf.load(os.path.join(root, "files", "cfg.yaml"))
-    except FileNotFoundError:
-        cfg = OmegaConf.load(os.path.join(root, "cfg.yaml"))
+    cfg = OmegaConf.load(resolved.cfg_path)
     OmegaConf.set_struct(cfg, False)
 
     if args.iterations is not None:
