@@ -33,11 +33,11 @@ Codebase adaptations vs. the paper
   sampling ``k ∈ future_offsets`` from the replay ring (paper short-horizon
   preview ``K = {1,2,4,16}``). Keys are listed in ``future_keys`` (e.g. dense
   teacher command). Optional static ``aux_keys`` add privileged context at ``t``.
-- Student post-training / RL finetuning (Stage III): a separate ``student``
-  network (initialized from ``prior`` via trunk+loc copy) is the latent-space
-  PPO actor; critic + GAE + clipped surrogate. By default the student uses a
-  state-independent ``actor_std`` (``student_pred_std=False``, regular PPO);
-  set ``student_pred_std=True`` to keep a state-dependent scale head.
+- Student post-training / RL finetuning (Stage III): residual latent actor
+  ``π(z) = N(μ_prior + μ_student, σ_student)`` with a frozen prior. The student
+  residual head is zero-initialized (small ``actor_std``) so RL starts at the
+  distilled prior. By default ``student_pred_std=False`` (state-independent
+  scale); set ``True`` for a state-dependent softplus head.
   Rollout stochasticity is controlled by TorchRL ``interaction_type()``
   (not a ``mode`` flag).
 - Teacher and student are separate modules (no weight sharing).
@@ -45,7 +45,7 @@ Codebase adaptations vs. the paper
 Model (paper Sec. 3.3, adapted)
 -------------------------------
 - Prior:   ``p_ψ(z_t | x_t, G_t)``   (Stage II / distill)
-- Student: ``π_student(z_t | x_t, G_t)``  (Stage III / rl; copy of prior)
+- Student: residual ``π(z_t | x_t, G_t)`` over the frozen prior (Stage III / rl)
 - Encoder: ``q_ϕ(z_t | x_t, G_t, y_{t+K})``  (training only; ``K = future_offsets``)
 - Decoder: ``f_θ(a_t | x_t, G_t, z_t)``
 
@@ -64,6 +64,7 @@ import torch.nn.functional as F
 import warnings
 
 from torchrl.data import Composite, TensorSpec, UnboundedContinuous
+from torchrl.objectives import hold_out_net
 from tensordict import TensorDict
 from tensordict.nn import (
     TensorDictModuleBase,
@@ -90,7 +91,6 @@ from active_adaptation.learning.ppo.common import (
     DONE_KEY,
     Critic,
     GAE,
-    hard_copy_,
     make_batch,
     ppo_clipped_loss,
     resolve_clip_param,
@@ -154,11 +154,14 @@ class InterPriorCfg:
     value_loss_coef: float = 1.0
     ppo_epochs: int = 4
     num_minibatches: int = 4
-    clip_param: Any = (0.2, 0.2)
+    clip_param: Any = (0.3, 0.2)
     entropy_coef: float = 0.0
     # Stage-III student scale: False → learned state-independent ``actor_std``
     # (regular PPO); True → state-dependent softplus head (same as prior).
     student_pred_std: bool = False
+    # Stage-III Adam LR; linearly warmed from 0 → ``rl_lr`` over ``rl_lr_warmup_updates``.
+    rl_lr: float = 5e-4
+    rl_lr_warmup_updates: int = 50
 
     compile: bool = False
     debug: bool = False
@@ -210,7 +213,7 @@ class DiagGaussianHead(nn.Module):
             self.linear = nn.Linear(in_dim, out_dim * 2)
         else:
             self.linear = nn.Linear(in_dim, out_dim)
-            self.actor_std = nn.Parameter(torch.ones(out_dim))
+            self.actor_std = nn.Parameter(0.5 * torch.ones(out_dim))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.predict_std:
@@ -288,8 +291,33 @@ class InterPriorRolloutPolicy(TensorDictModuleBase):
         return tensordict
 
 
+class ResidualStudent(nn.Module):
+    def __init__(self, prior: nn.Module, student: nn.Module):
+        super().__init__()
+        self.prior = prior
+        self.student = student
+
+    def forward(self, feat: torch.Tensor):
+        loc_prior, _ = self.prior(feat)
+        loc_student, scale_student = self.student(feat)
+        return loc_prior + loc_student, scale_student
+
+
 class InterPriorPolicy(TensorDictModuleBase):
     """Variational distillation student (no shared parameters with the teacher)."""
+
+    # Explicit list so ``student_actor`` (which double-registers prior/student)
+    # is not saved/loaded a second time.
+    _CHECKPOINT_MODULES: Tuple[str, ...] = (
+        "vecnorm",
+        "prior",
+        "student",
+        "encoder",
+        "decoder_trunk",
+        "decoder_action",
+        "decoder_goal",
+        "critic",
+    )
 
     def __init__(
         self,
@@ -342,8 +370,9 @@ class InterPriorPolicy(TensorDictModuleBase):
             ).to(self.device)
 
         self.prior = make_latent_actor(predict_std=True)
-        # Separate RL actor (Stage III); trunk+loc synced from prior in on_stage_start.
+        # Residual RL actor (Stage III): μ = μ_prior + μ_student; prior frozen.
         self.student = make_latent_actor(predict_std=bool(cfg.student_pred_std))
+        self.student_actor = ResidualStudent(self.prior, self.student)
 
         self.encoder = nn.Sequential(
             MLP(num_units=[encoder_in_dim, *hidden], activation=Activation, first_non_muon=True),
@@ -389,14 +418,14 @@ class InterPriorPolicy(TensorDictModuleBase):
             self.decoder_action(feat)
             self.decoder_goal(feat)
 
-        def init_(module: nn.Module):
+        def init_(module: nn.Module, gain: float = 0.1):
             if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, 0.1)
+                nn.init.orthogonal_(module.weight, gain)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
 
         self.prior.apply(init_)
-        self.student.apply(init_)
+        self.student.apply(lambda x: init_(x, gain=0.01)) # start at ~0 so π ≈ prior before RL
         self.encoder.apply(init_)
         self.decoder_trunk.apply(init_)
         self.critic.apply(init_)
@@ -419,6 +448,7 @@ class InterPriorPolicy(TensorDictModuleBase):
         ]
 
         self.global_step = 0
+        self.rl_update_count = 0
         self.rb: Optional[ReplayBuffer] = None
         self.opt: Optional[torch.optim.Optimizer] = None
         self.observation_keys: List[str] = []
@@ -496,43 +526,32 @@ class InterPriorPolicy(TensorDictModuleBase):
             self.opt = torch.optim.Adam(
                 [
                     {"params": distill_params, "lr": self.cfg.lr},
-                    {"params": self.critic.parameters(), "lr": self.cfg.lr},
+                    {"params": self.critic.parameters(), "lr": self.cfg.rl_lr},
                 ]
             )
         elif self.cfg.stage == "rl":
-            # Sync from distilled prior unless a finetuned student was already loaded.
-            if not self._student_loaded:
-                self._init_student_from_prior()
-            # the action decoder is freezed
+            # the action decoder is freezed; LR warmed in ``_set_actor_lr``.
             self.opt = torch.optim.Adam(
                 [
-                    {"params": self.student.parameters(), "lr": self.cfg.lr},
-                    {"params": self.critic.parameters(), "lr": self.cfg.lr},
+                    {"params": self.student.parameters(), "lr": 0.0},
+                    {"params": self.critic.parameters(), "lr": self.cfg.rl_lr},
                 ]
             )
+            self.rl_update_count = 0
+            self._set_actor_lr()
         else:
             raise ValueError(f"Unknown stage {self.cfg.stage!r}; expected 'distill' or 'rl'.")
 
-    def _init_student_from_prior(self) -> None:
-        """Copy distilled prior into the Stage-III student.
-
-        When ``student_pred_std`` matches the prior (state-dependent), a full
-        ``hard_copy_`` works. With a state-independent student head, only the
-        MLP trunk and loc weights are copied; ``actor_std`` keeps its PPO-style
-        ones init.
-        """
-        if self.cfg.student_pred_std:
-            hard_copy_(self.prior, self.student)
-            return
-
-        hard_copy_(self.prior[0], self.student[0])
-        src_head: DiagGaussianHead = self.prior[1]
-        tgt_head: DiagGaussianHead = self.student[1]
-        d = self.latent_dim
-        with torch.no_grad():
-            tgt_head.linear.weight.copy_(src_head.linear.weight[:d])
-            if tgt_head.linear.bias is not None and src_head.linear.bias is not None:
-                tgt_head.linear.bias.copy_(src_head.linear.bias[:d])
+    def _set_actor_lr(self) -> float:
+        """Linear warmup of actor Adam LR to ``cfg.rl_lr``."""
+        warmup = max(int(self.cfg.rl_lr_warmup_updates), 1)
+        # After ``warmup`` completed updates, stay at ``rl_lr``.
+        # During warmup: lr = rl_lr * (update_count + 1) / warmup on the next step,
+        # i.e. first update uses rl_lr/warmup, the ``warmup``-th uses rl_lr.
+        t = min(self.rl_update_count + 1, warmup)
+        lr = float(self.cfg.rl_lr) * (t / warmup)
+        self.opt.param_groups[0]["lr"] = lr
+        return lr
 
     # ------------------------------------------------------------------
     # Rollout / inference
@@ -541,7 +560,7 @@ class InterPriorPolicy(TensorDictModuleBase):
     def get_rollout_policy(self, mode: str = "train", critic: bool = False):
         # Sampling vs mean is controlled by interaction_type / set_exploration_type;
         # ``mode`` only selects whether VecNorm stats keep updating.
-        actor = self.student if self.cfg.stage == "rl" else self.prior
+        actor = self.student_actor if self.cfg.stage == "rl" else self.prior
         if self.cfg.stage == "rl" or mode != "train":
             vecnorm = VecNorm.freeze()(self.vecnorm)
         else:
@@ -619,8 +638,11 @@ class InterPriorPolicy(TensorDictModuleBase):
             if ppo_info:
                 infos.append(ppo_info)
         elif self.cfg.stage == "rl":
+            lr = self._set_actor_lr()
             ppo_info = self._update_ppo(actor=True, critic=True)
             if ppo_info:
+                self.rl_update_count += 1
+                ppo_info["actor/lr"] = lr
                 infos.append(ppo_info)
         else:
             raise ValueError(f"Unknown stage {self.cfg.stage!r}")
@@ -642,7 +664,7 @@ class InterPriorPolicy(TensorDictModuleBase):
         out["train/beta_kl"] = self.beta_kl
         out["train/buffer_size"] = float(len(self.rb))
         out["train/stage"] = 0.0 if self.cfg.stage == "distill" else 1.0
-        return out
+        return dict(sorted(out.items()))
 
     @torch.no_grad()
     def compute_advantage(
@@ -757,22 +779,21 @@ class InterPriorPolicy(TensorDictModuleBase):
         self.opt.step()
 
         with torch.no_grad():
+            # do not `.item()` here to avoid device synchronization
             return {
-                "distill/beta_kl": float(self.beta_kl),
-                "distill/action_loss": float(loss_act.detach()),
-                "distill/kl": float(kl_diag.detach()),
-                "distill/kl_loss": float(loss_kl.detach()),
-                "distill/kl_active_frac": float(kl_active_frac.detach()),
-                "distill/scale_loss": float(loss_scale.detach()),
-                "distill/tc_loss": float(loss_tc.detach()),
-                "distill/goal_loss": float(loss_goal.detach()),
-                "distill/total_loss": float(loss.detach()),
-                "distill/grad_norm": float(
-                    grad_norm.detach() if torch.is_tensor(grad_norm) else grad_norm
-                ),
-                "distill/z_norm": float(z.norm(dim=-1).mean().detach()),
-                "distill/mu_p_norm": float(mu_p.norm(dim=-1).mean().detach()),
-                "distill/mu_q_norm": float(mu_q.norm(dim=-1).mean().detach()),
+                "distill/beta_kl": self.beta_kl,
+                "distill/action_loss": loss_act.detach(),
+                "distill/kl": kl_diag.detach(),
+                "distill/kl_loss": loss_kl.detach(),
+                "distill/kl_active_frac": kl_active_frac.detach(),
+                "distill/scale_loss": loss_scale.detach(),
+                "distill/tc_loss": loss_tc.detach(),
+                "distill/goal_loss": loss_goal.detach(),
+                "distill/total_loss": loss.detach(),
+                "distill/grad_norm": grad_norm.detach() if torch.is_tensor(grad_norm) else grad_norm,
+                "distill/z_norm": z.norm(dim=-1).mean().detach(),
+                "distill/mu_p_norm": mu_p.norm(dim=-1).mean().detach(),
+                "distill/mu_q_norm": mu_q.norm(dim=-1).mean().detach(),
             }
 
     def _update_ppo(self, actor: bool = True, critic: bool = True) -> dict:
@@ -814,23 +835,24 @@ class InterPriorPolicy(TensorDictModuleBase):
             keys = [k for k in keys if k not in ("z", "action_log_prob")]
         td = batch.select(*keys)
         infos = []
-        for _ in range(self.cfg.ppo_epochs):
-            for minibatch in make_batch(td, self.cfg.num_minibatches):
-                infos.append(
-                    self._update_actor_critic(
-                        minibatch, ret_var, update_actor=actor, update_critic=critic
+        with hold_out_net(self.prior):
+            for _ in range(self.cfg.ppo_epochs):
+                for minibatch in make_batch(td, self.cfg.num_minibatches):
+                    infos.append(
+                        self._update_actor_critic(
+                            minibatch, ret_var, update_actor=actor, update_critic=critic
+                        )
                     )
-                )
 
         out = {}
         keys = infos[0].keys()
         for k in keys:
-            out[k] = sum(d[k] for d in infos) / len(infos)
-        out["critic/adv_mean"] = float(adv_mean.detach())
-        out["critic/adv_std"] = float(adv_std.detach())
-        out["critic/value_mean"] = float(batch["ret"].mean().detach())
-        out["critic/value_std"] = float(batch["ret"].std().detach())
-        return out
+            out[k] = sum(d[k] for d in infos).item() / len(infos)
+        out["critic/adv_mean"] = adv_mean.detach().item()
+        out["critic/adv_std"] = adv_std.detach().item()
+        out["critic/value_mean"] = batch["ret"].mean().detach().item()
+        out["critic/value_std"] = batch["ret"].std().detach().item()
+        return dict(sorted(out.items()))
 
     def _update_actor_critic(
         self,
@@ -849,7 +871,7 @@ class InterPriorPolicy(TensorDictModuleBase):
         info: dict = {}
 
         if update_actor:
-            loc, scale = self.student(minibatch["prior_inp"])
+            loc, scale = self.student_actor(minibatch["prior_inp"])
             dist = IndependentNormal(loc, scale)
             z = minibatch["z"]
             log_probs = dist.log_prob(z).unsqueeze(-1)
@@ -867,21 +889,36 @@ class InterPriorPolicy(TensorDictModuleBase):
 
             loss = loss + policy_loss + entropy_loss
             with torch.no_grad():
+                loc_prior, _ = self.prior(minibatch["prior_inp"])
+                # Match rollout: decoder sees normalized latents when configured.
+                z_dec = (
+                    F.normalize(loc, dim=-1, eps=1e-6)
+                    if self.cfg.normalize_z
+                    else loc
+                )
+                z_prior_dec = (
+                    F.normalize(loc_prior, dim=-1, eps=1e-6)
+                    if self.cfg.normalize_z
+                    else loc_prior
+                )
+                policy_n = minibatch["_policy_normed"]
+                decoded_action = self.decoder_action(
+                    self.decoder_trunk(torch.cat([policy_n, z_dec], dim=-1))
+                )
+                decoded_action_prior = self.decoder_action(
+                    self.decoder_trunk(torch.cat([policy_n, z_prior_dec], dim=-1))
+                )
                 eps_neg, eps_pos = self.clip_param
                 ratio_det = ratio.detach()
                 info.update(
                     {
-                        "actor/policy_loss": float(policy_loss.detach()),
-                        "actor/entropy": float(entropy.detach()),
-                        "actor/approx_kl": float(
-                            ((ratio_det - 1.0) - log_ratio.detach()).mean()
-                        ),
-                        "actor/clamp_pos": float(
-                            (ratio_det > 1.0 + eps_pos).float().mean()
-                        ),
-                        "actor/clamp_neg": float(
-                            (ratio_det < 1.0 - eps_neg).float().mean()
-                        ),
+                        "actor/policy_loss": policy_loss.detach(),
+                        "actor/entropy": entropy.detach(),
+                        "actor/approx_kl": ((ratio_det - 1.0) - log_ratio.detach()).mean(),
+                        "actor/clamp_pos": (ratio_det > 1.0 + eps_pos).float().mean(),
+                        "actor/clamp_neg": (ratio_det < 1.0 - eps_neg).float().mean(),
+                        "actor/loc_diff": (loc - loc_prior).norm(dim=-1).mean(),
+                        "actor/decoded_action_diff": (decoded_action - decoded_action_prior).norm(dim=-1).mean(),
                     }
                 )
 
@@ -891,10 +928,8 @@ class InterPriorPolicy(TensorDictModuleBase):
             value_loss = (value_loss.reshape_as(valid) * valid).sum() / valid_cnt
             loss = loss + self.cfg.value_loss_coef * value_loss
             with torch.no_grad():
-                info["critic/value_loss"] = float(value_loss.detach())
-                info["critic/explained_var"] = float(
-                    (1.0 - value_loss / ret_var).detach()
-                )
+                info["critic/value_loss"] = value_loss.detach()
+                info["critic/explained_var"] = (1.0 - value_loss / ret_var).detach()
 
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -902,20 +937,12 @@ class InterPriorPolicy(TensorDictModuleBase):
             actor_grad_norm = nn.utils.clip_grad_norm_(
                 self.opt.param_groups[0]["params"], 1.0
             )
-            info["actor/grad_norm"] = float(
-                actor_grad_norm.detach()
-                if torch.is_tensor(actor_grad_norm)
-                else actor_grad_norm
-            )
+            info["actor/grad_norm"] = actor_grad_norm.detach() if torch.is_tensor(actor_grad_norm) else actor_grad_norm
         if update_critic:
             critic_grad_norm = nn.utils.clip_grad_norm_(
                 self.opt.param_groups[1]["params"], 1.0
             )
-            info["critic/grad_norm"] = float(
-                critic_grad_norm.detach()
-                if torch.is_tensor(critic_grad_norm)
-                else critic_grad_norm
-            )
+            info["critic/grad_norm"] = critic_grad_norm.detach() if torch.is_tensor(critic_grad_norm) else critic_grad_norm
         self.opt.step()
         return info
 
@@ -925,25 +952,25 @@ class InterPriorPolicy(TensorDictModuleBase):
 
     def state_dict(self):
         state_dict = OrderedDict()
-        for name, module in self.named_children():
-            state_dict[name] = module.state_dict()
+        for name in self._CHECKPOINT_MODULES:
+            state_dict[name] = getattr(self, name).state_dict()
         state_dict["global_step"] = self.global_step
         state_dict["student_frac"] = self.student_frac
         state_dict["beta_kl"] = self.beta_kl
+        state_dict["stage"] = self.cfg.stage
         return state_dict
 
     def load_state_dict(self, state_dict, strict: bool = True):
         succeed_keys = []
         failed_keys = []
-        for name, module in self.named_children():
+        for name in self._CHECKPOINT_MODULES:
+            module = getattr(self, name)
             _sd = state_dict.get(name, {})
             if not _sd:
                 continue
             try:
                 module.load_state_dict(_sd, strict=strict)
                 succeed_keys.append(name)
-                if name == "student":
-                    self._student_loaded = True
             except Exception as e:
                 warnings.warn(f"Failed to load state dict for {name}: {str(e)}")
                 failed_keys.append(name)
@@ -953,5 +980,10 @@ class InterPriorPolicy(TensorDictModuleBase):
             self.student_frac = float(state_dict["student_frac"])
         if "beta_kl" in state_dict:
             self.beta_kl = float(state_dict["beta_kl"])
+        # Distill runs save an unused random student; only treat student as
+        # "already finetuned" when resuming an RL-stage checkpoint.
+        ckpt_stage = state_dict.get("stage", "distill")
+        if "student" in succeed_keys and ckpt_stage == "rl":
+            self._student_loaded = True
         print(f"Successfully loaded {succeed_keys}.")
         return failed_keys
