@@ -239,12 +239,12 @@ class IsaacSceneAdapter(SceneAdapter):
     def create_frame_marker(
         self,
         prim_path: str,
-        scale: tuple[float, float, float] = (0.5, 0.5, 0.5),
+        scale: tuple[float, float, float] = (0.1, 0.1, 0.1),
     ):
         """Create an Isaac Lab VisualizationMarkers with a single frame (for GUI debug).
 
-        Returns a VisualizationMarkers instance. Call .set_visibility(True) and
-        .visualize(positions_tensor) to use it.
+        Returns a VisualizationMarkers instance. Call
+        ``.visualize(translations=..., orientations=...)`` (WXYZ) to update poses.
         """
         from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, ISAAC_NUCLEUS_DIR
         import isaaclab.sim as sim_utils

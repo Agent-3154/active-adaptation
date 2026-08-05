@@ -18,13 +18,13 @@ if TYPE_CHECKING:
     from mjlab.viewer.viewer_config import ViewerConfig
 
 
-class _NoopSphereMarker:
+class _NoopMarker:
     """Fallback marker for headless mode or unavailable viewer."""
 
     def set_visibility(self, visible: bool) -> None:  # noqa: ARG002
         return
 
-    def visualize(self, translations=None, positions=None) -> None:  # noqa: ANN001,ARG002
+    def visualize(self, *args, **kwargs) -> None:  # noqa: ANN002,ARG002
         return
 
 
@@ -398,22 +398,24 @@ class MjlabSceneAdapter(SceneAdapter):
     
     def create_sphere_marker(
         self,
-        name: str,
+        prim_path: str,
         color: tuple[float, float, float],
         radius: float = 0.05,
     ):
         if self._viewer is None:
-            return _NoopSphereMarker()
-        return _MjlabSphereMarker(self._viewer, name=name, color=color, radius=radius)
+            return _NoopMarker()
+        return _MjlabSphereMarker(
+            self._viewer, name=prim_path, color=color, radius=radius
+        )
 
     def create_frame_marker(
         self,
-        name: str,
-        scale: tuple[float, float, float] = (0.5, 0.5, 0.5),
+        prim_path: str,
+        scale: tuple[float, float, float] = (0.1, 0.1, 0.1),
     ):
         if self._viewer is None:
-            return _NoopSphereMarker()
-        return _MjlabFrameMarker(self._viewer, name=name, scale=scale)
+            return _NoopMarker()
+        return _MjlabFrameMarker(self._viewer, name=prim_path, scale=scale)
 
     def create_camera_frustum(
         self,
