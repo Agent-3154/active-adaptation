@@ -274,7 +274,49 @@ class actuator_params(Randomization):
         default_gainprm = self.env.sim.get_default_field("actuator_gainprm")
         default_biasprm = self.env.sim.get_default_field("actuator_biasprm")
 
+        builtin_target_names = {
+            target_name
+            for actuator in self.asset.actuators
+            if isinstance(actuator, BuiltinPositionActuator)
+            for target_name in actuator.target_names
+        }
+        ids, ranges = self._matching_mjlab_builtin_ranges(
+            self.asset.actuator_names,
+            kp_by_name,
+            builtin_target_names,
+        )
+        if ids:
+            ctrl_ids = self.asset.indexing.ctrl_ids[
+                torch.tensor(ids, device=self.device, dtype=torch.long)
+            ]
+            low, high = torch.tensor(ranges, device=self.device).unbind(1)
+            self.kp_implicit.append(
+                (
+                    ctrl_ids,
+                    default_gainprm[ctrl_ids, 0],
+                    default_biasprm[ctrl_ids, 1],
+                    low,
+                    high,
+                )
+            )
+
+        ids, ranges = self._matching_mjlab_builtin_ranges(
+            self.asset.actuator_names,
+            kd_by_name,
+            builtin_target_names,
+        )
+        if ids:
+            ctrl_ids = self.asset.indexing.ctrl_ids[
+                torch.tensor(ids, device=self.device, dtype=torch.long)
+            ]
+            low, high = torch.tensor(ranges, device=self.device).unbind(1)
+            self.kd_implicit.append(
+                (ctrl_ids, default_biasprm[ctrl_ids, 2], low, high)
+            )
+
         for actuator in self.asset.actuators:
+            if not isinstance(actuator, IdealPdActuator):
+                continue
             local_ids, ranges = self._matching_mjlab_actuator_ranges(
                 actuator, kp_by_name
             )
@@ -283,19 +325,7 @@ class actuator_params(Randomization):
                     local_ids, device=self.device, dtype=torch.long
                 )
                 low, high = torch.tensor(ranges, device=self.device).unbind(1)
-                if isinstance(actuator, BuiltinPositionActuator):
-                    ctrl_ids = actuator.global_ctrl_ids[local_ids]
-                    self.kp_implicit.append(
-                        (
-                            ctrl_ids,
-                            default_gainprm[ctrl_ids, 0],
-                            default_biasprm[ctrl_ids, 1],
-                            low,
-                            high,
-                        )
-                    )
-                else:
-                    self.kp_explicit.append((actuator, local_ids, low, high))
+                self.kp_explicit.append((actuator, local_ids, low, high))
 
             local_ids, ranges = self._matching_mjlab_actuator_ranges(
                 actuator, kd_by_name
@@ -305,13 +335,7 @@ class actuator_params(Randomization):
                     local_ids, device=self.device, dtype=torch.long
                 )
                 low, high = torch.tensor(ranges, device=self.device).unbind(1)
-                if isinstance(actuator, BuiltinPositionActuator):
-                    ctrl_ids = actuator.global_ctrl_ids[local_ids]
-                    self.kd_implicit.append(
-                        (ctrl_ids, default_biasprm[ctrl_ids, 2], low, high)
-                    )
-                else:
-                    self.kd_explicit.append((actuator, local_ids, low, high))
+                self.kd_explicit.append((actuator, local_ids, low, high))
 
         if self.armature_range is not None:
             arm_ids, _, arm_ranges = string_utils.resolve_matching_names_values(
@@ -368,6 +392,23 @@ class actuator_params(Randomization):
                 local_ids.append(local_id)
                 ranges.append(ranges_by_name[target_name])
         return local_ids, ranges
+
+    @staticmethod
+    def _matching_mjlab_builtin_ranges(
+        actuator_names,
+        ranges_by_name,
+        builtin_target_names,
+    ):
+        ids = []
+        ranges = []
+        for actuator_id, actuator_name in enumerate(actuator_names):
+            if (
+                actuator_name in builtin_target_names
+                and actuator_name in ranges_by_name
+            ):
+                ids.append(actuator_id)
+                ranges.append(ranges_by_name[actuator_name])
+        return ids, ranges
 
     def _validate_log_uniform_range(self, range_name: str, low: torch.Tensor, high: torch.Tensor):
         if torch.any(low <= 0.0) or torch.any(high <= 0.0):
@@ -706,10 +747,18 @@ class perturb_body_materials(Randomization):
 class perturb_body_mass(Randomization):
     supported_backends = ("isaaclab", "mjlab")
     def __init__(
-        self, env, **perturb_ranges: Tuple[float, float]
+        self,
+        env,
+        operation: str = "scale",
+        **perturb_ranges: Tuple[float, float],
     ):
         super().__init__(env)
         self.asset = self.env.scene.articulations["robot"]
+        if operation not in {"scale", "add"}:
+            raise ValueError(
+                f"Body-mass perturbation operation must be 'scale' or 'add', got {operation!r}"
+            )
+        self.operation = operation
 
         self.body_ids, self.body_names, values = string_utils.resolve_matching_names_values(
             perturb_ranges, self.asset.body_names
@@ -739,10 +788,17 @@ class perturb_body_mass(Randomization):
         if self.env.backend == "isaaclab":
             masses = self.asset.data.default_mass.clone()
             inertias = self.asset.data.default_inertia.clone()
-            scale = uniform(
+            sample = uniform(
                 self.mass_ranges[:, 0].expand_as(masses[:, self.body_ids]),
                 self.mass_ranges[:, 1].expand_as(masses[:, self.body_ids])
             ).cpu()
+            if self.operation == "scale":
+                scale = sample
+            else:
+                default_mass = masses[:, self.body_ids]
+                scale = (default_mass + sample) / default_mass
+                if torch.any(scale <= 0.0):
+                    raise ValueError("Additive body-mass perturbation produced non-positive mass")
             masses[:, self.body_ids] *= scale
             inertias[:, self.body_ids] *= scale.unsqueeze(-1)
             indices = torch.arange(self.asset.num_instances)
@@ -753,10 +809,16 @@ class perturb_body_mass(Randomization):
             num_bodies = self.global_body_ids.numel()
             low = self.mass_ranges[:, 0].unsqueeze(0).expand(self.num_envs, num_bodies)
             high = self.mass_ranges[:, 1].unsqueeze(0).expand(self.num_envs, num_bodies)
-            scale = uniform(low, high)
+            sample = uniform(low, high)
 
             model = self.env.sim.model
-            new_mass = self._default_body_mass * scale
+            if self.operation == "scale":
+                new_mass = self._default_body_mass * sample
+            else:
+                new_mass = self._default_body_mass + sample
+                if torch.any(new_mass <= 0.0):
+                    raise ValueError("Additive body-mass perturbation produced non-positive mass")
+            scale = new_mass / self._default_body_mass
             model.body_mass[:, self.global_body_ids] = new_mass
             model.body_inertia[:, self.global_body_ids] = (
                 self._default_body_inertia * scale.unsqueeze(-1)
