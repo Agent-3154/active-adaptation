@@ -44,7 +44,8 @@ class Command(MDPComponent, RegistryMixin):
 
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor | None:
         init_root_state = self.init_root_state[env_ids]
-        origins = self.env.scene.get_spawn_origins(env_ids)
+        origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
+        self.env.episode_origin[env_ids] = origins
         init_root_state[:, :3] += origins
         init_root_state[:, 3:7] = quat_mul(
             init_root_state[:, 3:7],
@@ -110,7 +111,8 @@ class CommandV2(MDPComponent, RegistryMixin):
 
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor | None:
         init_root_state = self.init_root_state[env_ids]
-        origins = self.env.scene.get_spawn_origins(env_ids)
+        origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
+        self.env.episode_origin[env_ids] = origins
         init_root_state[:, :3] += origins
         init_root_state[:, 3:7] = quat_mul(
             init_root_state[:, 3:7],

@@ -32,6 +32,11 @@ dependencies = [
     "matplotlib>=3.11.1",
 ]
 
+[project.optional-dependencies]
+render = [
+    "fvdb-core[viewer]==0.5.1+pt211.cu130",
+]
+
 [project.scripts]
 aa-create-project = "active_adaptation.cli:aa_create_project"
 aa-discover-projects = "active_adaptation.cli:aa_discover_projects"
@@ -66,8 +71,14 @@ name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
+[[tool.uv.index]]
+name = "fvdb"
+url = "https://d36m13axqqhiit.cloudfront.net/simple"
+explicit = true
+
 [tool.uv.sources]
 # Force CUDA 12.8-compatible PyTorch wheels instead of default cu13x builds.
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
+fvdb-core = { index = "fvdb" }

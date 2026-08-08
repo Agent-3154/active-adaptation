@@ -52,21 +52,35 @@ class IsaacSimAdapter(SimAdapter):
     def __init__(self, sim: "SimulationContext", viser_viewer: IsaacViserViewer = None):
         self._sim = sim
         self._viser_viewer = viser_viewer
+        self._kit_rendered_this_step = False
 
     def get_physics_dt(self) -> float:
         return self._sim.get_physics_dt()
 
     def has_gui(self) -> bool:
-        # True for Omniverse GUI *or* browser Viser (debug callbacks / mesh sync).
+        # True for Omniverse Kit GUI *or* browser Viser (debug callbacks / mesh sync).
         return self._sim.has_gui() or self._viser_viewer is not None
 
-    def step(self, render: bool = False) -> None:
-        self._sim.step(render=render)
-        if render and self._viser_viewer is not None:
+    def step(self) -> None:
+        self._kit_rendered_this_step = False
+        self._sim.step(render=False)
+
+    def render_sensors(self) -> None:
+        # Isaac Lab camera products require a Kit render pass.
+        self._sim.render()
+        self._kit_rendered_this_step = True
+
+    def render_gui(self) -> None:
+        # Kit couples viewport and sensor render; skip a second Kit pass if
+        # render_sensors() already ran this physics step.
+        if not self._kit_rendered_this_step and self._sim.has_gui():
+            self._sim.render()
+            self._kit_rendered_this_step = True
+        if self._viser_viewer is not None:
             self._viser_viewer.update()
 
     def render(self) -> None:
-        self._sim.render()
+        self.render_gui()
 
     def set_camera_view(self, eye=None, target=None, **kwargs) -> None:
         if eye is not None and target is not None:
@@ -303,7 +317,9 @@ class IsaacSceneAdapter(SceneAdapter):
             self._viser_viewer.plot(x, size=size, color=color)
 
     @override
-    def get_spawn_origins(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def sample_spawn_origin_candidates(
+        self, env_ids: torch.Tensor
+    ) -> torch.Tensor:
         if self._scene.terrain.terrain_origins is None:
             return self.env_origins[env_ids]
 
@@ -315,7 +331,7 @@ class IsaacSceneAdapter(SceneAdapter):
             device=env_ids.device,
         )
         return terrain_origins[idx]
-    
+
     def reset_to(self, state: dict, env_ids: torch.Tensor):
         self._scene.reset_to(state, env_ids=env_ids)
     

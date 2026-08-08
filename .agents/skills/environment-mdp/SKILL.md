@@ -43,6 +43,8 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 6. **Simulation name order** — Isaac and MuJoCo/mjlab typically use different joint/body orders. Resolve names via `asset.cfg.joint_names_simulation` / `asset.cfg.body_names_simulation` (helpers `find_joints` / `find_bodies` in `envs/utils/api.py`), **not** `asset.find_joints` / `asset.find_bodies`. Critical for action and observation terms so trained policies transfer across backends.
 7. **Contact sensor indices** — mjlab’s contact sensor has no `find_bodies`. Use `find_sensor_bodies(asset, contact_sensor, pattern)` so articulation and sensor indices stay aligned in simulation order.
 8. **Contact sensor data fields differ by backend** — do **not** assume a shared `sensor.data.*` API. Isaac uses `ContactSensorData` (`net_forces_w`, …); mjlab uses `ContactData` (`force`, `found`, …) and only populates fields listed in `ContactSensorCfg.fields`. Branch on `env.backend` or use a thin helper when reading forces / air time.
+9. **Never smoke-test with the shared root venv** — it is by design incomplete. Use `uv run --project venv/isaac51` (or `isaac60` / `mjlab`). See [.agents/skills/README.md](../README.md#smoke-tests--running-code).
+10. **Write ``env.episode_origin`` in ``sample_init``** — after choosing origins (e.g. via `scene.sample_spawn_origin_candidates`), set `env.episode_origin[env_ids] = origins`. Use `episode_origin` (not `scene.env_origins`) for shared 3DGS / episode-local frames. See [Episode origins](#episode-origins).
 
 ---
 
@@ -60,9 +62,10 @@ Task Progress:
 - [ ] Optional lifecycle: update, reset(env_ids, tensordict), pre_step, post_step, startup, debug_draw
 - [ ] If `debug_draw`: use `env.scene.draw_*` / `create_camera_frustum` (not `env.debug_draw`)
 - [ ] Optional: symmetry_transform (obs/action) for symaug
+- [ ] If overriding `sample_init`: write `env.episode_origin[env_ids] = origins` used for spawn
 - [ ] Ensure module is imported (auto-import or explicit in package __init__)
 - [ ] Wire into cfg/task/ YAML
-- [ ] Smoke: instantiate env and step once (or train a few iters)
+- [ ] Smoke via backend venv (`uv run --project venv/isaac51|mjlab`): instantiate env and step once
 ```
 
 ---
@@ -111,7 +114,7 @@ def _initialize(self, env):
 | Reward | `reward.<group>.<name>` | `RewardV2.make` | `_compute() -> Tensor` or `(rew, is_active)` | `compute()` applies `weight` + modifier + EMA |
 | Termination | `termination.<name>` | `TerminationV2.make` | `compute(terminated) -> bool Tensor` or `(term, discount)` | `is_timeout=True` → truncated |
 | Action | `input.<name>` | `ActionV2.make` | `process_action`, `apply_action` | Set `action_dim`; often `symmetry_transform` |
-| Command | `command` | `CommandV2.make` | `sync_state`, `update` | Also `sample_init` for resets; see step order |
+| Command | `command` | `CommandV2.make` | `sync_state`, `update` | Also `sample_init` (must set `env.episode_origin`); see step order |
 | Randomization | `randomization.<name>` | `RandomizationV2.make` | lifecycle hooks as needed | mjlab: declare `mj_fields` if expanding model |
 
 ### Minimal examples
@@ -204,6 +207,35 @@ def update(self):
 
 ---
 
+## Episode origins
+
+Multi-env layouts and shared appearance (one 3DGS / local frame for all envs) need a clear split:
+
+| Buffer | Owner | Meaning |
+|--------|--------|---------|
+| `scene.env_origins` | Scene / terrain | Persistent **layout / curriculum** slots (grid or terrain levels) |
+| `env.episode_origin` | Env (`(N, 3)`) | Origin used for the **current episode** (what was added in `sample_init`) |
+
+**Contract:** every `sample_init` (including overrides) must write the origins it actually uses:
+
+```python
+def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+    origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
+    self.env.episode_origin[env_ids] = origins
+    init_root_state = self.init_root_state[env_ids]
+    init_root_state[:, :3] += origins
+    ...
+    return init_root_state
+```
+
+- `scene.sample_spawn_origin_candidates(env_ids)` — unstamped candidates. Default: `env_origins[env_ids]`. Isaac may random-sample a terrain patch when procedural terrain is active.
+- For episode-local math (shared 3DGS, motion refs in env frame, etc.) subtract / add **`env.episode_origin`**, not `scene.env_origins`.
+- Base `Command` / `CommandV2.sample_init` already follows this pattern; overrides that skip `super()` must set `episode_origin` themselves.
+
+`gs_camera` with `origin: env` renders at `mount_pos_w - env.episode_origin` so all envs share one PLY around the episode frame.
+
+---
+
 ## Reset API
 
 **Required signature** (all MDP terms):
@@ -259,6 +291,18 @@ Use **`env.scene`** (`SceneAdapter`) for all MDP debug drawing. Do **not** use `
 |---------|------------------------|
 | Isaac | Omniverse Kit GUI **or** `viewer.viser: true` (`IsaacViserViewer`) |
 | mjlab | Not headless (`MjLabViewer` present) |
+
+**GUI vs sensor rendering** (separate `SimAdapter` APIs):
+
+| Call | When | Isaac | mjlab |
+|------|------|-------|-------|
+| `sim.step()` | every physics substep | physics only | physics only |
+| `sim.render_sensors()` | last substep if `env.sensor_render_enabled` | Kit `render()` (cameras) | `Simulation.sense()` |
+| `sim.render_gui()` | last substep if GUI, ~30 Hz | Kit viewport (coalesced) + Viser | `MjLabViewer.update()` |
+
+Native camera obs terms set `env.sensor_render_enabled = True` in `_initialize`.
+
+**3DGS / visual world (option A):** appearance is **not** on `sim`. Load via `task.visual` → `env.visual` (`VisualWorld`, e.g. `FvdbGaussianWorld`). Observation `gs_camera` calls `env.visual.render` in `update`/`compute` — no `sensor_render_enabled`. With `origin: env` (default for shared scenes), camera poses are expressed relative to `env.episode_origin` (must be set in `sample_init`; see [Episode origins](#episode-origins)). InteriorGS dirs also ship `{id}_collision.usd` (same frame as the PLY); `FvdbGaussianWorld` loads it for Isaac Viser (`/visual/collision`, visible; 3DGS stays hidden). Physics use of that mesh (replace ground plane) is not wired yet — still on `scene`. Placeholder PLY: `envs/visual/fvdb_gs.py` → `PLY_PATH_PLACEHOLDER`. See `aa-scenes` layout / `aa_scenes.collision`.
 
 Gate optional expensive viz with `if self.env.sim.has_gui():` (or a term-local `debug_vis` flag). Prefer `scene.draw_*` unconditionally inside `debug_draw` when the callback is only registered/useful with a GUI — adapters no-op when the viewer is absent.
 
@@ -381,6 +425,8 @@ Isaac/mjlab **Viser** robot meshes (viewer internals, not MDP terms): same body-
 - Subclassing legacy `Reward` / `Observation` / …
 - Putting command resampling or next-step target writes in `sync_state` (use `update`)
 - Re-evaluating next-step command/obs targets in `reset` “to fix” the first obs (that obs is discarded via `is_init`)
+- Overriding `sample_init` without writing `env.episode_origin[env_ids]` (shared 3DGS / episode-local consumers break)
+- Subtracting `scene.env_origins` for episode-local frames when spawn was randomized — use `env.episode_origin`
 - Forgetting to import the module (class never enters the registry)
 - Returning unbatched reward/obs tensors
 - Registering empty `update`/`reset` overrides unintentionally (they still run every step/reset)

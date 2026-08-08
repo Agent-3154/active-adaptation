@@ -550,7 +550,8 @@ class LocoManipSparse(LocoManipSparseBase):
     @override
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
         """Spawn near env origin (goal) or on a tighter ring (traj)."""
-        origins = self.env.scene.get_spawn_origins(env_ids)
+        origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
+        self.env.episode_origin[env_ids] = origins
         robot_init = self.init_root_state[env_ids].clone()
         default_z_offset = robot_init[:, 2].clone()
 
@@ -639,7 +640,7 @@ class LocoManipSparse(LocoManipSparseBase):
 
         if traj_ids.numel() > 0:
             n = traj_ids.numel()
-            origins = self.env.scene.env_origins[traj_ids]
+            origins = self.env.episode_origin[traj_ids]
             center = origins.clone()
             center[:, 2] = (
                 self.env.get_ground_height_at(origins)
@@ -997,7 +998,8 @@ class LocoManipSparseReplay(LocoManipSparseBase):
     @override
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
         """Spawn near env origins (small polar jitter)."""
-        origins = self.env.scene.get_spawn_origins(env_ids)
+        origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
+        self.env.episode_origin[env_ids] = origins
         robot_init = self.init_root_state[env_ids].clone()
         default_z_offset = robot_init[:, 2].clone()
         n = len(env_ids)

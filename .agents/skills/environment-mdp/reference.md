@@ -327,7 +327,16 @@ handle.wxyz = quat_wxyz
 handle.image = hwc_uint8
 ```
 
-Env backends register `scene.clear_debug` as the **first** `debug_draw` callback so each frame starts empty, then term callbacks append primitives; viewers sync on `sim.step(render=True)` / `viewer.update()`.
+Env backends register `scene.clear_debug` as the **first** `debug_draw` callback so each frame starts empty, then term callbacks append primitives; viewers sync on `sim.render_gui()` / `viewer.update()` (throttled ~30 Hz). Native MDP cameras request `env.sensor_render_enabled` → `sim.render_sensors()` each control step (Isaac Kit render / mjlab `sense()`). 3DGS uses `env.visual` + `gs_camera` → `visual.render` (option A); with `origin: env`, poses are relative to `env.episode_origin` (set in `sample_init`). Isaac Viser also uploads InteriorGS `*_collision.usd` as `/visual/collision` (visible; splat stays hidden). Physics collision from that mesh is not wired yet.
+
+### Episode origins (`env.episode_origin`)
+
+| Buffer | Meaning |
+|--------|---------|
+| `scene.env_origins` | Layout / curriculum slots |
+| `env.episode_origin` | Origin used this episode (`sample_init` must write it) |
+
+Candidates: `scene.sample_spawn_origin_candidates(env_ids)`. Shared appearance / episode-local math uses `episode_origin`, not `env_origins`.
 
 ### Backend behavior
 

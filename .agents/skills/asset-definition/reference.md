@@ -157,6 +157,8 @@ Shared: `target_names_expr`, `armature` / `frictionloss` / `viscous_damping` (`N
 
 Zoo pattern (for reference only): armature from reflected rotor inertia; stiffness = armature × ω²; multi-group disjoint regexes — still prefer wrapping those gains in `BuiltinPdActuatorCfg` inside AA.
 
+Mimic / coupled DOFs: put `<equality>` in the MJCF and **omit** mimic joints from `target_names_expr`. See [Mimic / coupled joints](#mimic--coupled-joints).
+
 ### CollisionCfg
 
 ```python
@@ -267,6 +269,70 @@ See [mjlab API](#mjlab-api) for why Pd (not Position) is required when actions s
 
 ---
 
+## Mimic / coupled joints
+
+Hands and grippers often expose more DOFs than motors. Encode coupling in the **model**, not only in action code.
+
+### Mapping
+
+URDF on the dependent joint:
+
+```xml
+<joint name="L_thumb_distal_joint" type="revolute">
+  ...
+  <mimic joint="L_thumb_proximal_pitch_joint" multiplier="2.4" offset="0"/>
+</joint>
+```
+
+means `q_mimic = offset + multiplier * q_driver`.
+
+MJCF has **no** `<mimic>` attribute. Equivalent:
+
+```xml
+<equality>
+  <!-- q2 = c0 + c1*q1 + c2*q1^2 + c3*q1^3 + c4*q1^4 -->
+  <joint joint1="L_thumb_proximal_pitch_joint"
+         joint2="L_thumb_distal_joint"
+         polycoef="0 2.4 0 0 0"/>
+</equality>
+```
+
+| URDF | MJCF |
+|------|------|
+| `joint="driver"` | `joint1` (independent) |
+| this joint (mimic) | `joint2` (dependent) |
+| `offset`, `multiplier` | `polycoef = "offset multiplier 0 0 0"` |
+
+Smoke: `mujoco.MjModel.from_xml_path(...); assert model.neq == N`.
+
+### Actuators
+
+| Backend | Drivers | Mimics |
+|---------|---------|--------|
+| Isaac `ImplicitActuatorCfg` | Real stiffness/damping | Separate group with `stiffness=0`, `damping=0` (passive), **or** omit if PhysX mimic alone is trusted |
+| mjlab `BuiltinPdActuatorCfg` | `target_names_expr` = drivers only | **Omit** — unactuated joints are fine; equality owns them |
+
+Do not PD-actuate mimic joints on mjlab while equality is active (controller fights the constraint).
+
+### MDP / actions
+
+- Keep mimic joint **names** in `JOINT_NAMES_SIMULATION` / symmetry maps (bodies still exist; obs/rewards may index them).
+- Task `action_scaling` / `JointPosition` / `BiDexHands`: **drivers only**.
+- `MimicJointPosition` (software target copy): optional Isaac aid when URDF mimic + passive actuators need mirrored position targets; **not** a substitute for missing MJCF `<equality>` on mjlab.
+
+### Reference implementations
+
+| Example | Where |
+|---------|--------|
+| Opposing gripper fingers | mjlab zoo `i2rt_yam` — equality `polycoef="0 -1 …"`; actuate one finger |
+| Inspire hand (12 mimics) | `aa-projects/object_hoi` — URDF `<mimic>`; MJCF 12 equalities; Isaac `hand` / `hand_passive`; mjlab driver-only `BuiltinPdActuatorCfg` |
+
+### Init / reset
+
+`INIT_JOINT_POS` and motion resets should be **consistent** with multipliers when both driver and mimic qpos are written; otherwise the equality solver corrects mimics after the first step. Prefer writing drivers (and consistent mimics) or relying on equality after a driver-only write.
+
+---
+
 ## Contact sensors
 
 | | Isaac | mjlab |
@@ -334,6 +400,7 @@ Use this when refactoring; do not expand these patterns.
 3. **`go2.py`** — add Isaac `make_isaaclab_cfg` + USD; switch mjlab to `BuiltinPdActuatorCfg`.
 4. **`b2.py` / `g1.py` / manipulators** — replace `BuiltinPositionActuatorCfg` with `BuiltinPdActuatorCfg`; add contact sensors where missing.
 5. **`spawn.py`** — Isaac-only experimental cloner; unrelated to AssetSpec; candidate for removal if unused.
+6. **Hands without MJCF equality** — if URDF has `<mimic>` but MJCF does not, add `<equality>` and drop mjlab actuators on mimic joints (see [Mimic / coupled joints](#mimic--coupled-joints)).
 
 ### Medium
 
@@ -367,7 +434,8 @@ After adding an asset:
 1. Import path: `from active_adaptation.assets import …` (or start training) prints registry registration.
 2. Isaac: create env with `robot.name`; assert `robot.joint_names` covers `joint_names_simulation`.
 3. mjlab: same; assert contact sensor `primary_names` align via `find_sensor_bodies`.
-4. Optional: one PPO/off-policy step on each backend; confirm obs dim identical.
+4. If mimic joints: `model.neq` matches expected count; action dim excludes mimics; drivers move mimics under contact.
+5. Optional: one PPO/off-policy step on each backend; confirm obs dim identical.
 
 ---
 
@@ -376,3 +444,4 @@ After adding an asset:
 - [environment-mdp](../environment-mdp/SKILL.md) — MDP terms and index helpers
 - [onpolicy-algorithms](../onpolicy-algorithms/SKILL.md) — symmetry augmentation consumers
 - mjlab docs: `docs/source/entity/index.rst`, `actuators.rst`, `sensors/index.rst`, `scene.rst`, `faq.rst`
+- mjlab zoo equality example: `asset_zoo/robots/i2rt_yam/xmls/yam.xml`

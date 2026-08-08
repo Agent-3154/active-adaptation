@@ -640,7 +640,7 @@ class uw_camera(ObservationV2):
     @override
     def _initialize(self, env: "_EnvBase") -> None:
         super()._initialize(env)
-        self.env.render_enabled = True
+        self.env.sensor_render_enabled = True
 
         self.camera: TiledCamera = self.env.scene.sensors[self.sensor_name]
         self.asset: Articulation = self.env.scene.articulations["robot"]

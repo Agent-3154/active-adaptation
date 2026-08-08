@@ -1,6 +1,6 @@
 ---
 name: asset-definition
-description: Define and register cross-backend robot/object assets in active-adaptation (Isaac Lab ArticulationCfg + mjlab EntityCfg via AssetSpec). Use when adding or editing files under assets/, wiring robot.name in cfg/task/, setting joint_names_simulation / body_names_simulation, contact sensors, actuators, symmetry mappings, AssetSpec wrappers, mjlab spec_fn/CollisionCfg/ContactMatch, floating props, or cleaning up outdated mujoco-backend / in-repo MJCF patterns.
+description: Define and register cross-backend robot/object assets in active-adaptation (Isaac Lab ArticulationCfg + mjlab EntityCfg via AssetSpec). Use when adding or editing files under assets/, wiring robot.name in cfg/task/, setting joint_names_simulation / body_names_simulation, contact sensors, actuators, URDF mimic / MJCF equality constraints, symmetry mappings, AssetSpec wrappers, mjlab spec_fn/CollisionCfg/ContactMatch, floating props, or cleaning up outdated mujoco-backend / in-repo MJCF patterns.
 ---
 
 # Asset definition (active-adaptation)
@@ -30,6 +30,7 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 - Porting an asset so it runs on both Isaac and mjlab
 - Fixing policy transfer bugs caused by joint/body order mismatch
 - Wiring `robot.name` in `cfg/task/**/*.yaml`
+- Configuring coupled / mimic joints (URDF `<mimic>` ↔ MJCF `<equality>`)
 - Cleaning outdated paths (`assets/Go2/`, `assets/G1/` vendored MJCF, `spawn.py`, mujoco backend branch)
 
 ---
@@ -45,6 +46,8 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 7. **Name parity** — joint/body names used by MDP, init regexes, and sensors must match across USD and MJCF (order may differ; the simulation lists fix layout).
 8. **No new mujoco-backend assets** — ignore `elif aa.get_backend() == "mujoco"` in `asset_cfg.py` for new work; prefer deleting it when cleaning.
 9. **mjlab actuators: `BuiltinPdActuatorCfg` by default** — AA joint actions often call both `set_joint_position_target` and `set_joint_velocity_target` (`envs/mdp/actions/joint.py`). Use `BuiltinPositionActuatorCfg` only when explicitly specified.
+10. **Mimic / coupled joints: physics constraints, drivers only** — Isaac: URDF `<mimic>`; mjlab: MJCF `<equality><joint …/></equality>` (no URDF-style mimic tag). Actuate **driver** joints only; leave mimics unactuated (or Isaac zero-gain / passive). Prefer physics coupling over software target-copy (`MimicJointPosition`) for mjlab. Details: [reference.md](reference.md#mimic--coupled-joints).
+11. **Never smoke-test with the shared root venv** — it is by design incomplete. Use `uv run --project venv/isaac51` and `uv run --project venv/mjlab`. See [.agents/skills/README.md](../README.md#smoke-tests--running-code).
 
 ---
 
@@ -58,10 +61,12 @@ Task Progress:
 - [ ] make_mjlab_cfg → EntityCfg (spec_fn → MjSpec) + ContactSensorCfg tuple
 - [ ] Both cfgs get the same joint_names_simulation / body_names_simulation / symmetry
 - [ ] Match actuator gains (stiffness, damping, effort, armature/friction) across backends
+- [ ] If mimic joints: URDF `<mimic>` (Isaac) + matching MJCF `<equality>` (mjlab); actuators cover drivers only
+- [ ] Action YAML `action_scaling` lists **drivers only** (mimics follow physics / optional Isaac `MimicJointPosition`)
 - [ ] make_cfg(backend) dispatcher; register under a stable name
 - [ ] Import module from assets/<family>/__init__.py
 - [ ] Set robot.name in cfg/task YAML
-- [ ] Smoke: instantiate env on isaac and mjlab; check joint/body counts and contact sensor
+- [ ] Smoke via backend venvs (`venv/isaac51` + `venv/mjlab`): joint/body counts and contact sensor
 ```
 
 ---
@@ -117,6 +122,7 @@ Helpers in `asset_cfg.py`: `to_simulation_joint_order`, `to_simulation_body_orde
 - Import from `active_adaptation.assets.asset_cfg`: `ArticulationCfg`, `ImplicitActuatorCfg`, `sim_utils`, `AssetSpec`
 - `spawn=sim_utils.UsdFileCfg(usd_path=..., activate_contact_sensors=True, ...)`
 - `actuators={...: ImplicitActuatorCfg(joint_names_expr=..., effort_limit_sim=..., stiffness=..., damping=..., armature=..., friction=...)}`
+- Split **driven** vs **mimic** groups when the URDF has `<mimic>`: drivers get real PD gains; mimics get zero stiffness/damping (`hand_passive`-style) so PhysX coupling owns them — see [Mimic joints](#mimic--coupled-joints)
 - Sensors as **dict**, typically:
 
 ```python
@@ -139,6 +145,7 @@ sensors = {
   - **Default: `BuiltinPdActuatorCfg`** — paired `<position>`+`<velocity>`; required when actions set both pos and vel targets (`JointReferenceModel`, `LeakyVelocity`, `JointPosition`+FF, etc. in `envs/mdp/actions/joint.py`)
   - `BuiltinPositionActuatorCfg` — only if explicitly specified (`<position>` only; vel target ignored / implied 0)
   - Match with `target_names_expr` regex tuple; wrong transmission namespace → hard error
+  - Mimic DOFs: **omit** from actuators (equality in MJCF drives them); do not PD-actuate intermediate/distal fingers, etc.
 - `collisions=(CollisionCfg(...),)` — **`disable_other_geoms=True` by default** (zeros contype/conaffinity on non-matches). Name collision geoms; match them explicitly (e.g. `.*_collision`)
 - Sensors as **tuple on AssetSpec**, not on EntityCfg — live on `SceneCfg.sensors`. Include every MDP-read quantity in `fields` (typically `("found", "force")`); Isaac exposes `net_forces_w` always, mjlab only allocates listed fields — see [environment-mdp](../environment-mdp/reference.md#contact-sensor-data-fields-isaac--mjlab).
 
@@ -153,6 +160,21 @@ ContactSensorCfg(
 ```
 
 `ContactMatch.entity` set → pattern is regex on that entity’s unprefixed names. `entity=None` → pattern is a **literal** MuJoCo name (plane terrain body is `"terrain"`).
+
+### Mimic / coupled joints
+
+URDF and MJCF express coupling differently. Prefer **physics** constraints on both backends; keep mimic joints in `JOINT_NAMES_SIMULATION` (they are still DOFs) but **exclude them from action spaces**.
+
+| Backend | Model file | Coupling | Actuators |
+|---------|------------|----------|-----------|
+| Isaac | URDF / USD from URDF | `<mimic joint="driver" multiplier="m" offset="o"/>` on the child joint | Drivers: normal PD. Mimics: zero-gain / passive group (or rely on PhysX mimic alone) |
+| mjlab | MJCF | `<equality><joint joint1="driver" joint2="mimic" polycoef="o m 0 0 0"/></equality>` | Drivers only — no `BuiltinPdActuatorCfg` on mimic joints |
+
+**polycoef:** MuJoCo enforces `q2 = c0 + c1*q1 + …` with `joint1` = independent (driver), `joint2` = dependent (mimic). Linear URDF mimic → `"offset multiplier 0 0 0"`.
+
+**Actions / MDP:** `action_scaling` and `JointPosition` must match **drivers only**. Software `MimicJointPosition` (copies targets) is an Isaac fallback / shared path — do **not** use it as a substitute for missing MJCF equality on mjlab.
+
+**Examples:** mjlab YAM gripper (`i2rt_yam` equality + actuate one finger); HOI G1 Inspire (`object_hoi` `g1_*_inspire_hand_DFQ.xml` equality + driver-only hand actuators). Full recipes: [reference.md](reference.md#mimic--coupled-joints).
 
 ### Floating objects (mjlab)
 
@@ -212,6 +234,7 @@ registry.register("asset", "unitree_a2", make_cfg)
 9. Prefer **fresh EntityCfg per call** (zoo `get_*_robot_cfg()` pattern) to avoid mutation.
 10. Entity-level `<option>` does **not** propagate through scene attach — use sim `MujocoCfg`.
 11. Import `mujoco` / mjlab types **inside** `make_mjlab_cfg` so Isaac-only processes do not import them.
+12. **Mimic joints** → `<equality>` in MJCF + actuate drivers only (see [Mimic / coupled joints](#mimic--coupled-joints)). Unactuated joints are allowed (YAM / G1 Inspire pattern).
 
 ---
 
@@ -236,6 +259,8 @@ When editing assets, prefer migrating away from:
 | mjlab factory with `sensors=()` while Isaac has contact | Add matching contact sensor |
 | `go2.py` / `b2.py` / `g1.py` / manipulators using `BuiltinPositionActuatorCfg` | Migrate to `BuiltinPdActuatorCfg` (AA actions often set vel targets) |
 | Divergent actuator gains across backends | Keep stiffness/damping/effort aligned |
+| MJCF with free mimic DOFs / PD on intermediates | `<equality>` + driver-only actuators (match URDF `<mimic>`) |
+| Relying on `MimicJointPosition` alone for mjlab | Physics equality in the MJCF |
 
 Full notes: [reference.md](reference.md#outdated-and-cleanup).
 
@@ -256,6 +281,9 @@ Full notes: [reference.md](reference.md#outdated-and-cleanup).
 - Relying on `CollisionCfg` default without matching collision geoms (everything else disabled)
 - `ContactMatch(entity=None, pattern=...)` expecting regex (literal only when entity unset)
 - Using `BuiltinPositionActuatorCfg` for robots whose actions call `set_joint_velocity_target` (vel targets are dropped)
+- Actuating mimic joints on mjlab while also declaring equality (fighting the constraint)
+- Putting mimic joints in task `action_scaling` / policy action dim
+- Assuming MJCF inherits URDF `<mimic>` (it does not — add `<equality>` explicitly)
 
 ---
 
