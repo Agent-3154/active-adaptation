@@ -74,6 +74,7 @@ Keep `warp-lang` pins in backend env `pyproject.toml` files, not in root, so sol
 - Use `uv run --project <env-dir>` as the default for all backend work. This ensures Python version and lockfile consistency.
 - Use `uv run --with <extra>` only for one-off temporary tooling layered on top of a selected project env (for example, debugging or profiling extras).
 - Do not use `--with` to switch backend stacks or manage core backend dependencies.
+- **Never use the shared root venv for smoke tests** involving Isaac, mjlab, warp, cameras, or 3DGS — the root env is by design incomplete. Agents: see `.agents/skills/README.md` (“Smoke tests / running code”).
 
 ### Dependency policy
 - Add shared dependencies only to the root `pyproject.toml`.

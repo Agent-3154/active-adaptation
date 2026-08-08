@@ -37,6 +37,14 @@ if active_adaptation.get_backend() == "isaac":
 # from simple_raycaster import MultiMeshRaycaster
 
 
+def _offset_rpy_deg_to_quat(
+    offset_rpy: Tuple[float, float, float],
+) -> Tuple[float, float, float, float]:
+    """XYZ Euler degrees → WXYZ quaternion (CPU)."""
+    rpy = torch.tensor(offset_rpy, dtype=torch.float32) * (math.pi / 180.0)
+    return tuple(quat_from_euler_xyz(rpy.unsqueeze(0)).squeeze(0).tolist())
+
+
 def raymap(width: int, height: int, fov: float) -> Float[torch.Tensor, "height width 3"]:
     """
     Generate a raymap for a given width, height, and field of view.
@@ -382,9 +390,9 @@ class raycast_camera(ObservationV2):
         resolution: Image size as ``(width, height)``.
         fov_deg: Horizontal field of view in degrees (vertical follows from the
             aspect ratio).
-        rpy_deg: Fixed roll/pitch/yaw mount rotation of the camera relative to
-            the body frame, in degrees.
-        pos_offset: Fixed camera position offset in the body frame.
+        offset_pos: Fixed camera position offset in the body frame.
+        offset_rpy: Fixed roll/pitch/yaw mount rotation of the camera relative
+            to the body frame, in degrees (XYZ convention).
         body_name: Body to mount the camera on. Defaults to the root link.
         near: Rays start ``near`` meters along the ray direction (avoids
             self-hits with the mounting body).
@@ -413,8 +421,8 @@ class raycast_camera(ObservationV2):
         self,
         resolution: Tuple[int, int],
         fov_deg: float,
-        rpy_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0),
-        pos_offset: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        offset_pos: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        offset_rpy: Tuple[float, float, float] = (0.0, 0.0, 0.0),
         body_name: Optional[str] = None,
         near: float = 0.01,
         far: float = 100.0,
@@ -424,8 +432,8 @@ class raycast_camera(ObservationV2):
     ):
         self.resolution = resolution
         self.fov_deg = fov_deg
-        self.rpy_deg = rpy_deg
-        self.pos_offset = pos_offset
+        self.offset_pos = tuple(float(x) for x in offset_pos)
+        self.offset_rpy = tuple(float(x) for x in offset_rpy)
         self.body_name = body_name
         self.near = near
         self.far = far
@@ -445,11 +453,11 @@ class raycast_camera(ObservationV2):
 
         width, height = self.resolution
         self.raymap = raymap(width, height, self.fov_deg / 180.0 * torch.pi).to(self.device)
-        euler = torch.tensor(self.rpy_deg, device=self.device) / 180.0 * torch.pi
+        euler = torch.tensor(self.offset_rpy, device=self.device) / 180.0 * torch.pi
         # body → camera mount rotation; also needed to express normals in the camera frame
         self.mount_quat = quat_from_euler_xyz(euler).reshape(1, 1, 4)
         self.raymap = quat_rotate(self.mount_quat, self.raymap)
-        self.pos_offset = torch.tensor(self.pos_offset, device=self.device)
+        self._offset_pos = torch.tensor(self.offset_pos, device=self.device)
 
         self.shape = self.raymap.shape[:2]
         assert self.shape == (height, width), "Resolution must match the raymap shape"
@@ -519,7 +527,7 @@ class raycast_camera(ObservationV2):
         self.ray_dirs_w = quat_rotate(
             body_quat.unsqueeze(1), self.raymap.reshape(1, self.num_rays, 3)
         )
-        offset_w = quat_rotate(body_quat, self.pos_offset.unsqueeze(0))
+        offset_w = quat_rotate(body_quat, self._offset_pos.unsqueeze(0))
         self.ray_starts_w = (
             body_pos_w.reshape(self.num_envs, 1, 3)
             + offset_w.reshape(self.num_envs, 1, 3)
@@ -581,7 +589,7 @@ class raycast_camera(ObservationV2):
         else:
             body_pos = self.asset.data.root_link_pos_w[env_idx]
             body_quat = self.asset.data.root_link_quat_w[env_idx]
-        self.camera_handle.position = body_pos + quat_rotate(body_quat, self.pos_offset)
+        self.camera_handle.position = body_pos + quat_rotate(body_quat, self._offset_pos)
         self.camera_handle.wxyz = quat_mul(body_quat, self._frustum_quat)
         self.camera_handle.image = self._debug_image_hwc_uint8(env_idx)
 
@@ -598,12 +606,12 @@ class raycast_camera(ObservationV2):
         Only valid for a mirror-symmetric mount: zero roll/yaw and zero
         lateral position offset.
         """
-        roll, _, yaw = self.rpy_deg
-        if roll != 0.0 or yaw != 0.0 or self.pos_offset[1].item() != 0.0:
+        roll, _, yaw = self.offset_rpy
+        if roll != 0.0 or yaw != 0.0 or self._offset_pos[1].item() != 0.0:
             raise NotImplementedError(
                 "raycast_camera symmetry requires a mirror-symmetric mount: "
-                f"roll=yaw=0 and zero lateral offset, got rpy_deg={self.rpy_deg}, "
-                f"pos_offset={self.pos_offset.tolist()}"
+                f"roll=yaw=0 and zero lateral offset, got offset_rpy={self.offset_rpy}, "
+                f"offset_pos={self._offset_pos.tolist()}"
             )
         perm = torch.arange(self.shape[1]).flip(0)
         signs = torch.ones(self.shape[1])
@@ -719,7 +727,8 @@ class camera_isaac(ObservationV2):
         sensor_name: Scene sensor attribute name. Defaults to a unique
             ``tiled_camera_{id}`` per instance so multiple cameras can coexist.
         offset_pos: Camera offset translation w.r.t. its parent frame.
-        offset_rot: Camera offset rotation ``(w, x, y, z)`` w.r.t. parent frame.
+        offset_rpy: Camera offset rotation as XYZ Euler angles in degrees
+            w.r.t. parent frame (converted to WXYZ for Isaac).
         offset_convention: Offset frame convention (``"ros"``, ``"world"``, or
             ``"opengl"``).
     """
@@ -738,7 +747,7 @@ class camera_isaac(ObservationV2):
         body_name: Optional[str] = None,
         sensor_name: Optional[str] = None,
         offset_pos: Tuple[float, float, float] = (0.0, 0.0, 0.0),
-        offset_rot: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
+        offset_rpy: Tuple[float, float, float] = (0.0, 0.0, 0.0),
         offset_convention: str = "world",
     ):
         super().__init__()
@@ -749,8 +758,8 @@ class camera_isaac(ObservationV2):
         self.horizontal_aperture = horizontal_aperture
         self.clipping_range = tuple(clipping_range)
         self.body_name = body_name
-        self.offset_pos = tuple(offset_pos)
-        self.offset_rot = tuple(offset_rot)
+        self.offset_pos = tuple(float(x) for x in offset_pos)
+        self.offset_rpy = tuple(float(x) for x in offset_rpy)
         self.offset_convention = offset_convention
 
         if sensor_name is None:
@@ -795,7 +804,7 @@ class camera_isaac(ObservationV2):
             prim_path=prim_path,
             offset=TiledCameraCfg.OffsetCfg(
                 pos=self.offset_pos,
-                rot=self.offset_rot,
+                rot=_offset_rpy_deg_to_quat(self.offset_rpy),
                 convention=self.offset_convention,
             ),
             data_types=[self.data_type],
@@ -816,7 +825,7 @@ class camera_isaac(ObservationV2):
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
-        self.env.render_enabled = True
+        self.env.sensor_render_enabled = True
         if self.body_name is None:
             self.camera_mount: RigidObject = self.env.scene.entities[self.sensor_name + "_mount"]
         self.camera: TiledCamera = self.env.scene.sensors[self.sensor_name]
@@ -834,29 +843,7 @@ class camera_isaac(ObservationV2):
     @override
     def compute(self) -> torch.Tensor:
         # for rgb, isaac sim returns uint8, which we leave as is
-        data = self.camera.data.output[self.data_type]  # NHWC        
-        # Temporary in-line code to save some images for sanity check
-        # from pathlib import Path
-        # from torchvision.utils import make_grid, save_image
-        # if not hasattr(self, "_cam_dbg_step"):
-        #     self._cam_dbg_step = 0
-        # if self._cam_dbg_step < 100:
-        #     raw = self.camera.data.output[self.data_type][:16].detach()
-        #     if self.data_type == "rgb":
-        #         imgs = raw.permute(0, 3, 1, 2).float() / 255.0
-        #     else:
-        #         imgs = raw.permute(0, 3, 1, 2).clone()
-        #         imgs[torch.isinf(imgs)] = 0.0
-        #         imgs = imgs / imgs.max().clamp_min(1e-6)
-        #         if imgs.shape[1] == 1:
-        #             imgs = imgs.expand(-1, 3, -1, -1)
-        #     out_dir = Path("test_images")
-        #     out_dir.mkdir(parents=True, exist_ok=True)
-        #     save_image(
-        #         make_grid(imgs, nrow=max(1, round(imgs.shape[0] ** 0.5))),
-        #         out_dir / f"{self.sensor_name}_{self._cam_dbg_step:04d}.png",
-        #     )
-        # self._cam_dbg_step += 1
+        data = self.camera.data.output[self.data_type]  # NHWC
         return einops.rearrange(data, "n h w c -> n c h w")
 
     @override
@@ -873,11 +860,12 @@ class camera_mjlab(ObservationV2):
 
     Registers a :class:`~mjlab.sensor.CameraSensorCfg` during scene construction
     (``edit_spec`` appends to the mjlab sensor list). Rendering runs via
-    ``sim.sense()`` each env step; :meth:`compute` returns ``(N, C, H, W)``.
+    ``sim.render_sensors()`` → ``Simulation.sense()`` each control step;
+    :meth:`compute` returns ``(N, C, H, W)``.
 
     MuJoCo cameras use **fixed** mode: ``pos``/``quat`` are set in the spec at
     build time. Attach via ``body_name`` (``robot/{name}``) or spawn on the
-    worldbody with ``offset_pos`` / ``offset_rot``. Dynamic tracking (e.g. via a
+    worldbody with ``offset_pos`` / ``offset_rpy``. Dynamic tracking (e.g. via a
     dummy mocap body) is not implemented yet.
 
     Args:
@@ -890,7 +878,8 @@ class camera_mjlab(ObservationV2):
         body_name: Robot body to attach the camera to (``robot/{name}``).
         sensor_name: Scene sensor key. Defaults to ``mjlab_camera_{id}``.
         offset_pos: Camera position w.r.t. parent body or world frame.
-        offset_rot: Camera orientation ``(w, x, y, z)`` w.r.t. parent frame.
+        offset_rpy: Camera orientation as XYZ Euler angles in degrees w.r.t.
+            parent frame (converted to WXYZ for MuJoCo).
     """
 
     supported_backends = ("mjlab",)
@@ -906,7 +895,7 @@ class camera_mjlab(ObservationV2):
         body_name: Optional[str] = None,
         sensor_name: Optional[str] = None,
         offset_pos: Tuple[float, float, float] = (0.0, 0.0, 0.0),
-        offset_rot: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
+        offset_rpy: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     ):
         super().__init__()
         self.resolution = resolution
@@ -915,8 +904,8 @@ class camera_mjlab(ObservationV2):
         self.focal_length = focal_length
         self.horizontal_aperture = horizontal_aperture
         self.body_name = body_name
-        self.offset_pos = tuple(offset_pos)
-        self.offset_rot = tuple(offset_rot)
+        self.offset_pos = tuple(float(x) for x in offset_pos)
+        self.offset_rpy = tuple(float(x) for x in offset_rpy)
 
         if sensor_name is None:
             camera_mjlab._instance_count += 1
@@ -941,7 +930,7 @@ class camera_mjlab(ObservationV2):
                 name=self.sensor_name,
                 parent_body=parent_body,
                 pos=self.offset_pos,
-                quat=self.offset_rot,
+                quat=_offset_rpy_deg_to_quat(self.offset_rpy),
                 fovy=self._resolved_fovy(),
                 width=self.resolution[0],
                 height=self.resolution[1],
@@ -952,6 +941,7 @@ class camera_mjlab(ObservationV2):
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
+        self.env.sensor_render_enabled = True
         self.camera: CameraSensor = self.env.scene.sensors[self.sensor_name]
 
     @override
@@ -966,29 +956,6 @@ class camera_mjlab(ObservationV2):
             output = data.segmentation
         else:
             raise ValueError(f"Unsupported camera data_type: {self.data_type!r}")
-
-        # Temporary in-line code to save some images for sanity check
-        # from pathlib import Path
-        # from torchvision.utils import make_grid, save_image
-        # if not hasattr(self, "_cam_dbg_step"):
-        #     self._cam_dbg_step = 0
-        # if self._cam_dbg_step < 100:
-        #     raw = output[:16].detach()
-        #     if self.data_type == "rgb":
-        #         imgs = raw.permute(0, 3, 1, 2).float() / 255.0
-        #     else:
-        #         imgs = raw.permute(0, 3, 1, 2).clone()
-        #         imgs[torch.isinf(imgs)] = 0.0
-        #         imgs = imgs / imgs.max().clamp_min(1e-6)
-        #         if imgs.shape[1] == 1:
-        #             imgs = imgs.expand(-1, 3, -1, -1)
-        #     out_dir = Path("test_images")
-        #     out_dir.mkdir(parents=True, exist_ok=True)
-        #     save_image(
-        #         make_grid(imgs, nrow=max(1, round(imgs.shape[0] ** 0.5))),
-        #         out_dir / f"{self.sensor_name}_{self._cam_dbg_step:04d}.png",
-        #     )
-        # self._cam_dbg_step += 1
         return einops.rearrange(output, "n h w c -> n c h w")
 
     @override

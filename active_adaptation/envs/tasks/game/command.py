@@ -55,7 +55,8 @@ class Game(Command):
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
         chase = env_ids % 2 == 0
         init_root_state = self.init_root_state[env_ids]
-        origins = self.env.scene.get_spawn_origins(env_ids)
+        origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
+        self.env.episode_origin[env_ids] = origins
         init_pos_even = origins[chase]
         offset = torch.zeros_like(init_pos_even)
         offset[:, 0].uniform_(3.0, 4.0).mul_(

@@ -268,8 +268,10 @@ algo.compile=false           # avoid with debug or DDP
 
 ## Verification
 
+**Never smoke-test with the shared root venv** — it is by design incomplete. Prefer `uv run --project venv/isaac51|mjlab` for env+train smokes (see [.agents/skills/README.md](../README.md#smoke-tests--running-code)).
+
 1. Import + Hydra `algo=<name>` resolves
-2. Short `train_ppo.py` run: metrics move, no NaN KL/grad norms
+2. Short `train_ppo.py` run (backend project env): metrics move, no NaN KL/grad norms
 3. Checkpoint round-trip
 4. If `sym_aug`: `actor/symmetry_loss` logged, batch doubling correct
 5. DDP: `vecnorm` synced, actor/critic params match rank 0 after broadcast

@@ -279,9 +279,6 @@ class MotrixScene:
     def zero_external_wrenches(self) -> None:
         pass
 
-    def get_spawn_origins(self, env_ids: torch.Tensor) -> torch.Tensor:
-        return self.env_origins[env_ids]
-
     @property
     def ground_mesh(self):
         return None # TODO: implement ground mesh
@@ -313,12 +310,18 @@ class MotrixSim:
     def has_gui(self) -> bool:
         return self._render_app is not None
 
-    def step(self, render: bool = False) -> None:
+    def step(self) -> None:
         self.scene.mx_model.step(self.scene.mx_data)
 
-    def render(self) -> None:
+    def render_sensors(self) -> None:
+        pass
+
+    def render_gui(self) -> None:
         if self._render_app is not None:
             self._render_app.sync(self.scene.mx_data)
+
+    def render(self) -> None:
+        self.render_gui()
 
     def set_camera_view(self, eye=None, target=None, **kwargs) -> None:
         pass

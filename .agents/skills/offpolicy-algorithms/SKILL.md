@@ -283,8 +283,9 @@ Always log when adding behavior:
 
 ## Verification before finishing
 
-1. `python -c "from active_adaptation.learning.offpolicy import <module>; ..."` imports cleanly
-2. Hydra: `algo=<name>` resolves without ConfigStore collision
-3. Smoke: construct policy via `from_env` on a small task config
-4. Checkpoint round-trip: `state_dict` → `load_state_dict`
-5. If distributed: rank-0 broadcast + `unwrap_ddp` checkpoint portability
+**Never smoke-test with the shared root venv** — it is by design incomplete. Prefer `uv run --project venv/isaac51|mjlab` for env+train smokes (see [.agents/skills/README.md](../README.md#smoke-tests--running-code)).
+
+1. Import + Hydra `algo=<name>` resolves without ConfigStore collision (backend project env)
+2. Smoke: construct policy via `from_env` on a small task config
+3. Checkpoint round-trip: `state_dict` → `load_state_dict`
+4. If distributed: rank-0 broadcast + `unwrap_ddp` checkpoint portability

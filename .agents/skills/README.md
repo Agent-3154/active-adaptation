@@ -18,6 +18,20 @@ Also see [TEACHME.md](../../active_adaptation/learning/TEACHME.md) (shared style
 
 ---
 
+## Smoke tests / running code
+
+**Never use the shared root venv for smoke tests** — it is by design incomplete (backend-agnostic deps only; no Isaac / mjlab / warp / `fvdb` stacks).
+
+| What you are testing | Run with |
+|----------------------|----------|
+| Isaac env / MDP / assets | `uv run --project venv/isaac51 …` (or `venv/isaac60`) |
+| mjlab env / MDP / assets | `uv run --project venv/mjlab …` |
+| Backend-agnostic utils only | `uv run …` (root) is fine |
+
+Do **not** invoke `active-adaptation/.venv/bin/python` for Isaac/mjlab smokes. See [AGENTS.md](../../AGENTS.md) environment matrix.
+
+---
+
 ## How to use
 
 ### Cursor

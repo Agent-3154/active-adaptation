@@ -111,7 +111,8 @@ class _LocoManipObjectBase(CommandV2):
 
     @override
     def sample_init(self, env_ids: torch.Tensor) -> dict:
-        origins = self.env.scene.get_spawn_origins(env_ids)
+        origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
+        self.env.episode_origin[env_ids] = origins
         n = len(env_ids)
 
         object_init = self.object_init_root_state[env_ids].clone()

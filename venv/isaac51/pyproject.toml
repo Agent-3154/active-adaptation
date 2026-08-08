@@ -3,7 +3,7 @@ name = "aa-isaac51-env"
 version = "0.1.0"
 requires-python = "==3.11.*"
 dependencies = [
-    "active-adaptation",
+    "active-adaptation[render]",
     # Keep this pinned to the Isaac 5.1-compatible version.
     "isaacsim[all,extscache]==5.1.0",
     "nicegui>=3.2.0",
@@ -17,6 +17,7 @@ isaacsim = { index = "nvidia" }
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
+fvdb-core = { index = "fvdb" }
 
 [[tool.uv.index]]
 name = "aliyun"
@@ -31,6 +32,11 @@ explicit = true
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "fvdb"
+url = "https://d36m13axqqhiit.cloudfront.net/simple"
 explicit = true
 
 [tool.uv]

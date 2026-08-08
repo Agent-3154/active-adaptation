@@ -67,9 +67,13 @@ Defined as `typing.Protocol` — **no inheritance required**, duck-typed.
 |--------|-------------|
 | `get_physics_dt()` | physics timestep |
 | `has_gui()` | whether a viewer is open |
-| `step(render=False)` | advance physics |
-| `render()` | update viewport |
+| `step()` | advance **physics only** |
+| `render_sensors()` | refresh camera / MDP sensor products (Isaac Kit render; mjlab `sense()`) |
+| `render_gui()` | update interactive viewers (Kit / Viser / MjLabViewer), ~30 Hz from env |
+| `render()` | Gym `human` mode — typically `render_gui()` |
 | `set_camera_view(eye, target)` | position camera |
+
+Isaac Kit couples viewport and camera sensors under the hood; the adapter still exposes both methods and coalesces duplicate Kit renders within one physics step. mjlab keeps them fully separate.
 
 Unknown attributes fall through via `__getattr__` to the wrapped native sim object.
 
@@ -80,10 +84,12 @@ Unknown attributes fall through via `__getattr__` to the wrapped native sim obje
 | `num_envs`, `reset(env_ids)` | basic multi-env interface |
 | `update(dt)`, `write_data_to_sim()` | sync state between MDP and sim |
 | `articulations`, `sensors`, `env_origins` | entity accessors |
+| `sample_spawn_origin_candidates(env_ids)` | Unstamped candidates (Isaac may random-sample terrain) |
 | `zero_external_wrenches()` | clear applied forces |
 | `ground_mesh` | Warp mesh for height-field raycasts |
-| `get_spawn_origins(env_ids)` | terrain-based spawn (Isaac override) |
 | `create_sphere_marker` / `create_arrow_marker` | debug visualization |
+
+Episode-local frame for shared worlds (e.g. 3DGS): ``env.episode_origin``, written in ``sample_init``.
 
 ---
 
@@ -165,9 +171,9 @@ supported_backends = ("isaac", "mjlab")  # only instantiated on these backends
 ### mjlab (`mjlab/`)
 
 - **Native stack**: `mjlab.scene.Scene`, `mjlab.sim.Simulation` (GPU-parallel)
-- **Viewer**: `MjLabViewer` (Viser-based), driven from env step
+- **Viewer**: `MjLabViewer` (Viser-based), driven via `sim.render_gui()`
 - **Ground mesh**: built from terrain geoms as a Warp mesh for raycasts
-- **Step quirk**: `sim.render()` is *not* called inside the step loop (mjlab handles rendering separately via viewer)
+- **Sensors**: `sim.render_sensors()` → `Simulation.sense()` when `env.sensor_render_enabled`
 
 ### motrix (`motrix/`)
 
@@ -188,11 +194,11 @@ Backend-agnostic:
    - `scene.zero_external_wrenches()`
    - apply actions + pre_step callbacks
    - `scene.write_data_to_sim()`
-   - `sim.step(render=False)`
+   - `sim.step()` — physics only
+   - on last substep: `sim.render_sensors()` if `sensor_render_enabled`; `sim.render_gui()` if GUI (~30 Hz)
    - `scene.update(physics_dt)` + post_step callbacks
-3. Render (skipped inside loop for mjlab)
-4. Compute rewards, terminations, observations
-5. Debug draw (Isaac `debug_draw` or mjlab viewer update)
+3. Compute rewards, terminations, observations
+4. Debug draw when `sim.has_gui()`
 
 ---
 
@@ -445,7 +451,7 @@ Planned adapter responsibilities (mirroring mjlab):
 |-----------------|--------------------------|
 | `get_physics_dt()` | `model.options.timestep` |
 | `has_gui()` | `render is not None and not headless` |
-| `step(render=False)` | `model.step(data)` — data held by scene adapter |
+| `step(render=False)` | `model.step(data)` — data held by scene adapter; AA uses `step()` then `render_gui`/`render_sensors` |
 | `render()` | `render.sync(data)` |
 | `set_camera_view(eye, target)` | `render.system_camera.set_view(...)` or attach a follower camera via MSD |
 
@@ -459,7 +465,7 @@ Planned adapter responsibilities (mirroring mjlab):
 | `update(dt)` | Numpy → torch: dof pos/vel, link poses, sensor values into `MotrixEntityData` |
 | `articulations` | `{"robot": MotrixEntity(...)}` wrapping `model.get_body(...)` |
 | `sensors` | Named sensor handles or lazy `get_sensor_value` wrappers |
-| `env_origins` | Tensor of per-env spawn offsets (may need explicit root-pose management) |
+| `env_origins` | Layout / curriculum slot origins |
 | `zero_external_wrenches()` | Clear per-link external force/torque buffers before each substep |
 | `ground_mesh` | Warp mesh from hfield / floor geom |
 | `create_sphere_marker` / `create_arrow_marker` | `render.gizmos` when GUI active; no-op headless |

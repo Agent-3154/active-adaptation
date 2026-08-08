@@ -118,6 +118,9 @@ class IsaacViserViewer:
         self._debug_point_size: float = 0.02
 
         self._cameras: dict[str, viser.CameraFrustumHandle] = {}
+        self._gaussian_handle: Any | None = None
+        self._gaussian_origin_handle: Any | None = None
+        self._collision_handle: Any | None = None
 
         self._gui_env_slider = None
         self._gui_show_all = None
@@ -138,6 +141,74 @@ class IsaacViserViewer:
         self._try_add_ground()
         self._setup_gui()
         self._is_setup = True
+
+    def add_gaussian_splat(self, gs, *, name: str = "/visual/gaussians") -> None:
+        """Upload an fvdb ``GaussianSplat3d`` for browser visualization (debug).
+
+        Policy RGB still comes from ``env.visual.render`` (option A). Splats are
+        uploaded hidden by default (browser 3DGS is expensive); prefer
+        :meth:`add_collision_mesh` for scene geometry in Viser.
+
+        Also places a coordinate frame at the splat origin (dataset PLYs are often
+        not centered at the world origin).
+        """
+        if not self._is_setup:
+            raise RuntimeError("IsaacViserViewer.setup() has not been called.")
+        from active_adaptation.envs.visual.viser_export import (
+            add_gaussian_splat_to_viser_server,
+        )
+
+        if self._gaussian_handle is not None:
+            try:
+                self._gaussian_handle.remove()
+            except Exception:
+                pass
+            self._gaussian_handle = None
+        if self._gaussian_origin_handle is not None:
+            try:
+                self._gaussian_origin_handle.remove()
+            except Exception:
+                pass
+            self._gaussian_origin_handle = None
+
+        self._gaussian_handle = add_gaussian_splat_to_viser_server(
+            self._server, gs, name=name
+        )
+        # Dataset 3DGS frames are often unnormalized; mark the splat origin.
+        self._gaussian_origin_handle = self._server.scene.add_frame(
+            f"{name}/origin",
+            show_axes=True,
+            axes_length=0.5,
+            axes_radius=0.02,
+            origin_radius=0.04,
+            position=(0.0, 0.0, 0.0),
+            wxyz=(1.0, 0.0, 0.0, 0.0),
+            visible=True,
+        )
+
+    def add_collision_mesh(
+        self,
+        mesh,
+        *,
+        name: str = "/visual/collision",
+        visible: bool = True,
+    ) -> None:
+        """Upload InteriorGS collision trimesh (same frame as the 3DGS PLY).
+
+        Cheap browser stand-in for the Gaussian scene. Not yet used as PhysX
+        collision (ground plane still owns sim contact).
+        """
+        if not self._is_setup:
+            raise RuntimeError("IsaacViserViewer.setup() has not been called.")
+        if self._collision_handle is not None:
+            try:
+                self._collision_handle.remove()
+            except Exception:
+                pass
+            self._collision_handle = None
+        self._collision_handle = self._server.scene.add_mesh_trimesh(
+            name, mesh, visible=visible
+        )
 
     def _setup_gui(self) -> None:
         with self._server.gui.add_folder("Scene"):
@@ -182,14 +253,34 @@ class IsaacViserViewer:
         self._mesh_batch = batch
 
     def _try_add_ground(self) -> None:
+        """Visualize ``/World/ground``: infinite grid for PhysX planes, mesh otherwise.
+
+        Matches :meth:`IsaacSceneAdapter.ground_mesh` plane-vs-mesh detection and
+        mjlab/mjviser's ``add_grid`` look for infinite planes.
+        """
         try:
+            import isaaclab.sim as sim_utils
             from isaacsim.core.utils.stage import get_current_stage
             from simple_raycaster.utils_usd import find_matching_prims, get_trimesh_from_prim
         except ImportError:
             return
 
-        stage = get_current_stage()
-        prims = find_matching_prims("/World/ground", stage)
+        mesh_prim_path = "/World/ground"
+        # Same test as IsaacSceneAdapter.ground_mesh: PhysX Plane → infinite ground.
+        plane_prim = sim_utils.get_first_matching_child_prim(
+            mesh_prim_path, lambda prim: prim.GetTypeName() == "Plane"
+        )
+        if plane_prim is not None:
+            self._ground_handle = self._server.scene.add_grid(
+                "/ground",
+                infinite_grid=True,
+                fade_distance=50.0,
+                shadow_opacity=0.2,
+                plane_opacity=0.4,
+            )
+            return
+
+        prims = find_matching_prims(mesh_prim_path, get_current_stage())
         if not prims:
             return
         try:

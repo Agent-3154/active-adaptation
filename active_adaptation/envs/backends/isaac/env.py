@@ -1,3 +1,4 @@
+from typing_extensions import override
 from active_adaptation import ROBOT_MODEL_DIR
 from active_adaptation.envs.backends.isaac.adapter import (
     IsaacSceneAdapter,
@@ -48,6 +49,7 @@ class IsaacBackendEnv(_EnvBase):
                 ViewerCfg(self.cfg.viewer.eye, self.cfg.viewer.lookat, origin_type="env"),
             )
 
+    @override
     def setup_scene(self):
         import isaaclab.sim as sim_utils
         from isaaclab.sim import (
@@ -178,6 +180,25 @@ class IsaacBackendEnv(_EnvBase):
             self._register_wrapper_callbacks(self.robot_wrapper)
         else:
             self.robot_wrapper = None
+    
+    @override
+    def _setup_visual(self) -> None:
+        super()._setup_visual()
+        if self.visual is None:
+            return
+        viser_viewer = self.sim._viser_viewer
+        if viser_viewer is None:
+            return
+        # Collision mesh first: cheap Viser proxy for InteriorGS geometry.
+        collision = getattr(self.visual, "collision_mesh", None)
+        if collision is not None:
+            viser_viewer.add_collision_mesh(collision)
+        gs = getattr(self.visual, "gaussian_splat", None) or getattr(
+            self.visual, "_gs", None
+        )
+        if gs is not None:
+            # Uploaded hidden by default (browser 3DGS is costly).
+            viser_viewer.add_gaussian_splat(gs)
 
 
 __all__ = ["IsaacBackendEnv"]

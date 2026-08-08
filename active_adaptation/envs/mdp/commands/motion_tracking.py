@@ -80,7 +80,8 @@ class MotionTrackingCommand(Command):
     
     def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
         init_root_state = self.init_root_state[env_ids]
-        origins = self.env.scene.env_origins[env_ids]
+        origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
+        self.env.episode_origin[env_ids] = origins
         motion = self.dataset.get_slice(self.motion_ids[env_ids.cpu()], 0, 1)
         init_root_state[:, :3] = origins + motion.root_pos_w[:, 0].to(self.device)
         init_root_state[:, 3:7] = motion.root_link_quat_w[:, 0].to(self.device)
@@ -130,7 +131,7 @@ class MotionTrackingCommand(Command):
     def _load_motion_targets(self):
         self._motion = self.dataset.get_slice(self.motion_ids, self.t, steps=self.future_steps)
         self.target_pos_w = self._motion.root_pos_w.to(self.device) \
-            + self.env.scene.env_origins.reshape(self.num_envs, 1, 3)
+            + self.env.episode_origin.reshape(self.num_envs, 1, 3)
         self.target_pos_b = quat_rotate_inverse(
             self.asset.data.root_link_quat_w.unsqueeze(1),
             (self.target_pos_w - self.asset.data.root_pos_w.unsqueeze(1))
@@ -143,9 +144,9 @@ class MotionTrackingCommand(Command):
         self.target_keypoints_b = self._motion.body_pos_b[:, :, self.keypoint_idx_motion].to(self.device)
         self.target_keypoints_w = self._motion.body_link_pos_w[:, :, self.keypoint_idx_motion].to(self.device)
         self.target_keypoints_w = self.target_keypoints_w \
-            + self.env.scene.env_origins.reshape(self.num_envs, 1, 1, 3)
+            + self.env.episode_origin.reshape(self.num_envs, 1, 1, 3)
         self.target_feet_pos_w = self._motion.body_link_pos_w[:, 0, self.feet_ids_motion].to(self.device) \
-            + self.env.scene.env_origins.reshape(self.num_envs, 1, 3)
+            + self.env.episode_origin.reshape(self.num_envs, 1, 3)
         self.target_joint_pos = self._motion.joint_pos[:, 0, self.joint_idx_motion].to(self.device)
 
     def sync_state(self):
@@ -156,7 +157,7 @@ class MotionTrackingCommand(Command):
         self._load_motion_targets()
 
     def debug_draw(self):
-        target_keypoints_w = self._motion.body_link_pos_w[:, 0] + self.env.scene.env_origins.cpu().unsqueeze(1)
+        target_keypoints_w = self._motion.body_link_pos_w[:, 0] + self.env.episode_origin.cpu().unsqueeze(1)
         self.env.scene.draw_point(target_keypoints_w.reshape(-1, 3), color=(1, 0, 0, 1))
 
         robot_keypoints_w = self.asset.data.body_link_pos_w[:, self.keypoint_idx_asset].cpu()

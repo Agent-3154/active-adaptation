@@ -218,9 +218,33 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.headless = headless
 
         self._create_mdp_terms()
-        self._setup_simulation()
+        
+        self.terrain_type = None
+        self.visual = None
+        self.setup_scene()
+        self.sim = cast(SimAdapter, self.sim)
+        self.scene = cast(SceneAdapter, self.scene)
+        self._setup_visual()
+        if self.terrain_type is None:
+            warnings.warn(
+                "Terrain type is not set. Please check if the scene is properly initialized."
+            )
+        self.step_dt = float(self.cfg.sim.step_dt)
+        self.physics_dt = float(self.sim.get_physics_dt())
+        self.decimation = int(self.step_dt / self.physics_dt)
 
-        self._render_enabled = False # TODO: better naming
+        self.max_episode_length = int(self.cfg.max_episode_length)
+
+        with torch.device(self.device):
+            self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long)
+            self.episode_id = torch.zeros(self.num_envs, dtype=torch.long)
+            self.episode_origin = torch.zeros(self.num_envs, 3)
+
+        self.episode_count = 0
+        self.current_iter = 0
+
+        self._sensor_render_enabled = False
+        self._last_gui_render_time = 0.0
         self._initialize_mdp_terms()
         self._build_tensor_specs()
 
@@ -244,40 +268,39 @@ class _EnvBase(EnvBase, RegistryMixin):
         else:
             raise ValueError(f"Invalid type for max episode length: {type(value)}")
         self._max_episode_length = value.to(self.device)
-    
+
+    @property
+    def sensor_render_enabled(self) -> bool:
+        """When True, call :meth:`SimAdapter.render_sensors` each control step.
+
+        Native Kit / mjlab camera observations set this in ``_initialize``.
+        3DGS cameras (:class:`~active_adaptation.envs.mdp.observations.visual.gs_camera`)
+        call ``env.visual.render`` in ``compute`` instead (option A) and do **not**
+        need this flag.
+        """
+        return self._sensor_render_enabled
+
+    @sensor_render_enabled.setter
+    def sensor_render_enabled(self, value: bool):
+        self._sensor_render_enabled = bool(value)
+
     @property
     def render_enabled(self) -> bool:
-        return self._render_enabled
-    
+        """Deprecated alias for :attr:`sensor_render_enabled`."""
+        return self.sensor_render_enabled
+
     @render_enabled.setter
     def render_enabled(self, value: bool):
-        self._render_enabled = value
+        self.sensor_render_enabled = value
 
-    # ---------------------------------------------------------------------
-    # Initialization helpers
-    # ---------------------------------------------------------------------
-    def _setup_simulation(self):
-        self.terrain_type = None
-        self.setup_scene()
-        self.sim = cast(SimAdapter, self.sim)
-        self.scene = cast(SceneAdapter, self.scene)
-        if self.terrain_type is None:
-            warnings.warn(
-                "Terrain type is not set. Please check if the scene is properly initialized."
-            )
-        self.step_dt = float(self.cfg.sim.step_dt)
-        self.physics_dt = float(self.sim.get_physics_dt())
-        self.decimation = int(self.step_dt / self.physics_dt)
+    def _setup_visual(self) -> None:
+        """Optional photoreal world (3DGS). Collision meshes stay on ``scene``."""
+        from active_adaptation.envs.visual import make_visual_world
 
-        self.max_episode_length = int(self.cfg.max_episode_length)
-        self.episode_length_buf = torch.zeros(
-            self.num_envs, dtype=torch.long, device=self.device
-        )
-        self.episode_id = torch.zeros(
-            self.num_envs, dtype=torch.long, device=self.device
-        )
-        self.episode_count = 0
-        self.current_iter = 0
+        self.visual = make_visual_world(self.cfg.get("visual", None), device=self.device)
+        if self.visual is not None:
+            # Eager load so missing PLY fails at env construction, not first obs.
+            self.visual.load()
 
     def _create_mdp_terms(self):
         self.randomizations: Mapping[str, mdp.RandomizationV2] = OrderedDict()
@@ -505,7 +528,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict = TensorDict({}, self.num_envs, device=self.device)
         tensordict.update(self.observation_spec.zero())
         tensordict.set("episode_id", self.episode_id.clone())
-        self._last_render_time = time.perf_counter()
+        self._last_gui_render_time = time.perf_counter()
         return tensordict
 
     def _reset_idx(self, env_ids: torch.Tensor):
@@ -516,15 +539,17 @@ class _EnvBase(EnvBase, RegistryMixin):
             entity = self.scene[key]
             entity.write_root_state_to_sim(value, env_ids=env_ids)
         self.stats[env_ids] = 0.0
-    
-    def _should_render(self) -> bool:
-        if self.render_enabled:
-            # isaacsim requires calling `render` to render the camera images
+
+    # TODO: add explanation for the difference
+    def _should_render_sensors(self) -> bool:
+        return self.sensor_render_enabled
+
+    def _should_render_gui(self) -> bool:
+        if not self.sim.has_gui():
+            return False
+        if time.perf_counter() - self._last_gui_render_time > 1.0 / 30.0:
+            self._last_gui_render_time = time.perf_counter()
             return True
-        if self.sim.has_gui():
-            if time.perf_counter() - self._last_render_time > 1.0 / 30.0:
-                self._last_render_time = time.perf_counter()
-                return True
         return False
 
     def _should_debug_draw(self) -> bool:
@@ -544,7 +569,12 @@ class _EnvBase(EnvBase, RegistryMixin):
                     [callback(substep) for callback in self._pre_step_callbacks]
                     self.scene.write_data_to_sim()
                 with ScopedTimer("sim.step", sync=PROFILE_SYNC_TIMERS):
-                    self.sim.step((substep == self.decimation - 1) and self._should_render())
+                    self.sim.step()
+                    if substep == self.decimation - 1:
+                        if self._should_render_sensors():
+                            self.sim.render_sensors()
+                        if self._should_render_gui():
+                            self.sim.render_gui()
                 with ScopedTimer("scene.update", sync=PROFILE_SYNC_TIMERS):
                     self.scene.update(self.physics_dt)
                 with ScopedTimer("post_step_callbacks", sync=False):
@@ -700,7 +730,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             raise ValueError(f"Unknown backend: {self.backend}")
 
     def render(self, mode: str = "human"):
-        self.sim.render()
+        self.sim.render_gui()
         if mode == "human":
             return None
         if mode == "rgb_array":
