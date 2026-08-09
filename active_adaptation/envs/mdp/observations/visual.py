@@ -114,8 +114,10 @@ class gs_camera(ObservationV2):
         
         # Explicit call — not via sim.render_sensors().
         pos = self.mount_pos_w
+        origin_w = None
         if self.origin == "env":
-            pos = pos - self.env.episode_origin
+            origin_w = self.env.episode_origin
+            pos = pos - origin_w
         self._image_hwc = self.env.visual.render(
             pos,
             self.mount_quat_w,
@@ -124,6 +126,7 @@ class gs_camera(ObservationV2):
             fov_y_deg=self.fov_y,
             near=self.near,
             far=self.far,
+            origin_w=origin_w,
         )
 
     @override

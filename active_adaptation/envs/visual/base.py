@@ -29,16 +29,20 @@ class VisualWorld(Protocol):
         fov_y_deg: float,
         near: float = 0.05,
         far: float = 50.0,
+        origin_w: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Rasterize RGB from world-frame camera poses.
+        """Rasterize RGB from camera poses (optionally composite dynamic meshes).
 
         Args:
-            pos_w: ``(N, 3)`` camera origin in world frame.
+            pos_w: ``(N, 3)`` camera origin in the appearance frame (world or
+                episode-local).
             quat_wxyz: ``(N, 4)`` camera orientation (WXYZ). Optical frame is
                 OpenCV: +Z forward, +Y down, +X right (same as fvdb).
             width / height: image size in pixels.
             fov_y_deg: vertical field of view in degrees.
             near / far: clip planes.
+            origin_w: optional ``(N, 3)`` subtracted from entity body poses so
+                meshes match ``pos_w``'s frame (e.g. ``env.episode_origin``).
 
         Returns:
             Float RGB ``(N, H, W, 3)`` in ``[0, 1]``.

@@ -289,7 +289,8 @@ stage / prim_path regex
 
 - **Dynamic bodies:** mesh vertices stay in the body/parent frame; runtime pose is `body_link_pose_w` (`[pos(3), quat_wxyz(4)]`).
 - **Static world geometry** (`add_isaac_static`): combine matching visuals once; bake world transform into the trimesh; raycast pose is identity.
-- Prim path for Isaac articulations: template `entity.root_physx_view.prim_paths[0]`, then `{template with body_name}/visuals` per `entity.body_names`. Count must equal `entity.num_bodies`.
+- Prim path for Isaac articulations: template `entity.root_physx_view.prim_paths[0]`, then `{template with body_name}/visuals` (or `/collisions`) per `entity.body_names`. Count must equal `entity.num_bodies`.
+- Prefer `scene.get_visual_meshes(name)` / `get_collision_meshes(name)` over ad-hoc extraction (`envs/backends/isaac/meshes.py` or `envs/backends/mjlab/meshes.py`).
 
 ### Raycast call shape
 
@@ -327,7 +328,7 @@ handle.wxyz = quat_wxyz
 handle.image = hwc_uint8
 ```
 
-Env backends register `scene.clear_debug` as the **first** `debug_draw` callback so each frame starts empty, then term callbacks append primitives; viewers sync on `sim.render_gui()` / `viewer.update()` (throttled ~30 Hz). Native MDP cameras request `env.sensor_render_enabled` → `sim.render_sensors()` each control step (Isaac Kit render / mjlab `sense()`). 3DGS uses `env.visual` + `gs_camera` → `visual.render` (option A); with `origin: env`, poses are relative to `env.episode_origin` (set in `sample_init`). Isaac Viser also uploads InteriorGS `*_collision.usd` as `/visual/collision` (visible; splat stays hidden). Physics collision from that mesh is not wired yet.
+Env backends register `scene.clear_debug` as the **first** `debug_draw` callback so each frame starts empty, then term callbacks append primitives; viewers sync on `sim.render_gui()` / `viewer.update()` (throttled ~30 Hz). Native MDP cameras request `env.sensor_render_enabled` → `sim.render_sensors()` each control step (Isaac Kit render / mjlab `sense()`). 3DGS uses `env.visual` + `gs_camera` → `visual.render` (option A); with `origin: env`, poses are relative to `env.episode_origin` (set in `sample_init`). `FvdbGaussianWorld.render` may depth-composite `mesh_entities` via `simple_raycaster` mesh RGB-D (`diffrast`/`raycast`) when meshes were attached in `_setup_visual`. Isaac Viser also uploads InteriorGS `*_collision.usd` as `/visual/collision` (visible; splat stays hidden). Physics collision from that mesh is not wired yet.
 
 ### Episode origins (`env.episode_origin`)
 

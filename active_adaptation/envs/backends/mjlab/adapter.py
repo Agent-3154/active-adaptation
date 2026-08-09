@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+import trimesh
 
 from typing_extensions import override
 
@@ -324,6 +325,33 @@ class MjlabSceneAdapter(SceneAdapter):
     @property
     def entities(self):
         return self._scene.entities
+    
+    def get_visual_meshes(self, name: str) -> list[trimesh.Trimesh]:
+        """Body-local visual trimeshes for ``entities[name]`` (``body_names`` order).
+
+        Visual = ``contype == 0`` and ``conaffinity == 0`` (mjlab convention).
+        Multiply by ``body_link_pose_w`` at runtime.
+        """
+        from active_adaptation.envs.backends.mjlab.meshes import load_entity_body_meshes
+
+        entity = self.entities[name]
+        return load_entity_body_meshes(
+            entity, self._sim.mj_model, role="visual", require_all=True
+        )
+
+    def get_collision_meshes(self, name: str) -> list[trimesh.Trimesh]:
+        """Body-local collision trimeshes for ``entities[name]`` (``body_names`` order).
+
+        Collision = any geom with nonzero ``contype``/``conaffinity``. Bodies without
+        collision geoms get an empty trimesh so the list stays aligned with
+        ``num_bodies`` / ``body_link_pose_w``.
+        """
+        from active_adaptation.envs.backends.mjlab.meshes import load_entity_body_meshes
+
+        entity = self.entities[name]
+        return load_entity_body_meshes(
+            entity, self._sim.mj_model, role="collision", require_all=False
+        )
 
     def __getattr__(self, name):
         return getattr(self._scene, name)

@@ -302,7 +302,11 @@ Use **`env.scene`** (`SceneAdapter`) for all MDP debug drawing. Do **not** use `
 
 Native camera obs terms set `env.sensor_render_enabled = True` in `_initialize`.
 
-**3DGS / visual world (option A):** appearance is **not** on `sim`. Load via `task.visual` → `env.visual` (`VisualWorld`, e.g. `FvdbGaussianWorld`). Observation `gs_camera` calls `env.visual.render` in `update`/`compute` — no `sensor_render_enabled`. With `origin: env` (default for shared scenes), camera poses are expressed relative to `env.episode_origin` (must be set in `sample_init`; see [Episode origins](#episode-origins)). InteriorGS dirs also ship `{id}_collision.usd` (same frame as the PLY); `FvdbGaussianWorld` loads it for Isaac Viser (`/visual/collision`, visible; 3DGS stays hidden). Physics use of that mesh (replace ground plane) is not wired yet — still on `scene`. Placeholder PLY: `envs/visual/fvdb_gs.py` → `PLY_PATH_PLACEHOLDER`. See `aa-scenes` layout / `aa_scenes.collision`.
+**3DGS / visual world (option A):** appearance is **not** on `sim`. Load via `task.visual` → `env.visual` (`VisualWorld`, e.g. `FvdbGaussianWorld`). Observation `gs_camera` calls `env.visual.render` in `update`/`compute` — no `sensor_render_enabled`. With `origin: env` (default for shared scenes), camera poses are expressed relative to `env.episode_origin` (must be set in `sample_init`; see [Episode origins](#episode-origins)).
+
+**Robot + GS composite:** `_setup_visual` calls `visual.attach_scene_meshes(scene)` for `task.visual.mesh_entities` (default `[robot]`). Isaac pulls body-local visuals via `scene.get_visual_meshes`; mesh RGB-D is rendered by **`simple_raycaster`** (`mesh_renderer: diffrast|raycast`, optional quadric `face_keep`). AA only depth-composites over GS (`envs/visual/mesh_composite.py`). Pass `origin_w=episode_origin` for episode-local cameras.
+
+InteriorGS dirs also ship `{id}_collision.usd` (same frame as the PLY); loaded for Isaac Viser (`/visual/collision`, visible; 3DGS stays hidden). Physics use of that mesh (replace ground plane) is not wired yet — still on `scene`. Placeholder PLY: `envs/visual/fvdb_gs.py` → `PLY_PATH_PLACEHOLDER`.
 
 Gate optional expensive viz with `if self.env.sim.has_gui():` (or a term-local `debug_vis` flag). Prefer `scene.draw_*` unconditionally inside `debug_draw` when the callback is only registered/useful with a GUI — adapters no-op when the viewer is absent.
 
@@ -387,17 +391,25 @@ self.raycaster.add_isaac_entity(self.env.scene.articulations["robot"])  # one me
 - Batch `N` on rays must equal `entity.num_instances` (`num_envs`).
 - Do not call V2’s private `_add_mesh` / `_add_from_path` without updating `entities` (registration validation will fail).
 
-### USD → trimesh (body-local visuals)
+### USD → trimesh (body-local visuals / collisions)
 
-Extraction lives in `simple_raycaster.utils_usd` (also used by Viser mesh upload):
+Prefer scene adapter APIs (shared helper `envs/backends/isaac/meshes.py`):
+
+```python
+visuals = env.scene.get_visual_meshes("robot")       # list[trimesh], body_names order
+collisions = env.scene.get_collision_meshes("robot") # empty mesh if body has no collision prim
+```
+
+Low-level extraction still lives in `simple_raycaster.utils_usd` (also used by Viser):
 
 1. `find_matching_prims(regex, stage)` — stage traverse with anchored regex.
 2. `get_trimesh_from_prim(prim)` — collect `Mesh`/`Cube` under the prim (follows instance prototypes), convert via `usd2trimesh`, apply **local** transform relative to the parent prim (`world * parent⁻¹`), concatenate + `merge_vertices`.
 3. Result is in **body / parent frame**; at runtime multiply by `body_link_pose_w` (or let V2 do it).
+4. Visuals: `{body}/visuals` (required). Collisions: `{body}/collisions` then `{body}/collision`.
 
 Static terrain: combine under e.g. `/World/ground` and keep identity pose (geometry already world-framed).
 
-MuJoCo counterpart: `utils_mjc.get_trimesh_from_body` + `MultiMeshRaycaster.from_MjModel`.
+mjlab: `env.scene.get_visual_meshes` / `get_collision_meshes` → `envs/backends/mjlab/meshes.py` (contype/conaffinity role split + `mjviser.conversions.merge_geoms`). Low-level: `simple_raycaster.utils_mjc.get_trimesh_from_body` (mesh geoms only, no role filter).
 
 ### In-repo usage patterns
 
