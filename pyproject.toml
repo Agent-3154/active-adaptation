@@ -35,6 +35,9 @@ dependencies = [
 [project.optional-dependencies]
 render = [
     "fvdb-core[viewer]==0.5.1+pt211.cu130",
+    # Robot mesh rasterization for GS composite (needs torch already installed).
+    "nvdiffrast",
+    "ninja",
 ]
 
 [project.scripts]
@@ -76,9 +79,14 @@ name = "fvdb"
 url = "https://d36m13axqqhiit.cloudfront.net/simple"
 explicit = true
 
+[tool.uv]
+# nvdiffrast compiles CUDA extensions against the env's torch (official install).
+no-build-isolation-package = ["nvdiffrast"]
+
 [tool.uv.sources]
 # Force CUDA 12.8-compatible PyTorch wheels instead of default cu13x builds.
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 fvdb-core = { index = "fvdb" }
+nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", rev = "253ac4fcea7de5f396371124af597e6cc957bfae" }

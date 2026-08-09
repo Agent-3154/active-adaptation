@@ -32,6 +32,11 @@ def make_visual_world(
           sh_degree_to_use: -1
           min_radius_2d: 0.0
           load_collision: true   # sibling *_collision.usd → Viser mesh
+          mesh_entities: [robot] # body visuals → mesh overlay
+          composite_meshes: true
+          mesh_renderer: diffrast # or raycast (simple_raycaster.mesh_rgbd)
+          face_keep: 0.1         # quadric decimate (cache once)
+          mesh_chunk_envs: 16    # peak mesh mem ~ O(chunk · V)
           # collision_usd: null  # optional override path
     """
     if cfg is None:

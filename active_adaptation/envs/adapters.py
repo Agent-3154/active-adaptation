@@ -5,6 +5,7 @@ from typing import Dict, Protocol, TYPE_CHECKING, Union, Any
 
 import torch
 import numpy as np
+import trimesh
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -125,6 +126,25 @@ class SceneAdapter(Protocol):
 
     @property
     def entities(self) -> Dict[str, Union["Articulation", "Entity"]]: ...
+
+    def get_visual_meshes(self, name: str) -> list[trimesh.Trimesh]:
+        """Body-local visual meshes for ``entities[name]`` (``body_names`` order).
+
+        Length matches ``num_bodies``; apply ``body_link_pose_w`` at runtime.
+        """
+        raise NotImplementedError(
+            f"get_visual_meshes is not implemented for {self.__class__.__name__}."
+        )
+
+    def get_collision_meshes(self, name: str) -> list[trimesh.Trimesh]:
+        """Body-local collision meshes for ``entities[name]`` (``body_names`` order).
+
+        Length matches ``num_bodies``; bodies without collision geometry may be
+        empty trimeshes (backend-dependent).
+        """
+        raise NotImplementedError(
+            f"get_collision_meshes is not implemented for {self.__class__.__name__}."
+        )
 
     @property
     def sensors(self) -> dict:

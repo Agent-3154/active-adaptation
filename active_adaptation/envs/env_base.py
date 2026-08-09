@@ -294,13 +294,18 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.sensor_render_enabled = value
 
     def _setup_visual(self) -> None:
-        """Optional photoreal world (3DGS). Collision meshes stay on ``scene``."""
+        """Optional photoreal world (3DGS + mesh composite). Collision on ``scene``."""
         from active_adaptation.envs.visual import make_visual_world
 
         self.visual = make_visual_world(self.cfg.get("visual", None), device=self.device)
-        if self.visual is not None:
-            # Eager load so missing PLY fails at env construction, not first obs.
-            self.visual.load()
+        if self.visual is None:
+            return
+        # Eager load so missing PLY fails at env construction, not first obs.
+        self.visual.load()
+        # Body-local visuals for GS mesh composite (typically ``robot``).
+        attach = getattr(self.visual, "attach_scene_meshes", None)
+        if attach is not None:
+            attach(self.scene)
 
     def _create_mdp_terms(self):
         self.randomizations: Mapping[str, mdp.RandomizationV2] = OrderedDict()

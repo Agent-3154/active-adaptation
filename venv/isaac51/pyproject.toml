@@ -18,6 +18,7 @@ torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 fvdb-core = { index = "fvdb" }
+nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", rev = "253ac4fcea7de5f396371124af597e6cc957bfae" }
 
 [[tool.uv.index]]
 name = "aliyun"
@@ -41,6 +42,8 @@ explicit = true
 
 [tool.uv]
 package = false
+# nvdiffrast compiles CUDA extensions against the env's torch (via active-adaptation[render]).
+no-build-isolation-package = ["nvdiffrast"]
 override-dependencies = [
     # isaacsim-core metadata may pull pywin32 unconditionally; gate it to Windows only.
     "pywin32==306 ; sys_platform == 'win32'",

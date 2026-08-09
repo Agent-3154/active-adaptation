@@ -29,63 +29,12 @@ def _rgba_to_rgb255(color: tuple[float, ...] | list[float]) -> tuple[int, int, i
     return (int(r), int(g), int(b))
 
 
-def _entity_visual_paths(entity) -> list[str]:
-    """Build ``{body}/visuals`` prim paths (same rules as MultiMeshRaycasterV2).
-
-    Isaac articulations often use a container root prim (e.g. ``.../Robot``) whose
-    name is not ``body_names[0]``. In that case visuals live at
-    ``{root}/{body_name}/visuals``. When the root prim *is* the first body, fall
-    back to string-replace like V2.
-    """
-    template_path = entity.root_physx_view.prim_paths[0]
-    root_prim_name = template_path.rstrip("/").split("/")[-1]
-    if root_prim_name == entity.body_names[0]:
-        return [
-            template_path.replace(root_prim_name, body_name) + "/visuals"
-            for body_name in entity.body_names
-        ]
-    return [f"{template_path}/{body_name}/visuals" for body_name in entity.body_names]
-
-
 def _load_entity_body_meshes(entity) -> list[tuple[str, Any]]:
-    """Extract body-local trimeshes via ``simple_raycaster.utils_usd``.
+    """Extract body-local visual trimeshes (shared helper with scene adapter)."""
+    from active_adaptation.envs.backends.isaac.meshes import load_entity_body_meshes
 
-    Returns:
-        List of ``(body_name, trimesh)`` in ``entity.body_names`` order.
-    """
-    try:
-        from isaacsim.core.utils.stage import get_current_stage
-        from simple_raycaster.utils_usd import find_matching_prims, get_trimesh_from_prim
-    except ImportError as e:
-        raise ImportError(
-            "IsaacViserViewer mesh extraction requires Isaac Sim and "
-            "simple-raycaster (utils_usd)."
-        ) from e
-
-    stage = get_current_stage()
-    paths = _entity_visual_paths(entity)
-    meshes: list[tuple[str, Any]] = []
-    for body_name, path in zip(entity.body_names, paths):
-        prims = find_matching_prims(path, stage)
-        if len(prims) != 1:
-            raise ValueError(
-                f"Expected exactly one visual prim for body '{body_name}' "
-                f"at '{path}', found {len(prims)}."
-            )
-        try:
-            mesh = get_trimesh_from_prim(prims[0])
-        except ValueError as e:
-            raise ValueError(
-                f"Failed to extract mesh for body '{body_name}' at '{path}': {e}"
-            ) from e
-        meshes.append((body_name, mesh))
-
-    if len(meshes) != entity.num_bodies:
-        raise ValueError(
-            f"Extracted {len(meshes)} body meshes but entity has "
-            f"{entity.num_bodies} bodies."
-        )
-    return meshes
+    meshes = load_entity_body_meshes(entity, suffixes=("visuals",), require_all=True)
+    return list(zip(entity.body_names, meshes))
 
 
 class IsaacViserViewer:

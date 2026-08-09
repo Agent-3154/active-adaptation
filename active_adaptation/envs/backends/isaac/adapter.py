@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING
 
 import torch
+import trimesh
 from typing_extensions import override
 
 from active_adaptation.envs.adapters import SimAdapter, SceneAdapter, CameraFrustumHandle
@@ -186,6 +187,35 @@ class IsaacSceneAdapter(SceneAdapter):
     @property
     def entities(self):
         return {**self._scene.articulations, **self._scene.rigid_objects}
+
+    def get_visual_meshes(self, name: str) -> list[trimesh.Trimesh]:
+        """Body-local visual trimeshes for ``entities[name]`` (``body_names`` order).
+
+        Uses ``{body}/visuals`` via ``simple_raycaster.utils_usd`` (same layout as
+        raycasting / Viser). Multiply by ``body_link_pose_w`` at runtime.
+        """
+        from active_adaptation.envs.backends.isaac.meshes import load_entity_body_meshes
+
+        entity = self.entities[name]
+        return load_entity_body_meshes(
+            entity, suffixes=("visuals",), require_all=True
+        )
+
+    def get_collision_meshes(self, name: str) -> list[trimesh.Trimesh]:
+        """Body-local collision trimeshes for ``entities[name]`` (``body_names`` order).
+
+        Tries ``{body}/collisions`` then ``{body}/collision``. Bodies without a
+        collision prim get an empty trimesh so the list stays aligned with
+        ``num_bodies`` / ``body_link_pose_w``.
+        """
+        from active_adaptation.envs.backends.isaac.meshes import load_entity_body_meshes
+
+        entity = self.entities[name]
+        return load_entity_body_meshes(
+            entity,
+            suffixes=("collisions", "collision"),
+            require_all=False,
+        )
 
     def __getattr__(self, name):
         return getattr(self._scene, name)
