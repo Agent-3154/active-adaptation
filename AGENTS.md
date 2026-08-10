@@ -20,7 +20,7 @@ Shared style: `active_adaptation/learning/TEACHME.md`.
 
 ## Build, Test, and Development Commands
 Install in a Python 3.11 environment with `uv sync` (or `pip install -e .` for legacy workflows).
-Use `aa-discover-projects` to refresh discovered project/task metadata, and `aa-list-tasks` to inspect available task IDs.
+Use `aa-project discover` to refresh discovered project/task metadata, and `aa-list-tasks` to inspect available task IDs.
 Typical workflows:
 
 ```bash
