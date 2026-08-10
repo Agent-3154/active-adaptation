@@ -30,6 +30,7 @@ dependencies = [
     "scipy",
     "trimesh",
     "matplotlib>=3.11.1",
+    "typer",
 ]
 
 [project.optional-dependencies]
@@ -41,12 +42,8 @@ render = [
 ]
 
 [project.scripts]
-aa-create-project = "active_adaptation.cli:aa_create_project"
-aa-discover-projects = "active_adaptation.cli:aa_discover_projects"
-aa-project = "active_adaptation.cli:aa_project"
+aa-project = "active_adaptation.cli:main"
 aa-list-tasks = "active_adaptation.cli:aa_list_tasks"
-aa-pull = "active_adaptation.cli:aa_pull"
-aa-recent-commands = "active_adaptation.cli:aa_recent_commands"
 
 [project.entry-points."active_adaptation.projects"]
 facet = "projects.facet"

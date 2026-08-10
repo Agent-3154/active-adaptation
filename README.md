@@ -18,6 +18,30 @@ and more to come...
 
 Note: The main branch is fast-moving and therefore **almost constantly broken somewhere**. We intentionally practice human design and limit AI-generated code. The best usage of this codebase is to read it instead of directly using it for your own projects.
 
+## Table of contents
+
+- [Installation](#installation)
+  - [Workspace layout](#workspace-layout)
+  - [Recommended: uv multi-environment workflow](#recommended-uv-multi-environment-workflow)
+  - [IsaacLab Installation](#isaaclab-installation)
+  - [Conda workflow (supported, legacy recommendation)](#conda-workflow-supported-legacy-recommendation)
+  - [MJLab setup](#mjlab-setup)
+  - [Optional VSCode setup](#optional-vscode-setup)
+- [Asset download and placement](#asset-download-and-placement)
+- [Project management](#project-management)
+  - [Why packaging / entry points](#why-packaging--entry-points)
+  - [Project layout](#project-layout)
+  - [Create a project](#create-a-project)
+  - [Install a project](#install-a-project)
+  - [Discover and enable](#discover-and-enable)
+  - [Pull updates](#pull-updates)
+  - [How loading works at runtime](#how-loading-works-at-runtime)
+  - [WandB defaults in `projects.json`](#wandb-defaults-in-projectsjson)
+  - [CLI reference](#cli-reference)
+- [Basic Usage](#basic-usage)
+  - [Training](#training)
+  - [VSCode/Cursor Python Debugging](#vscodecursor-python-debugging)
+
 ## Installation
 
 ### Workspace layout
@@ -33,6 +57,8 @@ ${workspaceFolder}/
   IsaacLab/
     _isaac_sim/
 ```
+
+Extension projects (tasks, MDP terms, custom algos) usually live as sibling repos, e.g. `aa-projects/<name>/`, and are registered through Python packaging — see [Project management](#project-management).
 
 ### Recommended: uv multi-environment workflow
 
@@ -84,7 +110,7 @@ Common commands:
 
 ```bash
 # shared
-uv run aa-discover-projects
+uv run aa-project discover
 uv run aa-list-tasks
 uv run pyright active_adaptation
 
@@ -213,49 +239,142 @@ huggingface-cli download btx0424/aa-robot-models --repo-type dataset --local-dir
 
 You can instead **clone or copy** the dataset contents into `.cache/aa-robot-models/`, or put the data elsewhere and replace `.cache/aa-robot-models` with a **symlink** to that folder.
 
-## CLI commands
+## Project management
 
-These commands are available after `pip install -e .` and help manage projects and tasks.
+Extension projects add task YAMLs, MDP terms, assets, and/or learning algorithms on top of `active-adaptation`. They are separate Python packages, discovered via packaging entry points, then selectively imported at runtime.
 
-| Command | Description |
-|--------|-------------|
-| `aa-create-project` | Create a new active-adaptation project scaffold. |
-| `aa-discover-projects` | Discover installed projects and learning modules, write/update `projects.json`. |
-| `aa-list-tasks` | List task names from `cfg/task` in active-adaptation and discovered projects. |
-| `aa-pull` | Run `git pull` for active-adaptation and all enabled projects. |
-| `aa-recent-commands` | List recent training/eval commands from stored history. |
+Typical flow:
 
-### aa-create-project
+1. **Create** a local scaffold, or **install** from a GitHub URL (clone + editable install).
+2. Ensure the project is installed into the **backend** env you train with (`venv/isaac51`, `venv/mjlab`, …).
+3. **Discover** entry points into `.cache/projects.json`.
+4. **Enable** the project(s) you want loaded.
+5. Run training / eval — `aa.init` imports enabled packages and Hydra picks up their `cfg/`.
 
-Create a new project with packages `{name}/` and `{name}_learning/`, `pyproject.toml`, `cfg/task`, `cfg/exp`, and optional README/`.gitignore` (existing files are not overwritten, e.g. when scaffolding inside a new git repo).
+### Why packaging / entry points
 
-```bash
-aa-create-project -n myproject
-aa-create-project -n myproject -d /path/to/parent
+Projects register through:
+
+| Entry-point group | Role |
+|-------------------|------|
+| `active_adaptation.projects` | Environment / MDP package (commands, rewards, assets, …) |
+| `active_adaptation.learning` | Algo configs / policies |
+
+We use packaging (instead of only scanning a folder like `aa-projects/`) so that **installing a project also installs its dependencies** into the same backend environment. Path-only loading would put code on `sys.path` but leave third-party deps missing.
+
+Install projects into the **backend** env you actually run (`uv run --project venv/isaac51 …`), not only the shared root env. Do not dump project-specific deps into the root `active-adaptation` `pyproject.toml`.
+
+### Project layout
+
+Scaffolded projects look like:
+
+```text
+myproject/
+├── cfg/
+│   ├── task/          # Hydra task YAMLs
+│   └── exp/           # Optional experiment overlays
+├── src/
+│   ├── myproject/           # Env / MDP package
+│   └── myproject_learning/  # Algo configs / policies
+└── pyproject.toml           # entry points + dependencies
 ```
 
-- **`-n`, `--name`** (required): Project/package name (lowercase, alphanumeric + underscores).
-- **`-d`, `--dir`**: Parent directory for the new project folder (default: current directory).
+Built-in examples also live under this repo’s `projects/` (e.g. `facet`, `mimic`, `metamorph`) and register from the root `pyproject.toml`.
 
-### aa-discover-projects
-
-Scans entry points `active_adaptation.projects` and `active_adaptation.learning` and updates `projects.json` (under the cache directory) with project paths and task dirs. Use this after installing or adding projects so that `aa-list-tasks` and `aa-pull` know about them. Edit `projects.json` to enable or disable projects.
+### Create a project
 
 ```bash
-aa-discover-projects
+aa-project create -n myproject
+# -> <workspace>/aa-projects/myproject  (sibling of active-adaptation)
+
+aa-project create -n myproject -d /path/to/parent
+# -> /path/to/parent/myproject
 ```
 
-### WandB defaults in projects.json
+- **`-n`, `--name`** (required): lowercase alphanumeric + underscores. Creates packages `src/{name}/` and `src/{name}_learning/`.
+- **`-d`, `--dir`**: parent directory for the new project folder (default: sibling `aa-projects/` next to the `active-adaptation` repo).
 
-You can set default WandB settings in `.cache/projects.json` so training scripts pick them up automatically during `aa.init(...)`.
+The scaffold writes `pyproject.toml` with both entry-point groups, `cfg/task`, `cfg/exp`, README, and `.gitignore` (existing README/`.gitignore` are kept).
 
-Supported keys:
+Declare any project-specific third-party packages in that project’s `[project.dependencies]` (in addition to `active_adaptation`).
 
-- `WANDB_API_KEY`
-- `WANDB_ENTITY`
-- `WANDB_PROJECT`
+### Install a project
 
-You can define these either:
+**From GitHub** (clone into `--dir`, editable-install into the *current* interpreter, then discover):
+
+```bash
+# run inside the backend env you train with
+uv run --project venv/isaac51 aa-project install git@github.com:ORG/myproject.git -d ../aa-projects
+uv run --project venv/isaac51 aa-project install https://github.com/ORG/myproject.git -d ../aa-projects --no-deps
+```
+
+- **`URL`**: HTTPS or SSH GitHub URL.
+- **`-d`, `--dir`**: parent directory for `git clone` (default: `.`).
+- **`--no-deps`**: install the project package only (avoids re-resolving transitive deps that can disturb a locked Isaac/mjlab env when `active_adaptation` is already present).
+- **`--skip-discover`**: do not refresh `.cache/projects.json` after install.
+
+**Already cloned locally:**
+
+```bash
+cd /path/to/myproject
+uv pip install -e . --python /path/to/active-adaptation/venv/isaac51/.venv/bin/python
+# or with the backend env activated:
+pip install -e .
+# then:
+uv run --project venv/isaac51 aa-project discover
+```
+
+Repeat for each backend env that should see the project. Prefer `--no-deps` when the backend env already has `active_adaptation` and you only need the project’s own extra packages installed separately.
+
+### Discover and enable
+
+```bash
+uv run --project venv/isaac51 aa-project discover
+```
+
+`aa-project discover` scans installed entry points and updates `.cache/projects.json` with package paths, task dirs, and an `enabled` flag (new entries default to disabled unless `--enabled` is passed). Then enable what you need:
+
+```bash
+aa-project enable myproject
+aa-project disable myproject
+aa-project enable          # enable all discovered projects
+aa-project disable         # disable all discovered projects
+```
+
+The same entry-point name may appear under both `environment` and `learning`; enable/disable updates both when present. You can also edit `.cache/projects.json` by hand.
+
+List tasks after discovery:
+
+```bash
+aa-list-tasks
+```
+
+### Pull updates
+
+```bash
+aa-project pull                 # active-adaptation + enabled projects
+aa-project pull --all           # active-adaptation + all discovered projects
+aa-project pull myproject       # one project only
+```
+
+Run `aa-project discover` again after adding or relocating installs so paths stay current.
+
+### How loading works at runtime
+
+When you run a script that calls `aa.init(...)`:
+
+1. **Environment packages** listed as `enabled` in `projects.json` are imported (MDP terms / assets register as a side effect).
+2. Hydra’s search-path plugin appends each enabled project’s `cfg/` directory and imports enabled **learning** modules (algo `ConfigStore` registration).
+
+Disabled projects are ignored. Only enable projects you need for a run — imports have side effects and can collide on class names.
+
+### WandB defaults in `projects.json`
+
+You can set default WandB settings in `.cache/projects.json` so training scripts pick them up during `aa.init(...)`.
+
+Supported keys: `WANDB_API_KEY`, `WANDB_ENTITY`, `WANDB_PROJECT`.
+
+Define them either:
 
 1. In a top-level `wandb` block (global defaults), or
 2. Inside enabled `environment` project entries (project-scoped defaults).
@@ -276,43 +395,29 @@ Example:
 
 Resolution behavior:
 
-- `WANDB_API_KEY` and `WANDB_ENTITY` are applied as environment defaults only when those env vars are not already set.
+- `WANDB_API_KEY` and `WANDB_ENTITY` apply as environment defaults only when those env vars are not already set.
 - `WANDB_PROJECT` overrides `cfg.wandb.project` when configured in `projects.json`.
-- If no manifest defaults are configured, WandB initializes normally:
-  - entity comes from env vars or your global WandB settings
-  - project comes from Hydra config (`cfg.wandb.project`)
+- If no manifest defaults are set, WandB initializes normally (entity from env / global settings; project from Hydra).
 - If multiple enabled projects define conflicting values for the same key, that key is ignored and a warning is logged.
 
-### aa-list-tasks
+### CLI reference
 
-Prints task IDs from YAML files under `cfg/task` for active-adaptation and for each enabled project in `projects.json`. Task names keep the directory prefix (e.g. `G1/G1LocoFlat`). Useful to see which tasks are available for `task=...` in training/eval.
+Available after installing `active-adaptation` (root `uv sync` or `pip install -e .`).
 
-```bash
-aa-list-tasks
-```
-
-### aa-pull
-
-Runs `git pull` in the active-adaptation repo and in all **enabled** projects listed in `projects.json`. Use after `aa-discover-projects` so projects are registered.
-
-```bash
-aa-pull           # active projects only
-aa-pull --all     # all discovered projects, including disabled
-```
-
-### aa-recent-commands
-
-Shows the last N commands (training/eval runs) from the stored command history. Optional filter by script name.
+| Command | Description |
+|--------|-------------|
+| `aa-project create -n NAME [-d DIR]` | Scaffold a new project (default: sibling `aa-projects/<name>`). |
+| `aa-project install URL [-d DIR] [--no-deps] [--skip-discover]` | Clone from GitHub and editable-install into the current env. |
+| `aa-project discover [--enabled]` | Scan installed entry points; update `.cache/projects.json`. |
+| `aa-project enable [NAME]` | Enable one project, or all if `NAME` is omitted. |
+| `aa-project disable [NAME]` | Disable one project, or all if `NAME` is omitted. |
+| `aa-project pull [NAME] [--all]` | `git pull` for active-adaptation and/or projects. |
+| `aa-list-tasks` | List task IDs from `cfg/task` in active-adaptation and discovered projects. |
 
 ```bash
-aa-recent-commands
-aa-recent-commands -n 10
-aa-recent-commands -s train_ppo -s eval_run
+aa-project --help
+aa-project create --help
 ```
-
-- **`-n`, `--num`**: Number of recent commands (default: 5).
-- **`-s`, `--script`**: Filter by script name (e.g. `train_ppo`, `eval_run`); can be repeated (OR).
-
 
 ## Basic Usage
 

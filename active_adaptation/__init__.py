@@ -1,7 +1,4 @@
 import os
-import sys
-import json
-import datetime
 import builtins
 import inspect
 
@@ -124,17 +121,6 @@ def init(cfg: DictConfig, auto_rank: bool):
         cfg: The configuration dictionary.
         auto_rank: Whether to automatically modify `cfg.device` according to the local rank.
     """
-
-    # Store sys.argv to a local file
-    if is_main_process():
-        argv_file = CACHE_DIR / "command_history.json"
-        if argv_file.exists():
-            history = json.loads(argv_file.read_text())
-        else:
-            history = []
-        entry = {"timestamp": datetime.datetime.now().isoformat(), "args": sys.argv}
-        history.append(entry)
-        argv_file.write_text(json.dumps(history, indent=2))
 
     set_backend(cfg.backend)
     if _BACKEND == "mjlab":

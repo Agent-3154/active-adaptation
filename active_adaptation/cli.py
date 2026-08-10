@@ -1,243 +1,126 @@
-import argparse
-import json
+"""CLI for managing active-adaptation extension projects."""
+
+from __future__ import annotations
+
 import subprocess
+import sys
 import warnings
 from pathlib import Path
+from typing import Annotated, Optional
+from urllib.parse import urlparse
+
+import typer
 
 from .project_loading.discovery import _task_dir_for_path, discover_projects
-from .project_loading.manifest import CACHE_DIR, PROJECTS_FILE, load_projects, save_projects
+from .project_loading.manifest import PROJECTS_FILE, load_projects, save_projects
+
+AA_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Manage active-adaptation extension projects.",
+)
 
 
-def aa_pull():
-    """
-    Runs `git pull` for active-adaptation and all projects discovered and listed in `projects.json`.
-
-    If `--all` is passed, it will pull all projects, including inactive ones.
-
-    Returns:
-        bool: True if all pulls succeeded, False otherwise.
-    """
-    parser = argparse.ArgumentParser(description="Update all projects")
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Pull all projects, including inactive ones",
-    )
-    args = parser.parse_args()
-
-    if args.all:
-        print("Pulling all projects, including inactive ones")
-    else:
-        print("Pulling active projects only")
-
-    projects = load_projects()
-    project_paths = {Path(__file__).resolve().parents[1]}
-
-    for category in ("environment", "learning"):
-        for project_info in projects.get(category, {}).values():
-            if args.all or project_info["enabled"]:
-                project_paths.add(Path(project_info["path"]))
-
-    for i, project_path in enumerate(project_paths):
-        print(f"[{i + 1}/{len(project_paths)}] Pulling {project_path}")
-        subprocess.run(["git", "branch"], cwd=project_path)
-        result = subprocess.run(["git", "pull"], cwd=project_path)
-        if result.returncode != 0:
-            warnings.warn(
-                f"Failed to pull {project_path} with result: {result.returncode}"
-            )
+def _fail(message: str, code: int = 1) -> None:
+    typer.secho(message, fg=typer.colors.RED, err=True)
+    raise typer.Exit(code)
 
 
-def aa_discover_projects(enabled: bool = False):
-    projects = discover_projects(enabled=enabled)
-
-    for project_info in projects.get("environment", {}).values():
-        task_dir = _task_dir_for_path(Path(project_info["path"]))
-        project_info["task_dir"] = str(task_dir) if task_dir is not None else None
-
-    save_projects(projects)
-    print(f"Modify {PROJECTS_FILE} to enable/disable projects.")
-    return projects
-
-
-def aa_project():
-    """
-    Enable or disable a logical project in projects.json.
-
-    The same entry-point name may appear under \"environment\" and/or \"learning\";
-    both parts are updated together when present.
-    """
-    parser = argparse.ArgumentParser(
-        description="Enable or disable a project (environment and/or learning manifest entries)",
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-    for cmd, help_text in (
-        ("enable", "Turn the project on for imports and aa-pull (default scope)"),
-        ("disable", "Turn the project off"),
-    ):
-        p = sub.add_parser(cmd, help=help_text)
-        p.add_argument(
-            "name",
-            metavar="NAME",
-            help="Entry-point name as in projects.json (e.g. same as pyproject entry point name)",
-        )
-    args = parser.parse_args()
-    name = args.name.strip()
-    if not name:
-        raise SystemExit("Project name must be non-empty.")
-
+def _set_enabled(name: str | None, enabled: bool) -> None:
     projects = load_projects()
     env = projects.setdefault("environment", {})
     learning = projects.setdefault("learning", {})
-    in_env = name in env
-    in_learning = name in learning
 
-    if not in_env and not in_learning:
-        raise SystemExit(
-            f"Unknown project {name!r}: not in environment or learning manifest. "
-            f"Run aa-discover-projects first."
-        )
+    if name is None:
+        names = sorted(set(env) | set(learning))
+        if not names:
+            _fail("No projects in the manifest. Run `aa-project discover` first.")
+    else:
+        name = name.strip()
+        if not name:
+            _fail("Project name must be non-empty.")
+        if name not in env and name not in learning:
+            _fail(
+                f"Unknown project {name!r}: not in environment or learning manifest. "
+                "Run `aa-project discover` first."
+            )
+        names = [name]
 
-    enabled = args.command == "enable"
-    updated: list[str] = []
-    if in_env:
-        env[name]["enabled"] = enabled
-        updated.append("environment")
-    if in_learning:
-        learning[name]["enabled"] = enabled
-        updated.append("learning")
+    state = "enabled" if enabled else "disabled"
+    for project_name in names:
+        updated: list[str] = []
+        if project_name in env:
+            env[project_name]["enabled"] = enabled
+            updated.append("environment")
+        if project_name in learning:
+            learning[project_name]["enabled"] = enabled
+            updated.append("learning")
+        print(f"Project {project_name!r} {state} ({', '.join(updated)}).")
 
     save_projects(projects)
-    state = "enabled" if enabled else "disabled"
-    print(f"Project {name!r} {state} ({', '.join(updated)}).")
 
 
-def aa_list_tasks():
-    """
-    List task names from YAML files under cfg/task in active-adaptation and in
-    all projects from projects.json. Task names preserve the directory prefix
-    (e.g. "G1/G1LocoFlat" instead of "G1LocoFlat").
-    """
-    repo_root = Path(__file__).resolve().parents[1]
-    task_dirs: list[tuple[str, Path]] = []
-    main_task_dir = repo_root / "cfg" / "task"
-    if main_task_dir.is_dir():
-        task_dirs.append(("active-adaptation", main_task_dir))
+def _git_toplevel(path: Path) -> Path:
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return Path(result.stdout.strip())
+    return path
 
+
+def _iter_manifest_project_paths(*, all_projects: bool, name: str | None) -> list[Path]:
     projects = load_projects()
-    for project_name, project_info in projects.get("environment", {}).items():
-        task_dir_str = project_info.get("task_dir")
-        task_dir = Path(task_dir_str) if task_dir_str else _task_dir_for_path(
-            Path(project_info["path"])
+    paths: dict[str, Path] = {}
+
+    for category in ("environment", "learning"):
+        for project_name, project_info in projects.get(category, {}).items():
+            if name is not None and project_name != name:
+                continue
+            if name is None and not all_projects and not project_info.get("enabled", False):
+                continue
+            paths[project_name] = _git_toplevel(Path(project_info["path"]))
+
+    if name is not None and name not in paths:
+        _fail(
+            f"Unknown project {name!r}: not in environment or learning manifest. "
+            "Run `aa-project discover` first."
         )
-        if task_dir is None or not task_dir.is_dir():
-            continue
-        if any(existing_task_dir == task_dir for _, existing_task_dir in task_dirs):
-            continue
-        task_dirs.append((project_name, task_dir))
-
-    for source_name, task_dir in task_dirs:
-        for yaml_path in sorted(task_dir.rglob("*.yaml")):
-            rel = yaml_path.relative_to(task_dir)
-            task_id = str(rel.with_suffix("")).replace("\\", "/")
-            print(f"  {task_id}  (from {source_name})")
+    return list(paths.values())
 
 
-def aa_recent_commands(n: int = 5):
-    """
-    List the n most recent commands (training runs / entry-point invocations)
-    from the stored command history. Optionally filter by script name.
-    """
-    parser = argparse.ArgumentParser(description="List recent commands")
-    parser.add_argument(
-        "-n", "--num",
-        type=int,
-        default=5,
-        help="Number of recent commands to show (default: 5)",
-    )
-    parser.add_argument(
-        "-s", "--script",
-        action="append",
-        default=[],
-        metavar="NAME",
-        help="Filter by script name (e.g. train_ppo, eval_run). Can be given multiple times (OR).",
-    )
-    args = parser.parse_args()
-    n = max(1, args.num)
-    script_filters = args.script
-
-    history_file = CACHE_DIR / "command_history.json"
-    if not history_file.exists():
-        print("No command history found.")
-        return
-
-    history = json.loads(history_file.read_text())
-
-    # Apply script filter: keep entries whose command line matches any of the script names
-    if script_filters:
-        filtered = []
-        for entry in history:
-            cmd = entry.get("args", [])
-            line = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-            if any(s in line for s in script_filters):
-                filtered.append(entry)
-        history = filtered
-
-    recent = history[-n:]
-    if not recent:
-        print("No command history found." if not script_filters else "No matching commands found.")
-        return
-
-    title = f"Last {len(recent)} command(s)"
-    if script_filters:
-        title += f" (script: {' | '.join(script_filters)})"
-    print(f"\n{title}:\n")
-    for i, entry in enumerate(reversed(recent), start=1):
-        ts = entry.get("timestamp", "?")
-        cmd = entry.get("args", [])
-        line = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-        print(f"  {i}. [{ts}]")
-        print(f"     {line}")
-        print()
+def _repo_name_from_url(url: str) -> str:
+    cleaned = url.strip().rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    if "://" in cleaned:
+        path = urlparse(cleaned).path
+        name = Path(path).name
+    elif ":" in cleaned and not cleaned.startswith("/"):
+        # git@host:org/repo
+        name = cleaned.rsplit(":", 1)[-1].rsplit("/", 1)[-1]
+    else:
+        name = Path(cleaned).name
+    if not name:
+        _fail(f"Could not infer repository name from {url!r}.")
+    return name
 
 
-def aa_create_project():
-    """
-    Create a new active-adaptation project scaffold: packages {name}/ and {name}_learning/,
-    pyproject.toml with entry points, cfg/task and cfg/exp, README, and .gitignore.
-    Usage: aa-create-project -n myproject [-d /path/to/parent]
-    """
-    parser = argparse.ArgumentParser(
-        description="Create a new active-adaptation project scaffold",
-    )
-    parser.add_argument(
-        "-n", "--name",
-        required=True,
-        metavar="NAME",
-        help="Project/package name (e.g. myproject → myproject/ and myproject_learning/)",
-    )
-    parser.add_argument(
-        "-d", "--dir",
-        default=".",
-        metavar="PATH",
-        help="Parent directory in which to create the project folder (default: current directory)",
-    )
-    args = parser.parse_args()
-
-    name = args.name.strip()
+def _create_project_scaffold(name: str, parent: Path) -> Path:
     if not name.replace("_", "").isalnum():
-        raise SystemExit("Project name must be alphanumeric (and underscores only).")
+        _fail("Project name must be alphanumeric (and underscores only).")
     if name != name.lower():
-        raise SystemExit("Project name must be lowercase.")
+        _fail("Project name must be lowercase.")
 
-    parent = Path(args.dir).resolve()
-    root: Path = parent / name
+    root = parent.resolve() / name
     if root.exists():
-        raise SystemExit(f"Directory already exists: {root}")
+        _fail(f"Directory already exists: {root}")
 
     root.mkdir(parents=True, exist_ok=True)
 
-    # pyproject.toml
     pyproject = f'''[build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -256,32 +139,30 @@ dependencies = [
 [project.entry-points."active_adaptation.learning"]
 {name} = "{name}_learning"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["{name}", "{name}_learning"]
+
 [tool.setuptools.package-data]
 "*" = ["**/*"]
 '''
     (root / "pyproject.toml").write_text(pyproject)
 
-    # Main package
-    pkg_dir: Path = root / "src" / name
+    pkg_dir = root / "src" / name
     pkg_dir.mkdir(parents=True)
     (pkg_dir / "__init__.py").write_text(
         f"# {name} environment package. Register tasks and assets here.\n"
     )
 
-    # Learning package
     learning_dir = root / "src" / f"{name}_learning"
     learning_dir.mkdir(parents=True)
-    (learning_dir / "__init__.py").write_text(
-        "# Learning scripts and entry points.\n"
-    )
+    (learning_dir / "__init__.py").write_text("# Learning scripts and entry points.\n")
 
-    # cfg/task and cfg/exp
     (root / "cfg" / "task").mkdir(parents=True)
     (root / "cfg" / "task" / ".gitkeep").write_text("")
     (root / "cfg" / "exp").mkdir(parents=True)
     (root / "cfg" / "exp" / ".gitkeep").write_text("")
 
-    # README and .gitignore: do not overwrite if present (e.g. existing git repo)
     readme_path = root / "README.md"
     gitignore_path = root / ".gitignore"
     if not readme_path.exists():
@@ -289,9 +170,10 @@ dependencies = [
             f"# {name}\n\nActive-adaptation project. Add tasks under `cfg/task/`, experiments under `cfg/exp/`.\n"
         )
     else:
-        print(f"  (kept existing README.md)")
+        print("  (kept existing README.md)")
     if not gitignore_path.exists():
-        gitignore_path.write_text("""# Byte-compiled / optimized / DLL files
+        gitignore_path.write_text(
+            """# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
@@ -318,13 +200,195 @@ wheels/
 *.xml
 *.urdf
 
-""")
+"""
+        )
     else:
-        print(f"  (kept existing .gitignore)")
+        print("  (kept existing .gitignore)")
 
     print(f"Created project at: {root}")
-    print(f"  - {name}/")
-    print(f"  - {name}_learning/")
-    print(f"  - pyproject.toml")
-    print(f"  - cfg/task/, cfg/exp/")
-    print(f"  - README.md, .gitignore")
+    print(f"  - src/{name}/")
+    print(f"  - src/{name}_learning/")
+    print("  - pyproject.toml")
+    print("  - cfg/task/, cfg/exp/")
+    print("  - README.md, .gitignore")
+    return root
+
+
+@app.command("create")
+def create_cmd(
+    name: Annotated[
+        str,
+        typer.Option("--name", "-n", help="Project/package name (lowercase, alphanumeric + underscores)."),
+    ],
+    dir: Annotated[
+        Path,
+        typer.Option(
+            "--dir",
+            "-d",
+            help="Parent directory for the new project folder (default: sibling aa-projects/).",
+        ),
+    ] = AA_REPO_ROOT.parent / "aa-projects",
+) -> None:
+    """Scaffold a new extension project under aa-projects/<name> by default."""
+    _create_project_scaffold(name.strip(), dir)
+
+
+@app.command("install")
+def install_cmd(
+    url: Annotated[str, typer.Argument(help="GitHub URL (HTTPS or SSH) of the project repository.")],
+    dir: Annotated[
+        Path,
+        typer.Option("--dir", "-d", help="Parent directory to clone into."),
+    ] = Path("."),
+    no_deps: Annotated[
+        bool,
+        typer.Option("--no-deps", help="Editable-install without resolving dependencies (safer for locked backend envs)."),
+    ] = False,
+    skip_discover: Annotated[
+        bool,
+        typer.Option("--skip-discover", help="Do not run discover after install."),
+    ] = False,
+) -> None:
+    """Clone a project repo and editable-install it into the current Python environment."""
+    parent = dir.resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    repo_name = _repo_name_from_url(url)
+    target = parent / repo_name
+    if target.exists():
+        _fail(f"Destination already exists: {target}")
+
+    print(f"Cloning {url} -> {target}")
+    clone = subprocess.run(["git", "clone", url, str(target)])
+    if clone.returncode != 0:
+        _fail(f"git clone failed with exit code {clone.returncode}")
+
+    if not (target / "pyproject.toml").is_file():
+        _fail(f"No pyproject.toml in {target}; cannot install.")
+
+    cmd = [sys.executable, "-m", "pip", "install", "-e", str(target)]
+    if no_deps:
+        cmd.append("--no-deps")
+    print("Running:", " ".join(cmd))
+    install = subprocess.run(cmd)
+    if install.returncode != 0:
+        _fail(f"pip install failed with exit code {install.returncode}")
+
+    if not skip_discover:
+        discover_cmd()
+
+
+@app.command("discover")
+def discover_cmd(
+    enabled: Annotated[
+        bool,
+        typer.Option("--enabled", help="Mark newly discovered projects as enabled."),
+    ] = False,
+) -> None:
+    """Scan installed entry points and update `.cache/projects.json`."""
+    projects = discover_projects(enabled=enabled)
+
+    for project_info in projects.get("environment", {}).values():
+        task_dir = _task_dir_for_path(Path(project_info["path"]))
+        project_info["task_dir"] = str(task_dir) if task_dir is not None else None
+
+    save_projects(projects)
+    print(f"Updated {PROJECTS_FILE}. Use `aa-project enable|disable` to toggle projects.")
+
+
+@app.command("enable")
+def enable_cmd(
+    name: Annotated[
+        Optional[str],
+        typer.Argument(help="Entry-point name in projects.json. Omit to enable all discovered projects."),
+    ] = None,
+) -> None:
+    """Enable a project (or all projects) for import / Hydra cfg loading."""
+    _set_enabled(name, True)
+
+
+@app.command("disable")
+def disable_cmd(
+    name: Annotated[
+        Optional[str],
+        typer.Argument(help="Entry-point name in projects.json. Omit to disable all discovered projects."),
+    ] = None,
+) -> None:
+    """Disable a project (or all projects)."""
+    _set_enabled(name, False)
+
+
+@app.command("pull")
+def pull_cmd(
+    name: Annotated[
+        Optional[str],
+        typer.Argument(help="Entry-point name to pull. Omit to pull active-adaptation and enabled projects."),
+    ] = None,
+    all: Annotated[
+        bool,
+        typer.Option("--all", help="When NAME is omitted, also pull disabled projects."),
+    ] = False,
+) -> None:
+    """Run `git pull` for active-adaptation and/or extension projects."""
+    if name is not None and all:
+        _fail("Use either NAME or --all, not both.")
+
+    if name is not None:
+        project_paths = _iter_manifest_project_paths(all_projects=True, name=name.strip())
+        print(f"Pulling project {name.strip()!r}")
+    else:
+        if all:
+            print("Pulling active-adaptation and all discovered projects")
+        else:
+            print("Pulling active-adaptation and enabled projects")
+        project_paths = [AA_REPO_ROOT, *_iter_manifest_project_paths(all_projects=all, name=None)]
+
+    # Deduplicate while preserving order
+    seen: set[Path] = set()
+    unique_paths: list[Path] = []
+    for path in project_paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique_paths.append(resolved)
+
+    for i, project_path in enumerate(unique_paths):
+        print(f"[{i + 1}/{len(unique_paths)}] Pulling {project_path}")
+        subprocess.run(["git", "branch"], cwd=project_path)
+        result = subprocess.run(["git", "pull"], cwd=project_path)
+        if result.returncode != 0:
+            warnings.warn(
+                f"Failed to pull {project_path} with result: {result.returncode}"
+            )
+
+
+def aa_list_tasks() -> None:
+    """List task IDs from cfg/task in active-adaptation and discovered projects."""
+    task_dirs: list[tuple[str, Path]] = []
+    main_task_dir = AA_REPO_ROOT / "cfg" / "task"
+    if main_task_dir.is_dir():
+        task_dirs.append(("active-adaptation", main_task_dir))
+
+    projects = load_projects()
+    for project_name, project_info in projects.get("environment", {}).items():
+        task_dir_str = project_info.get("task_dir")
+        task_dir = (
+            Path(task_dir_str)
+            if task_dir_str
+            else _task_dir_for_path(Path(project_info["path"]))
+        )
+        if task_dir is None or not task_dir.is_dir():
+            continue
+        if any(existing_task_dir == task_dir for _, existing_task_dir in task_dirs):
+            continue
+        task_dirs.append((project_name, task_dir))
+
+    for source_name, task_dir in task_dirs:
+        for yaml_path in sorted(task_dir.rglob("*.yaml")):
+            rel = yaml_path.relative_to(task_dir)
+            task_id = str(rel.with_suffix("")).replace("\\", "/")
+            print(f"  {task_id}  (from {source_name})")
+
+
+def main() -> None:
+    app()
