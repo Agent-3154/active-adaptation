@@ -737,6 +737,7 @@ class PPOTeacherStudentPolicy(TensorDictModuleBase):
         clamped_neg = ratio_det < 1.0 - eps_neg
 
         policy_loss = self.actor_loss_fn(ratio, adv, self.clip_param)
+        policy_loss = (policy_loss.reshape_as(valid) * valid).sum() / valid_cnt
         entropy_loss = -self.entropy_coef * entropy
 
         values = self.critic(tensordict)["state_value"]
