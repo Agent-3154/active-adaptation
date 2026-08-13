@@ -6,9 +6,7 @@ from active_adaptation.assets.underwater.BlueROVHeavy import (
     ADDED_MASS,
     COBM,
     INIT_POS,
-    LINEAR_DAMPING,
     NUM_ROTORS,
-    QUADRATIC_DAMPING,
     ROTOR_FORCE_CONSTANTS,
     ROTOR_MAX_ROTATION_VEL_RAD_S,
     ROTOR_TIME_CONSTANTS,
@@ -21,8 +19,7 @@ registry = Registry.instance()
 
 USD_PATH = ROBOT_MODEL_DIR / "underwater" / "BlueROVHeavyArm" / "model" / "model.usd"
 
-# X5A-style arm (same joint naming as a2_manipulator). Arm / gripper volumes are
-# zero placeholders until per-link displaced volumes are measured.
+# X5A-style arm (same joint naming as a2_manipulator).
 _ARM_JOINTS = tuple(f"arm_joint{i}" for i in range(1, 9))
 _ARM_BODIES = (
     "arm_base_link",
@@ -49,6 +46,35 @@ VOLUME = {
     "gripper_base": 0.00014946794,  # signed
     "gripper_right": 3.1933421e-05,  # signed
     "gripper_left": 3.1933416e-05,  # watertight
+}
+
+# Per-body damping: base keeps MarineGym 6-DoF coeffs; arm floats are isotropic
+# translational placeholders (~0.5*rho*Cd*A order for quadratic).
+LINEAR_DAMPING = {
+    "base_link": (4.03, 6.22, 5.18, 0.07, 0.07, 0.07),
+    "rotor_.*": 0.0,
+    "arm_base_link": 0.5,
+    "arm_link1": 0.5,
+    "arm_link2": 2.0,
+    "arm_link3": 1.5,
+    "arm_link4": 0.8,
+    "arm_link5": 1.0,
+    "gripper_base": 0.8,
+    "gripper_right": 0.3,
+    "gripper_left": 0.3,
+}
+QUADRATIC_DAMPING = {
+    "base_link": (18.18, 21.66, 36.99, 1.55, 1.55, 1.55),
+    "rotor_.*": 0.0,
+    "arm_base_link": 2.0,
+    "arm_link1": 2.0,
+    "arm_link2": 10.0,
+    "arm_link3": 8.0,
+    "arm_link4": 4.0,
+    "arm_link5": 5.0,
+    "gripper_base": 4.0,
+    "gripper_right": 1.5,
+    "gripper_left": 1.5,
 }
 
 # Actuator gains: X5A URDF effort=100; stiffness/damping aligned with a2_manipulator.
@@ -160,7 +186,103 @@ def make_isaaclab_cfg(self_collisions: bool = False):
 
 
 def make_mjlab_cfg(motrix: bool = False):
-    raise NotImplementedError("MJLab backend is not supported for BlueROVHeavyArm")
+    import mujoco
+    from active_adaptation.assets.asset_cfg import AssetSpec, EntityCfg
+    from mjlab.actuator import BuiltinPdActuatorCfg
+    from mjlab.entity import EntityArticulationInfoCfg
+    from mjlab.utils.spec_config import CollisionCfg
+
+    mjcf_path = ROBOT_MODEL_DIR / "underwater" / "BlueROVHeavyArm" / "model.xml"
+
+    def spec_fn():
+        spec = mujoco.MjSpec.from_file(str(mjcf_path))
+        # Arm/gripper geoms are unnamed in the MJCF; CollisionCfg needs names.
+        for body in spec.bodies:
+            visual_i = 0
+            collision_i = 0
+            for geom in body.geoms:
+                if geom.name:
+                    continue
+                is_visual = geom.contype == 0 and geom.conaffinity == 0
+                if is_visual:
+                    suffix = "_visual" if visual_i == 0 else f"_visual{visual_i}"
+                    visual_i += 1
+                else:
+                    suffix = "_collision" if collision_i == 0 else f"_collision{collision_i}"
+                    collision_i += 1
+                geom.name = f"{body.name}{suffix}"
+        return spec
+
+    cfg = EntityCfg(
+        init_state=EntityCfg.InitialStateCfg(
+            pos=INIT_POS,
+            joint_pos=INIT_JOINT_POS,
+            joint_vel={".*": 0.0},
+        ),
+        spec_fn=spec_fn,
+        # Rotors stay unactuated (thrust is applied as body wrenches).
+        articulation=EntityArticulationInfoCfg(
+            actuators=(
+                BuiltinPdActuatorCfg(
+                    target_names_expr=("arm_joint[1-6]",),
+                    effort_limit=ARM_EFFORT_LIMIT,
+                    stiffness=ARM_STIFFNESS,
+                    damping=ARM_DAMPING,
+                    armature=0.01,
+                    frictionloss=0.01,
+                ),
+                BuiltinPdActuatorCfg(
+                    target_names_expr=("arm_joint[7-8]",),
+                    effort_limit=GRIPPER_EFFORT_LIMIT,
+                    stiffness=GRIPPER_STIFFNESS,
+                    damping=GRIPPER_DAMPING,
+                    armature=0.01,
+                    frictionloss=0.01,
+                ),
+            ),
+        ),
+        collisions=(
+            # Rotors are thrust dummies: omit them so disable_other_geoms turns
+            # their colliders off. Gripper needs friction (condim=6); base/arm
+            # are frictionless (condim=1).
+            CollisionCfg(
+                geom_names_expr=(
+                    "base_link_collision.*",
+                    "arm_.*_collision.*",
+                    "gripper_.*_collision.*",
+                ),
+                contype=0,
+                conaffinity=1,
+                condim={
+                    "gripper_.*_collision.*": 6,
+                    "base_link_collision.*": 1,
+                    "arm_.*_collision.*": 1,
+                },
+            ),
+        ),
+        joint_names_simulation=JOINT_NAMES_SIMULATION,
+        body_names_simulation=BODY_NAMES_SIMULATION,
+    )
+    if motrix:
+        from active_adaptation.envs.backends.motrix.mjcf import export_entity_mjcf
+
+        cfg.motrix_mjcf_path_fn = lambda c: export_entity_mjcf(c, mjcf_path)
+
+    return AssetSpec(
+        config=cfg,
+        sensors=(),
+        wrapper=UnderwaterRobot(
+            cfg=HydrodynamicsCfg(
+                volume=VOLUME,
+                coBM=COBM,
+                added_mass=ADDED_MASS,
+                linear_damping=LINEAR_DAMPING,
+                quadratic_damping=QUADRATIC_DAMPING,
+            ),
+            rotor_time_constants=ROTOR_TIME_CONSTANTS,
+            rotor_force_constants=ROTOR_FORCE_CONSTANTS,
+        ),
+    )
 
 
 def make_cfg(backend: Literal["isaaclab", "mjlab", "motrix"]):

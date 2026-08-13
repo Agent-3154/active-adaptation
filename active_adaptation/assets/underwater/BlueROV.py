@@ -21,8 +21,15 @@ VOLUME = {
 }
 COBM = 0.01
 ADDED_MASS = (5.5, 12.7, 14.57, 0.12, 0.12, 0.12)
-LINEAR_DAMPING = (4.03, 6.22, 5.18, 0.07, 0.07, 0.07)
-QUADRATIC_DAMPING = (18.18, 21.66, 36.99, 1.55, 1.55, 1.55)
+# Per-body damping (6-tuple on base = MarineGym vehicle coeffs; rotors unused).
+LINEAR_DAMPING = {
+    "base_link": (4.03, 6.22, 5.18, 0.07, 0.07, 0.07),
+    "rotor_.*": 0.0,
+}
+QUADRATIC_DAMPING = {
+    "base_link": (18.18, 21.66, 36.99, 1.55, 1.55, 1.55),
+    "rotor_.*": 0.0,
+}
 
 # --- rotor / T200 thruster parameters (from BlueROV.yaml) ---
 NUM_ROTORS = 6
