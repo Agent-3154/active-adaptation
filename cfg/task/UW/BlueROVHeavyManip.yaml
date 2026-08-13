@@ -1,0 +1,79 @@
+# @package task
+name: BlueROVHeavyManip
+project: underwater
+
+viewer:
+  resolution: [1280, 720]
+  lookat: [0., 0., 0.]
+  eye: [4.0, 4.0, 4.0]
+
+robot:
+  name: bluerov_heavy_arm
+
+terrain: plane
+
+num_envs: 4096
+max_episode_length: 1000
+
+sim:
+  step_dt: 0.02
+  isaac_physics_dt: 0.01
+  mujoco_physics_dt: 0.002
+
+input:
+  action:
+    _target_: ConcatenatedAction
+    actions:
+      - _target_: UnderwaterThrottle
+      - _target_: JointReferenceModel
+        action_scaling:
+          arm_joint[1-3]: 1.0
+          arm_joint[4-6]: 0.5
+        omega: 20.0
+        max_delay: 1
+      - _target_: CorrelatedJointPosition
+        joint_names: "arm_joint[7,8]"
+        # arm_joint7: [0, 0.035], arm_joint8: [-0.035, 0] -> open/close together
+        matrix: [1.0, -1.0]
+        action_scaling: 0.035
+
+command:
+  _target_: TrajTracking
+  target_range: [[-4.0, 4.0], [-4.0, 4.0], [-1.0, 1.0]]
+  future_steps: [1, 4]
+  vel_range: [[-1.0, 1.0], [-1.0, 1.0], [0.0, 0.0]]
+  duration_range: [10.0, 20.0]
+  look_at_goal_prob: 0.5
+  resample_interval: 200
+  resample_prob: 0.2
+
+observation:
+  command:
+    command: {}
+  policy:
+    root_linvel_b: {yaw_only: true}
+    root_angvel_b: {}
+    gravity_multistep: {steps: 4, noise_std: 0.05}
+    joint_pos_multistep: {joint_names: "arm_joint.*", steps: 4, noise_std: 0.05}
+    joint_vel_multistep: {joint_names: "arm_joint.*", steps: 4, noise_std: 0.2}
+    # underwater.baro_pressure: {body_name: base_link}
+    # underwater.dvl_linvel:    {body_name: base_link}
+  extero:
+    underwater.uw_camera:
+      body_name: base_link
+      clipping_range: [0.2, 10.0]
+      offset_pos: [0.1, 0.0, 0.0]
+      debug_vis: true
+
+reward:
+  navi:
+    position_tracking: {weight: 1.5, sigma: 0.25}
+    velocity_tracking: {weight: 1.0, sigma: 0.25}
+    orientation_tracking: {weight: 1.0, sigma: 0.5}
+    survival: {weight: 1.0}
+    joint_acc_l2: {weight: 1.0e-6, joint_names: "arm_joint[1-6]" }
+    joint_vel_l2: {weight: 1.0e-2, joint_names: "arm_joint[1-6]" }
+
+termination:
+  max_episode_length: {}
+  position_error_exceeding: {threshold: 1.0}

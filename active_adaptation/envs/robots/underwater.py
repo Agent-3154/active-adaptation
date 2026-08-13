@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Mapping, Sequence, TYPE_CHECKING
+from functools import cached_property
 
 import torch
 from tensordict import TensorDictBase
@@ -18,22 +19,53 @@ if TYPE_CHECKING: # DO NOT MODIFY
     from active_adaptation.envs.env_base import _EnvBase
 
 
+# Scalar volume, or damping as float / 3-tuple / 6-tuple per body.
+BodyFloatSpec = Sequence[float] | Mapping[str, float]
+BodyDampingValue = float | Sequence[float]
+BodyDampingSpec = Sequence[BodyDampingValue] | Mapping[str, BodyDampingValue]
+
+
+def _expand_damping_coeffs(value: BodyDampingValue) -> list[float]:
+    """Expand a damping value to a length-6 diagonal coefficient vector.
+
+    - ``float`` → isotropic translational ``(d, d, d, 0, 0, 0)``
+    - length-3 → translational anisotropic ``(fx, fy, fz, 0, 0, 0)``
+    - length-6 → full wrench ``(Fx, Fy, Fz, Mx, My, Mz)``
+    """
+    if isinstance(value, (int, float)):
+        d = float(value)
+        return [d, d, d, 0.0, 0.0, 0.0]
+    coeffs = [float(x) for x in value]
+    if len(coeffs) == 3:
+        return [coeffs[0], coeffs[1], coeffs[2], 0.0, 0.0, 0.0]
+    if len(coeffs) == 6:
+        return coeffs
+    raise ValueError(
+        f"Damping value must be a float or a sequence of length 3 or 6; got {value!r}"
+    )
+
+
 @dataclass
 class HydrodynamicsCfg:
     """Hydrodynamic parameters for an underwater robot.
 
-    ``volume`` is per-body displaced volume (m^3). Pass either:
+    ``volume`` is per-body displaced volume (m^3). ``linear_damping`` /
+    ``quadratic_damping`` are per-body diagonal coefficients. For each body pass:
 
-    - a sequence of floats in ``robot.body_names`` order, or
-    - a ``{name_regex: volume}`` mapping (same style as actuator gains).
+    - a ``float`` (isotropic translational drag),
+    - a length-3 sequence (anisotropic translational), or
+    - a length-6 sequence (full Fossen-style wrench damping).
 
-    Every body must receive a volume (use ``0.0`` as a placeholder).
+    Specs may be a sequence in ``robot.body_names`` order or a
+    ``{name_regex: value}`` mapping. Every body must be specified.
+
+    ``added_mass`` remains the vehicle-level 6-DoF term on the **base** twist.
     """
-    volume: Sequence[float] | Mapping[str, float]
+    volume: BodyFloatSpec
     coBM: float
     added_mass: tuple[float, float, float, float, float, float]
-    linear_damping: tuple[float, float, float, float, float, float]
-    quadratic_damping: tuple[float, float, float, float, float, float]
+    linear_damping: BodyDampingSpec
+    quadratic_damping: BodyDampingSpec
     water_density: float = 997.0
     gravity: float = 9.8
     acc_filter_alpha: float = 0.3
@@ -50,8 +82,8 @@ class UnderwaterRobotData:
     """
     # Constant (or slowly changing) hydrodynamics parameters/matrices.
     added_mass_matrix: torch.Tensor
-    linear_damping_matrix: torch.Tensor
-    quadratic_damping_matrix: torch.Tensor
+    linear_damping: torch.Tensor  # (num_envs, num_bodies, 6)
+    quadratic_damping: torch.Tensor  # (num_envs, num_bodies, 6)
     volume: torch.Tensor  # (num_envs, num_bodies)
     coBM: torch.Tensor
 
@@ -74,9 +106,9 @@ class UnderwaterRobotData:
     rpm: torch.Tensor
     thrusts_b: torch.Tensor
 
-    # Per-step decomposed hydrodynamics terms (all in body frame).
+    # Per-step decomposed hydrodynamics terms.
     body_acc: torch.Tensor
-    damping: torch.Tensor
+    damping: torch.Tensor  # (num_envs, num_bodies, 6) body-frame wrenches
     added_mass: torch.Tensor
     coriolis: torch.Tensor
     buoyancy: torch.Tensor
@@ -114,17 +146,113 @@ class UnderwaterRobot:
         elif robot is not None or env is not None:
             raise ValueError("Both 'robot' and 'env' must be provided together.")
 
-    @property
+    @cached_property
     def num_envs(self) -> int:
         return self.env.num_envs
 
-    @property
+    @cached_property
     def device(self) -> torch.device:
-        return self.robot.device
+        try:
+            device = self.robot.device
+        except AttributeError:
+            device = self.robot.data.root_link_pos_w.device
+        return device
 
-    @property
+    @cached_property
     def num_bodies(self) -> int:
         return len(self.body_names)
+
+    def _resolve_body_floats(
+        self,
+        spec: BodyFloatSpec,
+        body_names: Sequence[str],
+        field_name: str,
+    ) -> torch.Tensor:
+        """Resolve a per-body float spec to a length-``num_bodies`` tensor."""
+        if isinstance(spec, Mapping):
+            indices, matched_names, values = string_utils.resolve_matching_names_values(
+                dict(spec), body_names, preserve_order=True
+            )
+            missing = [name for name in body_names if name not in matched_names]
+            assert not missing, (
+                f"HydrodynamicsCfg.{field_name} must specify every body; missing: {missing}. "
+                f"Bodies: {list(body_names)}"
+            )
+            assert len(matched_names) == len(body_names), (
+                f"HydrodynamicsCfg.{field_name} matched {len(matched_names)} bodies, "
+                f"expected {len(body_names)} ({list(body_names)})"
+            )
+            out = torch.zeros(len(body_names), dtype=torch.float32)
+            out[list(indices)] = torch.tensor(values, dtype=torch.float32)
+            return out
+
+        if isinstance(spec, (str, bytes)):
+            raise TypeError(
+                f"HydrodynamicsCfg.{field_name} must be a sequence of floats or a "
+                f"str-to-float mapping; got {type(spec).__name__}"
+            )
+
+        try:
+            values = list(spec)
+        except TypeError as exc:
+            raise TypeError(
+                f"HydrodynamicsCfg.{field_name} must be a sequence of floats or a "
+                f"str-to-float mapping; got {type(spec).__name__}"
+            ) from exc
+
+        assert len(values) == len(body_names), (
+            f"HydrodynamicsCfg.{field_name} list length {len(values)} != "
+            f"num_bodies {len(body_names)} ({list(body_names)})"
+        )
+        return torch.tensor(values, dtype=torch.float32)
+
+    def _resolve_body_damping(
+        self,
+        spec: BodyDampingSpec,
+        body_names: Sequence[str],
+        field_name: str,
+    ) -> torch.Tensor:
+        """Resolve per-body damping to a ``(num_bodies, 6)`` tensor."""
+        if isinstance(spec, Mapping):
+            indices, matched_names, values = string_utils.resolve_matching_names_values(
+                dict(spec), body_names, preserve_order=True
+            )
+            missing = [name for name in body_names if name not in matched_names]
+            assert not missing, (
+                f"HydrodynamicsCfg.{field_name} must specify every body; missing: {missing}. "
+                f"Bodies: {list(body_names)}"
+            )
+            assert len(matched_names) == len(body_names), (
+                f"HydrodynamicsCfg.{field_name} matched {len(matched_names)} bodies, "
+                f"expected {len(body_names)} ({list(body_names)})"
+            )
+            out = torch.zeros(len(body_names), 6, dtype=torch.float32)
+            for idx, value in zip(indices, values):
+                out[idx] = torch.tensor(_expand_damping_coeffs(value), dtype=torch.float32)
+            return out
+
+        if isinstance(spec, (str, bytes)):
+            raise TypeError(
+                f"HydrodynamicsCfg.{field_name} must be a sequence or str-to-value "
+                f"mapping; got {type(spec).__name__}"
+            )
+
+        try:
+            values = list(spec)
+        except TypeError as exc:
+            raise TypeError(
+                f"HydrodynamicsCfg.{field_name} must be a sequence or str-to-value "
+                f"mapping; got {type(spec).__name__}"
+            ) from exc
+
+        assert len(values) == len(body_names), (
+            f"HydrodynamicsCfg.{field_name} list length {len(values)} != "
+            f"num_bodies {len(body_names)} ({list(body_names)})"
+        )
+        out = torch.zeros(len(body_names), 6, dtype=torch.float32)
+        for i, value in enumerate(values):
+            out[i] = torch.tensor(_expand_damping_coeffs(value), dtype=torch.float32)
+        return out
 
     def _initialize(self, robot: "Articulation", env: "_EnvBase"):
         self.robot = robot
@@ -132,15 +260,15 @@ class UnderwaterRobot:
         self.dt = self.env.sim.get_physics_dt()
 
         self.body_names = list(self.robot.body_names)
-        _, matched_names, values = string_utils.resolve_matching_names_values(
-            dict(self.cfg.volume), self.robot.body_names, preserve_order=True
-        )
-        missing = [name for name in self.robot.body_names if name not in matched_names]
-        assert not missing, (
-            f"HydrodynamicsCfg.volume must specify every body; missing: {missing}. "
-            f"Bodies: {list(self.robot.body_names)}"
-        )
-        body_volumes = torch.tensor(values, device=self.device)
+        body_volumes = self._resolve_body_floats(
+            self.cfg.volume, self.body_names, "volume"
+        ).to(self.device)
+        linear_damping = self._resolve_body_damping(
+            self.cfg.linear_damping, self.body_names, "linear_damping"
+        ).to(self.device)
+        quadratic_damping = self._resolve_body_damping(
+            self.cfg.quadratic_damping, self.body_names, "quadratic_damping"
+        ).to(self.device)
 
         # Find the rotor bodies once and keep this order as canonical rotor order.
         rotor_indices, rotor_names = self.robot.find_bodies("rotor_.*")
@@ -166,21 +294,14 @@ class UnderwaterRobot:
             force_values, device=self.device, dtype=torch.float32
         )
 
-        hydro_coef = self.cfg
         added_mass_matrix = torch.diag(
-            torch.tensor(hydro_coef.added_mass, device=self.device)
-        ).expand(self.num_envs, -1, -1).clone()
-        linear_damping_matrix = torch.diag(
-            torch.tensor(hydro_coef.linear_damping, device=self.device)
-        ).expand(self.num_envs, -1, -1).clone()
-        quadratic_damping_matrix = torch.diag(
-            torch.tensor(hydro_coef.quadratic_damping, device=self.device)
+            torch.tensor(self.cfg.added_mass, device=self.device)
         ).expand(self.num_envs, -1, -1).clone()
 
         self.data = UnderwaterRobotData(
             added_mass_matrix=added_mass_matrix,
-            linear_damping_matrix=linear_damping_matrix,
-            quadratic_damping_matrix=quadratic_damping_matrix,
+            linear_damping=linear_damping.unsqueeze(0).expand(self.num_envs, -1, -1).clone(),
+            quadratic_damping=quadratic_damping.unsqueeze(0).expand(self.num_envs, -1, -1).clone(),
             volume=body_volumes.unsqueeze(0).expand(self.num_envs, -1).clone(),
             coBM=torch.full((self.num_envs,), self.cfg.coBM, device=self.device),
             prev_body_vels=torch.zeros(self.num_envs, 6, device=self.device),
@@ -195,7 +316,7 @@ class UnderwaterRobot:
             rpm=torch.zeros(self.num_envs, self.num_rotors, device=self.device),
             thrusts_b=torch.zeros(self.num_envs, self.num_rotors, 3, device=self.device),
             body_acc=torch.zeros(self.num_envs, 6, device=self.device),
-            damping=torch.zeros(self.num_envs, 6, device=self.device),
+            damping=torch.zeros(self.num_envs, self.num_bodies, 6, device=self.device),
             added_mass=torch.zeros(self.num_envs, 6, device=self.device),
             coriolis=torch.zeros(self.num_envs, 6, device=self.device),
             buoyancy=torch.zeros(self.num_envs, 6, device=self.device),
@@ -249,10 +370,12 @@ class UnderwaterRobot:
         root_link_rpy_w = euler_from_quat(root_link_quat_w)
 
         flow_twist_w = self.data.flow_vels + torch.rand_like(self.data.flow_vels) * self.data.flow_noise_scale
+        flow_lin_w = flow_twist_w[..., :3]
+        flow_ang_w = flow_twist_w[..., 3:]
         flow_twist_b = torch.cat(
             [
-                quat_rotate_inverse(root_link_quat_w, flow_twist_w[..., :3]),
-                quat_rotate_inverse(root_link_quat_w, flow_twist_w[..., 3:]),
+                quat_rotate_inverse(root_link_quat_w, flow_lin_w),
+                quat_rotate_inverse(root_link_quat_w, flow_ang_w),
             ],
             dim=-1,
         )
@@ -260,8 +383,6 @@ class UnderwaterRobot:
         # to the hydrodynamics sign convention used by the fitted coefficients.
         hydro_twist_b = root_link_twist_b - flow_twist_b
         hydro_twist_b[..., [1, 2, 4, 5]] *= -1
-        hydro_rpy = root_link_rpy_w.clone()
-        hydro_rpy[..., [1, 2]] *= -1
 
         alpha = self.cfg.acc_filter_alpha
         hydro_acc_b = (hydro_twist_b - self.data.prev_body_vels) / self.dt
@@ -269,18 +390,8 @@ class UnderwaterRobot:
         self.data.prev_body_vels.copy_(hydro_twist_b)
         self.data.prev_body_acc.copy_(hydro_acc_b)
 
-        hydro_twist_matrix_b = torch.diag_embed(hydro_twist_b)
-        hydro_twist_matrix_b[:, 1, 5] = hydro_twist_b[:, 5]
-        hydro_twist_matrix_b[:, 2, 4] = hydro_twist_b[:, 4]
-        hydro_twist_matrix_b[:, 4, 2] = hydro_twist_b[:, 2]
-        hydro_twist_matrix_b[:, 5, 1] = hydro_twist_b[:, 1]
-        damping_matrix = self.data.linear_damping_matrix + self.data.quadratic_damping_matrix * torch.abs(
-            hydro_twist_matrix_b
-        )
-        damping_wrench_b = (damping_matrix @ hydro_twist_b.unsqueeze(-1)).squeeze(-1)
-
+        # Added mass + Coriolis remain vehicle-level on the base twist.
         added_mass_wrench_b = (self.data.added_mass_matrix @ hydro_acc_b.unsqueeze(-1)).squeeze(-1)
-
         added_mass_momentum_b = (self.data.added_mass_matrix @ hydro_twist_b.unsqueeze(-1)).squeeze(-1)
         coriolis_wrench_b = torch.zeros(self.num_envs, 6, device=self.device)
         coriolis_wrench_b[:, 0:3] = -torch.cross(
@@ -318,8 +429,32 @@ class UnderwaterRobot:
             -self.data.coBM * base_buoyancy_force * sin_pitch[:, self._base_body_id]
         )
 
-        hydro_wrench_b = -(added_mass_wrench_b + coriolis_wrench_b + damping_wrench_b)
+        # Per-body damping on each link's flow-relative twist (hydro axis convention).
+        body_lin_vel_b = quat_rotate_inverse(
+            body_quat_w.reshape(-1, 4),
+            (data.body_link_lin_vel_w - flow_lin_w.unsqueeze(1)).reshape(-1, 3),
+        ).reshape(self.num_envs, self.num_bodies, 3)
+        body_ang_vel_b = quat_rotate_inverse(
+            body_quat_w.reshape(-1, 4),
+            (data.body_link_ang_vel_w - flow_ang_w.unsqueeze(1)).reshape(-1, 3),
+        ).reshape(self.num_envs, self.num_bodies, 3)
+        body_hydro_twist_b = torch.cat([body_lin_vel_b, body_ang_vel_b], dim=-1)
+        body_hydro_twist_b[..., [1, 2, 4, 5]] *= -1
+
+        twist_mat = torch.diag_embed(body_hydro_twist_b)
+        twist_mat[..., 1, 5] = body_hydro_twist_b[..., 5]
+        twist_mat[..., 2, 4] = body_hydro_twist_b[..., 4]
+        twist_mat[..., 4, 2] = body_hydro_twist_b[..., 2]
+        twist_mat[..., 5, 1] = body_hydro_twist_b[..., 1]
+        damping_mat = (
+            torch.diag_embed(self.data.linear_damping)
+            + torch.diag_embed(self.data.quadratic_damping) * torch.abs(twist_mat)
+        )
+        damping_wrench_b = (damping_mat @ body_hydro_twist_b.unsqueeze(-1)).squeeze(-1)
+
+        hydro_wrench_b = -(added_mass_wrench_b + coriolis_wrench_b)
         hydro_wrench_b[:, [1, 2, 4, 5]] *= -1
+        damping_wrench_b[..., [1, 2, 4, 5]] *= -1
         buoyancy_forces_b[..., [1, 2]] *= -1
         buoyancy_torques_b[..., [1, 2]] *= -1
 
@@ -356,8 +491,8 @@ class UnderwaterRobot:
         # Thrust is along local +X axis of each rotor body.
         self.data.thrusts_b[..., 0] = rotor_thrust_force_x
 
-        forces_b = buoyancy_forces_b.clone()
-        torques_b = buoyancy_torques_b.clone()
+        forces_b = buoyancy_forces_b - damping_wrench_b[..., 0:3]
+        torques_b = buoyancy_torques_b - damping_wrench_b[..., 3:6]
         forces_b[:, self._base_body_id] += hydro_wrench_b[..., 0:3]
         torques_b[:, self._base_body_id] += hydro_wrench_b[..., 3:6]
         forces_b[:, self.rotor_indices] += self.data.thrusts_b
@@ -373,13 +508,22 @@ class UnderwaterRobot:
         self.data.hydro_forces_b.copy_(forces_b[:, self._base_body_id])
         self.data.hydro_torques_b.copy_(torques_b[:, self._base_body_id])
 
-        # With `is_global=False`, each entry is interpreted in the local frame of
-        # the corresponding body: buoyancy on all bodies, hydro on base, thrust on rotors.
-        self.robot.permanent_wrench_composer.set_forces_and_torques(
-            forces_b,
-            torques_b,
-            is_global=False,
-        )
+        # Isaac: body-local wrenches via permanent_wrench_composer.
+        # mjlab: xfrc_applied is world-frame; rotate body wrenches here.
+        composer = getattr(self.robot, "permanent_wrench_composer", None)
+        if composer is not None:
+            composer.set_forces_and_torques(
+                forces_b,
+                torques_b,
+                is_global=False,
+            )
+        else:
+            quat_flat = body_quat_w.reshape(-1, 4)
+            forces_w = quat_rotate(quat_flat, forces_b.reshape(-1, 3)).reshape_as(forces_b)
+            torques_w = quat_rotate(quat_flat, torques_b.reshape(-1, 3)).reshape_as(
+                torques_b
+            )
+            self.robot.write_external_wrench_to_sim(forces_w, torques_w)
 
     def debug_draw(self):
         if self.env.backend == "isaac":
