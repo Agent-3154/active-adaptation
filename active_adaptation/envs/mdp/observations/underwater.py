@@ -250,6 +250,7 @@ class baro_pressure(ObservationV2):
         water_surface_z: float = 0.0,
         atmosphere_pressure: float = 101325.0,
     ) -> None:
+        super().__init__()
         self.body_name = body_name
         self.water_density = float(water_density)
         self.g = float(g)
@@ -347,6 +348,7 @@ class dvl_linvel(ObservationV2, _JanusDvlMixin):
         translation: Optional[Sequence[float]] = None,
         orientation: Optional[Sequence[float]] = None,
     ) -> None:
+        super().__init__()
         self.body_name = body_name
         self.elevation = float(elevation)
         self.rotation = float(rotation)
@@ -449,6 +451,7 @@ class dvl_beam_range(ObservationV2, _JanusDvlMixin):
         translation: Optional[Sequence[float]] = None,
         orientation: Optional[Sequence[float]] = None,
     ) -> None:
+        super().__init__()
         self.body_name = body_name
         self.elevation = float(elevation)
         self.rotation = float(rotation)
@@ -580,6 +583,7 @@ class uw_camera(ObservationV2):
         debug_vis: bool = False,
         debug_vis_every: int = 1,
     ) -> None:
+        super().__init__()
         self.body_name = body_name
         self.resolution = (int(resolution[0]), int(resolution[1]))
         self.focal_length = float(focal_length)
@@ -793,6 +797,7 @@ class imaging_sonar(ObservationV2):
         translation: Optional[Sequence[float]] = None,
         orientation: Optional[Sequence[float]] = None,
     ) -> None:
+        super().__init__()
         self.body_name = body_name
         self.min_range = min_range
         self.max_range = max_range

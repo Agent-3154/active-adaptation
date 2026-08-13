@@ -44,6 +44,7 @@ class UnderwaterThrottle(ActionV2):
         self.action_buf = torch.zeros(self.num_envs, 4, self.action_dim, device=self.device)
         self.applied_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self.alpha = torch.ones(self.num_envs, 1, device=self.device)
+        self.names = [f"rotor_{i}" for i in range(self.action_dim)]
 
     @override
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):

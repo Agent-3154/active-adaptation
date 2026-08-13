@@ -43,7 +43,7 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 4. **Share cross-backend constants** — `INIT_POS`, `INIT_JOINT_POS`, symmetry maps, effort/stiffness/damping, and the simulation name lists live at module top; only spawn/spec/actuator *types* differ per backend.
 5. **Models live in `ROBOT_MODEL_DIR`** — USD + MJCF under `.cache/aa-robot-models/<robot>/`. Do not vendor large meshes into `assets/` for new robots.
 6. **Register + import** — `registry.register("asset", "<name>", make_cfg)` and import the module from the package `__init__.py` so registration runs.
-7. **Name parity** — joint/body names used by MDP, init regexes, and sensors must match across USD and MJCF (order may differ; the simulation lists fix layout).
+7. **Name parity** — joint/body names used by MDP, init regexes, and sensors must match across USD and MJCF (order may differ; the simulation lists fix layout). We always assume the USD joint and body names match those of the MJCF (if provided). So do not bother checking them.
 8. **No new mujoco-backend assets** — ignore `elif aa.get_backend() == "mujoco"` in `asset_cfg.py` for new work; prefer deleting it when cleaning.
 9. **mjlab actuators: `BuiltinPdActuatorCfg` by default** — AA joint actions often call both `set_joint_position_target` and `set_joint_velocity_target` (`envs/mdp/actions/joint.py`). Use `BuiltinPositionActuatorCfg` only when explicitly specified.
 10. **Mimic / coupled joints: physics constraints, drivers only** — Isaac: URDF `<mimic>`; mjlab: MJCF `<equality><joint …/></equality>` (no URDF-style mimic tag). Actuate **driver** joints only; leave mimics unactuated (or Isaac zero-gain / passive). Prefer physics coupling over software target-copy (`MimicJointPosition`) for mjlab. Details: [reference.md](reference.md#mimic--coupled-joints).
@@ -284,6 +284,7 @@ Full notes: [reference.md](reference.md#outdated-and-cleanup).
 - Actuating mimic joints on mjlab while also declaring equality (fighting the constraint)
 - Putting mimic joints in task `action_scaling` / policy action dim
 - Assuming MJCF inherits URDF `<mimic>` (it does not — add `<equality>` explicitly)
+- Inspecting USD (usdcat / pxr / string dumps) to verify joint/body names against MJCF — trust the MJCF names
 
 ---
 
