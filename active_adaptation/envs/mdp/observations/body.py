@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 class body_observation(ObservationV2):
     def __init__(self, body_names: str):
+        super().__init__()
         self.body_names_pattern = body_names
 
     @override

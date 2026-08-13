@@ -100,6 +100,7 @@ class external_forces(ObservationV2):
     supported_backends = ("isaac",)
 
     def __init__(self, body_names, divide_by_mass: bool = True, scale: float = 1.0):
+        super().__init__()
         self.body_names_pattern = body_names
         self.divide_by_mass = divide_by_mass
         self.scale = scale
@@ -132,6 +133,7 @@ class external_torques(ObservationV2):
     supported_backends = ("isaac",)
 
     def __init__(self, body_names, divide_by_mass: bool = True, scale: float = 0.2):
+        super().__init__()
         self.body_names_pattern = body_names
         self.divide_by_mass = divide_by_mass
         self.scale = scale
@@ -175,6 +177,7 @@ class height_scan(ObservationV2):
         clamp_range: Tuple[float, float] = (-1.0, 1.0),
         targets: Optional[List[str]] = None,
     ):
+        super().__init__()
         self.x_range = x_range
         self.y_range = y_range
         self.resolution = resolution
@@ -298,6 +301,7 @@ class forward_scan(ObservationV2):
         max_range: float = 5.0,
         flatten: bool = False,
     ):
+        super().__init__()
         self.hfov = hfov
         self.vfov = vfov
         self.resolution = resolution
@@ -430,6 +434,7 @@ class raycast_camera(ObservationV2):
         dtype: torch.dtype | str = torch.float16,
         targets: Optional[List[str]] = None,
     ):
+        super().__init__()
         self.resolution = resolution
         self.fov_deg = fov_deg
         self.offset_pos = tuple(float(x) for x in offset_pos)
@@ -636,6 +641,7 @@ class feet_height_map(ObservationV2):
         clamp_range: Tuple[float, float] = (-1.0, 1.0),
         flatten: bool = True,
     ):
+        super().__init__()
         self.feet_names_pattern = feet_names
         self.nominal_height = nomial_height
         self.size = size
