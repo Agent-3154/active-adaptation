@@ -1,45 +1,77 @@
 from __future__ import annotations
 
-import math
-from pathlib import Path
 from typing import Literal
 
+from active_adaptation.assets.underwater.BlueROVHeavy import (
+    ADDED_MASS,
+    COBM,
+    INIT_POS,
+    LINEAR_DAMPING,
+    NUM_ROTORS,
+    QUADRATIC_DAMPING,
+    ROTOR_FORCE_CONSTANTS,
+    ROTOR_MAX_ROTATION_VEL_RAD_S,
+    ROTOR_TIME_CONSTANTS,
+)
 from active_adaptation.envs.robots.underwater import HydrodynamicsCfg, UnderwaterRobot
 from active_adaptation.registry import Registry
 from active_adaptation import ROBOT_MODEL_DIR
 
 registry = Registry.instance()
 
-USD_PATH = ROBOT_MODEL_DIR / "underwater" / "BlueROV.usd"
+USD_PATH = ROBOT_MODEL_DIR / "underwater" / "BlueROVHeavyArm" / "model" / "model.usd"
 
-# --- hydrodynamics (from BlueROV.yaml) ---
-DRAG_COEF = 0.3
-# Per-body displaced volume (m^3). Rotors are placeholders (0).
-VOLUME = {
-    "base_link": 0.0113459,
-    "rotor_.*": 0.0,
-}
-COBM = 0.01
-ADDED_MASS = (5.5, 12.7, 14.57, 0.12, 0.12, 0.12)
-LINEAR_DAMPING = (4.03, 6.22, 5.18, 0.07, 0.07, 0.07)
-QUADRATIC_DAMPING = (18.18, 21.66, 36.99, 1.55, 1.55, 1.55)
-
-# --- rotor / T200 thruster parameters (from BlueROV.yaml) ---
-NUM_ROTORS = 6
-ROTOR_DIRECTIONS = (1.0, -1.0, 1.0, -1.0, 1.0, -1.0)
-ROTOR_TIME_CONSTANTS = {f"rotor_{i}": 0.01 for i in range(NUM_ROTORS)}
-ROTOR_FORCE_CONSTANTS = {f"rotor_{i}": 4.4e-07 for i in range(NUM_ROTORS)}
-ROTOR_MAX_ROTATION_VEL_RPM = (3900.0,) * 6
-ROTOR_MOMENT_CONSTANTS = (1.3677728816219314e-09,) * 6
-ROTOR_MAX_ROTATION_VEL_RAD_S = tuple(
-    rpm * 2.0 * math.pi / 60.0 for rpm in ROTOR_MAX_ROTATION_VEL_RPM
+# X5A-style arm (same joint naming as a2_manipulator). Arm / gripper volumes are
+# zero placeholders until per-link displaced volumes are measured.
+_ARM_JOINTS = tuple(f"arm_joint{i}" for i in range(1, 9))
+_ARM_BODIES = (
+    "arm_base_link",
+    "arm_link1",
+    "arm_link2",
+    "arm_link3",
+    "arm_link4",
+    "arm_link5",
+    "gripper_base",
+    "gripper_right",
+    "gripper_left",
 )
 
-INIT_POS = (0.0, 0.0, 2.0)
+# Per-body displaced volume (m^3). Same base volume as BlueROVHeavy.
+VOLUME = {
+    "base_link": 0.0116499,
+    "rotor_.*": 0.0,
+    "arm_base_link": 0.00010617652,  # signed
+    "arm_link1": 2.4842129e-05,  # signed
+    "arm_link2": 0.00028625812,  # signed
+    "arm_link3": 0.00019056577,  # watertight
+    "arm_link4": 4.3607013e-05,  # signed
+    "arm_link5": 0.00021319292,  # signed
+    "gripper_base": 0.00014946794,  # signed
+    "gripper_right": 3.1933421e-05,  # signed
+    "gripper_left": 3.1933416e-05,  # watertight
+}
 
-JOINT_NAMES_SIMULATION = [f"rotor_{i}" for i in range(NUM_ROTORS)]
-BODY_NAMES_SIMULATION = ["base_link", *[f"rotor_{i}" for i in range(NUM_ROTORS)]]
+# Actuator gains: X5A URDF effort=100; stiffness/damping aligned with a2_manipulator.
+ARM_EFFORT_LIMIT = 100.0
+ARM_VELOCITY_LIMIT = 10.0
+ARM_STIFFNESS = 40.0
+ARM_DAMPING = 2.0
+GRIPPER_EFFORT_LIMIT = 50.0
+GRIPPER_VELOCITY_LIMIT = 0.1
+GRIPPER_STIFFNESS = 80.0
+GRIPPER_DAMPING = 2.0
 
+INIT_JOINT_POS = {".*": 0.0}
+
+JOINT_NAMES_SIMULATION = [
+    *[f"rotor_{i}_joint" for i in range(NUM_ROTORS)],
+    *_ARM_JOINTS,
+]
+BODY_NAMES_SIMULATION = [
+    "base_link",
+    *[f"rotor_{i}" for i in range(NUM_ROTORS)],
+    *_ARM_BODIES,
+]
 
 
 def make_isaaclab_cfg(self_collisions: bool = False):
@@ -76,17 +108,35 @@ def make_isaaclab_cfg(self_collisions: bool = False):
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=INIT_POS,
-            joint_pos={".*": 0.0},
+            joint_pos=INIT_JOINT_POS,
             joint_vel={".*": 0.0},
         ),
         actuators={
             # Thruster dynamics are applied as body wrenches; joints are free-spinning placeholders.
             "rotors": ImplicitActuatorCfg(
-                joint_names_expr=["rotor_.*"],
+                joint_names_expr=["rotor_.*_joint"],
                 effort_limit_sim=0.0,
                 velocity_limit_sim=max(ROTOR_MAX_ROTATION_VEL_RAD_S),
                 stiffness=0.0,
                 damping=0.0,
+            ),
+            "arm": ImplicitActuatorCfg(
+                joint_names_expr=["arm_joint[1-6]"],
+                effort_limit_sim=ARM_EFFORT_LIMIT,
+                velocity_limit_sim=ARM_VELOCITY_LIMIT,
+                stiffness=ARM_STIFFNESS,
+                damping=ARM_DAMPING,
+                friction=0.01,
+                armature=0.01,
+            ),
+            "gripper": ImplicitActuatorCfg(
+                joint_names_expr=["arm_joint[7,8]"],
+                effort_limit_sim=GRIPPER_EFFORT_LIMIT,
+                velocity_limit_sim=GRIPPER_VELOCITY_LIMIT,
+                stiffness=GRIPPER_STIFFNESS,
+                damping=GRIPPER_DAMPING,
+                friction=0.01,
+                armature=0.01,
             ),
         },
         joint_names_simulation=JOINT_NAMES_SIMULATION,
@@ -95,7 +145,6 @@ def make_isaaclab_cfg(self_collisions: bool = False):
     return AssetSpec(
         config=asset_cfg,
         sensors={},
-        # Wrapper is created as an instance and initialized by backend env.
         wrapper=UnderwaterRobot(
             cfg=HydrodynamicsCfg(
                 volume=VOLUME,
@@ -111,7 +160,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
 
 
 def make_mjlab_cfg(motrix: bool = False):
-    raise NotImplementedError("MJLab backend is not supported for BlueROV")
+    raise NotImplementedError("MJLab backend is not supported for BlueROVHeavyArm")
 
 
 def make_cfg(backend: Literal["isaaclab", "mjlab", "motrix"]):
@@ -125,4 +174,4 @@ def make_cfg(backend: Literal["isaaclab", "mjlab", "motrix"]):
         raise ValueError(f"Invalid backend: {backend}")
 
 
-registry.register("asset", "bluerov", make_cfg)
+registry.register("asset", "bluerov_heavy_arm", make_cfg)

@@ -4,16 +4,13 @@ Backend-agnostic underwater robot wrapper around IsaacLab's Articulation or Mjla
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Sequence, TYPE_CHECKING
+from typing import Dict, Mapping, Sequence, TYPE_CHECKING
 
 import torch
 from tensordict import TensorDictBase
 
 from active_adaptation.utils.math import euler_from_quat, quat_rotate, quat_rotate_inverse
-try:
-    import isaaclab.utils.string as string_utils
-except ModuleNotFoundError:
-    from mjlab.utils.lab_api import string as string_utils
+import active_adaptation.utils.string as string_utils
 
 if TYPE_CHECKING: # DO NOT MODIFY
     # for the editor to work
@@ -23,7 +20,16 @@ if TYPE_CHECKING: # DO NOT MODIFY
 
 @dataclass
 class HydrodynamicsCfg:
-    volume: float
+    """Hydrodynamic parameters for an underwater robot.
+
+    ``volume`` is per-body displaced volume (m^3). Pass either:
+
+    - a sequence of floats in ``robot.body_names`` order, or
+    - a ``{name_regex: volume}`` mapping (same style as actuator gains).
+
+    Every body must receive a volume (use ``0.0`` as a placeholder).
+    """
+    volume: Sequence[float] | Mapping[str, float]
     coBM: float
     added_mass: tuple[float, float, float, float, float, float]
     linear_damping: tuple[float, float, float, float, float, float]
@@ -46,7 +52,7 @@ class UnderwaterRobotData:
     added_mass_matrix: torch.Tensor
     linear_damping_matrix: torch.Tensor
     quadratic_damping_matrix: torch.Tensor
-    volume: torch.Tensor
+    volume: torch.Tensor  # (num_envs, num_bodies)
     coBM: torch.Tensor
 
     # Temporal state for filtered body acceleration estimate.
@@ -97,7 +103,7 @@ class UnderwaterRobot:
         self.env = None
         self.dt = None
         self.rotor_names = []
-        self.wrench_indices = None
+        self.body_names = []
         self.rotor_indices = None
         self.data = None
 
@@ -116,17 +122,29 @@ class UnderwaterRobot:
     def device(self) -> torch.device:
         return self.robot.device
 
+    @property
+    def num_bodies(self) -> int:
+        return len(self.body_names)
+
     def _initialize(self, robot: "Articulation", env: "_EnvBase"):
         self.robot = robot
         self.env = env
         self.dt = self.env.sim.get_physics_dt()
 
+        self.body_names = list(self.robot.body_names)
+        _, matched_names, values = string_utils.resolve_matching_names_values(
+            dict(self.cfg.volume), self.robot.body_names, preserve_order=True
+        )
+        missing = [name for name in self.robot.body_names if name not in matched_names]
+        assert not missing, (
+            f"HydrodynamicsCfg.volume must specify every body; missing: {missing}. "
+            f"Bodies: {list(self.robot.body_names)}"
+        )
+        body_volumes = torch.tensor(values, device=self.device)
+
         # Find the rotor bodies once and keep this order as canonical rotor order.
         rotor_indices, rotor_names = self.robot.find_bodies("rotor_.*")
         self.rotor_names = rotor_names
-        self.wrench_indices = torch.tensor(
-            [self._base_body_id, *rotor_indices], device=self.device, dtype=torch.long
-        )
         self.rotor_indices = torch.tensor(rotor_indices, device=self.device, dtype=torch.long)
 
         time_ids, _, time_values = string_utils.resolve_matching_names_values(
@@ -163,7 +181,7 @@ class UnderwaterRobot:
             added_mass_matrix=added_mass_matrix,
             linear_damping_matrix=linear_damping_matrix,
             quadratic_damping_matrix=quadratic_damping_matrix,
-            volume=torch.full((self.num_envs,), self.cfg.volume, device=self.device),
+            volume=body_volumes.unsqueeze(0).expand(self.num_envs, -1).clone(),
             coBM=torch.full((self.num_envs,), self.cfg.coBM, device=self.device),
             prev_body_vels=torch.zeros(self.num_envs, 6, device=self.device),
             prev_body_acc=torch.zeros(self.num_envs, 6, device=self.device),
@@ -273,22 +291,37 @@ class UnderwaterRobot:
             + torch.cross(added_mass_momentum_b[:, 3:6], hydro_twist_b[:, 3:6], dim=-1)
         )
 
-        buoyancy_wrench_b = torch.zeros(self.num_envs, 6, device=self.device)
-        buoyancy_force = self.cfg.water_density * self.cfg.gravity * self.data.volume
-        buoyancy_wrench_b[:, 0] = buoyancy_force * torch.sin(hydro_rpy[:, 1])
-        buoyancy_wrench_b[:, 1] = -buoyancy_force * torch.sin(hydro_rpy[:, 0]) * torch.cos(hydro_rpy[:, 1])
-        buoyancy_wrench_b[:, 2] = -buoyancy_force * torch.cos(hydro_rpy[:, 0]) * torch.cos(hydro_rpy[:, 1])
-        buoyancy_wrench_b[:, 3] = (
-            -self.data.coBM * buoyancy_force * torch.cos(hydro_rpy[:, 1]) * torch.sin(hydro_rpy[:, 0])
+        # Per-body buoyancy in each body's local frame (same hydro orientation
+        # convention as the root). coBM moment arm applies only on the base body.
+        body_quat_w = data.body_link_quat_w
+        body_rpy_w = euler_from_quat(body_quat_w.reshape(-1, 4)).reshape(
+            self.num_envs, self.num_bodies, 3
         )
-        buoyancy_wrench_b[:, 4] = -self.data.coBM * buoyancy_force * torch.sin(hydro_rpy[:, 1])
+        body_hydro_rpy = body_rpy_w.clone()
+        body_hydro_rpy[..., [1, 2]] *= -1
+
+        buoyancy_force = self.cfg.water_density * self.cfg.gravity * self.data.volume
+        buoyancy_forces_b = torch.zeros(self.num_envs, self.num_bodies, 3, device=self.device)
+        buoyancy_torques_b = torch.zeros(self.num_envs, self.num_bodies, 3, device=self.device)
+        sin_roll = torch.sin(body_hydro_rpy[..., 0])
+        cos_roll = torch.cos(body_hydro_rpy[..., 0])
+        sin_pitch = torch.sin(body_hydro_rpy[..., 1])
+        cos_pitch = torch.cos(body_hydro_rpy[..., 1])
+        buoyancy_forces_b[..., 0] = buoyancy_force * sin_pitch
+        buoyancy_forces_b[..., 1] = -buoyancy_force * sin_roll * cos_pitch
+        buoyancy_forces_b[..., 2] = -buoyancy_force * cos_roll * cos_pitch
+        base_buoyancy_force = buoyancy_force[:, self._base_body_id]
+        buoyancy_torques_b[:, self._base_body_id, 0] = (
+            -self.data.coBM * base_buoyancy_force * cos_pitch[:, self._base_body_id] * sin_roll[:, self._base_body_id]
+        )
+        buoyancy_torques_b[:, self._base_body_id, 1] = (
+            -self.data.coBM * base_buoyancy_force * sin_pitch[:, self._base_body_id]
+        )
 
         hydro_wrench_b = -(added_mass_wrench_b + coriolis_wrench_b + damping_wrench_b)
         hydro_wrench_b[:, [1, 2, 4, 5]] *= -1
-        buoyancy_wrench_b[:, [1, 2, 4, 5]] *= -1
-
-        base_link_force_b = (hydro_wrench_b[..., 0:3] + buoyancy_wrench_b[..., 0:3]).unsqueeze(1)
-        base_link_torque_b = (hydro_wrench_b[..., 3:6] + buoyancy_wrench_b[..., 3:6]).unsqueeze(1)
+        buoyancy_forces_b[..., [1, 2]] *= -1
+        buoyancy_torques_b[..., [1, 2]] *= -1
 
         target_throttle = torch.clamp(self.data.throttle_cmd, -1.0, 1.0)
         alpha_rotor = torch.exp(-self.dt / self.data.time_constants)
@@ -323,27 +356,31 @@ class UnderwaterRobot:
         # Thrust is along local +X axis of each rotor body.
         self.data.thrusts_b[..., 0] = rotor_thrust_force_x
 
+        forces_b = buoyancy_forces_b.clone()
+        torques_b = buoyancy_torques_b.clone()
+        forces_b[:, self._base_body_id] += hydro_wrench_b[..., 0:3]
+        torques_b[:, self._base_body_id] += hydro_wrench_b[..., 3:6]
+        forces_b[:, self.rotor_indices] += self.data.thrusts_b
+
         self.data.body_acc.copy_(hydro_acc_b)
         self.data.damping.copy_(damping_wrench_b)
         self.data.added_mass.copy_(added_mass_wrench_b)
         self.data.coriolis.copy_(coriolis_wrench_b)
-        self.data.buoyancy.copy_(buoyancy_wrench_b)
+        # Debug buoyancy: base-body wrench (force + coBM torque).
+        self.data.buoyancy[:, 0:3] = buoyancy_forces_b[:, self._base_body_id]
+        self.data.buoyancy[:, 3:6] = buoyancy_torques_b[:, self._base_body_id]
         self.data.hydro.copy_(hydro_wrench_b)
-        self.data.hydro_forces_b.copy_(base_link_force_b.squeeze(1))
-        self.data.hydro_torques_b.copy_(base_link_torque_b.squeeze(1))
+        self.data.hydro_forces_b.copy_(forces_b[:, self._base_body_id])
+        self.data.hydro_torques_b.copy_(torques_b[:, self._base_body_id])
 
         # With `is_global=False`, each entry is interpreted in the local frame of
-        # the corresponding body in `self.wrench_indices`: [base_link, rotors...].
-        combined_forces_b = torch.cat([base_link_force_b, self.data.thrusts_b], dim=1)
-        rotor_torques_b = torch.zeros_like(self.data.thrusts_b)
-        combined_torques_b = torch.cat([base_link_torque_b, rotor_torques_b], dim=1)
+        # the corresponding body: buoyancy on all bodies, hydro on base, thrust on rotors.
         self.robot.permanent_wrench_composer.set_forces_and_torques(
-            combined_forces_b,
-            combined_torques_b,
-            body_ids=self.wrench_indices,
+            forces_b,
+            torques_b,
             is_global=False,
         )
-    
+
     def debug_draw(self):
         if self.env.backend == "isaac":
             rotor_pos_w = self.robot.data.body_link_pos_w[:, self.rotor_indices]

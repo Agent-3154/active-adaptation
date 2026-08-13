@@ -28,7 +28,10 @@ Per environment, we compute body-frame hydrodynamic terms each pre-step:
   `D(v) = D_lin + D_quad * |v|` (implemented with a maintained 6x6 form).
 - Added mass: `M_a * a`.
 - Coriolis-like term from added-mass momentum.
-- Buoyancy from displaced volume, gravity, and center-of-buoyancy offset.
+- Buoyancy from **per-body** displaced volume, gravity, and center-of-buoyancy
+  offset (`coBM` on the base body only). `HydrodynamicsCfg.volume` is a list in
+  `body_names` order or a `{name_regex: volume}` map (actuator-style); every
+  body must be specified (use `0.0` as a placeholder).
 
 Final hydro wrench is:
 

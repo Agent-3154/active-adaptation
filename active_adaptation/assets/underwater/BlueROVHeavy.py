@@ -13,7 +13,11 @@ USD_PATH = ROBOT_MODEL_DIR / "underwater" / "BlueROVHeavy.usd"
 
 # --- hydrodynamics (from MarineGym BlueROVHeavy.yaml) ---
 DRAG_COEF = 0.3
-VOLUME = 0.0116499
+# Per-body displaced volume (m^3). Rotors are placeholders (0).
+VOLUME = {
+    "base_link": 0.0116499,
+    "rotor_.*": 0.0,
+}
 COBM = 0.01
 ADDED_MASS = (5.5, 12.7, 14.57, 0.12, 0.12, 0.12)
 LINEAR_DAMPING = (4.03, 6.22, 5.18, 0.07, 0.07, 0.07)

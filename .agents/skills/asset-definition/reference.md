@@ -250,6 +250,8 @@ Isaac PhysX and MuJoCo often enumerate joints/bodies in different orders. Polici
 
 Lists must be a **permutation** of the names present in both USD and MJCF (for DOFs/bodies the MDP uses). Missing names break `sort_names_by_preferred_order` / index helpers.
 
+We always assume the USD joint and body names match those of the MJCF (if provided). So do not bother checking them — author `*_names_simulation` from the MJCF (or URDF) and skip USD name dumps.
+
 Regex init maps (`INIT_JOINT_POS`) are resolved by each backend independently; ensure every actuated joint matches some key on both.
 
 ---
