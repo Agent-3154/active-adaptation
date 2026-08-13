@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 class joint_observation(ObservationV2):
     def __init__(self, joint_names: str):
+        super().__init__()
         self.joint_names_pattern = joint_names
 
     @override

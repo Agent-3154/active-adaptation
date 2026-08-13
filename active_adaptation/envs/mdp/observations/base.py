@@ -5,6 +5,8 @@ import torch
 
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+from tensordict import TensorDictBase
+
 from active_adaptation.registry import RegistryMixin
 from active_adaptation.utils.symmetry import SymmetryTransform
 
@@ -60,10 +62,16 @@ class ObservationV2(Generic[CT], MDPComponent, RegistryMixin):
 
     Subclasses that need ``num_envs``/``device`` or sim handles should override
     :meth:`_initialize` and call ``super()._initialize(env)`` first.
+
+    When ``functional=True``, the env stores compact state via :meth:`fupdate`
+    and densifies on demand via :meth:`fcompute` (which may still read
+    ``command_manager`` / motion buffers). Dense groups keep using
+    :meth:`compute`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, functional: bool = False) -> None:
         self._initialized = False
+        self.functional = bool(functional)
 
     def _initialize(self, env: "_EnvBase") -> None:
         """Bind to ``env``. Called once at startup."""
@@ -80,15 +88,35 @@ class ObservationV2(Generic[CT], MDPComponent, RegistryMixin):
     def compute(self) -> torch.Tensor:
         raise NotImplementedError
 
+    def fupdate(self, tensordict: TensorDictBase) -> None:
+        """Write compact tensors needed by :meth:`fcompute` into ``tensordict``.
+
+        Only used when :attr:`functional` is ``True``. May read env / command
+        state; should write only tensor (or nested TensorDict) entries.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} sets functional=True but does not implement fupdate"
+        )
+
+    def fcompute(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """Densify compact state from ``tensordict`` into a feature vector.
+
+        Only used when :attr:`functional` is ``True``. May still read
+        ``command_manager`` (e.g. motion libraries) that are awkward to store.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} sets functional=True but does not implement fcompute"
+        )
+
     def symmetry_transform(self) -> SymmetryTransform:
         """Return the mirror transform for this observation term's output slice.
 
         The transform describes how this observation changes under the task's
         left/right symmetry. It must have the same width and ordering as the
-        tensor returned by :meth:`compute`. Implementations usually build a
-        :class:`SymmetryTransform` from a permutation and sign flips: swap
-        left/right quantities, negate lateral or yaw-like components, and leave
-        invariant scalars unchanged.
+        tensor returned by :meth:`compute` / :meth:`fcompute`. Implementations
+        usually build a :class:`SymmetryTransform` from a permutation and sign
+        flips: swap left/right quantities, negate lateral or yaw-like
+        components, and leave invariant scalars unchanged.
 
         Observation groups concatenate term outputs in config order, so each
         observation returns only its local transform; :class:`ObsGroup`

@@ -18,6 +18,7 @@ from tensordict import TensorDictBase
 import active_adaptation
 from active_adaptation.utils.wandb import parse_checkpoint
 from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.string import resolve_matching_names
 from active_adaptation.envs import _EnvBase
 
 if active_adaptation.get_backend() is None:
@@ -61,6 +62,9 @@ def make_env_policy(
 
     If ``algo_cfg`` is ``algo=from_checkpoint``, replace it with the ``algo``
     block from the run sidecar ``cfg.yaml`` next to the resolved checkpoint.
+
+    ``algo.in_keys`` entries are regex patterns matched with ``re.fullmatch``
+    against observation group names (see :func:`~active_adaptation.utils.string.resolve_matching_names`).
     """
 
     seed = seed + active_adaptation.get_local_rank()
@@ -122,20 +126,27 @@ def make_env_policy(
             raise ValueError(f"Unknown backend: {backend}")
         
         try:
-            policy_in_keys = algo_cfg.in_keys
+            in_keys = tuple(algo_cfg.in_keys)
         except AttributeError:
-            raise ValueError("Specify `in_keys` (e.g., `policy`, `priv`) in `cfg.algo`.")
+            raise ValueError(
+                "Specify `in_keys` (e.g., `policy`, `priv`, or regex `.*`) in `cfg.algo`."
+            )
 
+        _, in_keys = resolve_matching_names(in_keys, task_cfg.observation.keys())
         if discard_unused_obs:
-            def should_discard(key: str) -> bool:
-                return (
-                    key not in policy_in_keys
-                    and not key.endswith("_")
-                )
             for obs_group_key in list(task_cfg.observation.keys()):
-                if should_discard(obs_group_key):
+                # Trailing ``_`` keeps a group for buffer/debug even if unused by the policy.
+                if str(obs_group_key).endswith("_"):
+                    continue
+                if str(obs_group_key) not in in_keys:
                     task_cfg.observation.pop(obs_group_key)
-                    print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
+                    print(
+                        colored(
+                            f"Discard obs group {obs_group_key} as it is not used.",
+                            "yellow",
+                        )
+                    )
+        algo_cfg.in_keys = in_keys
 
         base_env = env_cls(task_cfg, env_device, headless=headless)
         checkpoint = checkpoint_future.result()

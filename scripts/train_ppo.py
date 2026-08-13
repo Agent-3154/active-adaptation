@@ -29,6 +29,7 @@ from active_adaptation.pipeline_io import (
     write_run_state,
 )
 from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.torchrl import tensordict_nbytes
 from active_adaptation.learning.ppo.ppo_base import PPOBase
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -148,6 +149,10 @@ class StackingCollector:
         self.transitions = transitions
         self.device = env.device
         self._observation_keys = list(env.observation_spec.keys(True, True))
+        self._functional_keys = [
+            key for key, group in env.observation_groups.items()
+            if group.is_functional
+        ]
 
     @torch.no_grad()
     @set_exploration_type(ExplorationType.RANDOM)
@@ -155,9 +160,17 @@ class StackingCollector:
         rollout_policy = rollout_policy.to(device=self.device)
         data = []
         for _ in range(self.steps):
+            compact = {}
+            if self._functional_keys:
+                with ScopedTimer("materialization"):
+                    for key in self._functional_keys:
+                        compact[key] = carry[key]
+                        carry[key] = self.env.observation_groups[key].materialize(carry)
             with ScopedTimer("policy_inference"):
                 carry = rollout_policy(carry)
+            carry.update(compact)
             td, carry = self.env.step_and_maybe_reset(carry)
+            # td.update(compact)
             private_keys = [
                 key
                 for key in td.keys(True, True)
@@ -186,28 +199,29 @@ class BufferCollector:
         self.steps = steps
         self.transitions = transitions
         self._observation_keys = list(env.observation_spec.keys(True, True))
+        self._functional_keys = [
+            key for key, group in env.observation_groups.items()
+            if group.is_functional
+        ]
         
         buffer = env.fake_tensordict()
         if not transitions:
             buffer["next"] = buffer["next"].exclude(*self._observation_keys)
         self._buffer = buffer.unsqueeze(1).expand(env.shape[0], steps).clone()
-        buffer_nbytes = sum(
-            value.numel() * value.element_size()
-            for _, value in self._buffer.items(True, True)
-            if torch.is_tensor(value)
-        )
-        logging.info(
-            "BufferCollector allocated %.2f MiB on %s",
-            buffer_nbytes / (1024**2),
-            self._buffer.device,
-        )
     
     @torch.no_grad()
     @set_exploration_type(ExplorationType.RANDOM)
     def collect(self, carry: TensorDictBase, rollout_policy: TensorDictModuleBase):
         for i in range(self.steps):
+            compact = {}
+            if self._functional_keys:
+                with ScopedTimer("materialization"):
+                    for key in self._functional_keys:
+                        compact[key] = carry[key]
+                        carry[key] = self.env.observation_groups[key].materialize(carry)
             with ScopedTimer("policy_inference"):
                 carry = rollout_policy(carry)
+            carry.update(compact)
             td, carry = self.env.step_and_maybe_reset(carry)
             private_keys = [
                 key
@@ -361,6 +375,13 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         steps=cfg.algo.train_every,
         transitions=transitions,
     )
+
+    if aa.is_main_process():
+        fake = env.fake_tensordict()
+        if not transitions:
+            del fake["next"]
+        storage_nbytes = tensordict_nbytes(fake.expand(env.num_envs, cfg.algo.train_every))
+        wandb_run.summary["buffer_MiB"] = storage_nbytes / (1024**2)
 
     env_frames = 0
 

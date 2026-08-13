@@ -1,3 +1,10 @@
+"""Low-dimensional proprio / command observations.
+
+These terms stay **dense** (``functional=False``): features are small enough that
+compact ``fupdate``/``fcompute`` storage is not worth the complexity. Always call
+``super().__init__()`` so :class:`~ObservationV2` sets ``functional`` correctly.
+"""
+
 import torch
 import numpy as np
 import einops
@@ -48,6 +55,7 @@ class root_state_w(ObservationV2):
 
 class root_linacc_substep(ObservationV2):
     def __init__(self, steps: int | None = None, flatten: bool = False):
+        super().__init__()
         self.steps = steps
         self.flatten = flatten
 
@@ -76,6 +84,7 @@ class root_linacc_substep(ObservationV2):
 
 class command(ObservationV2):
     def __init__(self, key: str | None = None):
+        super().__init__()
         self.key = key
 
     @override
@@ -93,6 +102,7 @@ class command(ObservationV2):
 
 class root_angvel_b(ObservationV2):
     def __init__(self, steps: int = 1, noise_std: float = 0.0, yaw_only: bool = False):
+        super().__init__()
         self.steps = steps
         self.noise_std = noise_std
         self.yaw_only = yaw_only
@@ -132,6 +142,7 @@ class root_angvel_b(ObservationV2):
 
 class root_gyro_substep(ObservationV2):
     def __init__(self, steps: int | None = None, flatten: bool = False):
+        super().__init__()
         self.steps = steps
         self.flatten = flatten
 
@@ -156,6 +167,7 @@ class root_gyro_substep(ObservationV2):
 
 class root_gyro_multistep(ObservationV2):
     def __init__(self, steps: int = 4, noise_std: float = 0.0):
+        super().__init__()
         self.steps = steps
         self.noise_std = noise_std
 
@@ -179,6 +191,7 @@ class root_gyro_multistep(ObservationV2):
 
 class projected_gravity_b(ObservationV2):
     def __init__(self, noise_std: float = 0.0):
+        super().__init__()
         self.noise_std = noise_std
 
     @override
@@ -207,6 +220,7 @@ class projected_gravity_b(ObservationV2):
 
 class gravity_multistep(ObservationV2):
     def __init__(self, steps: int = 4, interval: int = 1, noise_std: float = 0.0):
+        super().__init__()
         self.steps = steps
         self.interval = interval
         self.noise_std = noise_std
@@ -239,6 +253,7 @@ class gravity_multistep(ObservationV2):
 
 class gravity_substep(ObservationV2):
     def __init__(self, steps: int | None = None, flatten: bool = False):
+        super().__init__()
         self.steps = steps
         self.flatten = flatten
 
@@ -263,6 +278,7 @@ class gravity_substep(ObservationV2):
 
 class root_linvel_b(ObservationV2):
     def __init__(self, yaw_only: bool = False):
+        super().__init__()
         self.yaw_only = yaw_only
 
     @override
@@ -293,6 +309,7 @@ class root_linvel_b(ObservationV2):
 
 class prev_actions(ObservationV2):
     def __init__(self, key: str = "action", steps: int = 1, flatten: bool = True):
+        super().__init__()
         self.key = key
         self.steps = steps
         self.flatten = flatten
@@ -324,6 +341,7 @@ class cum_error(ObservationV2):
 
 class clock(ObservationV2):
     def __init__(self, frequencies: list[int] = [1, 2, 4]):
+        super().__init__()
         self.frequencies = frequencies
 
     @override

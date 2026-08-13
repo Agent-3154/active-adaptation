@@ -304,3 +304,10 @@ class EnsembleCritic(EnsembleModule):
             td[k] = tensor.permute(*dims[1:1+td.batch_dims], 0, td.batch_dims+1).flatten(-2)
         return td
 
+
+def tensordict_nbytes(td: TensorDictBase) -> int:
+    return sum(
+        value.numel() * value.element_size()
+        for _, value in td.items(True, True)
+        if torch.is_tensor(value)
+    )

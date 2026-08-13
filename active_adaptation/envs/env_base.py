@@ -35,12 +35,25 @@ PROFILE_SYNC_TIMERS = os.environ.get("AA_PROFILE_SYNC_TIMERS", "0").lower() in {
     "yes",
     "on",
 }
+
+
 def parse_component_spec(name: str, cfg):
     if cfg is None or not hasattr(cfg, "items"):
         raise ValueError(f"Component '{name}' must be a mapping.")
     kwargs = dict(cfg)
     target = kwargs.pop("_target_", name)
     return name, target, kwargs
+
+
+def _tensordict_to_composite(td: TensorDictBase) -> Composite:
+    """Build a :class:`Composite` spec matching a compact observation TensorDict."""
+    spec: dict = {}
+    for key, value in td.items():
+        if isinstance(value, TensorDictBase):
+            spec[key] = _tensordict_to_composite(value)
+        else:
+            spec[key] = Unbounded(value.shape, dtype=value.dtype, device=td.device)
+    return Composite(spec, shape=td.batch_size, device=td.device)
 
 
 class ObsGroup:
@@ -54,24 +67,49 @@ class ObsGroup:
         self.funcs = funcs
         self.max_delay = max_delay
         self.timestamp = -1
-    
+        self._keys = list(funcs.keys())
+        self._is_functional: bool | None = None
+
     def _initialize(self, env: "_EnvBase"):
         self.env = env
         for func in self.funcs.values():
             if isinstance(func, mdp.ObservationV2):
                 func._initialize(env)
-        tensors = [func.compute() for func in self.funcs.values()]
-        shapes = OrderedDict([(key, tensor.shape) for key, tensor in zip(self.funcs.keys(), tensors)])
-        obs = torch.cat(tensors, dim=-1)
-        spec = {
-            self.name: Unbounded(
-                obs.shape,
-                dtype=obs.dtype,
+
+        flags = [bool(func.functional) for func in self.funcs.values()]
+        if any(flags) and not all(flags):
+            raise ValueError(
+                f"ObsGroup '{self.name}' mixes functional and dense terms; "
+                "use all-functional or all-dense within a group."
             )
-        }
-        self._spec = Composite(spec, shape=[obs.shape[0]]).to(self.env.device)
+        self._is_functional = bool(flags) and bool(flags[0])
+
+        shapes = OrderedDict()
+        if self._is_functional:
+            compact = OrderedDict()
+            for key, func in self.funcs.items():
+                term_td = TensorDict(
+                    {}, batch_size=[env.num_envs], device=self.env.device
+                )
+                func.fupdate(term_td)
+                compact[key] = term_td
+                shapes[key] = func.fcompute(term_td).shape
+            group_td = TensorDict(
+                compact, batch_size=[env.num_envs], device=self.env.device
+            )
+            spec = {self.name: _tensordict_to_composite(group_td)}
+        else:
+            outputs = OrderedDict(
+                (key, func.compute()) for key, func in self.funcs.items()
+            )
+            for key, tensor in outputs.items():
+                shapes[key] = tensor.shape
+            obs = torch.cat(list(outputs.values()), dim=-1)
+            spec = {self.name: Unbounded(obs.shape, dtype=obs.dtype)}
+
+        self._spec = Composite(spec, shape=[env.num_envs]).to(self.env.device)
         self._shapes = shapes
-    
+
     def __getitem__(self, key: str) -> mdp.ObservationV2:
         return self.funcs[key]
 
@@ -81,35 +119,78 @@ class ObsGroup:
     @property
     def spec(self):
         return self._spec
-    
+
     @property
     def shapes(self):
         return self._shapes
-    
+
     @property
     def split(self):
         return [shape[-1] for shape in self._shapes.values()]
 
+    @property
+    def is_functional(self) -> bool:
+        if self._is_functional is None:
+            raise RuntimeError(f"ObsGroup '{self.name}' is not initialized")
+        return self._is_functional
+
     def compute(self, tensordict: TensorDictBase, timestamp: int) -> TensorDictBase:
-        tensors = [func.compute() for func in self.funcs.values()]
-        tensordict[self.name] = torch.cat(tensors, dim=-1)
+        if self._is_functional:
+            compact = OrderedDict()
+            for key, func in self.funcs.items():
+                term_td = TensorDict(
+                    {},
+                    batch_size=tensordict.batch_size,
+                    device=tensordict.device,
+                )
+                func.fupdate(term_td)
+                compact[key] = term_td
+            tensordict[self.name] = TensorDict(
+                compact,
+                batch_size=tensordict.batch_size,
+                device=tensordict.device,
+            )
+        else:
+            outputs = OrderedDict(
+                (key, func.compute()) for key, func in self.funcs.items()
+            )
+            tensordict[self.name] = torch.cat(list(outputs.values()), dim=-1)
         return tensordict
+
+    def materialize(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """Densify a functional group stored under ``self.name`` into a cat vector.
+
+        Idempotent: if the group entry is already a dense tensor, return it.
+
+        ``nan_to_num`` covers the post-reset zeroed compact buffer (first obs is
+        discarded by algos); zero quats would otherwise NaN in ``fcompute``.
+        """
+        value = tensordict[self.name]
+        if not self._is_functional or torch.is_tensor(value):
+            return value
+        parts = [
+            func.fcompute(value[key]) for key, func in self.funcs.items()
+        ]
+        return torch.nan_to_num(torch.cat(parts, dim=-1))
 
     def symmetry_transform(self):
         """Return the mirror transform for the concatenated observation group.
 
         Each observation component defines a local
         :class:`~active_adaptation.utils.symmetry.SymmetryTransform` matching
-        the tensor slice produced by that component's ``compute()`` method.
-        ``ObsGroup`` concatenates observations in ``self.funcs`` order, so the
-        full group transform is the concatenation of the same per-component
-        transforms in the same order.
+        the tensor slice produced by that component's ``compute()`` /
+        densified ``fcompute()`` output. ``ObsGroup`` concatenates observations
+        in ``self.funcs`` order, so the full group transform is the
+        concatenation of the same per-component transforms in the same order.
 
         This is used by symmetry augmentation/equivariance losses to mirror a
         complete policy observation without each learner needing to know how the
         observation was assembled. When adding a new observation term, implement
         its ``symmetry_transform()`` with the same dimension, permutation, and
-        sign convention as its output tensor.
+        sign convention as its densified output tensor.
+
+        For functional groups the transform applies to the densified vector from
+        :meth:`materialize` (same layout as a dense group).
         """
         transforms = [
             func.symmetry_transform().to(func.device) for func in self.funcs.values()

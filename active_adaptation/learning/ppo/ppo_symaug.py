@@ -71,6 +71,7 @@ from active_adaptation.learning.ppo.common import (
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.learning.utils.distributed import check_parameters, unwrap_ddp
 from active_adaptation.learning.utils.dormancy import DormancyTracker
+from active_adaptation.utils.string import resolve_matching_names
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.symmetry import SymmetryTransform
 
@@ -107,7 +108,10 @@ class PPOConfig:
     use_ddp: bool = True
     debug: bool = False # enable correctness checkers
 
-    in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY,) # CMD_KEY is optional. One can embed the command into the observation.
+    # Regex patterns matched with ``re.fullmatch`` against observation group names
+    # (see ``resolve_matching_names``). Examples: ``("policy",)``, ``("command", "policy")``,
+    # ``(".*",)`` to consume every observation group.
+    in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY,)
 
     def get_class(self):
         return PPOPolicy
@@ -133,12 +137,13 @@ class PPOPolicy(TensorDictModuleBase):
         reward_spec: TensorSpec,
         device,
         *,
-        cmd_transform: Optional[SymmetryTransform] = None,
-        obs_transform: Optional[SymmetryTransform] = None,
+        obs_transforms: Optional[dict[str, SymmetryTransform]] = None,
         act_transform: Optional[SymmetryTransform] = None,
+        materializers: Optional[dict[str, Any]] = None,
     ):
         super().__init__()
         self.cfg = cfg
+        self.in_keys = self.cfg.in_keys
         if self.cfg.debug and self.cfg.compile:
             raise ValueError("Debug mode and compile mode cannot be enabled together")
         self.device = device
@@ -149,26 +154,38 @@ class PPOPolicy(TensorDictModuleBase):
         self.clip_param = resolve_clip_param(self.cfg.clip_param)
         self.actor_loss_fn = PPO_LOSS_MAP[self.cfg.loss_fn]
         self.critic_loss_fn = nn.MSELoss(reduction="none")
-        self.gae = GAE(0.99, 0.95)  
+        self.gae = GAE(0.99, 0.95)
 
         fake_input = observation_spec.zero().to(self.device)
-        self.cmd_transform = cmd_transform.to(self.device) if cmd_transform is not None else None
-        self.obs_transform = obs_transform.to(self.device)
-        self.act_transform = act_transform.to(self.device)
-        
-        # the keys needed for `_update`
-        self.training_keys = ["action_log_prob", "adv", "ret", "is_init"]
-        if CMD_KEY in observation_spec.keys(True, True):
-            self.training_keys += [CMD_KEY, OBS_KEY, ACTION_KEY]
-            inp_dim = fake_input[CMD_KEY].shape[-1] + fake_input[OBS_KEY].shape[-1]
-            self.vecnorm = Seq(
-                CatTensors([CMD_KEY, OBS_KEY], "_input", del_keys=False, sort=False),
-                Mod(VecNorm((inp_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
-            ).to(self.device)
-        else:
-            self.training_keys += [OBS_KEY, ACTION_KEY]
-            inp_dim = fake_input[OBS_KEY].shape[-1]
-            self.vecnorm = Mod(VecNorm((inp_dim,), decay=1.0), [OBS_KEY], ["_obs_normed"]).to(self.device)
+        self.materializers = dict(materializers or {})
+        self.functional_keys = tuple(self.materializers.keys())
+        self.obs_transforms: dict[str, SymmetryTransform] = {
+            key: transform.to(self.device)
+            for key, transform in (obs_transforms or {}).items()
+        }
+        self.act_transform = act_transform.to(self.device) if act_transform is not None else None
+
+        for key, materialize in self.materializers.items():
+            fake_input[key] = materialize(fake_input)
+
+        # Keys needed for `_update`
+        self.training_keys = [
+            "action_log_prob",
+            "adv",
+            "ret",
+            "is_init",
+            *self.in_keys,
+            ACTION_KEY,
+        ]
+        inp_dim = sum(int(fake_input[key].shape[-1]) for key in self.in_keys)
+        preproc_modules: list = []
+        preproc_modules.append(
+            CatTensors(list(self.in_keys), "_input", del_keys=False, sort=False)
+        )
+        preproc_modules.append(
+            Mod(VecNorm((inp_dim,), decay=1.0), ["_input"], ["_obs_normed"])
+        )
+        self.preproc = Seq(*preproc_modules).to(self.device)
         self.action_dim = action_spec.shape[-1]
 
         Activation = getattr(nn, self.cfg.activation)
@@ -202,9 +219,9 @@ class PPOPolicy(TensorDictModuleBase):
             Mod(Critic(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 
-        self.vecnorm(fake_input)
-        self.actor(fake_input)
-        self.critic(fake_input)
+        fake_input = self.preproc(fake_input)
+        fake_input = self.actor(fake_input)
+        fake_input = self.critic(fake_input)
 
         def init_(module):
             if isinstance(module, nn.Linear):
@@ -229,30 +246,31 @@ class PPOPolicy(TensorDictModuleBase):
 
     @classmethod
     def from_env(cls, cfg: PPOConfig, env: _EnvBase, device: str):
-        observation_spec = env.observation_spec
-        action_spec = env.action_spec
-        reward_spec = env.reward_spec
-        obs_func_keys = list(env.observation_groups[OBS_KEY].keys())
-        obs_split = env.observation_groups[OBS_KEY].split
-        # CMD_KEY precedes OBS_KEY in the observation
-        if CMD_KEY in observation_spec.keys(True, True):
-            cmd_transform = env.observation_groups[CMD_KEY].symmetry_transform()
-            obs_func_keys = list(env.observation_groups[CMD_KEY].keys()) + obs_func_keys
-            obs_split = env.observation_groups[CMD_KEY].split + obs_split
-        else:
-            cmd_transform = None
-        obs_transform = env.observation_groups[OBS_KEY].symmetry_transform()
-        act_transform = env.action_manager.symmetry_transform()
+        materializers = {
+            key: env.observation_groups[key].materialize
+            for key in cfg.in_keys
+            if key in env.observation_groups and env.observation_groups[key].is_functional
+        }
         policy = cls(
             cfg=cfg,
-            observation_spec=observation_spec,
-            action_spec=action_spec,
-            reward_spec=reward_spec,
+            observation_spec=env.observation_spec,
+            action_spec=env.action_spec,
+            reward_spec=env.reward_spec,
             device=device,
-            cmd_transform=cmd_transform,
-            obs_transform=obs_transform,
-            act_transform=act_transform,
+            materializers=materializers,
         )
+        policy.obs_transforms = {
+            key: env.observation_groups[key].symmetry_transform().to(device)
+            for key in policy.in_keys
+        }
+        policy.act_transform = env.action_manager.symmetry_transform().to(device)
+
+        obs_func_keys: list[str] = []
+        obs_split: list[int] = []
+        for key in policy.in_keys:
+            group = env.observation_groups[key]
+            obs_func_keys.extend(group.keys())
+            obs_split.extend(group.split)
         policy.obs_func_keys = obs_func_keys
         policy.obs_split = obs_split
         return policy
@@ -302,11 +320,11 @@ class PPOPolicy(TensorDictModuleBase):
             self._rollout_dormancy_tracker.close()
             self._rollout_dormancy_tracker = None
         # VecNorm is frozen in eval mode to avoid unexpected updates
-        vecnorm = self.vecnorm if mode == "train" else VecNorm.freeze()(self.vecnorm)
+        preproc = self.preproc if mode == "train" else VecNorm.freeze()(self.preproc)
         if critic:
-            policy = Seq(vecnorm, self.actor, self.critic)
+            policy = Seq(preproc, self.actor, self.critic)
         else:
-            policy = Seq(vecnorm, self.actor)
+            policy = Seq(preproc, self.actor)
         if self.cfg.compile:
             policy = torch.compile(policy)
         if self.cfg.debug:
@@ -322,7 +340,7 @@ class PPOPolicy(TensorDictModuleBase):
         tensordict = tensordict.exclude("stats").to(self.device, non_blocking=True)
         infos = []
 
-        self.vecnorm.to(self.device, non_blocking=True)
+        self.preproc.to(self.device, non_blocking=True)
         self.actor.to(self.device)
         self.critic.to(self.device)
 
@@ -357,21 +375,30 @@ class PPOPolicy(TensorDictModuleBase):
         td = tensordict.select(*self.training_keys)
         for epoch in range(self.cfg.ppo_epochs):
             compute_diagnostics = epoch == self.cfg.ppo_epochs - 1
+            need_kl = self.desired_kl is not None
             batch = make_batch(td, self.cfg.num_minibatches)
+            epoch_kls = []
             for minibatch in batch:
                 minibatch = self._augment_symmetry(minibatch)
-                info = self.update(minibatch, compute_diagnostics, ret_var)
+                info = self.update(
+                    minibatch, compute_diagnostics or need_kl, ret_var
+                )
                 if compute_diagnostics:
                     infos.append(info)
-                
-                if self.desired_kl is not None: # adaptive learning rate
-                    kl = infos[-1]["actor/kl"]
-                    actor_lr = self.opt.param_groups[0]["lr"]
-                    if kl > self.desired_kl * 2.0:
-                        actor_lr = max(1e-5, actor_lr / 1.5)
-                    elif kl < self.desired_kl / 2.0 and kl > 0.0:
-                        actor_lr = min(1e-2, actor_lr * 1.5)
-                    self.opt.param_groups[0]["lr"] = actor_lr
+                if need_kl:
+                    epoch_kls.append(info["actor/approx_kl"])
+
+            if need_kl:
+                kl = sum(epoch_kls) / len(epoch_kls)
+                if aa.is_distributed():
+                    distr.all_reduce(kl, op=distr.ReduceOp.SUM)
+                    kl = kl / self.world_size
+                actor_lr = self.opt.param_groups[0]["lr"]
+                if kl > self.desired_kl * 2.0:
+                    actor_lr = max(1e-5, actor_lr / 1.5)
+                elif kl < self.desired_kl / 2.0 and kl > 0.0:
+                    actor_lr = min(1e-2, actor_lr * 1.5)
+                self.opt.param_groups[0]["lr"] = actor_lr
         
         with torch.no_grad():
             tensordict_ = self.actor(tensordict.copy())
@@ -408,7 +435,7 @@ class PPOPolicy(TensorDictModuleBase):
             self._rollout_dormancy_tracker.reset()
         
         if aa.is_distributed():
-            self.vecnorm.apply(vecnorm_sync_)
+            self.preproc.apply(vecnorm_sync_)
             if self.cfg.debug:
                 actor_diff = check_parameters(self.actor)
                 critic_diff = check_parameters(self.critic)
@@ -441,10 +468,13 @@ class PPOPolicy(TensorDictModuleBase):
         clamp_reward: bool = True,  # avoid suicide due to negative rewards
     ):
         keys = tensordict.keys(True, True)
+        for key, materialize in self.materializers.items():
+            tensordict[key] = materialize(tensordict)
+            tensordict["next", key] = materialize(tensordict["next"])
         if not ("state_value" in keys and ("next", "state_value") in keys):
             with tensordict.view(-1) as tensordict_flat:
-                critic(self.vecnorm(tensordict_flat))
-                critic(self.vecnorm(tensordict_flat["next"]))
+                critic(self.preproc(tensordict_flat))
+                critic(self.preproc(tensordict_flat["next"]))
 
         values = tensordict["state_value"]
         next_values = tensordict["next", "state_value"]
@@ -507,7 +537,7 @@ class PPOPolicy(TensorDictModuleBase):
         # Bypass DDP hooks: forward the underlying modules only.
         critic = unwrap_ddp(self.critic)
         actor_body = unwrap_ddp(self.actor).module[0]
-        vecnorm = self.vecnorm
+        vecnorm = self.preproc
 
         with hold_out_net(critic), hold_out_net(vecnorm):
             td_value = vecnorm(td.copy())
@@ -541,11 +571,16 @@ class PPOPolicy(TensorDictModuleBase):
         return grad_value_per_dim, grad_policy_per_dim
 
     def _augment_symmetry(self, tensordict: TensorDict) -> TensorDict:
+        # Densify functional groups before applying tensor symmetry transforms.
+        for key, materialize in self.materializers.items():
+            tensordict[key] = materialize(tensordict)
         symmetry = tensordict.empty()
-        symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
-        if self.cmd_transform is not None:
-            symmetry[CMD_KEY] = self.cmd_transform(tensordict[CMD_KEY])
-        symmetry[OBS_KEY] = self.obs_transform(tensordict[OBS_KEY])
+        if self.act_transform is not None:
+            symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
+        else:
+            symmetry[ACTION_KEY] = tensordict[ACTION_KEY]
+        for key, transform in self.obs_transforms.items():
+            symmetry[key] = transform(tensordict[key])
         symmetry["action_log_prob"] = tensordict["action_log_prob"]
         symmetry["adv"] = tensordict["adv"]
         symmetry["ret"] = tensordict["ret"]
@@ -561,7 +596,7 @@ class PPOPolicy(TensorDictModuleBase):
     ):
         bsize = tensordict.shape[0] // 2
 
-        self.vecnorm(tensordict)
+        self.preproc(tensordict)
         
         valid = (~tensordict["is_init"]).float()
         valid_cnt = valid.sum()
@@ -615,13 +650,20 @@ class PPOPolicy(TensorDictModuleBase):
         self.opt.step()
         
         if not compute_diagnostics:
+            if self.desired_kl is not None:
+                with torch.no_grad():
+                    return {
+                        "actor/approx_kl": ((ratio - 1.0) - log_ratio).mean(),
+                    }
             return
 
         with torch.no_grad():
             # value_loss is masked MSE; ret_var is full-rollout masked Var(ret).
             explained_var = 1 - value_loss / ret_var
             approx_kl = ((ratio - 1.0) - log_ratio).mean()
-            symmetry_loss = F.mse_loss(dist.mean[bsize:], self.act_transform(dist.mean[:bsize]))
+            symmetry_loss = F.mse_loss(
+                dist.mean[bsize:], self.act_transform(dist.mean[:bsize])
+            ) if self.act_transform is not None else dist.mean.new_zeros(())
             actor_feature_norm = torch.norm(tensordict["_actor_feature"], dim=-1).mean()
             critic_feature_norm = torch.norm(tensordict["_critic_feature"], dim=-1).mean()
 
@@ -648,12 +690,14 @@ class PPOPolicy(TensorDictModuleBase):
             if isinstance(module, DDP):
                 module = module.module
             state_dict[name] = module.state_dict()
-        
-        if self.cmd_transform is not None:
-            state_dict["cmd_transform"] = self.cmd_transform.state_dict()
-        state_dict["obs_transform"] = self.obs_transform.state_dict()
-        state_dict["act_transform"] = self.act_transform.state_dict()
+
+        state_dict["obs_transforms"] = {
+            key: transform.state_dict() for key, transform in self.obs_transforms.items()
+        }
+        if self.act_transform is not None:
+            state_dict["act_transform"] = self.act_transform.state_dict()
         state_dict["ret_std_ema"] = self.ret_std_ema
+        state_dict["in_keys"] = list(self.in_keys)
         return state_dict
     
     def load_state_dict(self, state_dict, strict=True):

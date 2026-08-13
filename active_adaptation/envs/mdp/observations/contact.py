@@ -31,6 +31,7 @@ class last_contact_pos(ObservationV2):
     """
 
     def __init__(self, body_names: str, world_frame: bool = False):
+        super().__init__()
         self.body_names_pattern = body_names
         self.world_frame = world_frame
 
@@ -105,6 +106,7 @@ class contact_indicator(ObservationV2):
     supported_backends = ("isaac",)
 
     def __init__(self, body_names: str):
+        super().__init__()
         self.body_names_pattern = body_names
 
     @override
@@ -124,6 +126,7 @@ class contact_indicator(ObservationV2):
 
 class contact_forces(ObservationV2):
     def __init__(self, body_names: str, world_frame: bool = False):
+        super().__init__()
         self.body_names_pattern = body_names
         self.world_frame = world_frame
 
