@@ -17,7 +17,7 @@ from active_adaptation import ROBOT_MODEL_DIR
 
 registry = Registry.instance()
 
-USD_PATH = ROBOT_MODEL_DIR / "underwater" / "BlueROVHeavyArm" / "model" / "model.usd"
+USD_PATH = ROBOT_MODEL_DIR / "underwater" / "BlueROVHeavyArm" / "model" / "model_flattened.usd"
 
 # X5A-style arm (same joint naming as a2_manipulator).
 _ARM_JOINTS = tuple(f"arm_joint{i}" for i in range(1, 9))
@@ -31,6 +31,7 @@ _ARM_BODIES = (
     "gripper_base",
     "gripper_right",
     "gripper_left",
+    "grasp_point",
 )
 
 # Per-body displaced volume (m^3). Same base volume as BlueROVHeavy.
@@ -46,6 +47,7 @@ VOLUME = {
     "gripper_base": 0.00014946794,  # signed
     "gripper_right": 3.1933421e-05,  # signed
     "gripper_left": 3.1933416e-05,  # watertight
+    "grasp_point": 0.0,
 }
 
 # Per-body damping: base keeps MarineGym 6-DoF coeffs; arm floats are isotropic
@@ -62,6 +64,7 @@ LINEAR_DAMPING = {
     "gripper_base": 0.8,
     "gripper_right": 0.3,
     "gripper_left": 0.3,
+    "grasp_point": 0.0,
 }
 QUADRATIC_DAMPING = {
     "base_link": (18.18, 21.66, 36.99, 1.55, 1.55, 1.55),
@@ -75,6 +78,7 @@ QUADRATIC_DAMPING = {
     "gripper_base": 4.0,
     "gripper_right": 1.5,
     "gripper_left": 1.5,
+    "grasp_point": 0.0,
 }
 
 # Actuator gains: X5A URDF effort=100; stiffness/damping aligned with a2_manipulator.
