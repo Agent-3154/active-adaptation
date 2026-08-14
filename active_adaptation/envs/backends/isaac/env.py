@@ -77,8 +77,9 @@ class IsaacBackendEnv(_EnvBase):
             ),
         )
 
-        asset_factory = registry.get("asset", self.cfg.robot.name)
-        asset_spec: AssetSpec = asset_factory(backend="isaaclab")
+        robot_cfg = dict(self.cfg.robot.copy())
+        asset_factory = registry.get("asset", robot_cfg.pop("name"))
+        asset_spec: AssetSpec = asset_factory(backend="isaaclab", **robot_cfg)
         scene_cfg.robot = asset_spec.config
         sensors = asset_spec.sensors
         for name, sensor_cfg in sensors.items():

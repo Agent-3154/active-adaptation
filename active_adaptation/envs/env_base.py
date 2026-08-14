@@ -623,7 +623,10 @@ class _EnvBase(EnvBase, RegistryMixin):
             init_state = {"robot": init_state}
         for key, value in init_state.items():
             entity = self.scene[key]
-            entity.write_root_state_to_sim(value, env_ids=env_ids)
+            if self.backend == "mjlab" and entity.is_fixed_base:
+                entity.write_mocap_pose_to_sim(value[:, :7], env_ids=env_ids)
+            else:
+                entity.write_root_state_to_sim(value, env_ids=env_ids)
         self.stats[env_ids] = 0.0
 
     # TODO: add explanation for the difference

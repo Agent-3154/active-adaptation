@@ -100,7 +100,7 @@ BODY_NAMES_SIMULATION = [
 ]
 
 
-def make_isaaclab_cfg(self_collisions: bool = False):
+def make_isaaclab_cfg(self_collisions: bool = False, fixed_base: bool = False):
     from active_adaptation.assets.asset_cfg import (
         AssetSpec,
         ArticulationCfg,
@@ -124,7 +124,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
                 enabled_self_collisions=self_collisions,
                 solver_position_iteration_count=4,
                 solver_velocity_iteration_count=1,
-                fix_root_link=False,
+                fix_root_link=fixed_base,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 contact_offset=0.02,
@@ -185,7 +185,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
     )
 
 
-def make_mjlab_cfg(motrix: bool = False):
+def make_mjlab_cfg(motrix: bool = False, fixed_base: bool = False):
     import mujoco
     from active_adaptation.assets.asset_cfg import AssetSpec, EntityCfg
     from mjlab.actuator import BuiltinPdActuatorCfg
@@ -211,6 +211,12 @@ def make_mjlab_cfg(motrix: bool = False):
                     suffix = "_collision" if collision_i == 0 else f"_collision{collision_i}"
                     collision_i += 1
                 geom.name = f"{body.name}{suffix}"
+        # No freejoint ⇒ fixed base. mjlab auto-wraps a mocap root so per-env
+        # placement via init_state / root pose still works.
+        if fixed_base:
+            for joint in list(spec.joints):
+                if joint.type == mujoco.mjtJoint.mjJNT_FREE:
+                    spec.delete(joint)
         return spec
 
     cfg = EntityCfg(
@@ -285,13 +291,16 @@ def make_mjlab_cfg(motrix: bool = False):
     )
 
 
-def make_cfg(backend: Literal["isaaclab", "mjlab", "motrix"]):
+def make_cfg(
+    backend: Literal["isaaclab", "mjlab", "motrix"],
+    fixed_base: bool = False,
+):
     if backend == "isaaclab":
-        return make_isaaclab_cfg()
+        return make_isaaclab_cfg(fixed_base=fixed_base)
     elif backend == "mjlab":
-        return make_mjlab_cfg(motrix=False)
+        return make_mjlab_cfg(motrix=False, fixed_base=fixed_base)
     elif backend == "motrix":
-        return make_mjlab_cfg(motrix=True)
+        return make_mjlab_cfg(motrix=True, fixed_base=fixed_base)
     else:
         raise ValueError(f"Invalid backend: {backend}")
 

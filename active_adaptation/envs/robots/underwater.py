@@ -45,6 +45,14 @@ def _expand_damping_coeffs(value: BodyDampingValue) -> list[float]:
     )
 
 
+# Bodies introduced by mjlab fixed-base mocap wrapping; no hydrodynamics.
+_HYDRO_SKIP_BODIES = frozenset({"mocap_base"})
+
+
+def _hydro_required_bodies(body_names: Sequence[str]) -> list[str]:
+    return [name for name in body_names if name not in _HYDRO_SKIP_BODIES]
+
+
 @dataclass
 class HydrodynamicsCfg:
     """Hydrodynamic parameters for an underwater robot.
@@ -168,22 +176,28 @@ class UnderwaterRobot:
         body_names: Sequence[str],
         field_name: str,
     ) -> torch.Tensor:
-        """Resolve a per-body float spec to a length-``num_bodies`` tensor."""
+        """Resolve a per-body float spec to a length-``num_bodies`` tensor.
+
+        ``mocap_base`` (mjlab fixed-base wrapper) is skipped and left at 0.
+        """
+        required = _hydro_required_bodies(body_names)
         if isinstance(spec, Mapping):
             indices, matched_names, values = string_utils.resolve_matching_names_values(
-                dict(spec), body_names, preserve_order=True
+                dict(spec), required, preserve_order=True
             )
-            missing = [name for name in body_names if name not in matched_names]
+            missing = [name for name in required if name not in matched_names]
             assert not missing, (
                 f"HydrodynamicsCfg.{field_name} must specify every body; missing: {missing}. "
-                f"Bodies: {list(body_names)}"
+                f"Bodies: {required}"
             )
-            assert len(matched_names) == len(body_names), (
+            assert len(matched_names) == len(required), (
                 f"HydrodynamicsCfg.{field_name} matched {len(matched_names)} bodies, "
-                f"expected {len(body_names)} ({list(body_names)})"
+                f"expected {len(required)} ({required})"
             )
             out = torch.zeros(len(body_names), dtype=torch.float32)
-            out[list(indices)] = torch.tensor(values, dtype=torch.float32)
+            name_to_idx = {name: i for i, name in enumerate(body_names)}
+            for req_i, value in zip(indices, values):
+                out[name_to_idx[required[req_i]]] = float(value)
             return out
 
         if isinstance(spec, (str, bytes)):
@@ -200,11 +214,15 @@ class UnderwaterRobot:
                 f"str-to-float mapping; got {type(spec).__name__}"
             ) from exc
 
-        assert len(values) == len(body_names), (
+        assert len(values) == len(required), (
             f"HydrodynamicsCfg.{field_name} list length {len(values)} != "
-            f"num_bodies {len(body_names)} ({list(body_names)})"
+            f"num_bodies {len(required)} ({required})"
         )
-        return torch.tensor(values, dtype=torch.float32)
+        out = torch.zeros(len(body_names), dtype=torch.float32)
+        name_to_idx = {name: i for i, name in enumerate(body_names)}
+        for name, value in zip(required, values):
+            out[name_to_idx[name]] = float(value)
+        return out
 
     def _resolve_body_damping(
         self,
@@ -212,23 +230,30 @@ class UnderwaterRobot:
         body_names: Sequence[str],
         field_name: str,
     ) -> torch.Tensor:
-        """Resolve per-body damping to a ``(num_bodies, 6)`` tensor."""
+        """Resolve per-body damping to a ``(num_bodies, 6)`` tensor.
+
+        ``mocap_base`` (mjlab fixed-base wrapper) is skipped and left at 0.
+        """
+        required = _hydro_required_bodies(body_names)
         if isinstance(spec, Mapping):
             indices, matched_names, values = string_utils.resolve_matching_names_values(
-                dict(spec), body_names, preserve_order=True
+                dict(spec), required, preserve_order=True
             )
-            missing = [name for name in body_names if name not in matched_names]
+            missing = [name for name in required if name not in matched_names]
             assert not missing, (
                 f"HydrodynamicsCfg.{field_name} must specify every body; missing: {missing}. "
-                f"Bodies: {list(body_names)}"
+                f"Bodies: {required}"
             )
-            assert len(matched_names) == len(body_names), (
+            assert len(matched_names) == len(required), (
                 f"HydrodynamicsCfg.{field_name} matched {len(matched_names)} bodies, "
-                f"expected {len(body_names)} ({list(body_names)})"
+                f"expected {len(required)} ({required})"
             )
             out = torch.zeros(len(body_names), 6, dtype=torch.float32)
-            for idx, value in zip(indices, values):
-                out[idx] = torch.tensor(_expand_damping_coeffs(value), dtype=torch.float32)
+            name_to_idx = {name: i for i, name in enumerate(body_names)}
+            for req_i, value in zip(indices, values):
+                out[name_to_idx[required[req_i]]] = torch.tensor(
+                    _expand_damping_coeffs(value), dtype=torch.float32
+                )
             return out
 
         if isinstance(spec, (str, bytes)):
@@ -245,13 +270,16 @@ class UnderwaterRobot:
                 f"mapping; got {type(spec).__name__}"
             ) from exc
 
-        assert len(values) == len(body_names), (
+        assert len(values) == len(required), (
             f"HydrodynamicsCfg.{field_name} list length {len(values)} != "
-            f"num_bodies {len(body_names)} ({list(body_names)})"
+            f"num_bodies {len(required)} ({required})"
         )
         out = torch.zeros(len(body_names), 6, dtype=torch.float32)
-        for i, value in enumerate(values):
-            out[i] = torch.tensor(_expand_damping_coeffs(value), dtype=torch.float32)
+        name_to_idx = {name: i for i, name in enumerate(body_names)}
+        for name, value in zip(required, values):
+            out[name_to_idx[name]] = torch.tensor(
+                _expand_damping_coeffs(value), dtype=torch.float32
+            )
         return out
 
     def _initialize(self, robot: "Articulation", env: "_EnvBase"):
@@ -260,6 +288,15 @@ class UnderwaterRobot:
         self.dt = self.env.sim.get_physics_dt()
 
         self.body_names = list(self.robot.body_names)
+        # Prefer named base_link; fall back to first non-mocap body (Isaac: index 0).
+        if "base_link" in self.body_names:
+            self._base_body_id = self.body_names.index("base_link")
+        else:
+            self._base_body_id = next(
+                i
+                for i, name in enumerate(self.body_names)
+                if name not in _HYDRO_SKIP_BODIES
+            )
         body_volumes = self._resolve_body_floats(
             self.cfg.volume, self.body_names, "volume"
         ).to(self.device)

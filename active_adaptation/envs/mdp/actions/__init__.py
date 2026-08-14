@@ -13,6 +13,7 @@ from .joint import (
     JointVelocity,
 )
 from .marker import Marker
+from .task_space import EndEffectorPose
 from .underwater import UnderwaterThrottle
 from .write import WriteJointPosition, WriteRootState
 
@@ -27,6 +28,7 @@ __all__ = [
     "JointPositionDelta",
     "CorrelatedJointPosition",
     "JointVelocity",
+    "EndEffectorPose",
     "UnderwaterThrottle",
     "Marker",
     "WriteRootState",
