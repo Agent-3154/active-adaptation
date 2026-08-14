@@ -214,6 +214,18 @@ wheels/
     return root
 
 
+def _editable_install(project_root: Path, *, no_deps: bool) -> None:
+    if not (project_root / "pyproject.toml").is_file():
+        _fail(f"No pyproject.toml in {project_root}; cannot install.")
+    cmd = [sys.executable, "-m", "pip", "install", "-e", str(project_root)]
+    if no_deps:
+        cmd.append("--no-deps")
+    print("Running:", " ".join(cmd))
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        _fail(f"pip install failed with exit code {result.returncode}")
+
+
 @app.command("create")
 def create_cmd(
     name: Annotated[
@@ -228,9 +240,23 @@ def create_cmd(
             help="Parent directory for the new project folder (default: sibling aa-projects/).",
         ),
     ] = AA_REPO_ROOT.parent / "aa-projects",
+    no_deps: Annotated[
+        bool,
+        typer.Option(
+            "--no-deps/--deps",
+            help="Editable-install without resolving dependencies (default: --no-deps; safer when active_adaptation is already installed).",
+        ),
+    ] = True,
+    skip_discover: Annotated[
+        bool,
+        typer.Option("--skip-discover", help="Do not run discover after create/install."),
+    ] = False,
 ) -> None:
-    """Scaffold a new extension project under aa-projects/<name> by default."""
-    _create_project_scaffold(name.strip(), dir)
+    """Scaffold a project, editable-install it, and discover it (default: aa-projects/<name>)."""
+    root = _create_project_scaffold(name.strip(), dir)
+    _editable_install(root, no_deps=no_deps)
+    if not skip_discover:
+        discover_cmd()
 
 
 @app.command("install")
@@ -262,16 +288,7 @@ def install_cmd(
     if clone.returncode != 0:
         _fail(f"git clone failed with exit code {clone.returncode}")
 
-    if not (target / "pyproject.toml").is_file():
-        _fail(f"No pyproject.toml in {target}; cannot install.")
-
-    cmd = [sys.executable, "-m", "pip", "install", "-e", str(target)]
-    if no_deps:
-        cmd.append("--no-deps")
-    print("Running:", " ".join(cmd))
-    install = subprocess.run(cmd)
-    if install.returncode != 0:
-        _fail(f"pip install failed with exit code {install.returncode}")
+    _editable_install(target, no_deps=no_deps)
 
     if not skip_discover:
         discover_cmd()
