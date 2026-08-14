@@ -100,8 +100,9 @@ class MjlabBackendEnv(_EnvBase):
         from active_adaptation.envs.backends.mjlab.viewer import MjLabViewer
 
         registry = Registry.instance()
-        asset_factory = registry.get("asset", self.cfg.robot.name)
-        asset_spec: AssetSpec = asset_factory(backend="mjlab")
+        robot_cfg = dict(self.cfg.robot.copy())
+        asset_factory = registry.get("asset", robot_cfg.pop("name"))
+        asset_spec: AssetSpec = asset_factory(backend="mjlab", **robot_cfg)
         asset_cfg = asset_spec.config
         sensors = asset_spec.sensors
         terrain = self.cfg.get("terrain", "plane")
