@@ -284,17 +284,22 @@ Built-in examples also live under this repo’s `projects/` (e.g. `facet`, `mimi
 ### Create a project
 
 ```bash
-aa-project create -n myproject
-# -> <workspace>/aa-projects/myproject  (sibling of active-adaptation)
+# run inside the backend env you train with
+uv run --project venv/isaac51 aa-project create -n myproject
+# -> scaffolds <workspace>/aa-projects/myproject
+# -> editable-installs into the current env (--no-deps by default)
+# -> runs discover
 
 aa-project create -n myproject -d /path/to/parent
-# -> /path/to/parent/myproject
+# -> /path/to/parent/myproject (+ install + discover)
 ```
 
 - **`-n`, `--name`** (required): lowercase alphanumeric + underscores. Creates packages `src/{name}/` and `src/{name}_learning/`.
 - **`-d`, `--dir`**: parent directory for the new project folder (default: sibling `aa-projects/` next to the `active-adaptation` repo).
+- **`--no-deps` / `--deps`**: editable-install without (default) or with dependency resolution.
+- **`--skip-discover`**: scaffold + install only; do not refresh `.cache/projects.json`.
 
-The scaffold writes `pyproject.toml` with both entry-point groups, `cfg/task`, `cfg/exp`, README, and `.gitignore` (existing README/`.gitignore` are kept).
+The scaffold writes `pyproject.toml` with both entry-point groups, `cfg/task`, `cfg/exp`, README, and `.gitignore` (existing README/`.gitignore` are kept). New projects still start as **disabled** in `projects.json` until you `aa-project enable <name>`.
 
 Declare any project-specific third-party packages in that project’s `[project.dependencies]` (in addition to `active_adaptation`).
 
@@ -406,7 +411,7 @@ Available after installing `active-adaptation` (root `uv sync` or `pip install -
 
 | Command | Description |
 |--------|-------------|
-| `aa-project create -n NAME [-d DIR]` | Scaffold a new project (default: sibling `aa-projects/<name>`). |
+| `aa-project create -n NAME [-d DIR] [--deps] [--skip-discover]` | Scaffold, editable-install, and discover (default: sibling `aa-projects/<name>`). |
 | `aa-project install URL [-d DIR] [--no-deps] [--skip-discover]` | Clone from GitHub and editable-install into the current env. |
 | `aa-project discover [--enabled]` | Scan installed entry points; update `.cache/projects.json`. |
 | `aa-project enable [NAME]` | Enable one project, or all if `NAME` is omitted. |
