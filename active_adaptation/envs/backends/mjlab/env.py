@@ -104,7 +104,7 @@ class MjlabBackendEnv(_EnvBase):
         asset_factory = registry.get("asset", robot_cfg.pop("name"))
         asset_spec: AssetSpec = asset_factory(backend="mjlab", **robot_cfg)
         asset_cfg = asset_spec.config
-        sensors = asset_spec.sensors
+        sensors = {sensor.name: sensor for sensor in asset_spec.sensors}
         terrain = self.cfg.get("terrain", "plane")
         
         self.terrain_type = terrain
@@ -125,11 +125,19 @@ class MjlabBackendEnv(_EnvBase):
                 obj_cfg = obj_cfg.config
             entities[obj_name] = obj_cfg
 
+        import active_adaptation.envs.sensors  # noqa: F401  # register sensor factories
+        for sensor_name, sensor_spec in self.cfg.get("sensors", {}).items():
+            sensor_spec = dict(sensor_spec)
+            fn = registry.get("sensor", sensor_spec.pop("_target_"))
+            sensors[sensor_name] = fn(
+                backend="mjlab", name=sensor_name, **sensor_spec
+            )
+
         scene_cfg = SceneCfg(
             num_envs=self.cfg.num_envs,
             env_spacing=self.cfg.get("env_spacing", 2.5),
             entities=entities,
-            sensors=tuple(sensors),
+            sensors=tuple(sensors.values()),
             terrain=terrain_cfg,
         )
 

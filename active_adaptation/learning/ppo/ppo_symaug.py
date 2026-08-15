@@ -41,7 +41,7 @@ from tensordict.nn import (
 
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
-from typing import Union, Tuple, Optional, Any, List, TYPE_CHECKING
+from typing import Any, Union, Tuple, Optional, Any, List, TYPE_CHECKING
 from collections import OrderedDict
 import numpy as np
 
@@ -111,7 +111,7 @@ class PPOConfig:
     # Regex patterns matched with ``re.fullmatch`` against observation group names
     # (see ``resolve_matching_names``). Examples: ``("policy",)``, ``("command", "policy")``,
     # ``(".*",)`` to consume every observation group.
-    in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY,)
+    in_keys: Any = (CMD_KEY, OBS_KEY,)
 
     def get_class(self):
         return PPOPolicy

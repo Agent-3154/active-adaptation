@@ -126,7 +126,9 @@ def make_env_policy(
             raise ValueError(f"Unknown backend: {backend}")
         
         try:
-            in_keys = tuple(algo_cfg.in_keys)
+            in_keys = algo_cfg.in_keys # str or Sequence[str]
+            if not isinstance(in_keys, str):
+                in_keys = list(in_keys)
         except AttributeError:
             raise ValueError(
                 "Specify `in_keys` (e.g., `policy`, `priv`, or regex `.*`) in `cfg.algo`."
