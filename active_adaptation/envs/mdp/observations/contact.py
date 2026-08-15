@@ -7,7 +7,7 @@ from active_adaptation.utils.symmetry import cartesian_space_symmetry
 from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation
+    from isaaclab.assets import Articulation, RigidObject
     from isaaclab.sensors import ContactSensor
     from active_adaptation.envs.env_base import _EnvBase
 
@@ -125,28 +125,74 @@ class contact_indicator(ObservationV2):
 
 
 class contact_forces(ObservationV2):
-    def __init__(self, body_names: str, world_frame: bool = False):
+    """Net contact force on matched bodies, flattened to ``(num_envs, 3 * B)``.
+
+    Reads ``force_matrix_w`` when the sensor has a filter (e.g. object vs
+    terrain), otherwise ``net_forces_w`` (Isaac) or ``force`` (mjlab).
+
+    Args:
+        body_names: Body-name regex on ``entity_name``.
+        world_frame: If False (default), rotate forces into the entity root frame.
+        entity_name: Scene entity key (``robot``, ``object``, …).
+        sensor_name: Scene sensor key (``contact_forces``, ``object_contact``, …).
+        vis_scale: Arrow length in meters per Newton for debug draw.
+    """
+
+    def __init__(
+        self,
+        body_names: str,
+        world_frame: bool = False,
+        entity_name: str = "robot",
+        sensor_name: str = "contact_forces",
+        vis_scale: float = 0.01,
+    ):
         super().__init__()
         self.body_names_pattern = body_names
         self.world_frame = world_frame
+        self.entity_name = entity_name
+        self.sensor_name = sensor_name
+        self.vis_scale = vis_scale
 
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
-        self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
-        self.body_names = self.asset.find_bodies(self.body_names_pattern)[1]
-        self.body_ids = self.contact_sensor.find_bodies(self.body_names_pattern)[0]
+        self.asset: Articulation | RigidObject = self.env.scene.entities[self.entity_name]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors[self.sensor_name]
+        self.asset_body_ids, self.body_names = self.asset.find_bodies(self.body_names_pattern)
+        if hasattr(self.contact_sensor, "find_bodies"):
+            self.sensor_body_ids = self.contact_sensor.find_bodies(
+                self.body_names, preserve_order=True
+            )[0]
+        else:
+            names = self.contact_sensor.primary_names
+            self.sensor_body_ids = [names.index(name) for name in self.body_names]
 
     def compute(self):
-        self.root_link_quat_w = self.asset.data.root_link_quat_w
-        contact_forces = self.contact_sensor.data.net_forces_w[:, self.body_ids]
+        self.body_pos_w = self.asset.data.root_link_pos_w
+        if self.env.backend == "isaac":
+            self.forces_w = self.contact_sensor.data.net_forces_w[:, self.sensor_body_ids]
+        elif self.env.backend == "mjlab":
+            self.forces_w = self.contact_sensor.data.force[:, self.sensor_body_ids]
+        else:
+            raise ValueError(f"Unsupported backend: {self.env.backend}")
+        contact_forces = self.forces_w
         if not self.world_frame:
             contact_forces = quat_rotate_inverse(
-                self.root_link_quat_w.reshape(self.num_envs, 1, 4),
+                self.asset.data.root_link_quat_w.reshape(self.num_envs, 1, 4),
                 contact_forces,
             )
         return contact_forces.reshape(self.num_envs, -1)
 
     def symmetry_transform(self):
+        if getattr(self.asset.cfg, "spatial_symmetry_mapping", None) is None:
+            raise NotImplementedError(
+                f"contact_forces symmetry is undefined for entity {self.entity_name!r}"
+            )
         return cartesian_space_symmetry(self.asset, self.body_names)
+
+    def debug_draw(self):
+        self.env.scene.draw_vector(
+            self.body_pos_w.reshape(-1, 3),
+            self.forces_w.reshape(-1, 3),
+            color=(1.0, 0.25, 0.1, 1.0),
+        )

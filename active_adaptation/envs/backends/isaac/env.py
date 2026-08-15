@@ -97,6 +97,12 @@ class IsaacBackendEnv(_EnvBase):
             assert isinstance(cfg, (ArticulationCfg, RigidObjectCfg)), f"Asset configuration must be an instance of ArticulationCfg or RigidObjectCfg, got {type(cfg)}"
             cfg.prim_path = "{ENV_REGEX_NS}/" + obj_name
             setattr(scene_cfg, obj_name, cfg)
+
+        for sensor_name, sensor_spec in self.cfg.get("sensors", {}).items():
+            sensor_spec = dict(sensor_spec)
+            fn = registry.get("sensor", sensor_spec.pop("_target_"))
+            cfg = fn(backend="isaaclab", name=sensor_name, **sensor_spec)
+            setattr(scene_cfg, sensor_name, cfg)
         
         for observation in self.observation_groups.values():
             for func in observation.funcs.values():

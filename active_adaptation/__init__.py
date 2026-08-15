@@ -155,6 +155,7 @@ def init(cfg: DictConfig, auto_rank: bool):
         AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
 
     import active_adaptation.assets # register assets
+    import active_adaptation.envs.sensors  # register sensors
     projects = import_environment_projects()
 
     default_wandb_api_key, default_wandb_project, default_wandb_entity = resolve_wandb_defaults(projects)

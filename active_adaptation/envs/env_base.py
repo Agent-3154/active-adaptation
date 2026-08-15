@@ -1,7 +1,7 @@
 import os
 import warnings
 from collections import OrderedDict
-from typing import Callable, Dict, Mapping, cast
+from typing import Callable, Dict, Mapping, Any, Optional, cast
 
 import numpy as np
 import torch
@@ -23,6 +23,7 @@ from active_adaptation.utils.video_recorder import (
 )
 from active_adaptation.envs.utils import GroundQuery
 from active_adaptation.registry import RegistryMixin
+from dataclasses import dataclass
 
 if active_adaptation.get_backend() == "isaac":
     import isaacsim.core.utils.torch as torch_utils
@@ -286,9 +287,22 @@ class RewardGroup:
 
         return cls(group_name, funcs, enabled, compile)
 
+@dataclass
+class EnvConfig:
+    # common terms
+    num_envs: int
+    max_episode_length: int
+    
+    # simulation terms, maybe backend-specific
+    sim: Any
+    robot: Any
+    terrain: Any
+    sensors: Optional[Dict[str, Any]]
+    objects: Optional[Dict[str, Any]]
+
 
 class _EnvBase(EnvBase, RegistryMixin):
-    def __init__(self, cfg, device: str, headless: bool = True):
+    def __init__(self, cfg: EnvConfig, device: str, headless: bool = True):
         super().__init__(
             device=device,
             batch_size=[cfg.num_envs],

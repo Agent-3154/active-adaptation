@@ -7,6 +7,18 @@ import torch.distributions as D
 from .helpers import batchify
 
 
+def rot6d(quat: torch.Tensor) -> torch.Tensor:
+    """First two columns of the rotation matrix (Zhou et al. 6D representation).
+
+    Args:
+        quat: Quaternions ``(..., 4)`` in ``(w, x, y, z)``.
+    Returns:
+        ``(..., 6)`` as ``[c0_x, c0_y, c0_z, c1_x, c1_y, c1_z]``.
+    """
+    mat = matrix_from_quat(quat)
+    return mat[..., :, :2].reshape(quat.shape[:-1] + (6,))
+
+
 def wrap_to_pi(angles: torch.Tensor) -> torch.Tensor:
     r"""Wraps input angles (in radians) to the range :math:`[-\pi, \pi]`.
 
@@ -453,6 +465,25 @@ def slerp(quat0: torch.Tensor, quat1: torch.Tensor, t: torch.Tensor):
 
 def sample_uniform(size, low: float, high: float, device: torch.device = "cpu"):
     return torch.rand(size, device=device) * (high - low) + low
+
+
+def quat_rotate_x_to(direction: torch.Tensor) -> torch.Tensor:
+    """WXYZ quaternion that rotates ``+X`` onto ``direction`` (..., 3)."""
+    d = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    quat = torch.stack(
+        [
+            1.0 + d[..., 0],
+            torch.zeros_like(d[..., 0]),
+            -d[..., 2],
+            d[..., 1],
+        ],
+        dim=-1,
+    )
+    antiparallel = d[..., 0] < -0.999
+    if antiparallel.any():
+        quat = quat.clone()
+        quat[antiparallel] = quat.new_tensor([0.0, 0.0, 1.0, 0.0])
+    return quat / quat.norm(dim=-1, keepdim=True).clamp_min(1e-8)
 
 
 class MultiUniform(D.Distribution):
