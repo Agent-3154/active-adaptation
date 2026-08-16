@@ -47,55 +47,30 @@ class MjlabBackendEnv(_EnvBase):
         from mjlab.terrains import TerrainEntityCfg
         from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
         from mjlab.viewer import ViewerConfig
-        from mjlab.utils.spec_config import CollisionCfg, _GEOM_ATTR_DEFAULTS
+        # mjlab 1.6+ still silently zeros all collisions when geom_names_expr
+        # matches nothing and disable_other_geoms=True. Keep a thin fail-fast.
+        from mjlab.utils.spec_config import CollisionCfg
+        from mjlab.utils.string import filter_exp
 
-        def edit_spec(self: CollisionCfg, spec: mujoco.MjSpec):
-            from mjlab.utils.spec import disable_collision
-            from mjlab.utils.string import filter_exp, resolve_field
+        if not getattr(CollisionCfg.edit_spec, "_aa_empty_match_guard", False):
+            _collision_edit_spec = CollisionCfg.edit_spec
 
-            self.validate()
+            def _edit_spec_require_matches(
+                self: CollisionCfg, spec: mujoco.MjSpec
+            ) -> None:
+                matched = filter_exp(
+                    self.geom_names_expr, tuple(g.name for g in spec.geoms)
+                )
+                if not matched:
+                    raise ValueError(
+                        f"CollisionCfg geom_names_expr={self.geom_names_expr!r} "
+                        "matched no geoms; with disable_other_geoms=True this would "
+                        "silently disable all collisions."
+                    )
+                _collision_edit_spec(self, spec)
 
-            all_geoms: list[mujoco.MjsGeom] = spec.geoms
-            all_geom_names = tuple(g.name for g in all_geoms)
-            geom_subset = filter_exp(self.geom_names_expr, all_geom_names)
-
-            resolved_fields = {
-                name: resolve_field(getattr(self, name), geom_subset, default)
-                for name, default in _GEOM_ATTR_DEFAULTS.items()
-            }
-
-            # raise error if any of the resolved fields are None
-            if any(not len(field) for field in resolved_fields.values()):
-                raise ValueError("Resolved fields cannot be empty")
-
-            for i, geom_name in enumerate(geom_subset):
-                geom = spec.geom(geom_name)
-
-                geom.condim = resolved_fields["condim"][i]
-                geom.contype = resolved_fields["contype"][i]
-                geom.conaffinity = resolved_fields["conaffinity"][i]
-                geom.priority = resolved_fields["priority"][i]
-
-                CollisionCfg.set_array_field(geom.friction, resolved_fields["friction"][i])
-                CollisionCfg.set_array_field(geom.solref, resolved_fields["solref"][i])
-                CollisionCfg.set_array_field(geom.solimp, resolved_fields["solimp"][i])
-
-                if resolved_fields["margin"][i] is not None:
-                    geom.margin = resolved_fields["margin"][i]
-                if resolved_fields["gap"][i] is not None:
-                    geom.gap = resolved_fields["gap"][i]
-                if resolved_fields["solmix"][i] is not None:
-                    geom.solmix = resolved_fields["solmix"][i]
-
-            other_geoms = ()
-            if self.disable_other_geoms:
-                other_geoms = set(all_geom_names).difference(geom_subset)
-                for geom_name in other_geoms:
-                    geom = spec.geom(geom_name)
-                    disable_collision(geom)
-        
-        # replace the edit_spec method of CollisionCfg with our own
-        CollisionCfg.edit_spec = edit_spec
+            _edit_spec_require_matches._aa_empty_match_guard = True  # type: ignore[attr-defined]
+            CollisionCfg.edit_spec = _edit_spec_require_matches
 
         from active_adaptation.envs.backends.mjlab.viewer import MjLabViewer
 

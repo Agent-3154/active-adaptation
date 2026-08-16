@@ -147,6 +147,8 @@ sensors = {
   - Match with `target_names_expr` regex tuple; wrong transmission namespace → hard error
   - Mimic DOFs: **omit** from actuators (equality in MJCF drives them); do not PD-actuate intermediate/distal fingers, etc.
 - `collisions=(CollisionCfg(...),)` — **`disable_other_geoms=True` by default** (zeros contype/conaffinity on non-matches). Name collision geoms; match them explicitly (e.g. `.*_collision`)
+- **mjlab ≥1.6 structural fields are required:** always set `contype`, `conaffinity`, `condim`, and `priority`. Dict values for those fields must cover every matched geom (add a catch-all `".*"` / `".*_collision.*"`). Tuning fields (`friction`, `solref`, …) may stay partial / `None` (inherit XML).
+- AA’s `mjlab/env.py` wraps `CollisionCfg.edit_spec` with an **empty-match fail-fast** (stock mjlab still silently disables all geoms when the regex matches nothing).
 - Sensors as **tuple on AssetSpec**, not on EntityCfg — live on `SceneCfg.sensors`. Include every MDP-read quantity in `fields` (typically `("found", "force")`); Isaac exposes `net_forces_w` always, mjlab only allocates listed fields — see [environment-mdp](../environment-mdp/reference.md#contact-sensor-data-fields-isaac--mjlab).
 
 ```python
@@ -183,7 +185,10 @@ URDF and MJCF express coupling differently. Prefer **physics** constraints on bo
 EntityCfg(
     init_state=EntityCfg.InitialStateCfg(pos=(...), rot=(1, 0, 0, 0)),
     spec_fn=...,  # freejoint + mesh/box geom
-    collisions=(CollisionCfg(geom_names_expr=(".*_collision",), contype=1, conaffinity=1),),
+    collisions=(CollisionCfg(
+        geom_names_expr=(".*_collision",),
+        contype=1, conaffinity=1, condim=3, priority=0,
+    ),),
 )
 ```
 
@@ -228,13 +233,14 @@ registry.register("asset", "unitree_a2", make_cfg)
 3. **`joint_pos=None`** requires an MJCF keyframe; otherwise use a regex dict (default `{".*": 0.0}`).
 4. **Freejoint qpos** = `[pos(3), quat_wxyz(4), ...joint_qpos]`.
 5. **Sensors on SceneCfg**, not EntityCfg; `ContactMatch.entity` must be an entities key (or `None` for literal names).
-6. **`CollisionCfg.disable_other_geoms` defaults True** — unmatched geoms lose collision; name + match collision geoms deliberately.
-7. **Name geoms** used by CollisionCfg / contact sensors (unnamed geoms are hard to match).
-8. Prefer **`BuiltinPdActuatorCfg`** for robots (AA actions often set pos **and** vel targets via `envs/mdp/actions/joint.py`). Use `BuiltinPositionActuatorCfg` only when explicitly specified.
-9. Prefer **fresh EntityCfg per call** (zoo `get_*_robot_cfg()` pattern) to avoid mutation.
-10. Entity-level `<option>` does **not** propagate through scene attach — use sim `MujocoCfg`.
-11. Import `mujoco` / mjlab types **inside** `make_mjlab_cfg` so Isaac-only processes do not import them.
-12. **Mimic joints** → `<equality>` in MJCF + actuate drivers only (see [Mimic / coupled joints](#mimic--coupled-joints)). Unactuated joints are allowed (YAM / G1 Inspire pattern).
+6. **`CollisionCfg.disable_other_geoms` defaults True** — unmatched geoms lose collision; name + match collision geoms deliberately. Empty match would wipe all collisions; AA raises in `mjlab/env.py`.
+7. **`CollisionCfg` structural fields required (mjlab ≥1.6)** — pass `contype`, `conaffinity`, `condim`, `priority`; dict patterns need a catch-all for every matched geom.
+8. **Name geoms** used by CollisionCfg / contact sensors (unnamed geoms are hard to match).
+9. Prefer **`BuiltinPdActuatorCfg`** for robots (AA actions often set pos **and** vel targets via `envs/mdp/actions/joint.py`). Use `BuiltinPositionActuatorCfg` only when explicitly specified.
+10. Prefer **fresh EntityCfg per call** (zoo `get_*_robot_cfg()` pattern) to avoid mutation.
+11. Entity-level `<option>` does **not** propagate through scene attach — use sim `MujocoCfg`.
+12. Import `mujoco` / mjlab types **inside** `make_mjlab_cfg` so Isaac-only processes do not import them.
+13. **Mimic joints** → `<equality>` in MJCF + actuate drivers only (see [Mimic / coupled joints](#mimic--coupled-joints)). Unactuated joints are allowed (YAM / G1 Inspire pattern).
 
 ---
 
@@ -279,6 +285,7 @@ Full notes: [reference.md](reference.md#outdated-and-cleanup).
 - Multiple freejoints in one EntityCfg / one free body spanning robot+object
 - Putting ContactSensorCfg on EntityCfg (must be AssetSpec.sensors → SceneCfg.sensors)
 - Relying on `CollisionCfg` default without matching collision geoms (everything else disabled)
+- Omitting `contype` / `conaffinity` / `condim` / `priority`, or using a structural dict without a catch-all (mjlab ≥1.6 raises)
 - `ContactMatch(entity=None, pattern=...)` expecting regex (literal only when entity unset)
 - Using `BuiltinPositionActuatorCfg` for robots whose actions call `set_joint_velocity_target` (vel targets are dropped)
 - Actuating mimic joints on mjlab while also declaring equality (fighting the constraint)
@@ -361,6 +368,7 @@ def make_mjlab_cfg():
         collisions=(CollisionCfg(
             geom_names_expr=(".*_collision",),
             contype=0, conaffinity=1,  # no self-collision among matched geoms
+            condim=3, priority=0,      # required structural fields (mjlab ≥1.6)
             # disable_other_geoms=True by default
         ),),
         joint_symmetry_mapping=JOINT_SYMMETRY_MAPPING,

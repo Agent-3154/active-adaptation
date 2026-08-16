@@ -6,6 +6,9 @@
 active_adaptation/envs/
 ├── env_base.py              # _EnvBase: create / init / step / reset wiring
 ├── adapters.py              # SimAdapter, SceneAdapter, CameraFrustumHandle
+├── sensors/                 # Scene sensor factories (registry group "sensor")
+│   ├── __init__.py          # imports contact (registration side effect)
+│   └── contact.py           # contact_sensor → Isaac/mjlab ContactSensorCfg
 ├── utils/
 │   ├── api.py               # find_joints / find_bodies / find_sensor_bodies (simulation order)
 │   └── ground.py
@@ -13,11 +16,11 @@ active_adaptation/envs/
 │   ├── isaac/
 │   │   ├── adapter.py       # Omni DebugDraw + Viser draw_*/frustum
 │   │   ├── viewer.py        # IsaacViserViewer (meshes, lines, frustums)
-│   │   └── env.py           # viewer.viser, clear_debug callback
+│   │   └── env.py           # AssetSpec.sensors + task sensors: → InteractiveSceneCfg
 │   └── mjlab/
 │       ├── adapter.py       # Viser draw_*/frustum
 │       ├── viewer.py        # MjLabViewer
-│       └── env.py
+│       └── env.py           # AssetSpec.sensors + task sensors: → SceneCfg.sensors
 └── mdp/
     ├── base.py              # MDPComponent, is_method_implemented
     ├── __init__.py          # re-exports V1+V2 bases + subpackages
@@ -29,7 +32,7 @@ active_adaptation/envs/
     │   └── *.py             # e.g. Twist
     ├── observations/
     │   ├── base.py          # Observation, ObservationV2
-    │   ├── common.py, joint.py, underwater.py, …
+    │   ├── common.py, joint.py, contact.py, underwater.py, …
     │   └── __init__.py      # explicit submodule imports
     ├── rewards/
     │   ├── base.py          # Reward (deprecated), RewardV2
@@ -40,9 +43,9 @@ active_adaptation/envs/
     └── …
 ```
 
-Registry: `active_adaptation/registry.py` (`RegistryMixin.make`).
+Registry: `active_adaptation/registry.py` (`RegistryMixin.make` for MDP; `Registry.register("sensor", …)` for scene sensors).
 
-Task YAML: `cfg/task/<Robot>/<Task>.yaml` — blocks `input`, `command`, `observation`, `reward`, `termination`, `randomization`.
+Task YAML: `cfg/task/<Robot>/<Task>.yaml` — blocks `input`, `command`, `observation`, `reward`, `termination`, `randomization`, optional `sensors`, `objects`.
 
 ---
 
@@ -51,12 +54,26 @@ Task YAML: `cfg/task/<Robot>/<Task>.yaml` — blocks `input`, `command`, `observ
 ```
 _EnvBase.__init__
   ├─ _create_mdp_terms()     # ActionV2/CommandV2/… .make from cfg; no scene yet
-  ├─ _setup_simulation()     # setup_scene → sim/scene ready
+  ├─ _setup_simulation()     # setup_scene → entities + AssetSpec.sensors + task sensors: → sim/scene ready
   ├─ _initialize_mdp_terms() # term._initialize(self) for all terms
   └─ _build_tensor_specs()   # action/obs/reward/done specs from initialized terms
 ```
 
 `ObsGroup` / `RewardGroup` call `_initialize` on each member, then probe `compute()` once to build shapes/specs.
+
+### Scene sensor merge (backend `setup_scene`)
+
+```
+robot AssetSpec.config → scene entity "robot"
+robot AssetSpec.sensors → scene.sensors (defaults)
+objects.* → scene entities
+task sensors.* → registry "sensor" factories → scene.sensors (override same name)
+observation edit_spec (legacy cameras, etc.)
+```
+
+Isaac attaches task sensors **after** objects. mjlab builds a name→cfg dict from the robot tuple, overlays task sensors, then `SceneCfg(sensors=tuple(...))`.
+
+See SKILL.md [Scene sensors](SKILL.md#scene-sensors) for `contact_sensor` kwargs and Isaac RigidObject vs articulation prim rules.
 
 ---
 
@@ -199,32 +216,39 @@ Index resolution is shared via `find_sensor_bodies`, but **`sensor.data` field n
 
 | Quantity | Isaac (`ContactSensorData`) | mjlab (`ContactData`) |
 |----------|----------------------------|------------------------|
-| Net / contact force | `net_forces_w` `[N, B, 3]` (world) | `force` `[B, N, 3]` if `"force"` in `fields` (contact frame; world if `reduce="netforce"` or `global_frame=True`) |
+| Net / contact force | `net_forces_w` `[N, B, 3]` (world; **unfiltered** total) | `force` `[B, N, 3]` if `"force"` in `fields` (contact frame; world if `reduce="netforce"` or `global_frame=True`) |
 | Force history | `net_forces_w_history` `[N, T, B, 3]` | `force_history` `[B, N, H, 3]` (needs history) |
-| Filtered body×filter forces | `force_matrix_w` `[N, B, M, 3]` | — (use primary/secondary match instead) |
+| Filtered body×filter forces | `force_matrix_w` `[N, B, M, 3]` when `filter_prim_paths_expr` set | — (use primary/secondary `ContactMatch` instead) |
 | Contact present | infer `norm(net_forces_w) > thresh` | `found` `[B, N]` (0 = none) if `"found"` in `fields` |
 | Penetration / pose | optional `contact_pos_w`, … | `dist`, `pos`, `normal`, `tangent` if requested |
 | Air / contact time | `current_air_time`, `last_air_time`, `current_contact_time`, `last_contact_time` `[N, B]` | same names `[B, P]` when `track_air_time=True` (needs `"found"`) |
 
-**Pattern** (e.g. `object_hoi` `contact_reward`):
+**Filtered object–ground (Isaac):** task `sensors.object_contact` with `secondary_entity: terrain` sets filters to GroundPlane/CollisionPlane + generator mesh. Read `force_matrix_w` (sum over filter dim `M` if one force vector is enough). Do not use `net_forces_w` alone — it still includes robot–object contacts.
+
+**Pattern** (e.g. `observations/contact.py` `contact_forces`, or HOI contact rewards):
 
 ```python
 ids = self.sensor_body_indices  # from find_sensor_bodies
+data = self.sensor.data
 if self.env.backend == "isaac":
-    forces = self.sensor.data.net_forces_w[:, ids]
+    matrix = getattr(data, "force_matrix_w", None)
+    forces = matrix[:, ids].sum(dim=-2) if matrix is not None else data.net_forces_w[:, ids]
 else:
-    forces = self.sensor.data.force[:, ids]  # requires fields=("found", "force", ...)
+    forces = data.force[:, ids]  # requires fields=("found", "force", ...)
 ```
 
-Ensure the mjlab asset’s `ContactSensorCfg.fields` includes every quantity the MDP reads (`"force"`, `"found"`, …). Air-time fields exist on both once `track_air_time=True`, but force tensors do **not** share names.
+Ensure the mjlab sensor’s `ContactSensorCfg.fields` includes every quantity the MDP reads (`"force"`, `"found"`, …). Air-time fields exist on both once `track_air_time=True`, but force tensors do **not** share names.
 
-### Anti-patterns (indices)
+### Anti-patterns (indices / sensors)
 
 - `asset.find_joints` / `asset.find_bodies` for obs/action feature order
 - `contact_sensor.find_bodies(...)` without going through `find_sensor_bodies`
 - Assuming articulation body index == contact-sensor body index for the same name
 - Reading `sensor.data.net_forces_w` on mjlab (AttributeError) or `sensor.data.force` on Isaac
 - Forgetting `"force"` / `"found"` in mjlab `ContactSensorCfg.fields` then dereferencing `None`
+- Isaac RigidObject contact with `prim_path` ending in `/.*` (no ContactReportAPI on children)
+- Expecting Isaac terrain filter at `/World/ground/terrain` without the collision leaf
+- Putting new scene sensors only on `AssetSpec` when they belong to an object or are task-specific — use task `sensors:`
 
 ---
 

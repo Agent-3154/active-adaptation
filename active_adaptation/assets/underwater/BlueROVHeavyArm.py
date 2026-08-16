@@ -268,6 +268,7 @@ def make_mjlab_cfg(motrix: bool = False, fixed_base: bool = False):
                     "base_link_collision.*": 1,
                     "arm_.*_collision.*": 1,
                 },
+                priority=0,
             ),
         ),
         joint_names_simulation=JOINT_NAMES_SIMULATION,
