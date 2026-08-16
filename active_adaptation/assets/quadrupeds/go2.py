@@ -109,6 +109,7 @@ def make_mjlab_cfg(motrix: bool = False):
                 contype=0,
                 conaffinity=1,
                 condim=3,
+                priority=0,
             ),
         ),
         joint_symmetry_mapping=JOINT_SYMMETRY_MAPPING,

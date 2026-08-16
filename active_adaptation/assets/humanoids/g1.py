@@ -334,7 +334,12 @@ def make_mjlab_cfg():
         ),
         collisions=(
             CollisionCfg(
+                # Preserve pre-1.6 defaults on every geom; leave unmatched alone.
                 geom_names_expr=(".*",),
+                contype=1,
+                conaffinity=1,
+                condim=3,
+                priority=0,
                 disable_other_geoms=False,
             ),
         ),

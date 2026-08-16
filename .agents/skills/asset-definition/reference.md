@@ -166,15 +166,18 @@ CollisionCfg(
   geom_names_expr=(".*_collision",),  # required named geoms
   contype=0, conaffinity=1,           # collide with world, not each other
   condim={foot_re: 6, ".*_collision": 1},
-  friction={foot_re: (1, 5e-3, 5e-4)},
+  priority={foot_re: 1, ".*": 0},     # structural dicts need a catch-all
+  friction={foot_re: (1, 5e-3, 5e-4)}, # optional; partial dict OK
   solref=(0.01, 1),
   disable_other_geoms=True,           # DEFAULT — disables non-matches
 )
 ```
 
+**mjlab ≥1.6:** `contype`, `conaffinity`, `condim`, and `priority` are required (no silent `1/1/3/0` defaults). Dict-valued structural fields must cover every matched geom — add a catch-all `".*"` (or a broad collision pattern). Tuning fields (`friction`, `solref`, `solimp`, `margin`, `gap`, `solmix`) may be `None` or partial (inherit XML).
+
 Feet-only (Go1): match feet only + `disable_other_geoms=True`. Full body: match all `*_collision`.
 
-AA’s `mjlab/env.py` patches `CollisionCfg.edit_spec` to error if the matched subset is empty.
+AA’s `mjlab/env.py` wraps stock `CollisionCfg.edit_spec` with an empty-match fail-fast: if `geom_names_expr` matches nothing, raise (stock mjlab would silently disable all geoms when `disable_other_geoms=True`). Partial mismatches still disable unmatched geoms — name patterns carefully (see Go1 numbered `*_collision1`).
 
 ### ContactMatch / ContactSensorCfg
 
@@ -210,7 +213,8 @@ Order: terrain (no prefix) → entities with `{name}/` prefix → sensors. Keyfr
 | Compile / attach fail | >1 freejoint in one entity; bad meshdir; missing mesh file |
 | Entity build fail | `joint_pos=None` without keyframe; actuator regex empty / wrong transmission |
 | Contact edit_spec fail | `entity` not in `entities`; primary matches nothing |
-| No contacts | `disable_other_geoms` wiped geoms; contype/conaffinity miss terrain; visual-only geoms; secondary not literal `"terrain"` |
+| No contacts | `disable_other_geoms` wiped geoms (empty or partial regex); contype/conaffinity miss terrain; visual-only geoms; secondary not literal `"terrain"`. Empty match raises in AA `mjlab/env.py`; incomplete structural dicts raise in mjlab ≥1.6 |
+| CollisionCfg init / edit_spec fail | Missing `contype`/`conaffinity`/`condim`/`priority` (required ≥1.6); structural dict without catch-all `".*"` |
 | Fixed robot at origin | mocap wrap without reset placement |
 | Missed foot strikes | no `history_length` / `track_air_time` |
 

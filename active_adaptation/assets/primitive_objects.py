@@ -210,6 +210,7 @@ def _make_mjlab_cfg(
                 contype=1,
                 conaffinity=1,
                 condim=3,
+                priority=0,
                 solref=(0.02, 1),
                 friction=(1.0, 5e-3, 5e-4),
             ),

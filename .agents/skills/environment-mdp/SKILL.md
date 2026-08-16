@@ -1,6 +1,6 @@
 ---
 name: environment-mdp
-description: Implement and wire MDP terms in active-adaptation (observations, rewards, terminations, actions, commands, randomizations) using the V2 deferred-init API. Use when adding or modifying classes under envs/mdp/, editing cfg/task/ observation/reward/termination/input/command/randomization blocks, debugging env_base step/reset callbacks, cross-backend contact sensor data (Isaac net_forces_w vs mjlab force), debug viz (scene.draw_*, camera frustums), Warp/simple-raycaster raycasting, USD mesh extraction, or Isaac/mjlab Viser viewers.
+description: Implement and wire MDP terms in active-adaptation (observations, rewards, terminations, actions, commands, randomizations) using the V2 deferred-init API. Use when adding or modifying classes under envs/mdp/, editing cfg/task/ observation/reward/termination/input/command/randomization/sensors blocks, registering scene sensors (envs/sensors/, contact_sensor), debugging env_base step/reset callbacks, cross-backend contact sensor data (Isaac net_forces_w / force_matrix_w vs mjlab force), debug viz (scene.draw_*, camera frustums), Warp/simple-raycaster raycasting, USD mesh extraction, or Isaac/mjlab Viser viewers.
 ---
 
 # Environment / MDP terms (active-adaptation)
@@ -11,12 +11,13 @@ Implement MDP terms as **V2** classes: construct from Hydra kwargs **without** a
 - Env wiring + step/reset: `active_adaptation/envs/env_base.py`
 - Shared hooks: `active_adaptation/envs/mdp/base.py` (`MDPComponent`)
 - Term bases: `envs/mdp/{observations,rewards,terminations,actions,commands,randomizations}/base.py`
+- Scene sensors: `active_adaptation/envs/sensors/` (registry group `"sensor"`); backends merge into `scene.sensors`
 - Name / index helpers: `active_adaptation/envs/utils/api.py` (`find_joints`, `find_bodies`, `find_sensor_bodies`)
 - Task configs: `cfg/task/**/*.yaml`
 - Debug viz API: `active_adaptation/envs/adapters.py` (`SceneAdapter`, `CameraFrustumHandle`)
 - Raycasting / USD meshes: installed package `simple-raycaster` (see section below + [reference.md](reference.md))
 
-Read [reference.md](reference.md) for the step-loop diagram, callback registration, file map, viz backends, name-order / contact-index rules, and raycast/mesh details.
+Read [reference.md](reference.md) for the step-loop diagram, callback registration, file map, scene-sensor wiring, viz backends, name-order / contact-index rules, and raycast/mesh details.
 
 **Related skills:** `onpolicy-algorithms`, `offpolicy-algorithms`, `asset-definition`.
 
@@ -27,6 +28,7 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 - Adding a new observation / reward / termination / action / command / randomization
 - Porting a legacy `Reward`/`Observation`/… term to V2
 - Wiring or renaming terms in `cfg/task/`
+- Declaring task-level scene sensors (`sensors:` — object contact, filtered ground contact, …)
 - Debugging missing callbacks, wrong step order, or registry lookup failures
 - Debug vectors / points / plots / camera frustums across Isaac and mjlab
 - Isaac multi-mesh raycasting, USD → trimesh/Warp extraction, or browser Viser robot meshes
@@ -42,9 +44,10 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 5. **Override only what you need** — `_add_mdp_component` registers `startup` / `reset` / `update` / `pre_step` / `post_step` / `debug_draw` only when the subclass **overrides** the base method (`is_method_implemented`). Empty overrides still register.
 6. **Simulation name order** — Isaac and MuJoCo/mjlab typically use different joint/body orders. Resolve names via `asset.cfg.joint_names_simulation` / `asset.cfg.body_names_simulation` (helpers `find_joints` / `find_bodies` in `envs/utils/api.py`), **not** `asset.find_joints` / `asset.find_bodies`. Critical for action and observation terms so trained policies transfer across backends.
 7. **Contact sensor indices** — mjlab’s contact sensor has no `find_bodies`. Use `find_sensor_bodies(asset, contact_sensor, pattern)` so articulation and sensor indices stay aligned in simulation order.
-8. **Contact sensor data fields differ by backend** — do **not** assume a shared `sensor.data.*` API. Isaac uses `ContactSensorData` (`net_forces_w`, …); mjlab uses `ContactData` (`force`, `found`, …) and only populates fields listed in `ContactSensorCfg.fields`. Branch on `env.backend` or use a thin helper when reading forces / air time.
-9. **Never smoke-test with the shared root venv** — it is by design incomplete. Use `uv run --project venv/isaac51` (or `isaac60` / `mjlab`). See [.agents/skills/README.md](../README.md#smoke-tests--running-code).
-10. **Write ``env.episode_origin`` in ``sample_init``** — after choosing origins (e.g. via `scene.sample_spawn_origin_candidates`), set `env.episode_origin[env_ids] = origins`. Use `episode_origin` (not `scene.env_origins`) for shared 3DGS / episode-local frames. See [Episode origins](#episode-origins).
+8. **Contact sensor data fields differ by backend** — do **not** assume a shared `sensor.data.*` API. Isaac uses `ContactSensorData` (`net_forces_w`, `force_matrix_w`, …); mjlab uses `ContactData` (`force`, `found`, …) and only populates fields listed in `ContactSensorCfg.fields`. Branch on `env.backend` or use a thin helper when reading forces / air time.
+9. **Scene owns sensors; assets suggest defaults** — prefer task YAML `sensors:` + `envs/sensors/` factories. `AssetSpec.sensors` still seeds robot defaults (e.g. `contact_forces`); task entries with the same name **replace** them. Do not assume every contact sensor is on the robot.
+10. **Never smoke-test with the shared root venv** — it is by design incomplete. Use `uv run --project venv/isaac51` (or `isaac60` / `mjlab`). See [.agents/skills/README.md](../README.md#smoke-tests--running-code).
+11. **Write ``env.episode_origin`` in ``sample_init``** — after choosing origins (e.g. via `scene.sample_spawn_origin_candidates`), set `env.episode_origin[env_ids] = origins`. Use `episode_origin` (not `scene.env_origins`) for shared 3DGS / episode-local frames. See [Episode origins](#episode-origins).
 
 ---
 
@@ -58,15 +61,93 @@ Task Progress:
 - [ ] _initialize: super()._initialize(env); then asset/sensor/buffer setup
 - [ ] Joint/body indices: `find_joints` / `find_bodies` (simulation order), not `asset.find_*`
 - [ ] Contact indices: `find_sensor_bodies` (not `contact_sensor.find_bodies`)
+- [ ] Bind sensors by name: `env.scene.sensors[sensor_name]`, entities via `env.scene.entities[entity_name]`
 - [ ] Implement the type-specific compute / apply / sync API
 - [ ] Optional lifecycle: update, reset(env_ids, tensordict), pre_step, post_step, startup, debug_draw
 - [ ] If `debug_draw`: use `env.scene.draw_*` / `create_camera_frustum` (not `env.debug_draw`)
 - [ ] Optional: symmetry_transform (obs/action) for symaug
 - [ ] If overriding `sample_init`: write `env.episode_origin[env_ids] = origins` used for spawn
 - [ ] Ensure module is imported (auto-import or explicit in package __init__)
-- [ ] Wire into cfg/task/ YAML
+- [ ] Wire into cfg/task/ YAML (and `sensors:` if a new scene sensor is required)
 - [ ] Smoke via backend venv (`uv run --project venv/isaac51|mjlab`): instantiate env and step once
 ```
+
+---
+
+## Scene sensors
+
+Sensors live on the **scene** (`env.scene.sensors`), not on assets. MDP terms only **read** them in `_initialize`.
+
+### Declaration
+
+| Source | Role |
+|--------|------|
+| `AssetSpec.sensors` (robot factory) | Defaults (Isaac: `dict[str, cfg]`; mjlab: `tuple` of named cfgs) |
+| Task YAML `sensors:` | Scene-level sensors; same name **overrides** the asset default |
+
+```yaml
+sensors:
+  object_contact:
+    _target_: contact_sensor   # registry group "sensor"
+    entity: object             # scene entity key (objects.<name> / robot)
+    secondary_entity: terrain  # optional filter (ground / another entity)
+```
+
+Factories: `active_adaptation/envs/sensors/` (imported from `active_adaptation/__init__.py` and again in backend `setup_scene`). Register with `registry.register("sensor", name, fn)`.
+
+Backends (`isaac/env.py`, `mjlab/env.py`):
+
+1. Attach robot + `AssetSpec.sensors`
+2. Spawn `objects:`
+3. Build task `sensors:` via `registry.get("sensor", _target_)(backend=..., name=sensor_name, **kwargs)` and merge onto the scene (Isaac after objects so prims exist)
+
+Cameras may still be spawned from obs `edit_spec` (`camera_isaac` / `camera_mjlab`); prefer moving new cameras into `sensors:` factories over time.
+
+### `contact_sensor` factory (`envs/sensors/contact.py`)
+
+Shared kwargs → backend `ContactSensorCfg`:
+
+| Kwarg | Default | Meaning |
+|-------|---------|---------|
+| `entity` | `robot` | Scene entity to measure |
+| `pattern` | `None` | Bodies; see Isaac prim rule below |
+| `secondary_entity` | `None` | Contact filter (`terrain` or another entity key) |
+| `secondary_pattern` | `None` | Override filter prim / mjlab match |
+| `track_air_time` | `True` | Air / contact timers |
+| `history_length` | `3` | History buffer |
+| `fields` / `reduce` | mjlab only | `("found","force")` / `"netforce"` |
+
+**Isaac prim paths**
+
+- Articulation (`robot`): ContactReportAPI is on **child** links → default `{ENV}/Robot/.*`
+- RigidObject (`object`, …): ContactReportAPI is on the **root** → default `{ENV}/object` (not `{ENV}/object/.*`)
+- Isaac needs `activate_contact_sensors=True` on the asset spawn
+- `secondary_entity: terrain` → filters `/World/ground/terrain/GroundPlane/CollisionPlane` (plane) and `/World/ground/terrain/mesh` (generator). Parent `/World/ground/terrain` is an Xform, not the collision leaf.
+
+**mjlab**
+
+- `ContactMatch(entity=entity, pattern=...)` for primary
+- `secondary_entity: terrain` → literal body `terrain` (`entity=None`)
+
+### Binding in MDP terms
+
+```python
+def __init__(self, body_names: str, entity_name: str = "robot", sensor_name: str = "contact_forces"):
+    ...
+
+def _initialize(self, env):
+    super()._initialize(env)
+    self.asset = env.scene.entities[self.entity_name]
+    self.contact_sensor = env.scene.sensors[self.sensor_name]
+    self.body_ids, self.body_names = find_bodies(self.asset, self.body_names_pattern)
+    self.contact_ids = find_sensor_bodies(
+        self.asset, self.contact_sensor, self.body_names_pattern
+    )[0]
+```
+
+Do **not** hardcode `"robot"` / `"contact_forces"` when the task may use object sensors.
+
+**Isaac filtered contacts:** with a non-empty `filter_prim_paths_expr`, pair-specific forces are in `force_matrix_w` `(N, B, M, 3)`; `net_forces_w` remains the unfiltered total. Prefer `force_matrix_w` (sum over `M` if needed) for object–ground terms. See `observations/contact.py` → `contact_forces`.
 
 ---
 
@@ -446,3 +527,7 @@ Isaac/mjlab **Viser** robot meshes (viewer internals, not MDP terms): same body-
 - Using `asset.find_joints` / `asset.find_bodies` for MDP feature layout (backend-native order; breaks Isaac↔mjlab transfer) — use `find_joints` / `find_bodies` / `*_names_simulation`
 - Calling `contact_sensor.find_bodies` directly (missing on mjlab; may disagree with articulation order even on Isaac) — use `find_sensor_bodies`
 - Assuming Isaac/mjlab contact `sensor.data` share field names (`net_forces_w` vs `force`) — see [reference.md](reference.md#contact-sensor-data-fields-isaac--mjlab)
+- Hardcoding `scene.sensors["contact_forces"]` / `articulations["robot"]` when the task may use object or filtered sensors — take `sensor_name` / `entity_name`
+- Isaac contact on a RigidObject with `prim_path={ENV}/object/.*` (children lack ContactReportAPI) — use the entity root; enable `activate_contact_sensors` on spawn
+- Filtering Isaac terrain with `/World/ground/terrain` alone (Xform) — use GroundPlane/CollisionPlane or mesh leaves
+- Reading Isaac `net_forces_w` when you need filtered object–ground forces — use `force_matrix_w`

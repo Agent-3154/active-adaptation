@@ -178,8 +178,8 @@ def make_mjlab_cfg(motrix: bool = False):
                 solref=(0.01, 1),
                 # Configure feet colliders. Other colliders are frictionless (condim=1).
                 condim={".*_foot_collision$": 6, ".*_collision.*": 1},
-                priority={".*_foot_collision$": 1},
-                friction={".*_foot_collision$": (1, 5e-3, 5e-4)}
+                priority={".*_foot_collision$": 1, ".*": 0},
+                friction={".*_foot_collision$": (1, 5e-3, 5e-4)},
             ),
         ),
         joint_symmetry_mapping=JOINT_SYMMETRY_MAPPING,
