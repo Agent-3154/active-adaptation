@@ -135,12 +135,18 @@ def init(cfg: DictConfig, auto_rank: bool):
     elif _BACKEND == "motrix":
         pass # motrixsim env lives on CPU while policy training can be on GPU
 
-    if auto_rank and (str(cfg.device) == "cuda"):
+    if auto_rank and str(cfg.device).startswith("cuda"):
+        # Remap bare "cuda" / "cuda:0" etc. onto the local visible device index.
         cfg.device = f"cuda:{get_local_rank()}"
 
     if is_distributed():
         import torch
         import torch.distributed as dist
+
+        # NCCL uses torch.cuda.current_device(). Without set_device, every rank
+        # stays on visible cuda:0 → "Duplicate GPU detected".
+        if auto_rank and torch.cuda.is_available():
+            torch.cuda.set_device(get_local_rank())
 
         if dist.is_available() and not dist.is_initialized():
             dist.init_process_group(

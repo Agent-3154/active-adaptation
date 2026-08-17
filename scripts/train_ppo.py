@@ -380,7 +380,11 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         fake = env.fake_tensordict()
         if not transitions:
             del fake["next"]
-        storage_nbytes = tensordict_nbytes(fake.expand(env.num_envs, cfg.algo.train_every))
+        storage_nbytes = tensordict_nbytes(
+            fake
+            .unsqueeze(1)
+            .expand(env.num_envs, cfg.algo.train_every)
+        )
         wandb_run.summary["buffer_MiB"] = storage_nbytes / (1024**2)
 
     env_frames = 0

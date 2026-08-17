@@ -136,7 +136,6 @@ class EndEffectorPose(ActionV2):
     def process_action(self, action: torch.Tensor | None) -> None:
         if action is None:
             return
-        action = torch.tensor([0.2, 0.0, -0.15], device=action.device)
         self.raw_actions[:] = action
         # Absolute body-frame position target.
         self.controller.set_command(action)
