@@ -353,4 +353,5 @@ class position_error_exceeding(TerminationV2[TrajTracking]):
 
     @override
     def compute(self, termination: torch.Tensor):
-        return termination | (self.command_manager._cum_error > self.threshold)
+        this_termination = (self.env.episode_length_buf.unsqueeze(1) > 1) & (self.command_manager._cum_error > self.threshold)
+        return termination | this_termination
