@@ -124,3 +124,32 @@ class action_saturation(RewardV2):
         action = self.action_manager.action_buf[:, 0]
         violation = (self.low - action).clamp_min(0.0) + (action - self.high).clamp_min(0.0)
         return -violation.square().sum(dim=-1, keepdim=True)
+
+
+class body_angvel_penalty(RewardV2):
+    """Penalize the angular velocity of the body."""
+
+    def __init__(
+        self,
+        weight: float,
+        body_names: str | List[str] = ".*",
+        mask: List[float] = [1.0, 1.0, 1.0],
+        enabled: bool = True,
+        track_var: bool = False,
+    ):
+        super().__init__(weight, enabled=enabled, track_var=track_var)
+        self.body_names = body_names
+        self.mask = mask
+
+    @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
+        self.asset = self.env.scene.entities["robot"]
+        self.body_ids = self.asset.find_bodies(self.body_names)[0]
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
+        self.mask = torch.tensor(self.mask, device=self.device)
+
+    def _compute(self) -> torch.Tensor:
+        body_angvel = self.asset.data.body_ang_vel_w[:, self.body_ids]
+        rew = -(body_angvel * self.mask).square().sum(dim=-1, keepdim=True)
+        return rew.sum(1).reshape(self.num_envs, 1)
