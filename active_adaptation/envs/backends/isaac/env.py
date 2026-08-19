@@ -8,15 +8,18 @@ from active_adaptation.envs.backends.isaac.adapter import (
 )
 from active_adaptation.envs.env_base import _EnvBase
 from active_adaptation.assets.asset_cfg import AssetSpec
+from active_adaptation.envs.utils.quat_layout import isaaclab_uses_xyzw
 from active_adaptation.registry import Registry
 from tqdm import tqdm
 import os
 
 
 def _sim_usd_stage(sim):
-    """Lab 3 exposes ``sim.stage``; Lab 2 uses ``get_initial_stage()``."""
-    stage = getattr(sim, "stage", None)
-    if stage is not None:
+    """Lab 3: ``sim.stage``. Lab 2: ``sim.get_initial_stage()``."""
+    if isaaclab_uses_xyzw():
+        stage = sim.stage
+        if stage is None:
+            raise RuntimeError("Isaac Lab 3 SimulationContext.stage is None")
         return stage
     return sim.get_initial_stage()
 
@@ -29,33 +32,19 @@ def _writable_isaaclab_log_dir() -> str:
 
 
 def _make_simulation_cfg(sim_utils, *, dt, device, physx_kwargs):
-    """Build ``SimulationCfg`` for Lab 2 (``physx=``) or Lab 3 (``physics=``)."""
-    render = sim_utils.RenderCfg(rendering_mode="balanced")
-    base = {"dt": dt, "device": device, "render": render}
-    fields = getattr(sim_utils.SimulationCfg, "__dataclass_fields__", {})
-    if "log_dir" in fields:
-        base["log_dir"] = _writable_isaaclab_log_dir()
+    """Build ``SimulationCfg``. Lab 2: ``physx=PhysxCfg``. Lab 3: ``physics=PhysxCfg``."""
     physx_kwargs = dict(physx_kwargs or {})
-    PhysxCfg = None
-    try:
-        PhysxCfg = sim_utils.PhysxCfg
-    except (ImportError, AttributeError):
-        PhysxCfg = None
-    if PhysxCfg is not None:
-        try:
-            return sim_utils.SimulationCfg(**base, physx=PhysxCfg(**physx_kwargs))
-        except TypeError:
-            pass
-    extra = {}
-    if physx_kwargs:
-        if PhysxCfg is None:
-            try:
-                from isaaclab_physx.physics.physx_manager_cfg import PhysxCfg
-            except ImportError:
-                PhysxCfg = None
-        if PhysxCfg is not None:
-            extra["physics"] = PhysxCfg(**physx_kwargs)
-    return sim_utils.SimulationCfg(**base, **extra)
+    base = {
+        "dt": dt,
+        "device": device,
+        "render": sim_utils.RenderCfg(rendering_mode="balanced"),
+        "log_dir": _writable_isaaclab_log_dir(),
+    }
+    if isaaclab_uses_xyzw():
+        from isaaclab_physx.physics.physx_manager_cfg import PhysxCfg
+
+        return sim_utils.SimulationCfg(**base, physics=PhysxCfg(**physx_kwargs))
+    return sim_utils.SimulationCfg(**base, physx=sim_utils.PhysxCfg(**physx_kwargs))
 
 
 class IsaacBackendEnv(_EnvBase):
@@ -105,14 +94,7 @@ class IsaacBackendEnv(_EnvBase):
         from isaaclab.assets import AssetBaseCfg
         from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-        try:
-            from isaaclab.sim.utils.stage import use_stage
-        except ImportError:
-            from isaaclab.sim import use_stage
-        try:
-            from isaaclab.sim.utils.stage import attach_stage_to_usd_context
-        except ImportError:
-            attach_stage_to_usd_context = getattr(sim_utils, "attach_stage_to_usd_context", None)
+        from isaaclab.sim.utils.stage import use_stage
 
         registry = Registry.instance()
         scene_cfg = InteractiveSceneCfg(
@@ -172,9 +154,11 @@ class IsaacBackendEnv(_EnvBase):
         stage = _sim_usd_stage(sim)
         with use_stage(stage):
             self.scene = InteractiveScene(scene_cfg)
-            if hasattr(self.scene, "initialize_renderers"):
+            if isaaclab_uses_xyzw():
                 self.scene.initialize_renderers()
-            if callable(attach_stage_to_usd_context):
+            else:
+                from isaaclab.sim.utils.stage import attach_stage_to_usd_context
+
                 attach_stage_to_usd_context()
         with use_stage(_sim_usd_stage(sim)):
             sim.reset()
@@ -203,14 +187,14 @@ class IsaacBackendEnv(_EnvBase):
         for _ in tqdm(range(10), desc="Warming up the simulation"):
             sim.step(render=False)
 
-        try:
+        if isaaclab_uses_xyzw():
+            sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat)
+        else:
             sim.set_camera_view(
                 eye=self.cfg.viewer.eye,
                 target=self.cfg.viewer.lookat,
                 camera_prim_path=camera_path,
             )
-        except TypeError:
-            sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat)
         try:
             import omni.replicator.core as rep
 

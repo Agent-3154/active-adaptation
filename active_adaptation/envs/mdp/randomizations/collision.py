@@ -12,31 +12,18 @@ from active_adaptation.envs.mdp.randomizations.common import (
     NestedRangeType,
     sample_uniform,
 )
+from active_adaptation.envs.utils.quat_layout import isaaclab_uses_xyzw
 
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-def _physx_view_uses_warp_frontend(view) -> bool:
-    """Lab 3 ``omni.physics.tensors`` Warp frontend needs ``wp`` arrays, not torch."""
-    frontend = getattr(view, "_frontend", None)
-    if frontend is not None:
-        return "frontend_warp" in type(frontend).__module__
-    from active_adaptation.envs.utils.quat_layout import isaaclab_uses_xyzw
-
-    return isaaclab_uses_xyzw()
-
-
 def _set_physx_material_properties(view, materials_cpu: torch.Tensor, env_ids: torch.Tensor) -> None:
-    """Write rigid materials. Lab 3 Warp frontend: unflattened ``wp`` arrays.
+    """Write rigid materials. Lab 3: unflattened ``wp`` arrays. Lab 2: flattened torch."""
+    if isaaclab_uses_xyzw():
+        import warp as wp
 
-    Lab 2's CPU view wants ``materials.flatten()`` + torch env ids. Do not send
-    Warp arrays to Lab 2: it accepts them and then fails inside Warp.
-    """
-    import warp as wp
-
-    if _physx_view_uses_warp_frontend(view):
         view.set_material_properties(
             wp.from_torch(materials_cpu, dtype=wp.float32),
             wp.from_torch(env_ids, dtype=wp.int32),
@@ -71,7 +58,10 @@ class randomize_materials_isaac(RandomizationV2):
         self.body_ids, self.body_names = self.asset.find_bodies(self.body_names)
 
         num_shapes_per_body = [0,]
-        for link_path in self.asset.root_physx_view.link_paths[0]:
+        from active_adaptation.envs.backends.isaac.canonical_asset import isaac_root_view
+
+        view = isaac_root_view(self.asset)
+        for link_path in view.link_paths[0]:
             link_physx_view = self.asset._physics_sim_view.create_rigid_body_view(link_path)  # type: ignore
             num_shapes_per_body.append(link_physx_view.max_shapes)
         cumsum = np.cumsum(num_shapes_per_body)
@@ -94,9 +84,12 @@ class randomize_materials_isaac(RandomizationV2):
 
     @override
     def startup(self):
-        from active_adaptation.envs.backends.isaac.canonical_asset import as_torch
+        from active_adaptation.envs.backends.isaac.canonical_asset import (
+            as_torch,
+            isaac_root_view,
+        )
 
-        view = getattr(self.asset, "root_view", None) or self.asset.root_physx_view
+        view = isaac_root_view(self.asset)
         materials = as_torch(view.get_material_properties()).clone()
         if self.homogeneous:
             shape = (self.num_envs, 1)
@@ -118,9 +111,7 @@ class randomize_materials_isaac(RandomizationV2):
             ]
 
         # Lab 3 PhysX Warp frontend wants unflattened wp arrays + CPU int32
-        # env ids. Lab 2 takes a flattened torch buffer. Duck-type the view
-        # frontend: Lab 3 restored ``convert_quat``, so quat-layout detection
-        # is not a reliable Lab 2/3 split for this write.
+        # env ids. Lab 2 takes a flattened torch buffer.
         env_ids = torch.arange(self.asset.num_instances, device="cpu", dtype=torch.int32)
         materials_cpu = materials.cpu().contiguous()
         _set_physx_material_properties(view, materials_cpu, env_ids)

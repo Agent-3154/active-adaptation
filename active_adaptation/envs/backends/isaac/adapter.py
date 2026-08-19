@@ -6,12 +6,14 @@ from typing_extensions import override
 
 from active_adaptation.envs.adapters import SimAdapter, SceneAdapter, CameraFrustumHandle
 from active_adaptation.envs.backends.isaac.viewer import IsaacViserViewer
+from active_adaptation.envs.utils.quat_layout import isaaclab_uses_xyzw
 
 
 def _sim_has_gui(sim) -> bool:
     """Lab 3 ``has_gui`` is a property; Lab 2 is a method."""
-    gui = getattr(sim, "has_gui", False)
-    return bool(gui() if callable(gui) else gui)
+    if isaaclab_uses_xyzw():
+        return bool(sim.has_gui)
+    return bool(sim.has_gui())
 
 
 if TYPE_CHECKING:

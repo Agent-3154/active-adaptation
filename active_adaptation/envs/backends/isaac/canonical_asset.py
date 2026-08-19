@@ -28,23 +28,24 @@ from active_adaptation.envs.utils.quat_layout import (
 
 def as_torch(value: Any) -> Any:
     """Return a torch tensor from Lab 3 ``ProxyArray`` / warp arrays, else ``value``."""
-    if value is None:
-        return None
-    torch_attr = getattr(value, "torch", None)
-    if torch_attr is not None and not isinstance(value, torch.Tensor):
-        try:
-            return torch_attr if isinstance(torch_attr, torch.Tensor) else torch_attr()
-        except TypeError:
-            if isinstance(torch_attr, torch.Tensor):
-                return torch_attr
-    wp_to_torch = getattr(value, "__class__", type(value)).__module__
-    if wp_to_torch.startswith("warp") or type(value).__name__ in ("array", "ProxyArray"):
-        try:
-            import warp as wp
-            return wp.to_torch(value)
-        except Exception:
-            pass
+    if value is None or isinstance(value, torch.Tensor):
+        return value
+    torch_view = getattr(value, "torch", None)
+    if isinstance(torch_view, torch.Tensor):
+        return torch_view
+    if type(value).__module__.startswith("warp") or type(value).__name__ in ("array", "ProxyArray"):
+        import warp as wp
+
+        return wp.to_torch(value)
     return value
+
+
+def isaac_root_view(asset: Any) -> Any:
+    """PhysX tensor view: Lab 3 ``root_view``, Lab 2 ``root_physx_view``."""
+    native = getattr(asset, "_asset", asset)
+    if isaaclab_uses_xyzw():
+        return native.root_view
+    return native.root_physx_view
 
 
 def _as_int32_index(value: Any) -> Any:
@@ -52,14 +53,6 @@ def _as_int32_index(value: Any) -> Any:
     if isinstance(value, torch.Tensor) and value.dtype == torch.int64:
         return value.to(dtype=torch.int32)
     return value
-
-
-def is_lab3_data(data: Any) -> bool:
-    """Duck-type Isaac Lab 3: data properties expose ``.torch`` (ProxyArray)."""
-    sample = getattr(data, "root_link_pos_w", None)
-    if sample is None:
-        sample = getattr(data, "root_pos_w", None)
-    return sample is not None and not isinstance(sample, torch.Tensor) and hasattr(sample, "torch")
 
 
 class CanonicalData:
@@ -123,27 +116,16 @@ class CanonicalIsaacAsset:
     ) -> None:
         asset = self._asset
         index_fn = getattr(asset, f"{stem}_index", None)
-        legacy_fn = getattr(asset, stem, None)
+        if index_fn is None:
+            raise AttributeError(
+                f"Isaac Lab 3 {type(asset).__name__} is missing {stem}_index"
+            )
         env_ids = self._coerce_env_ids(env_ids)
         kwargs = {
             key: _as_int32_index(val) if key.endswith("_ids") else val
             for key, val in kwargs.items()
         }
-        if index_fn is not None:
-            try:
-                index_fn(**{payload_kw: payload, "env_ids": env_ids}, **kwargs)
-                return
-            except TypeError:
-                index_fn(payload, env_ids=env_ids, **kwargs)
-                return
-        if legacy_fn is None:
-            raise AttributeError(
-                f"{type(asset).__name__} has neither {stem} nor {stem}_index"
-            )
-        try:
-            legacy_fn(payload, env_ids=env_ids, **kwargs)
-        except TypeError:
-            legacy_fn(**{payload_kw: payload, "env_ids": env_ids}, **kwargs)
+        index_fn(**{payload_kw: payload, "env_ids": env_ids}, **kwargs)
 
     def write_root_pose_to_sim(
         self, root_pose: torch.Tensor, env_ids: Optional[torch.Tensor] = None
@@ -180,24 +162,12 @@ class CanonicalIsaacAsset:
         self, root_state: torch.Tensor, env_ids: Optional[torch.Tensor] = None
     ) -> None:
         native = state_wxyz_to_xyzw(root_state) if self._xyzw else root_state
-        asset = self._asset
-        # Lab 3 still has a deprecated write_root_state_to_sim that forwards to
-        # the _index writers. Prefer _index so we do not double-roll via the
-        # AA write_root_pose_to_sim helper.
-        if hasattr(asset, "write_root_pose_to_sim_index"):
-            pose = native[..., :7]
-            vel = native[..., 7:13]
-            self._call_write_index(
-                "write_root_pose_to_sim", "root_pose", pose, env_ids
-            )
-            self._call_write_index(
-                "write_root_velocity_to_sim", "root_velocity", vel, env_ids
-            )
-            return
-        try:
-            asset.write_root_state_to_sim(native, env_ids=env_ids)
-        except TypeError:
-            asset.write_root_state_to_sim(native, env_ids)
+        pose = native[..., :7]
+        vel = native[..., 7:13]
+        self._call_write_index("write_root_pose_to_sim", "root_pose", pose, env_ids)
+        self._call_write_index(
+            "write_root_velocity_to_sim", "root_velocity", vel, env_ids
+        )
 
     def write_joint_state_to_sim(
         self,
@@ -207,29 +177,20 @@ class CanonicalIsaacAsset:
         env_ids: Optional[torch.Tensor] = None,
     ) -> None:
         extra = {} if joint_ids is None else {"joint_ids": joint_ids}
-        asset = self._asset
-        if hasattr(asset, "write_joint_position_to_sim_index"):
-            self._call_write_index(
-                "write_joint_position_to_sim",
-                "position",
-                position,
-                env_ids,
-                **extra,
-            )
-            self._call_write_index(
-                "write_joint_velocity_to_sim",
-                "velocity",
-                velocity,
-                env_ids,
-                **extra,
-            )
-            return
-        try:
-            asset.write_joint_state_to_sim(position, velocity, joint_ids, env_ids)
-        except TypeError:
-            asset.write_joint_state_to_sim(
-                position, velocity, joint_ids=joint_ids, env_ids=env_ids
-            )
+        self._call_write_index(
+            "write_joint_position_to_sim",
+            "position",
+            position,
+            env_ids,
+            **extra,
+        )
+        self._call_write_index(
+            "write_joint_velocity_to_sim",
+            "velocity",
+            velocity,
+            env_ids,
+            **extra,
+        )
 
     def write_joint_position_to_sim(
         self,
@@ -342,38 +303,23 @@ def maybe_wrap_asset(asset: Any) -> Any:
     """Lab 3 → ``CanonicalIsaacAsset``; Lab 2 returns ``asset`` unchanged."""
     if isinstance(asset, CanonicalIsaacAsset):
         return asset
-    data = getattr(asset, "data", None)
-    if data is None:
+    if not isaaclab_uses_xyzw():
         return asset
-    lab3 = (
-        is_lab3_data(data)
-        or isaaclab_uses_xyzw()
-        or (
-            not hasattr(asset, "write_root_state_to_sim")
-            and hasattr(asset, "write_root_pose_to_sim_index")
+    if getattr(asset, "data", None) is None:
+        raise RuntimeError(
+            f"Isaac Lab 3 asset {type(asset).__name__} has no .data to wrap"
         )
-    )
-    if not lab3:
-        return asset
     return CanonicalIsaacAsset(asset, xyzw=True)
 
 
 def maybe_wrap_sensor(sensor: Any) -> Any:
-    """Wrap sensors whose ``.data`` is Lab 3 ProxyArray."""
+    """Lab 3 → ``CanonicalIsaacSensor``; Lab 2 returns ``sensor`` unchanged."""
     if isinstance(sensor, CanonicalIsaacSensor):
         return sensor
-    data = getattr(sensor, "data", None)
-    if data is None:
+    if not isaaclab_uses_xyzw():
         return sensor
-    xyzw = is_lab3_data(data) or isaaclab_uses_xyzw()
-    if not xyzw:
-        # ContactSensorData may not have root_link_pos_w; still ProxyArray on Lab 3.
-        sample = None
-        for attr in ("net_forces_w", "force_matrix_w", "quat_w", "pos_w"):
-            sample = getattr(data, attr, None)
-            if sample is not None:
-                break
-        xyzw = sample is not None and not isinstance(sample, torch.Tensor) and hasattr(sample, "torch")
-        if not xyzw:
-            return sensor
-    return CanonicalIsaacSensor(sensor, xyzw=xyzw)
+    if getattr(sensor, "data", None) is None:
+        raise RuntimeError(
+            f"Isaac Lab 3 sensor {type(sensor).__name__} has no .data to wrap"
+        )
+    return CanonicalIsaacSensor(sensor, xyzw=True)

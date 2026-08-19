@@ -684,15 +684,16 @@ class perturb_body_mass(RandomizationV2):
             )
             masses[:, body_ids] *= scale
             inertias[:, body_ids] *= scale.unsqueeze(-1)
+            from active_adaptation.envs.utils.quat_layout import isaaclab_uses_xyzw
+
             # Lab 3: default_mass is GPU ProxyArray; write via set_*_index.
             # Lab 2: PhysX tensor view still wants CPU buffers.
-            set_masses_index = getattr(self.asset, "set_masses_index", None)
-            if callable(set_masses_index):
+            if isaaclab_uses_xyzw():
                 env_ids = torch.arange(
                     self.asset.num_instances, device=masses.device, dtype=torch.int32
                 )
                 body_ids_i32 = body_ids.to(dtype=torch.int32)
-                set_masses_index(
+                self.asset.set_masses_index(
                     masses=masses[:, body_ids],
                     body_ids=body_ids_i32,
                     env_ids=env_ids,
