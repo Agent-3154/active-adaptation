@@ -71,6 +71,23 @@ def _apply_default_isaaclab_kit_args(app_config: dict) -> dict:
     return app_config
 
 
+def _print_kit_log_file() -> None:
+    """Print Kit's carb log path. Sim 6 kit files set log.level=Warn, so Kit itself does not."""
+    import carb.settings
+
+    path = carb.settings.get_settings().get("/log/file")
+    if not path:
+        from pathlib import Path
+
+        import isaacsim
+
+        logs = Path(isaacsim.__file__).resolve().parent / "kit" / "logs" / "Kit"
+        files = list(logs.rglob("kit_*.log"))
+        path = str(max(files, key=lambda p: p.stat().st_mtime)) if files else None
+    if path:
+        print(f"[Info] [carb] Logging to file: {path}")
+
+
 # Save original print function
 _original_print = builtins.print
 
@@ -164,6 +181,10 @@ def init(cfg: DictConfig, auto_rank: bool):
         app_config = OmegaConf.to_container(cfg.app, resolve=True)
         app_config = _apply_default_isaaclab_kit_args(app_config)
         AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
+        from active_adaptation.envs.utils.quat_layout import isaaclab_uses_xyzw
+
+        if isaaclab_uses_xyzw():
+            _print_kit_log_file()
         # IsaacSim#740: after SimulationApp. Re-applied after SimulationContext
         # in backends/isaac/env.py once omni.physx.fabric is loaded.
         from active_adaptation.envs.utils.isaacsim_740 import (
