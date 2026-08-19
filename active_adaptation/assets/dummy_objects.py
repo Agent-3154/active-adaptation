@@ -9,6 +9,7 @@ registry = Registry.instance()
 def _make_rigid(name: str):
     from isaaclab.assets import RigidObjectCfg
     import isaaclab.sim as sim_utils
+    from active_adaptation.envs.utils.quat_layout import isaac_cfg_quat
     path = ROBOT_MODEL_DIR / "dummy_objects" / f"{name}.usda"
     
     return RigidObjectCfg(
@@ -30,7 +31,7 @@ def _make_rigid(name: str):
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
+            rot=isaac_cfg_quat((1.0, 0.0, 0.0, 0.0)),
         ),
     )
 
@@ -38,6 +39,7 @@ def _make_rigid(name: str):
 def _make_static_platform(size: tuple[float, float, float] = (0.2, 0.2, 0.2)):
     from isaaclab.assets import RigidObjectCfg
     import isaaclab.sim as sim_utils
+    from active_adaptation.envs.utils.quat_layout import isaac_cfg_quat
 
     return RigidObjectCfg(
         spawn=sim_utils.CuboidCfg(
@@ -57,7 +59,7 @@ def _make_static_platform(size: tuple[float, float, float] = (0.2, 0.2, 0.2)):
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=(0.0, 0.0, size[2] * 0.5),
-            rot=(1.0, 0.0, 0.0, 0.0),
+            rot=isaac_cfg_quat((1.0, 0.0, 0.0, 0.0)),
         ),
     )
 

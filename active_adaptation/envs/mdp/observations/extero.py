@@ -211,10 +211,17 @@ class height_scan(ObservationV2):
             self.ground_mesh_quat_w = torch.tensor([1.0, 0.0, 0.0, 0.0]).expand(self.num_envs, 1, 4)
             self.ray_dirs_w = torch.tensor([0.0, 0.0, -1.0]).expand(self.num_envs, self.n_rays, 3)
 
-        self.raycaster = MultiMeshRaycaster([self.env.ground_mesh], device=self.device)
+        # Ground-only scans use Isaac Lab / AA Warp raycast_mesh. Multi-mesh
+        # targets still need simple_raycaster, which is not installed on isaac60
+        # (warp-lang 1.16 vs simple-raycaster's warp-lang<1.13 pin).
+        self.raycaster = None
         self.target_assets = []
+        self._ground_mesh = self.env.ground_mesh
 
         if self.targets is not None:
+            from simple_raycaster import MultiMeshRaycaster
+
+            self.raycaster = MultiMeshRaycaster([self.env.ground_mesh], device=self.device)
             if self.env.backend == "isaac":
                 from isaacsim.core.utils.stage import get_current_stage
 
@@ -245,7 +252,7 @@ class height_scan(ObservationV2):
             + quat_rotate(root_quat, self.scan_pos_b.unsqueeze(0))
         )
 
-        if len(self.target_assets) > 0:
+        if self.raycaster is not None:
             mesh_pos_w = torch.cat(
                 [self.ground_mesh_pos_w]
                 + [target_asset.data.root_link_pos_w.unsqueeze(1) for target_asset in self.target_assets],
@@ -256,17 +263,33 @@ class height_scan(ObservationV2):
                 + [target_asset.data.root_link_quat_w.unsqueeze(1) for target_asset in self.target_assets],
                 dim=1,
             )
+            hit_pos_w, _, _ = self.raycaster.raycast_fused(
+                mesh_pos_w=mesh_pos_w,
+                mesh_quat_w=mesh_quat_w,
+                ray_starts_w=self.scan_pos_w.reshape(self.num_envs, self.n_rays, 3),
+                ray_dirs_w=self.ray_dirs_w,
+            )
+            self.hit_pos_w = hit_pos_w.reshape(self.num_envs, *self.shape, 3)
+        elif self.env.backend == "isaac":
+            ray_hits = raycast_mesh(
+                ray_starts=self.scan_pos_w.reshape(-1, 3),
+                ray_directions=self.ray_dirs_w.reshape(-1, 3),
+                max_dist=20.0,
+                mesh=self._ground_mesh,
+                return_distance=False,
+            )[0]
+            self.hit_pos_w = ray_hits.reshape(self.num_envs, *self.shape, 3)
         else:
-            mesh_pos_w = self.ground_mesh_pos_w
-            mesh_quat_w = self.ground_mesh_quat_w
+            from active_adaptation.utils.warp import raycast_mesh as aa_raycast_mesh
 
-        hit_pos_w, _, _ = self.raycaster.raycast_fused(
-            mesh_pos_w=mesh_pos_w,
-            mesh_quat_w=mesh_quat_w,
-            ray_starts_w=self.scan_pos_w.reshape(self.num_envs, self.n_rays, 3),
-            ray_dirs_w=self.ray_dirs_w,
-        )
-        self.hit_pos_w = hit_pos_w.reshape(self.num_envs, *self.shape, 3)
+            ray_hits, _ = aa_raycast_mesh(
+                ray_starts=self.scan_pos_w.reshape(-1, 3),
+                ray_directions=self.ray_dirs_w.reshape(-1, 3),
+                mesh=self._ground_mesh,
+                min_dist=0.0,
+                max_dist=20.0,
+            )
+            self.hit_pos_w = ray_hits.reshape(self.num_envs, *self.shape, 3)
 
         height_map = root_pos_w[:, :, :, 2] - self.hit_pos_w[:, :, :, 2]
         height_map = (height_map + self.noise_scale * torch.randn_like(height_map)).clamp(

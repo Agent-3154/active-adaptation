@@ -3,12 +3,60 @@ from active_adaptation import ROBOT_MODEL_DIR
 from active_adaptation.envs.backends.isaac.adapter import (
     IsaacSceneAdapter,
     IsaacSimAdapter,
-    IsaacDebugDraw
+    IsaacDebugDraw,
+    _sim_has_gui,
 )
 from active_adaptation.envs.env_base import _EnvBase
 from active_adaptation.assets.asset_cfg import AssetSpec
 from active_adaptation.registry import Registry
 from tqdm import tqdm
+import os
+
+
+def _sim_usd_stage(sim):
+    """Lab 3 exposes ``sim.stage``; Lab 2 uses ``get_initial_stage()``."""
+    stage = getattr(sim, "stage", None)
+    if stage is not None:
+        return stage
+    return sim.get_initial_stage()
+
+
+def _writable_isaaclab_log_dir() -> str:
+    """Avoid /tmp/isaaclab/logs when another user already owns it."""
+    path = os.path.join(os.path.expanduser("~"), ".cache", "isaaclab", "logs")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _make_simulation_cfg(sim_utils, *, dt, device, physx_kwargs):
+    """Build ``SimulationCfg`` for Lab 2 (``physx=``) or Lab 3 (``physics=``)."""
+    render = sim_utils.RenderCfg(rendering_mode="balanced")
+    base = {"dt": dt, "device": device, "render": render}
+    fields = getattr(sim_utils.SimulationCfg, "__dataclass_fields__", {})
+    if "log_dir" in fields:
+        base["log_dir"] = _writable_isaaclab_log_dir()
+    physx_kwargs = dict(physx_kwargs or {})
+    PhysxCfg = None
+    try:
+        PhysxCfg = sim_utils.PhysxCfg
+    except (ImportError, AttributeError):
+        PhysxCfg = None
+    if PhysxCfg is not None:
+        try:
+            return sim_utils.SimulationCfg(**base, physx=PhysxCfg(**physx_kwargs))
+        except TypeError:
+            pass
+    extra = {}
+    if physx_kwargs:
+        if PhysxCfg is None:
+            try:
+                from isaaclab_physx.physics.physx_manager_cfg import PhysxCfg
+            except ImportError:
+                PhysxCfg = None
+        if PhysxCfg is not None:
+            extra["physics"] = PhysxCfg(**physx_kwargs)
+    return sim_utils.SimulationCfg(**base, **extra)
+
 
 class IsaacBackendEnv(_EnvBase):
     """Isaac backend env: scene/sim construction and viewer glue."""
@@ -36,7 +84,7 @@ class IsaacBackendEnv(_EnvBase):
         super().__init__(cfg, device, headless)
         self.robot = self.scene.articulations["robot"]
 
-        if self.sim._sim.has_gui():
+        if _sim_has_gui(self.sim._sim):
             from isaaclab.envs import ViewerCfg
             from isaaclab.envs.ui import BaseEnvWindow, ViewportCameraController
 
@@ -52,14 +100,19 @@ class IsaacBackendEnv(_EnvBase):
     @override
     def setup_scene(self):
         import isaaclab.sim as sim_utils
-        from isaaclab.sim import (
-            SimulationContext,
-            attach_stage_to_usd_context,
-            use_stage,
-        )
+        from isaaclab.sim import SimulationContext
         from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
         from isaaclab.assets import AssetBaseCfg
         from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+
+        try:
+            from isaaclab.sim.utils.stage import use_stage
+        except ImportError:
+            from isaaclab.sim import use_stage
+        try:
+            from isaaclab.sim.utils.stage import attach_stage_to_usd_context
+        except ImportError:
+            attach_stage_to_usd_context = getattr(sim_utils, "attach_stage_to_usd_context", None)
 
         registry = Registry.instance()
         scene_cfg = InteractiveSceneCfg(
@@ -108,25 +161,29 @@ class IsaacBackendEnv(_EnvBase):
             for func in observation.funcs.values():
                 func.edit_spec(scene_cfg)
 
-        sim_cfg = sim_utils.SimulationCfg(
+        sim_cfg = _make_simulation_cfg(
+            sim_utils,
             dt=self.cfg.sim.isaac_physics_dt,
-            render=sim_utils.RenderCfg(rendering_mode="balanced"),
-            physx=sim_utils.PhysxCfg(**self.cfg.sim.get("physx", {})),
             device=str(self.device),
+            physx_kwargs=self.cfg.sim.get("physx", {}) or {},
         )
 
         sim = SimulationContext.instance() or SimulationContext(sim_cfg)
-        with use_stage(sim.get_initial_stage()):
+        stage = _sim_usd_stage(sim)
+        with use_stage(stage):
             self.scene = InteractiveScene(scene_cfg)
-            attach_stage_to_usd_context()
-        with use_stage(sim.get_initial_stage()):
+            if hasattr(self.scene, "initialize_renderers"):
+                self.scene.initialize_renderers()
+            if callable(attach_stage_to_usd_context):
+                attach_stage_to_usd_context()
+        with use_stage(_sim_usd_stage(sim)):
             sim.reset()
         
         # Try to fix headless record
         # --------------------------
         from pxr import UsdGeom, Gf
 
-        stage = sim.get_initial_stage()
+        stage = _sim_usd_stage(sim)
 
         camera_path = "/World/RecordCamera"
 
@@ -146,7 +203,14 @@ class IsaacBackendEnv(_EnvBase):
         for _ in tqdm(range(10), desc="Warming up the simulation"):
             sim.step(render=False)
 
-        sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat, camera_prim_path=camera_path)
+        try:
+            sim.set_camera_view(
+                eye=self.cfg.viewer.eye,
+                target=self.cfg.viewer.lookat,
+                camera_prim_path=camera_path,
+            )
+        except TypeError:
+            sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat)
         try:
             import omni.replicator.core as rep
 
@@ -169,7 +233,7 @@ class IsaacBackendEnv(_EnvBase):
         else:
             viser_viewer = None
         
-        if sim.has_gui(): # native isaac gui
+        if _sim_has_gui(sim): # native isaac gui
             debug_draw = IsaacDebugDraw()
         else:
             debug_draw = None

@@ -1,0 +1,54 @@
+diff --git a/source/isaaclab/isaaclab/cli/commands/install.py b/source/isaaclab/isaaclab/cli/commands/install.py
+index 8088316..78f89f3 100644
+--- a/source/isaaclab/isaaclab/cli/commands/install.py
++++ b/source/isaaclab/isaaclab/cli/commands/install.py
+@@ -258,6 +258,23 @@ def _ensure_pink_ik_dependencies_installed(python_exe: str, pip_cmd: list[str],
+         )
+ 
+ 
++def _pep440_release_tuple(version: str) -> tuple[int, ...]:
++    """Numeric release prefix of a pip/torch version (``2.11.0+cu128`` → ``(2, 11, 0)``)."""
++    core = version.split("+", 1)[0].strip()
++    parts: list[int] = []
++    for token in core.split("."):
++        digits = ""
++        for char in token:
++            if char.isdigit():
++                digits += char
++            else:
++                break
++        if not digits:
++            break
++        parts.append(int(digits))
++    return tuple(parts)
++
++
+ def _ensure_cuda_torch() -> None:
+     """Ensure correct PyTorch and CUDA versions are installed."""
+     python_exe = extract_python_exe()
+@@ -303,6 +320,25 @@ def _ensure_cuda_torch() -> None:
+         print_info(f"PyTorch {want_torch} already installed.")
+         return
+ 
++    # Do not downgrade a newer CUDA torch already in the env (e.g. AA isaac60
++    # pins 2.11 while this installer still defaults to 2.10). Force the Lab pin
++    # with ISAACLAB_FORCE_TORCH_PIN=1.
++    force_pin = os.environ.get("ISAACLAB_FORCE_TORCH_PIN", "").strip().lower() in {
++        "1",
++        "true",
++        "yes",
++        "y",
++    }
++    if current_ver and not force_pin:
++        current_rel = _pep440_release_tuple(current_ver)
++        want_rel = _pep440_release_tuple(torch_ver)
++        if current_rel > want_rel:
++            print_info(
++                f"Keeping existing PyTorch {current_ver} (newer than Lab pin {want_torch}). "
++                "Set ISAACLAB_FORCE_TORCH_PIN=1 to replace it."
++            )
++            return
++
+     # Clean install torch.
+     print_info(f"Installing torch=={torch_ver} and torchvision=={tv_ver} ({cuda_tag}) from {index_url}...")
+ 

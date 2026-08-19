@@ -67,26 +67,45 @@ class randomize_materials_isaac(RandomizationV2):
 
     @override
     def startup(self):
-        materials = self.asset.root_physx_view.get_material_properties().clone()
+        import warp as wp
+
+        from active_adaptation.envs.backends.isaac.canonical_asset import as_torch
+
+        view = getattr(self.asset, "root_view", None) or self.asset.root_physx_view
+        materials = as_torch(view.get_material_properties()).clone()
         if self.homogeneous:
             shape = (self.num_envs, 1)
         else:
             shape = (self.num_envs, len(self.shape_ids))
+        device = materials.device
+        shape_ids = self.shape_ids.to(device)
         if self.static_friction_range is not None:
-            materials[:, self.shape_ids, 0] = self.static_friction_buckets[
-                torch.randint(0, self.num_buckets, shape)
+            materials[:, shape_ids, 0] = self.static_friction_buckets.to(device)[
+                torch.randint(0, self.num_buckets, shape, device=device)
             ]
         if self.dynamic_friction_range is not None:
-            materials[:, self.shape_ids, 1] = self.dynamic_friction_buckets[
-                torch.randint(0, self.num_buckets, shape)
+            materials[:, shape_ids, 1] = self.dynamic_friction_buckets.to(device)[
+                torch.randint(0, self.num_buckets, shape, device=device)
             ]
         if self.restitution_range is not None:
-            materials[:, self.shape_ids, 2] = self.restitution_buckets[
-                torch.randint(0, self.num_buckets, shape)
+            materials[:, shape_ids, 2] = self.restitution_buckets.to(device)[
+                torch.randint(0, self.num_buckets, shape, device=device)
             ]
 
-        indices = torch.arange(self.asset.num_instances)
-        self.asset.root_physx_view.set_material_properties(materials.flatten(), indices)
+        # Lab 3 PhysX tensor API wants warp arrays + CPU env ids. Lab 2 takes
+        # a flattened torch buffer. Do not probe Lab 3 first: Lab 2 accepts
+        # warp arrays and then fails inside Warp with ValueError.
+        env_ids = torch.arange(self.asset.num_instances, device="cpu", dtype=torch.int32)
+        materials_cpu = materials.cpu().contiguous()
+        from active_adaptation.envs.utils.quat_layout import isaaclab_uses_xyzw
+
+        if isaaclab_uses_xyzw():
+            view.set_material_properties(
+                wp.from_torch(materials_cpu, dtype=wp.float32),
+                wp.from_torch(env_ids, dtype=wp.int32),
+            )
+        else:
+            view.set_material_properties(materials_cpu.flatten(), env_ids)
         self.asset.data.body_materials = materials.to(self.device)
 
 

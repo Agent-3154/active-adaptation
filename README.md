@@ -80,7 +80,7 @@ uv sync
 
 # backend-specific environments
 uv sync --project venv/isaac51
-# uv sync --project venv/isaac60 # not supported yet
+uv sync --project venv/isaac60
 uv sync --project venv/mjlab
 ```
 
@@ -88,9 +88,11 @@ uv sync --project venv/mjlab
 
 We will install [IsaacLab](https://github.com/isaac-sim/IsaacLab) from source, not from pip.
 
-> `isaac51` is currently the only tested Isaac track. `isaac60` setup is planned but not validated yet.
+Isaac Sim 5.1 (Lab 2.x) and Isaac Sim 6.0 (Lab 3.x) cannot share one Lab checkout or one Python env. Keep the existing `IsaacLab/` tree on **2.3.x** for `isaac51`, and clone Lab 3 into a sibling (e.g. `IsaacLab60/`) for `isaac60`.
 
-Manual installation steps (`isaac51`):
+AA MDP, policies, Viser, and asset `INIT` rotations stay **WXYZ**. Isaac Lab 3 APIs are **XYZW** and return `ProxyArray`; the Isaac adapter (`CanonicalIsaacAsset`) converts at the boundary. Do not use `isaaclab.utils.math` quaternion helpers in MDP terms.
+
+Manual installation steps (`isaac51`, Lab 2 / Sim 5.1):
 
 ```bash
 # from active-adaptation repo
@@ -98,13 +100,35 @@ cd /path/to/active-adaptation
 uv sync --project venv/isaac51
 source venv/isaac51/.venv/bin/activate
 
-# install IsaacLab extensions from source repo
+# install IsaacLab 2.x extensions from source repo
 cd /path/to/IsaacLab
 ./isaaclab.sh -i none
 
 # optional: verify IsaacLab import in this env
 python -c "import isaaclab; print(isaaclab.__file__)"
 ```
+
+Manual installation steps (`isaac60`, Lab 3 / Sim 6):
+
+```bash
+# sibling checkout so IsaacLab/ can stay on 2.3.x
+git clone https://github.com/isaac-sim/IsaacLab.git IsaacLab60
+cd IsaacLab60
+git checkout v3.0.0-beta2   # or release/3.0.0-beta2
+
+cd /path/to/active-adaptation
+uv sync --project venv/isaac60
+source venv/isaac60/.venv/bin/activate
+
+# Lab 3's installer pins torch 2.10 and will replace AA's 2.11 unless patched
+patch -p1 -d /path/to/IsaacLab60 < venv/isaac60/patches/isaaclab-keep-newer-torch.patch
+cd /path/to/IsaacLab60
+./isaaclab.sh -i none
+
+python -c "import isaaclab, torch; print(isaaclab.__file__, isaaclab.__version__, torch.__version__)"
+```
+
+`uv sync --project venv/isaac60` downloads Isaac Sim 6.0 from NVIDIA PyPI and can take a long time. If it times out, retry later; the AA façade does not require a successful sync to land in git.
 
 Common commands:
 
@@ -116,7 +140,7 @@ uv run pyright active_adaptation
 
 # backend-specific runs
 uv run --project venv/isaac51 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
-# uv run --project venv/isaac60 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo # not supported yet
+uv run --project venv/isaac60 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
 uv run --project venv/mjlab scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
 
 # multi-GPU helper (DDP via torchrun)

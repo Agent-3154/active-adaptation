@@ -677,16 +677,38 @@ class perturb_body_mass(RandomizationV2):
         if self.env.backend == "isaac":
             masses = self.asset.data.default_mass.clone()
             inertias = self.asset.data.default_inertia.clone()
+            body_ids = torch.as_tensor(self.body_ids, device=masses.device, dtype=torch.long)
             scale = uniform(
-                self.mass_ranges[:, 0].expand_as(masses[:, self.body_ids]),
-                self.mass_ranges[:, 1].expand_as(masses[:, self.body_ids])
-            ).cpu()
-            masses[:, self.body_ids] *= scale
-            inertias[:, self.body_ids] *= scale.unsqueeze(-1)
-            indices = torch.arange(self.asset.num_instances)
-            self.asset.root_physx_view.set_masses(masses, indices)
-            self.asset.root_physx_view.set_inertias(inertias, indices)
-            assert torch.allclose(self.asset.root_physx_view.get_masses(), masses)
+                self.mass_ranges[:, 0].to(masses.device).expand_as(masses[:, body_ids]),
+                self.mass_ranges[:, 1].to(masses.device).expand_as(masses[:, body_ids]),
+            )
+            masses[:, body_ids] *= scale
+            inertias[:, body_ids] *= scale.unsqueeze(-1)
+            # Lab 3: default_mass is GPU ProxyArray; write via set_*_index.
+            # Lab 2: PhysX tensor view still wants CPU buffers.
+            set_masses_index = getattr(self.asset, "set_masses_index", None)
+            if callable(set_masses_index):
+                env_ids = torch.arange(
+                    self.asset.num_instances, device=masses.device, dtype=torch.int32
+                )
+                body_ids_i32 = body_ids.to(dtype=torch.int32)
+                set_masses_index(
+                    masses=masses[:, body_ids],
+                    body_ids=body_ids_i32,
+                    env_ids=env_ids,
+                )
+                self.asset.set_inertias_index(
+                    inertias=inertias[:, body_ids],
+                    body_ids=body_ids_i32,
+                    env_ids=env_ids,
+                )
+            else:
+                masses = masses.cpu()
+                inertias = inertias.cpu()
+                indices = torch.arange(self.asset.num_instances)
+                self.asset.root_physx_view.set_masses(masses, indices)
+                self.asset.root_physx_view.set_inertias(inertias, indices)
+                assert torch.allclose(self.asset.root_physx_view.get_masses(), masses)
         elif self.env.backend == "mjlab":
             num_bodies = self.global_body_ids.numel()
             low = self.mass_ranges[:, 0].unsqueeze(0).expand(self.num_envs, num_bodies)

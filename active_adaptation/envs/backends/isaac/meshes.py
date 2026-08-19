@@ -13,6 +13,11 @@ import numpy as np
 import trimesh
 
 
+def _native_entity(entity):
+    """Unwrap ``CanonicalIsaacAsset`` so USD helpers see the Lab articulation."""
+    return getattr(entity, "_asset", entity)
+
+
 def entity_body_prim_paths(entity, suffix: str) -> list[str]:
     """Build ``{body}/{suffix}`` prim paths (same rules as MultiMeshRaycasterV2).
 
@@ -21,6 +26,7 @@ def entity_body_prim_paths(entity, suffix: str) -> list[str]:
     ``{root}/{body_name}/{suffix}``. When the root prim *is* the first body, fall
     back to string-replace like V2.
     """
+    entity = _native_entity(entity)
     template_path = entity.root_physx_view.prim_paths[0]
     root_prim_name = template_path.rstrip("/").split("/")[-1]
     if root_prim_name == entity.body_names[0]:
@@ -57,6 +63,7 @@ def load_entity_body_meshes(
     Returns:
         List of length ``entity.num_bodies`` in ``body_names`` order.
     """
+    entity = _native_entity(entity)
     try:
         from isaacsim.core.utils.stage import get_current_stage
         from simple_raycaster.utils_usd import find_matching_prims, get_trimesh_from_prim

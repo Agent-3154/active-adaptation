@@ -3,13 +3,64 @@ name = "aa-isaac60-env"
 version = "0.1.0"
 requires-python = "==3.12.*"
 dependencies = [
+    # Omit [render] by default: nvdiffrast builds CUDA extensions and needs nvcc.
+    # Opt in: uv sync --project venv/isaac60 --extra render
     "active-adaptation",
-    # Keep this pinned to the Isaac 6.0-compatible version.
-    "warp-lang",
+    "isaacsim[all,extscache]==6.0.0.1",
+    "nicegui>=3.2.0",
+    "viser>=1.0.30",
+    # Lab 3 / Sim 6: resolved by uv lock (do not reuse isaac51's warp-lang < 1.13).
+    "warp-lang==1.16.0",
 ]
+
+[project.optional-dependencies]
+render = ["active-adaptation[render]"]
 
 [tool.uv.sources]
 active-adaptation = { path = "../..", editable = true }
+isaacsim = { index = "nvidia" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+fvdb-core = { index = "fvdb" }
+nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", rev = "253ac4fcea7de5f396371124af597e6cc957bfae" }
+
+[[tool.uv.index]]
+name = "aliyun"
+url = "http://mirrors.aliyun.com/pypi/simple/"
+default = true
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com/"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "fvdb"
+url = "https://d36m13axqqhiit.cloudfront.net/simple"
+explicit = true
 
 [tool.uv]
 package = false
+no-build-isolation-package = ["nvdiffrast"]
+override-dependencies = [
+    "pywin32==306 ; sys_platform == 'win32'",
+    # Keep this torch triplet aligned with venv/isaac51 and venv/mjlab.
+    # Lab 3's isaaclab.sh -i otherwise installs torch 2.10; apply
+    # venv/isaac60/patches/isaaclab-keep-newer-torch.patch first (see AGENTS.md).
+    "torch==2.11",
+    "torchaudio==2.11",
+    "torchvision==0.26.0",
+    "websockets>=13.1,<=16.0",
+    "matplotlib>=3.10.3",
+    # isaacsim-kernel==6.0.0.1 pins jinja2==3.1.5; nicegui>=3.2 needs >=3.1.6.
+    "jinja2>=3.1.6",
+]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'"
+]

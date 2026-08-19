@@ -8,6 +8,12 @@ from active_adaptation.envs.adapters import SimAdapter, SceneAdapter, CameraFrus
 from active_adaptation.envs.backends.isaac.viewer import IsaacViserViewer
 
 
+def _sim_has_gui(sim) -> bool:
+    """Lab 3 ``has_gui`` is a property; Lab 2 is a method."""
+    gui = getattr(sim, "has_gui", False)
+    return bool(gui() if callable(gui) else gui)
+
+
 if TYPE_CHECKING:
     from isaaclab.scene import InteractiveScene
     from isaaclab.sim import SimulationContext
@@ -60,7 +66,7 @@ class IsaacSimAdapter(SimAdapter):
 
     def has_gui(self) -> bool:
         # True for Omniverse Kit GUI *or* browser Viser (debug callbacks / mesh sync).
-        return self._sim.has_gui() or self._viser_viewer is not None
+        return _sim_has_gui(self._sim) or self._viser_viewer is not None
 
     def step(self) -> None:
         self._kit_rendered_this_step = False
@@ -74,7 +80,7 @@ class IsaacSimAdapter(SimAdapter):
     def render_gui(self) -> None:
         # Kit couples viewport and sensor render; skip a second Kit pass if
         # render_sensors() already ran this physics step.
-        if not self._kit_rendered_this_step and self._sim.has_gui():
+        if not self._kit_rendered_this_step and _sim_has_gui(self._sim):
             self._sim.render()
             self._kit_rendered_this_step = True
         if self._viser_viewer is not None:
@@ -100,6 +106,29 @@ class IsaacSceneAdapter(SceneAdapter):
         self._scene: "InteractiveScene" = scene
         self._viser_viewer = viser_viewer
         self._debug_draw = debug_draw
+        self._wrap_scene_entities()
+
+    def _wrap_scene_entities(self) -> None:
+        from active_adaptation.envs.backends.isaac.canonical_asset import (
+            as_torch,
+            maybe_wrap_asset,
+            maybe_wrap_sensor,
+        )
+
+        self._as_torch = as_torch
+        self._articulations = {
+            name: maybe_wrap_asset(asset)
+            for name, asset in self._scene.articulations.items()
+        }
+        self._rigid_objects = {
+            name: maybe_wrap_asset(asset)
+            for name, asset in self._scene.rigid_objects.items()
+        }
+        native_sensors = getattr(self._scene, "sensors", {}) or {}
+        self._sensors = {
+            name: maybe_wrap_sensor(sensor) for name, sensor in native_sensors.items()
+        }
+        self._wrapped_entities = {**self._articulations, **self._rigid_objects}
 
     @override
     def zero_external_wrenches(self) -> None:
@@ -178,15 +207,33 @@ class IsaacSceneAdapter(SceneAdapter):
 
     @property
     def articulations(self):
-        return self._scene.articulations
+        return self._articulations
 
     @property
     def rigid_objects(self):
-        return self._scene.rigid_objects
-    
+        return self._rigid_objects
+
     @property
     def entities(self):
-        return {**self._scene.articulations, **self._scene.rigid_objects}
+        return self._wrapped_entities
+
+    @property
+    def sensors(self):
+        return self._sensors
+
+    @property
+    def env_origins(self) -> torch.Tensor:
+        return self._as_torch(self._scene.env_origins)
+
+    def __getattr__(self, name):
+        return getattr(self._scene, name)
+
+    def __getitem__(self, key):
+        if key in self._wrapped_entities:
+            return self._wrapped_entities[key]
+        if key in self._sensors:
+            return self._sensors[key]
+        return self._scene[key]
 
     def get_visual_meshes(self, name: str) -> list[trimesh.Trimesh]:
         """Body-local visual trimeshes for ``entities[name]`` (``body_names`` order).
@@ -216,12 +263,6 @@ class IsaacSceneAdapter(SceneAdapter):
             suffixes=("collisions", "collision"),
             require_all=False,
         )
-
-    def __getattr__(self, name):
-        return getattr(self._scene, name)
-    
-    def __getitem__(self, key):
-        return self._scene[key]
 
     def create_sphere_marker(
         self,

@@ -1,4 +1,5 @@
 import os
+import random
 import warnings
 from collections import OrderedDict
 from typing import Callable, Dict, Mapping, Any, Optional, cast
@@ -24,9 +25,6 @@ from active_adaptation.utils.video_recorder import (
 from active_adaptation.envs.utils import GroundQuery
 from active_adaptation.registry import RegistryMixin
 from dataclasses import dataclass
-
-if active_adaptation.get_backend() == "isaac":
-    import isaacsim.core.utils.torch as torch_utils
 
 
 EMA_DECAY = 0.99
@@ -390,9 +388,13 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     def _setup_visual(self) -> None:
         """Optional photoreal world (3DGS + mesh composite). Collision on ``scene``."""
+        visual_cfg = self.cfg.get("visual", None)
+        if visual_cfg is None:
+            self.visual = None
+            return
         from active_adaptation.envs.visual import make_visual_world
 
-        self.visual = make_visual_world(self.cfg.get("visual", None), device=self.device)
+        self.visual = make_visual_world(visual_cfg, device=self.device)
         if self.visual is None:
             return
         # Eager load so missing PLY fails at env construction, not first obs.
@@ -811,7 +813,15 @@ class _EnvBase(EnvBase, RegistryMixin):
         # Other backends: return a no-op recorder by default.
         return NullVideoRecorder()
 
-    def _set_seed(self, seed: int = -1):
+    def _set_seed(self, seed: int = -1) -> int:
+        """Seed Python, NumPy, and torch. Isaac also seeds Omniverse Replicator when present."""
+        if seed < 0:
+            seed = random.randint(0, 2**31 - 1)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
         if self.backend == "isaac":
             try:
                 import omni.replicator.core as rep
@@ -819,18 +829,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                 rep.set_global_seed(seed)
             except ModuleNotFoundError:
                 pass
-            return torch_utils.set_seed(seed)
-        elif self.backend == "mujoco":
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-        elif self.backend == "mjlab":
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-        elif self.backend == "motrix":
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-        else:
-            raise ValueError(f"Unknown backend: {self.backend}")
+        return seed
 
     def render(self, mode: str = "human"):
         self.sim.render_gui()

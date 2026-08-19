@@ -52,7 +52,7 @@ Use `uv` as the default environment manager and keep backend stacks isolated.
 |-----|------|--------|---------------|------------------|
 | Root/shared | `.` | `>=3.11,<3.13` | Common tooling + backend-agnostic code | Avoid pinning backend-specific warp |
 | Isaac 5.1 | `venv/isaac51` | `==3.11.*` | Isaac 5.1 tasks | Pin exact Isaac-5.1-compatible warp version |
-| Isaac 6.0 | `venv/isaac60` | `==3.12.*` | Isaac 6.0 tasks | Pin exact Isaac-6.0-compatible warp version |
+| Isaac 6.0 | `venv/isaac60` | `==3.12.*` | Isaac 6.0 / Lab 3 tasks | `==1.16.0` (do **not** reuse `< 1.13`) |
 | Mjlab | `venv/mjlab` | `>=3.11` | Mujoco/mjlab tasks | Pin mjlab-compatible warp (or omit if unused) |
 
 Keep `warp-lang` pins in backend env `pyproject.toml` files, not in root, so solves stay independent.
@@ -82,6 +82,28 @@ Keep `warp-lang` pins in backend env `pyproject.toml` files, not in root, so sol
 - Do not install both backend stacks into a single environment.
 - Commit lockfiles for root and each backend so everyone gets reproducible solves.
 - For `warp-lang`, prefer exact pins (`==`) per backend env; update one backend at a time and re-lock only that backend.
+
+### Isaac Lab source install must not replace AA torch
+`uv sync --project venv/isaac51` / `venv/isaac60` / `venv/mjlab` all pin **torch 2.11** (cu128) so the uv wheel cache is shared. Isaac Lab's installer does **not** honor that pin:
+
+- Lab 3 (`IsaacLab60`): `source/isaaclab/isaaclab/cli/commands/install.py` `_ensure_cuda_torch()` uninstalls torch/vision/audio and installs **2.10.0 / torchvision 0.25.0**.
+- Lab 2 (`IsaacLab/` 2.3.2): `isaaclab.sh` has the same pattern with **2.7.0 / 0.22.0**.
+
+Before `./isaaclab.sh -i none` on a Lab 3 checkout, apply the AA patch so a newer env torch is kept (2.11 is not downgraded to 2.10):
+
+```bash
+patch -p1 -d /path/to/IsaacLab60 < venv/isaac60/patches/isaaclab-keep-newer-torch.patch
+```
+
+If the installer already downgraded the venv, restore the AA triplet instead of re-running a full `uv sync`:
+
+```bash
+source venv/isaac60/.venv/bin/activate
+uv pip install --index-url https://download.pytorch.org/whl/cu128 \
+  torch==2.11 torchvision==0.26.0 torchaudio==2.11
+```
+
+Set `ISAACLAB_FORCE_TORCH_PIN=1` only when you intentionally want Lab's older pin. Do not bump AA's torch override to match Lab 3's 2.10.
 
 ## Coding Style & Naming Conventions
 Follow existing Python style: 4-space indentation, snake_case for modules/functions, PascalCase for classes, and concise docstrings only where behavior is not obvious. Keep Hydra config keys and task names consistent with existing patterns such as `Go2/Go2Flat` and `ppo_symaug`. There is no pinned formatter in this repo today; keep imports grouped cleanly and match surrounding file structure. `pyproject.toml` enables Pyright checks, so prefer type-safe changes and preserve annotated APIs.

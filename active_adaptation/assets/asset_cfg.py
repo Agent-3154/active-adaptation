@@ -22,6 +22,7 @@ if aa.get_backend() == "isaac":
     )
     from isaaclab.utils import configclass
     from isaaclab.sensors import ContactSensorCfg as IsaaclabContactSensorCfg
+    from active_adaptation.envs.utils.quat_layout import isaac_cfg_quat  # noqa: F401
 
     @configclass
     class ArticulationCfg(_ArticulationCfg):

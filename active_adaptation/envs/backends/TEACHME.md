@@ -5,8 +5,10 @@
 ```
 envs/backends/
 ├── isaac/
-│   ├── env.py          # IsaacBackendEnv
-│   └── adapter.py      # IsaacSimAdapter, IsaacSceneAdapter
+│   ├── env.py              # IsaacBackendEnv
+│   ├── adapter.py          # IsaacSimAdapter, IsaacSceneAdapter
+│   ├── canonical_asset.py  # Lab 3 ProxyArray/XYZW → torch WXYZ façade
+│   └── viewer.py           # IsaacViserViewer
 ├── mjlab/
 │   ├── env.py          # MjlabBackendEnv
 │   ├── adapter.py      # MjlabSimAdapter, MjlabSceneAdapter
@@ -161,6 +163,7 @@ supported_backends = ("isaac", "mjlab")  # only instantiated on these backends
 - **`setup_scene()`**: builds scene from asset registry + terrain + optional objects; wires dome light + optional Replicator RGB annotator
 - **Parallelism**: `cfg.num_envs` via Isaac Lab scene replication
 - **Extras**: `VisualizationMarkers`, `debug_draw`, terrain spawn origins, USD ground mesh
+- **Lab 3 / Sim 6**: `IsaacSceneAdapter` wraps articulations/sensors with `CanonicalIsaacAsset` so MDP still sees torch **WXYZ**. Lab 2 is a no-op passthrough. Cfg identity quats use `isaac_cfg_quat()`. Keep `backend=isaac`.
 
 ### MuJoCo (`mujoco/`)
 

@@ -7,7 +7,6 @@ from typing import Any
 import torch
 
 from .base import VisualWorld
-from .fvdb_gs import FvdbGaussianWorld, PLY_PATH_PLACEHOLDER
 
 __all__ = [
     "VisualWorld",
@@ -15,6 +14,18 @@ __all__ = [
     "PLY_PATH_PLACEHOLDER",
     "make_visual_world",
 ]
+
+
+def __getattr__(name: str):
+    # fvdb_gs / simple_raycaster are optional; A2LocoFlat and other non-GS
+    # tasks must not import them at package load.
+    if name in ("FvdbGaussianWorld", "PLY_PATH_PLACEHOLDER"):
+        from .fvdb_gs import FvdbGaussianWorld, PLY_PATH_PLACEHOLDER
+
+        globals()["FvdbGaussianWorld"] = FvdbGaussianWorld
+        globals()["PLY_PATH_PLACEHOLDER"] = PLY_PATH_PLACEHOLDER
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def make_visual_world(
@@ -48,6 +59,8 @@ def make_visual_world(
         cfg = dict(cfg)
     target = str(cfg.pop("_target_", "fvdb_gs"))
     if target in ("fvdb_gs", "FvdbGaussianWorld"):
+        from .fvdb_gs import FvdbGaussianWorld
+
         ply = cfg.pop("ply_path", None)
         return FvdbGaussianWorld(ply_path=ply, device=device, **cfg)
     raise ValueError(f"Unknown visual world target: {target!r}")

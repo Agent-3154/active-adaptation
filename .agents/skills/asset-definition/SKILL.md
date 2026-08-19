@@ -40,14 +40,14 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 1. **Return `AssetSpec`** for articulated robots — `config` + optional `sensors` + optional `wrapper`. Do not hand raw Isaac/mjlab cfgs to the robot slot.
 2. **Two factories + dispatcher** — `make_isaaclab_cfg()`, `make_mjlab_cfg()`, `make_cfg(backend: Literal["isaaclab", "mjlab"])`. Backends call with `"isaaclab"` or `"mjlab"` (not `"isaac"`).
 3. **Always set simulation order** — `joint_names_simulation` and `body_names_simulation` on both backend cfgs (same lists). MDP terms resolve against these via `find_joints` / `find_bodies`.
-4. **Share cross-backend constants** — `INIT_POS`, `INIT_JOINT_POS`, symmetry maps, effort/stiffness/damping, and the simulation name lists live at module top; only spawn/spec/actuator *types* differ per backend.
+4. **Share cross-backend constants** — `INIT_POS`, `INIT_JOINT_POS`, symmetry maps, effort/stiffness/damping, and the simulation name lists live at module top; only spawn/spec/actuator *types* differ per backend. Keep init quaternions **WXYZ** (`(1,0,0,0)` identity). On Isaac Lab 3 pass them through `isaac_cfg_quat()` from `envs/utils/quat_layout.py` (re-exported from `assets.asset_cfg` when backend is isaac) so cfg identity becomes XYZW.
 5. **Models live in `ROBOT_MODEL_DIR`** — USD + MJCF under `.cache/aa-robot-models/<robot>/`. Do not vendor large meshes into `assets/` for new robots.
 6. **Register + import** — `registry.register("asset", "<name>", make_cfg)` and import the module from the package `__init__.py` so registration runs.
 7. **Name parity** — joint/body names used by MDP, init regexes, and sensors must match across USD and MJCF (order may differ; the simulation lists fix layout). We always assume the USD joint and body names match those of the MJCF (if provided). So do not bother checking them.
 8. **No new mujoco-backend assets** — ignore `elif aa.get_backend() == "mujoco"` in `asset_cfg.py` for new work; prefer deleting it when cleaning.
 9. **mjlab actuators: `BuiltinPdActuatorCfg` by default** — AA joint actions often call both `set_joint_position_target` and `set_joint_velocity_target` (`envs/mdp/actions/joint.py`). Use `BuiltinPositionActuatorCfg` only when explicitly specified.
 10. **Mimic / coupled joints: physics constraints, drivers only** — Isaac: URDF `<mimic>`; mjlab: MJCF `<equality><joint …/></equality>` (no URDF-style mimic tag). Actuate **driver** joints only; leave mimics unactuated (or Isaac zero-gain / passive). Prefer physics coupling over software target-copy (`MimicJointPosition`) for mjlab. Details: [reference.md](reference.md#mimic--coupled-joints).
-11. **Never smoke-test with the shared root venv** — it is by design incomplete. Use `uv run --project venv/isaac51` and `uv run --project venv/mjlab`. See [.agents/skills/README.md](../README.md#smoke-tests--running-code).
+11. **Never smoke-test with the shared root venv** — it is by design incomplete. Use `uv run --project venv/isaac51` (or `isaac60` / `mjlab`). See [.agents/skills/README.md](../README.md#smoke-tests--running-code).
 
 ---
 

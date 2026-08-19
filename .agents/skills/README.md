@@ -25,6 +25,8 @@ Also see [TEACHME.md](../../active_adaptation/learning/TEACHME.md) (shared style
 | What you are testing | Run with |
 |----------------------|----------|
 | Isaac env / MDP / assets | `uv run --project venv/isaac51 …` (or `venv/isaac60`) |
+
+Isaac Lab `./isaaclab.sh -i` overwrites the venv torch pin (Lab 3 → 2.10, Lab 2 → 2.7). AA keeps **2.11**. Apply `venv/isaac60/patches/isaaclab-keep-newer-torch.patch` on a Lab 3 checkout before `-i none`. See [AGENTS.md](../../AGENTS.md#isaac-lab-source-install-must-not-replace-aa-torch).
 | mjlab env / MDP / assets | `uv run --project venv/mjlab …` |
 | Backend-agnostic utils only | `uv run …` (root) is fine |
 

@@ -127,6 +127,7 @@ def _make_isaaclab_cfg(
 ):
     from isaaclab.assets import RigidObjectCfg
     import isaaclab.sim as sim_utils
+    from active_adaptation.envs.utils.quat_layout import isaac_cfg_quat
 
     spawn_kw = _isaac_spawn_kwargs(
         mass=mass,
@@ -152,7 +153,7 @@ def _make_isaaclab_cfg(
 
     return RigidObjectCfg(
         spawn=spawn,
-        init_state=RigidObjectCfg.InitialStateCfg(pos=pos, rot=rot),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=pos, rot=isaac_cfg_quat(rot)),
     )
 
 
