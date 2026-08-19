@@ -14,6 +14,21 @@ from tqdm import tqdm
 import os
 
 
+def _sim_needs_fabric_transforms(sim, headless: bool) -> bool:
+    """True when Kit GUI, cameras, or XR still need Fabric pose sync."""
+    if (not headless) or _sim_has_gui(sim):
+        return True
+    if not isaaclab_uses_xyzw():
+        return False
+    import carb.settings
+
+    settings = carb.settings.get_settings()
+    return bool(
+        settings.get("/isaaclab/render/offscreen")
+        or settings.get("/isaaclab/xr/enabled")
+    )
+
+
 def _sim_usd_stage(sim):
     """Lab 3: ``sim.stage``. Lab 2: ``sim.get_initial_stage()``."""
     if isaaclab_uses_xyzw():
@@ -151,6 +166,16 @@ class IsaacBackendEnv(_EnvBase):
         )
 
         sim = SimulationContext.instance() or SimulationContext(sim_cfg)
+        # IsaacSim#740: omni.physx.fabric is enabled here and can restore the
+        # default transform-sync path. Re-apply carb keys after that load.
+        from active_adaptation.envs.utils.isaacsim_740 import (
+            apply_isaacsim_740_fabric_workaround,
+        )
+
+        apply_isaacsim_740_fabric_workaround(
+            rendering_needed=_sim_needs_fabric_transforms(sim, self.headless),
+            log=True,
+        )
         stage = _sim_usd_stage(sim)
         with use_stage(stage):
             self.scene = InteractiveScene(scene_cfg)

@@ -164,6 +164,16 @@ def init(cfg: DictConfig, auto_rank: bool):
         app_config = OmegaConf.to_container(cfg.app, resolve=True)
         app_config = _apply_default_isaaclab_kit_args(app_config)
         AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
+        # IsaacSim#740: after SimulationApp. Re-applied after SimulationContext
+        # in backends/isaac/env.py once omni.physx.fabric is loaded.
+        from active_adaptation.envs.utils.isaacsim_740 import (
+            app_config_needs_fabric_transforms,
+            apply_isaacsim_740_fabric_workaround,
+        )
+
+        apply_isaacsim_740_fabric_workaround(
+            rendering_needed=app_config_needs_fabric_transforms(app_config)
+        )
 
     import active_adaptation.assets # register assets
     import active_adaptation.envs.sensors  # register sensors
