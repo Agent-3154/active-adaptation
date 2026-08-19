@@ -97,8 +97,8 @@ Then, in order of crashes:
 3. **Joint writers on the WXYZ façade** (`b01fd860`, `f2abebb2`, `1086ee00`)  
    Lab 3 `_index` kernels want **int32** env/joint ids and keyword payloads. Wrap `write_joint_*` and `set_joint_*_target` on `CanonicalIsaacAsset`.
 
-4. **Material randomization Warp vs torch** (`be9df835`, `16f66eb8`)  
-   Lab 3 `get_material_properties()` is a Warp array. Lab 2 `set_material_properties` wants a flattened torch buffer (passing Warp arrays fails inside Warp, not with `TypeError`). Branch on `isaaclab_uses_xyzw()`.
+4. **Material randomization Warp vs torch** (`be9df835`, `16f66eb8`, later detector fix)  
+   Lab 3 `get_material_properties()` is a Warp array. Lab 2 `set_material_properties` wants a flattened torch buffer (passing Warp arrays fails inside Warp, not with `TypeError`). Do **not** treat `convert_quat` as a Lab 2 signal — Lab 3 restored it while keeping XYZW + Warp PhysX. Flattened torch then crashes in `frontend_warp.as_contiguous_float32` (`type_ctype` TypeError). Detect Lab 3 via `isaaclab.utils.warp.proxy_array` and duck-type the view `_frontend`.
 
 5. **Contact `compute_first_contact` dtype** (`2cca92b0`)  
    Lab 3 returns a float `ProxyArray`. Gait rewards use `torch.where`. Convert to `bool` on `CanonicalIsaacSensor`.

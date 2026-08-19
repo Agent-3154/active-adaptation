@@ -18,6 +18,33 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
+def _physx_view_uses_warp_frontend(view) -> bool:
+    """Lab 3 ``omni.physics.tensors`` Warp frontend needs ``wp`` arrays, not torch."""
+    frontend = getattr(view, "_frontend", None)
+    if frontend is not None:
+        return "frontend_warp" in type(frontend).__module__
+    from active_adaptation.envs.utils.quat_layout import isaaclab_uses_xyzw
+
+    return isaaclab_uses_xyzw()
+
+
+def _set_physx_material_properties(view, materials_cpu: torch.Tensor, env_ids: torch.Tensor) -> None:
+    """Write rigid materials. Lab 3 Warp frontend: unflattened ``wp`` arrays.
+
+    Lab 2's CPU view wants ``materials.flatten()`` + torch env ids. Do not send
+    Warp arrays to Lab 2: it accepts them and then fails inside Warp.
+    """
+    import warp as wp
+
+    if _physx_view_uses_warp_frontend(view):
+        view.set_material_properties(
+            wp.from_torch(materials_cpu, dtype=wp.float32),
+            wp.from_torch(env_ids, dtype=wp.int32),
+        )
+        return
+    view.set_material_properties(materials_cpu.flatten(), env_ids)
+
+
 class randomize_materials_isaac(RandomizationV2):
 
     supported_backends = ("isaac",)
@@ -67,8 +94,6 @@ class randomize_materials_isaac(RandomizationV2):
 
     @override
     def startup(self):
-        import warp as wp
-
         from active_adaptation.envs.backends.isaac.canonical_asset import as_torch
 
         view = getattr(self.asset, "root_view", None) or self.asset.root_physx_view
@@ -92,20 +117,13 @@ class randomize_materials_isaac(RandomizationV2):
                 torch.randint(0, self.num_buckets, shape, device=device)
             ]
 
-        # Lab 3 PhysX tensor API wants warp arrays + CPU env ids. Lab 2 takes
-        # a flattened torch buffer. Do not probe Lab 3 first: Lab 2 accepts
-        # warp arrays and then fails inside Warp with ValueError.
+        # Lab 3 PhysX Warp frontend wants unflattened wp arrays + CPU int32
+        # env ids. Lab 2 takes a flattened torch buffer. Duck-type the view
+        # frontend: Lab 3 restored ``convert_quat``, so quat-layout detection
+        # is not a reliable Lab 2/3 split for this write.
         env_ids = torch.arange(self.asset.num_instances, device="cpu", dtype=torch.int32)
         materials_cpu = materials.cpu().contiguous()
-        from active_adaptation.envs.utils.quat_layout import isaaclab_uses_xyzw
-
-        if isaaclab_uses_xyzw():
-            view.set_material_properties(
-                wp.from_torch(materials_cpu, dtype=wp.float32),
-                wp.from_torch(env_ids, dtype=wp.int32),
-            )
-        else:
-            view.set_material_properties(materials_cpu.flatten(), env_ids)
+        _set_physx_material_properties(view, materials_cpu, env_ids)
         self.asset.data.body_materials = materials.to(self.device)
 
 

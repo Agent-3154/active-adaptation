@@ -77,16 +77,22 @@ def state_wxyz_to_xyzw(state: torch.Tensor) -> torch.Tensor:
 
 
 def isaaclab_uses_xyzw() -> bool:
-    """True on Isaac Lab 3 (``convert_quat`` removed; APIs are XYZW)."""
+    """True on Isaac Lab 3 / Sim 6 (native APIs are XYZW + ``ProxyArray``).
+
+    Do not key off ``convert_quat``: Lab 3 restored that helper while keeping
+    XYZW tensors. Flattened torch writes then hit the Warp PhysX frontend
+    (``type_ctype`` TypeError). Lab 3 ships ``isaaclab.utils.warp.proxy_array``;
+    Lab 2 does not.
+    """
     global _LAB3_XYZW
     if _LAB3_XYZW is not None:
         return _LAB3_XYZW
     try:
-        import isaaclab.utils.math as math_utils
-    except ImportError:
+        import importlib.util
+
+        _LAB3_XYZW = importlib.util.find_spec("isaaclab.utils.warp.proxy_array") is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
         _LAB3_XYZW = False
-        return False
-    _LAB3_XYZW = not hasattr(math_utils, "convert_quat")
     return _LAB3_XYZW
 
 
