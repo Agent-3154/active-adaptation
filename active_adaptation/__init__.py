@@ -164,6 +164,14 @@ def init(cfg: DictConfig, auto_rank: bool):
         app_config = OmegaConf.to_container(cfg.app, resolve=True)
         app_config = _apply_default_isaaclab_kit_args(app_config)
         AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
+        # SimulationApp can reset torch's current CUDA device to 0; re-bind so
+        # later NCCL collectives (e.g. broadcast_object_list before env create)
+        # do not all land on the same visible GPU.
+        if is_distributed() and auto_rank:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.set_device(get_local_rank())
 
     import active_adaptation.assets # register assets
     import active_adaptation.envs.sensors  # register sensors

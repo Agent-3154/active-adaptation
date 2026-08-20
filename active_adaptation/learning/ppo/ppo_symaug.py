@@ -107,6 +107,7 @@ class PPOConfig:
     compile: bool = False
     use_ddp: bool = True
     debug: bool = False # enable correctness checkers
+    obs_importance_interval: int = -1 # -1: disable, 0: every update, >0: every N updates
 
     # Regex patterns matched with ``re.fullmatch`` against observation group names
     # (see ``resolve_matching_names``). Examples: ``("policy",)``, ``("command", "policy")``,
@@ -237,7 +238,7 @@ class PPOPolicy(TensorDictModuleBase):
         self._rollout_dormancy_tracker: Union[DormancyTracker, None] = None
         self.obs_func_keys: List[str]
         self.obs_split: List[int]
-        self._obs_importance_interval: int = 8
+        self._obs_importance_interval: int = self.cfg.obs_importance_interval
         self._obs_importance_step: int = 0
         # Running EMA of return std for scale-invariant value loss normalization.
         # Initialized conservatively at 1.0 so early training uses a larger (not smaller)
@@ -444,6 +445,7 @@ class PPOPolicy(TensorDictModuleBase):
         
         self._obs_importance_step += 1
         if (
+            self._obs_importance_interval > 0 and
             self._obs_importance_step % self._obs_importance_interval == 0 and
             aa.is_main_process()
         ):

@@ -275,10 +275,16 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         wandb_run.save(str(run_dir / "config.yaml"), policy="now")
 
     if aa.is_distributed():
+        import torch
         import torch.distributed as dist
 
+        # Explicit device: Isaac AppLauncher may leave current_device at 0.
         name_list = [proc_name]
-        dist.broadcast_object_list(name_list, src=0)
+        dist.broadcast_object_list(
+            name_list,
+            src=0,
+            device=torch.device(f"cuda:{aa.get_local_rank()}"),
+        )
         proc_name = name_list[0]
 
     if proc_name is not None:
