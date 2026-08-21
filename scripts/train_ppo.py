@@ -275,7 +275,6 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         wandb_run.save(str(run_dir / "config.yaml"), policy="now")
 
     if aa.is_distributed():
-        import torch
         import torch.distributed as dist
 
         # Explicit device: Isaac AppLauncher may leave current_device at 0.

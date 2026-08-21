@@ -228,13 +228,9 @@ class RewardGroup:
 
     def compute(self) -> torch.Tensor:
         rewards = []
-        if self.name in {"tracking", "tracking_metrics"}:
-            print_enabled = True
-            # print(f"Reward group '{self.name}':")
-        else:
-            print_enabled = False
         for key, func in self.funcs.items():
-            reward = func.compute()
+            with ScopedTimer(f"{self.name}.{key}", sync=False):
+                reward = func.compute()
             self.env.stats[self.name, key].add_(reward)
             if func.enabled:
                 rewards.append(reward)

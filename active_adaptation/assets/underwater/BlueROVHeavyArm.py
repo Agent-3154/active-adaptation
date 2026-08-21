@@ -134,7 +134,7 @@ def make_isaaclab_cfg(self_collisions: bool = False, fixed_base: bool = False):
                 contact_offset=0.02,
                 rest_offset=0.0,
             ),
-            activate_contact_sensors=False,
+            activate_contact_sensors=True,
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=INIT_POS,
