@@ -10,7 +10,8 @@ from functools import cached_property
 import torch
 from tensordict import TensorDictBase
 
-from active_adaptation.utils.math import euler_from_quat, quat_rotate, quat_rotate_inverse
+from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
+from active_adaptation.utils.profiling import ScopedTimer
 import active_adaptation.utils.string as string_utils
 
 if TYPE_CHECKING: # DO NOT MODIFY
@@ -23,6 +24,69 @@ if TYPE_CHECKING: # DO NOT MODIFY
 BodyFloatSpec = Sequence[float] | Mapping[str, float]
 BodyDampingValue = float | Sequence[float]
 BodyDampingSpec = Sequence[BodyDampingValue] | Mapping[str, BodyDampingValue]
+
+
+def _compute_root_flow(
+    root_lin_vel_w: torch.Tensor,
+    root_ang_vel_w: torch.Tensor,
+    root_link_quat_w: torch.Tensor,
+    flow_vels: torch.Tensor,
+    flow_noise_scale: torch.Tensor,
+    prev_body_vels: torch.Tensor,
+    prev_body_acc: torch.Tensor,
+    hydro_axis_sign: torch.Tensor,
+    dt: float,
+    acc_filter_alpha: float,
+    add_noise: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute flow-relative root twist and filtered acceleration."""
+    flow_twist_w = flow_vels
+    if add_noise:
+        flow_twist_w = flow_twist_w + torch.rand_like(flow_twist_w) * flow_noise_scale
+    relative_twist_w = torch.cat(
+        [
+            root_lin_vel_w - flow_twist_w[..., :3],
+            root_ang_vel_w - flow_twist_w[..., 3:],
+        ],
+        dim=-1,
+    ).reshape(-1, 2, 3)
+    root_quat_w = root_link_quat_w.unsqueeze(1).expand(-1, 2, -1)
+    hydro_twist_b = quat_rotate_inverse(root_quat_w, relative_twist_w).reshape_as(
+        flow_twist_w
+    )
+    hydro_twist_b = hydro_twist_b * hydro_axis_sign
+    hydro_acc_b = (hydro_twist_b - prev_body_vels) / dt
+    hydro_acc_b = (
+        (1.0 - acc_filter_alpha) * prev_body_acc
+        + acc_filter_alpha * hydro_acc_b
+    )
+    return hydro_twist_b, hydro_acc_b, flow_twist_w
+
+
+def _compute_buoyancy(
+    body_quat_w: torch.Tensor,
+    buoyancy_force: torch.Tensor,
+    coBM: torch.Tensor,
+    base_body_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute body-local buoyancy directly from WXYZ quaternions."""
+    w, x, y, z = body_quat_w.unbind(-1)
+    buoyancy_forces_b = torch.stack(
+        [
+            2.0 * buoyancy_force * (x * z - w * y),
+            2.0 * buoyancy_force * (y * z + w * x),
+            buoyancy_force * (1.0 - 2.0 * (x.square() + y.square())),
+        ],
+        dim=-1,
+    )
+    buoyancy_torques_b = torch.zeros_like(buoyancy_forces_b)
+    buoyancy_torques_b[:, base_body_id, 0] = (
+        -coBM * buoyancy_forces_b[:, base_body_id, 1]
+    )
+    buoyancy_torques_b[:, base_body_id, 1] = (
+        coBM * buoyancy_forces_b[:, base_body_id, 0]
+    )
+    return buoyancy_forces_b, buoyancy_torques_b
 
 
 def _expand_damping_coeffs(value: BodyDampingValue) -> list[float]:
@@ -146,6 +210,9 @@ class UnderwaterRobot:
         self.body_names = []
         self.rotor_indices = None
         self.data = None
+        self._hydro_axis_sign = None
+        self._flow_noise_enabled = False
+        self._compute_buoyancy = _compute_buoyancy
 
         # Base body is assumed to be the root body in IsaacLab articulations.
         self._base_body_id = 0
@@ -361,6 +428,9 @@ class UnderwaterRobot:
             hydro_forces_b=torch.zeros(self.num_envs, 3, device=self.device),
             hydro_torques_b=torch.zeros(self.num_envs, 3, device=self.device),
         )
+        self._hydro_axis_sign = torch.tensor(
+            [1.0, -1.0, -1.0, 1.0, -1.0, -1.0], device=self.device
+        )
 
         # Keep underwater terms in a dedicated namespace to avoid polluting
         # IsaacLab's default articulation data fields.
@@ -384,6 +454,9 @@ class UnderwaterRobot:
         self.data.flow_noise_scale[env_ids] = torch.tensor(
             flow_velocity_gaussian_noise, device=self.device, dtype=torch.float32
         )
+        self._flow_noise_enabled |= any(
+            float(scale) != 0.0 for scale in flow_velocity_gaussian_noise
+        )
 
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self.data.prev_body_vels[env_ids] = 0.0
@@ -399,168 +472,179 @@ class UnderwaterRobot:
         # This method will be called by the env before the simulation step.
         # It will be used to update the underwater robot data.
         data = self.robot.data
-        root_link_quat_w = data.root_link_quat_w
-        root_link_twist_b = torch.cat(
-            [data.root_link_lin_vel_b, data.root_link_ang_vel_b],
-            dim=-1,
-        )
-        root_link_rpy_w = euler_from_quat(root_link_quat_w)
+        with ScopedTimer("underwater.root_flow"):
+            root_link_quat_w = data.root_link_quat_w
+            if self.env.backend == "isaac":
+                # Rotate the COM world twist together with flow below instead
+                # of invoking the two derived body-frame properties.
+                root_lin_vel_w = data.root_com_lin_vel_w
+                root_ang_vel_w = data.root_com_ang_vel_w
+            else:
+                root_lin_vel_w = data.root_link_lin_vel_w
+                root_ang_vel_w = data.root_link_ang_vel_w
 
-        flow_twist_w = self.data.flow_vels + torch.rand_like(self.data.flow_vels) * self.data.flow_noise_scale
-        flow_lin_w = flow_twist_w[..., :3]
-        flow_ang_w = flow_twist_w[..., 3:]
-        flow_twist_b = torch.cat(
-            [
-                quat_rotate_inverse(root_link_quat_w, flow_lin_w),
-                quat_rotate_inverse(root_link_quat_w, flow_ang_w),
-            ],
-            dim=-1,
-        )
-        # Relative body twist after subtracting ocean current, then converted
-        # to the hydrodynamics sign convention used by the fitted coefficients.
-        hydro_twist_b = root_link_twist_b - flow_twist_b
-        hydro_twist_b[..., [1, 2, 4, 5]] *= -1
-
-        alpha = self.cfg.acc_filter_alpha
-        hydro_acc_b = (hydro_twist_b - self.data.prev_body_vels) / self.dt
-        hydro_acc_b = (1.0 - alpha) * self.data.prev_body_acc + alpha * hydro_acc_b
-        self.data.prev_body_vels.copy_(hydro_twist_b)
-        self.data.prev_body_acc.copy_(hydro_acc_b)
-
-        # Added mass + Coriolis remain vehicle-level on the base twist.
-        added_mass_wrench_b = (self.data.added_mass_matrix @ hydro_acc_b.unsqueeze(-1)).squeeze(-1)
-        added_mass_momentum_b = (self.data.added_mass_matrix @ hydro_twist_b.unsqueeze(-1)).squeeze(-1)
-        coriolis_wrench_b = torch.zeros(self.num_envs, 6, device=self.device)
-        coriolis_wrench_b[:, 0:3] = -torch.cross(
-            added_mass_momentum_b[:, 0:3], hydro_twist_b[:, 3:6], dim=-1
-        )
-        coriolis_wrench_b[:, 3:6] = -(
-            torch.cross(added_mass_momentum_b[:, 0:3], hydro_twist_b[:, 0:3], dim=-1)
-            + torch.cross(added_mass_momentum_b[:, 3:6], hydro_twist_b[:, 3:6], dim=-1)
-        )
-
-        # Per-body buoyancy in each body's local frame (same hydro orientation
-        # convention as the root). coBM moment arm applies only on the base body.
-        body_quat_w = data.body_link_quat_w
-        body_rpy_w = euler_from_quat(body_quat_w.reshape(-1, 4)).reshape(
-            self.num_envs, self.num_bodies, 3
-        )
-        body_hydro_rpy = body_rpy_w.clone()
-        body_hydro_rpy[..., [1, 2]] *= -1
-
-        buoyancy_force = self.cfg.water_density * self.cfg.gravity * self.data.volume
-        buoyancy_forces_b = torch.zeros(self.num_envs, self.num_bodies, 3, device=self.device)
-        buoyancy_torques_b = torch.zeros(self.num_envs, self.num_bodies, 3, device=self.device)
-        sin_roll = torch.sin(body_hydro_rpy[..., 0])
-        cos_roll = torch.cos(body_hydro_rpy[..., 0])
-        sin_pitch = torch.sin(body_hydro_rpy[..., 1])
-        cos_pitch = torch.cos(body_hydro_rpy[..., 1])
-        buoyancy_forces_b[..., 0] = buoyancy_force * sin_pitch
-        buoyancy_forces_b[..., 1] = -buoyancy_force * sin_roll * cos_pitch
-        buoyancy_forces_b[..., 2] = -buoyancy_force * cos_roll * cos_pitch
-        base_buoyancy_force = buoyancy_force[:, self._base_body_id]
-        buoyancy_torques_b[:, self._base_body_id, 0] = (
-            -self.data.coBM * base_buoyancy_force * cos_pitch[:, self._base_body_id] * sin_roll[:, self._base_body_id]
-        )
-        buoyancy_torques_b[:, self._base_body_id, 1] = (
-            -self.data.coBM * base_buoyancy_force * sin_pitch[:, self._base_body_id]
-        )
-
-        # Per-body damping on each link's flow-relative twist (hydro axis convention).
-        body_lin_vel_b = quat_rotate_inverse(
-            body_quat_w.reshape(-1, 4),
-            (data.body_link_lin_vel_w - flow_lin_w.unsqueeze(1)).reshape(-1, 3),
-        ).reshape(self.num_envs, self.num_bodies, 3)
-        body_ang_vel_b = quat_rotate_inverse(
-            body_quat_w.reshape(-1, 4),
-            (data.body_link_ang_vel_w - flow_ang_w.unsqueeze(1)).reshape(-1, 3),
-        ).reshape(self.num_envs, self.num_bodies, 3)
-        body_hydro_twist_b = torch.cat([body_lin_vel_b, body_ang_vel_b], dim=-1)
-        body_hydro_twist_b[..., [1, 2, 4, 5]] *= -1
-
-        twist_mat = torch.diag_embed(body_hydro_twist_b)
-        twist_mat[..., 1, 5] = body_hydro_twist_b[..., 5]
-        twist_mat[..., 2, 4] = body_hydro_twist_b[..., 4]
-        twist_mat[..., 4, 2] = body_hydro_twist_b[..., 2]
-        twist_mat[..., 5, 1] = body_hydro_twist_b[..., 1]
-        damping_mat = (
-            torch.diag_embed(self.data.linear_damping)
-            + torch.diag_embed(self.data.quadratic_damping) * torch.abs(twist_mat)
-        )
-        damping_wrench_b = (damping_mat @ body_hydro_twist_b.unsqueeze(-1)).squeeze(-1)
-
-        hydro_wrench_b = -(added_mass_wrench_b + coriolis_wrench_b)
-        hydro_wrench_b[:, [1, 2, 4, 5]] *= -1
-        damping_wrench_b[..., [1, 2, 4, 5]] *= -1
-        buoyancy_forces_b[..., [1, 2]] *= -1
-        buoyancy_torques_b[..., [1, 2]] *= -1
-
-        target_throttle = torch.clamp(self.data.throttle_cmd, -1.0, 1.0)
-        alpha_rotor = torch.exp(-self.dt / self.data.time_constants)
-        self.data.throttle.copy_(
-            alpha_rotor * self.data.throttle + (1.0 - alpha_rotor) * target_throttle
-        )
-        target_rpm = torch.where(
-            self.data.throttle > 0.075,
-            3.6599e3 * self.data.throttle + 3.4521e2,
-            torch.where(
-                self.data.throttle < -0.075,
-                3.4944e3 * self.data.throttle - 4.3350e2,
-                torch.zeros_like(self.data.throttle),
-            ),
-        )
-        self.data.rpm.copy_(torch.clamp(target_rpm, -3900.0, 3900.0))
-        rotor_thrust_force_x = (
-            self.data.force_constants
-            / 4.4e-7
-            * 9.81
-            * torch.where(
-                self.data.rpm > 0,
-                4.7368e-7 * torch.square(self.data.rpm)
-                - 1.9275e-4 * self.data.rpm
-                + 8.4452e-2,
-                -3.8442e-7 * torch.square(self.data.rpm)
-                - 1.6186e-4 * self.data.rpm
-                - 3.9139e-2,
+            hydro_twist_b, hydro_acc_b, flow_twist_w = _compute_root_flow(
+                root_lin_vel_w,
+                root_ang_vel_w,
+                root_link_quat_w,
+                self.data.flow_vels,
+                self.data.flow_noise_scale,
+                self.data.prev_body_vels,
+                self.data.prev_body_acc,
+                self._hydro_axis_sign,
+                self.dt,
+                self.cfg.acc_filter_alpha,
+                self._flow_noise_enabled,
             )
-        )
-        self.data.thrusts_b.zero_()
-        # Thrust is along local +X axis of each rotor body.
-        self.data.thrusts_b[..., 0] = rotor_thrust_force_x
+            flow_lin_w = flow_twist_w[..., :3]
+            flow_ang_w = flow_twist_w[..., 3:]
+            self.data.prev_body_vels.copy_(hydro_twist_b)
+            self.data.prev_body_acc.copy_(hydro_acc_b)
 
-        forces_b = buoyancy_forces_b - damping_wrench_b[..., 0:3]
-        torques_b = buoyancy_torques_b - damping_wrench_b[..., 3:6]
-        forces_b[:, self._base_body_id] += hydro_wrench_b[..., 0:3]
-        torques_b[:, self._base_body_id] += hydro_wrench_b[..., 3:6]
-        forces_b[:, self.rotor_indices] += self.data.thrusts_b
+        with ScopedTimer("underwater.added_mass_coriolis"):
+            # Added mass + Coriolis remain vehicle-level on the base twist.
+            added_mass_wrench_b = (
+                self.data.added_mass_matrix @ hydro_acc_b.unsqueeze(-1)
+            ).squeeze(-1)
+            added_mass_momentum_b = (
+                self.data.added_mass_matrix @ hydro_twist_b.unsqueeze(-1)
+            ).squeeze(-1)
+            coriolis_wrench_b = torch.zeros(self.num_envs, 6, device=self.device)
+            coriolis_wrench_b[:, 0:3] = -torch.cross(
+                added_mass_momentum_b[:, 0:3], hydro_twist_b[:, 3:6], dim=-1
+            )
+            coriolis_wrench_b[:, 3:6] = -(
+                torch.cross(
+                    added_mass_momentum_b[:, 0:3], hydro_twist_b[:, 0:3], dim=-1
+                )
+                + torch.cross(
+                    added_mass_momentum_b[:, 3:6], hydro_twist_b[:, 3:6], dim=-1
+                )
+            )
 
-        self.data.body_acc.copy_(hydro_acc_b)
-        self.data.damping.copy_(damping_wrench_b)
-        self.data.added_mass.copy_(added_mass_wrench_b)
-        self.data.coriolis.copy_(coriolis_wrench_b)
-        # Debug buoyancy: base-body wrench (force + coBM torque).
-        self.data.buoyancy[:, 0:3] = buoyancy_forces_b[:, self._base_body_id]
-        self.data.buoyancy[:, 3:6] = buoyancy_torques_b[:, self._base_body_id]
-        self.data.hydro.copy_(hydro_wrench_b)
-        self.data.hydro_forces_b.copy_(forces_b[:, self._base_body_id])
-        self.data.hydro_torques_b.copy_(torques_b[:, self._base_body_id])
+        with ScopedTimer("underwater.buoyancy"):
+            # Per-body buoyancy in each body's local frame (same hydro orientation
+            # convention as the root). coBM moment arm applies only on the base body.
+            body_quat_w = data.body_link_quat_w
+            buoyancy_force = (
+                self.cfg.water_density * self.cfg.gravity * self.data.volume
+            )
+            buoyancy_forces_b, buoyancy_torques_b = self._compute_buoyancy(
+                body_quat_w,
+                buoyancy_force,
+                self.data.coBM,
+                self._base_body_id,
+            )
+
+        with ScopedTimer("underwater.body_damping"):
+            # Per-body damping on each link's flow-relative twist.
+            with ScopedTimer("underwater.body_state"):
+                if self.env.backend == "isaac":
+                    # `data.body_link_lin_vel_w` and `data.body_link_ang_vel_w` are slow for isaac, use
+                    # `data.body_com_lin_vel_w` and `data.body_com_ang_vel_w` instead.
+                    body_lin_vel_w = data.body_com_lin_vel_w
+                    body_ang_vel_w = data.body_com_ang_vel_w
+                else:
+                    body_lin_vel_w = data.body_link_lin_vel_w
+                    body_ang_vel_w = data.body_link_ang_vel_w
+
+            with ScopedTimer("underwater.body_damping_math"):
+                body_lin_vel_b = quat_rotate_inverse(
+                    body_quat_w.reshape(-1, 4),
+                    (body_lin_vel_w - flow_lin_w.unsqueeze(1)).reshape(-1, 3),
+                ).reshape(self.num_envs, self.num_bodies, 3)
+                body_ang_vel_b = quat_rotate_inverse(
+                    body_quat_w.reshape(-1, 4),
+                    (body_ang_vel_w - flow_ang_w.unsqueeze(1)).reshape(-1, 3),
+                ).reshape(self.num_envs, self.num_bodies, 3)
+                body_hydro_twist_b = torch.cat(
+                    [body_lin_vel_b, body_ang_vel_b], dim=-1
+                )
+                body_hydro_twist_b.mul_(self._hydro_axis_sign)
+
+                # Damping coefficients are diagonal, so applying the damping
+                # matrix is equivalent to an elementwise product.
+                damping_wrench_b = (
+                    self.data.linear_damping
+                    + self.data.quadratic_damping * torch.abs(body_hydro_twist_b)
+                ) * body_hydro_twist_b
+
+                hydro_wrench_b = -(added_mass_wrench_b + coriolis_wrench_b)
+                hydro_wrench_b.mul_(self._hydro_axis_sign)
+                damping_wrench_b.mul_(self._hydro_axis_sign)
+
+        with ScopedTimer("underwater.propulsion"):
+            target_throttle = torch.clamp(self.data.throttle_cmd, -1.0, 1.0)
+            alpha_rotor = torch.exp(-self.dt / self.data.time_constants)
+            self.data.throttle.copy_(
+                alpha_rotor * self.data.throttle
+                + (1.0 - alpha_rotor) * target_throttle
+            )
+            target_rpm = torch.where(
+                self.data.throttle > 0.075,
+                3.6599e3 * self.data.throttle + 3.4521e2,
+                torch.where(
+                    self.data.throttle < -0.075,
+                    3.4944e3 * self.data.throttle - 4.3350e2,
+                    0.0,
+                ),
+            )
+            self.data.rpm.copy_(torch.clamp(target_rpm, -3900.0, 3900.0))
+            rotor_thrust_force_x = (
+                self.data.force_constants
+                / 4.4e-7
+                * 9.81
+                * torch.where(
+                    self.data.rpm > 0,
+                    4.7368e-7 * torch.square(self.data.rpm)
+                    - 1.9275e-4 * self.data.rpm
+                    + 8.4452e-2,
+                    -3.8442e-7 * torch.square(self.data.rpm)
+                    - 1.6186e-4 * self.data.rpm
+                    - 3.9139e-2,
+                )
+            )
+            self.data.thrusts_b.zero_()
+            # Thrust is along local +X axis of each rotor body.
+            self.data.thrusts_b[..., 0] = rotor_thrust_force_x
+
+        with ScopedTimer("underwater.assemble_wrench"):
+            forces_b = buoyancy_forces_b - damping_wrench_b[..., 0:3]
+            torques_b = buoyancy_torques_b - damping_wrench_b[..., 3:6]
+            forces_b[:, self._base_body_id] += hydro_wrench_b[..., 0:3]
+            torques_b[:, self._base_body_id] += hydro_wrench_b[..., 3:6]
+            forces_b[:, self.rotor_indices] += self.data.thrusts_b
+
+            self.data.body_acc.copy_(hydro_acc_b)
+            self.data.damping.copy_(damping_wrench_b)
+            self.data.added_mass.copy_(added_mass_wrench_b)
+            self.data.coriolis.copy_(coriolis_wrench_b)
+            # Debug buoyancy: base-body wrench (force + coBM torque).
+            self.data.buoyancy[:, 0:3] = buoyancy_forces_b[:, self._base_body_id]
+            self.data.buoyancy[:, 3:6] = buoyancy_torques_b[:, self._base_body_id]
+            self.data.hydro.copy_(hydro_wrench_b)
+            self.data.hydro_forces_b.copy_(forces_b[:, self._base_body_id])
+            self.data.hydro_torques_b.copy_(torques_b[:, self._base_body_id])
 
         # Isaac: body-local wrenches via permanent_wrench_composer.
         # mjlab: xfrc_applied is world-frame; rotate body wrenches here.
-        composer = getattr(self.robot, "permanent_wrench_composer", None)
-        if composer is not None:
-            composer.set_forces_and_torques(
-                forces_b,
-                torques_b,
-                is_global=False,
-            )
-        else:
-            quat_flat = body_quat_w.reshape(-1, 4)
-            forces_w = quat_rotate(quat_flat, forces_b.reshape(-1, 3)).reshape_as(forces_b)
-            torques_w = quat_rotate(quat_flat, torques_b.reshape(-1, 3)).reshape_as(
-                torques_b
-            )
-            self.robot.write_external_wrench_to_sim(forces_w, torques_w)
+        with ScopedTimer("underwater.submit_wrench"):
+            composer = getattr(self.robot, "permanent_wrench_composer", None)
+            if composer is not None:
+                composer.set_forces_and_torques(
+                    forces_b,
+                    torques_b,
+                    is_global=False,
+                )
+            else:
+                quat_flat = body_quat_w.reshape(-1, 4)
+                forces_w = quat_rotate(
+                    quat_flat, forces_b.reshape(-1, 3)
+                ).reshape_as(forces_b)
+                torques_w = quat_rotate(
+                    quat_flat, torques_b.reshape(-1, 3)
+                ).reshape_as(torques_b)
+                self.robot.write_external_wrench_to_sim(forces_w, torques_w)
 
     def debug_draw(self):
         if self.env.backend == "isaac":
