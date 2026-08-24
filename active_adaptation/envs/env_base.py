@@ -656,11 +656,12 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     @ScopedTimer("env._step", sync=PROFILE_SYNC_TIMERS)
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
+        with ScopedTimer("process_action", sync=False):
+            self.command_manager.prescribe(tensordict)
+            for input_key, input_manager in self.input_managers.items():
+                input_manager.process_action(tensordict.get(input_key, None))
+        
         with ScopedTimer("simulation", sync=False):
-            with ScopedTimer("process_action", sync=False):
-                for input_key, input_manager in self.input_managers.items():
-                    input_manager.process_action(tensordict.get(input_key))
-
             for substep in range(self.decimation):
                 with ScopedTimer("pre_step_callbacks", sync=False):
                     self.scene.zero_external_wrenches()

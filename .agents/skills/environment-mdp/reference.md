@@ -81,6 +81,7 @@ See SKILL.md [Scene sensors](SKILL.md#scene-sensors) for `contact_sensor` kwargs
 
 ```
 _step(tensordict)
+  ├─ command.prescribe(tensordict)   # optional: fill missing task.input keys
   ├─ for each input_manager: process_action(tensordict[key])
   ├─ for substep in decimation:
   │     zero external wrenches
@@ -223,7 +224,7 @@ Index resolution is shared via `find_sensor_bodies`, but **`sensor.data` field n
 | Penetration / pose | optional `contact_pos_w`, … | `dist`, `pos`, `normal`, `tangent` if requested |
 | Air / contact time | `current_air_time`, `last_air_time`, `current_contact_time`, `last_contact_time` `[N, B]` | same names `[B, P]` when `track_air_time=True` (needs `"found"`) |
 
-**Filtered object–ground (Isaac):** task `sensors.object_contact` with `secondary_entity: terrain` sets filters to GroundPlane/CollisionPlane + generator mesh. Read `force_matrix_w` (sum over filter dim `M` if one force vector is enough). Do not use `net_forces_w` alone — it still includes robot–object contacts.
+**Filtered robot↔ground / robot↔object (Isaac):** declare `sensors.robot_ground` / `sensors.robot_object` with `entity: robot`. The factory auto-inverts to partner-primary + `Robot/.*` filters (`force_matrix_w` `(N, 1, B, 3)`). Prefer that over putting filters on multi-link `Robot/.*` (PhysX many×one failure). Read `force_matrix_w`, not `net_forces_w`.
 
 **Pattern** (e.g. `observations/contact.py` `contact_forces`, or HOI contact rewards):
 
@@ -259,7 +260,18 @@ Ensure the mjlab sensor’s `ContactSensorCfg.fields` includes every quantity th
 - No teleop on V2 (legacy `Command` had `teleop`).
 - **`sync_state`:** refresh intermediates for rewards from the *current* command; do not change commands / next-step targets.
 - **`update`:** may change commands; write next-step targets for observations (rewards on the *next* step read these).
-- **First obs discarded:** post-reset observation is invalid (`is_init`); do not recompute next-step targets in `reset` solely to validate it. See SKILL.md “Command timing”.
+- **`prescribe(tensordict)`:** optional; called once at the start of `_step` **before** `input_manager.process_action`. Fill **missing** keys on the step tensordict that match `task.input` entries (e.g. command-driven `arm_control` while the policy only outputs `action`). Uses reference state from the **previous** step’s `update`, not new targets. Default no-op in `envs/mdp/commands/base.py`.
+- **First obs discarded:** post-reset observation is invalid (`is_init`); do not recompute next-step targets in `reset` solely to validate it. See SKILL.md “Command timing” and “`prescribe`”.
+
+### `prescribe` vs `update` vs policy action
+
+| | `update` | `prescribe` | policy → `action` |
+|--|----------|-------------|-------------------|
+| When | after sim, before obs | start of `_step`, before substeps | env step input |
+| Purpose | next-step command refs | inject non-learned `input.*` | learned control |
+| Tensordict | no | yes (in-place) | yes (`action` key) |
+
+Split-control tasks: declare separate `input.arm_control` + `input.action` in YAML; implement `prescribe` on the command; keep learned dim on `action` only (`env.action_manager`). Example: `aa-projects/uw_manip/…/manip_tracking.py` + `BlueROVHeavyManipTracking.yaml`.
 
 ---
 

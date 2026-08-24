@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 
 from typing import TYPE_CHECKING
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 
 from active_adaptation.registry import RegistryMixin
 from active_adaptation.utils.math import quat_mul, sample_quat_yaw
@@ -119,6 +119,41 @@ class CommandV2(MDPComponent, RegistryMixin):
             sample_quat_yaw(len(env_ids), device=self.device),
         )
         return init_root_state
+    
+    def prescribe(self, tensordict: TensorDictBase) -> None:
+        """Fill prescribed control inputs on the step tensordict before action processing.
+
+        Called once at the start of each env step, **before** input managers run
+        :meth:`~active_adaptation.envs.mdp.actions.base.ActionV2.process_action`.
+        Subclasses may write tensors under keys that match ``task.input`` entries
+        (e.g. ``arm_control``) when the policy did not supply them.
+
+        This is the hook for **command-driven actuation**: reference trajectories,
+        hand-crafted controllers, or other task logic that should not be learned
+        by the policy. Only fill keys that are **missing**
+        (``tensordict.get(key) is None``) so a policy or teleop can still
+        override a slot when present.
+
+        **Why ``prescribe``?** The command *writes* reference inputs into the
+        step batch; it does not return a single action vector and is not the
+        policy's action API. The name avoids colliding with RL *action*
+        terminology and teleop ``get_action``, and reads as intentional task
+        logic ("the command prescribes the arm target") rather than a passive
+        lookup.
+
+        Example (tracking task with policy base control + command-driven IK)::
+
+            def prescribe(self, tensordict):
+                if tensordict.get("arm_control") is None:
+                    tensordict.set(
+                        "arm_control",
+                        torch.cat([self.cmd_eef_pos_b, self.cmd_eef_quat_b], dim=-1),
+                    )
+
+        Default implementation is a no-op.
+        """
+        pass
+
     
     # for relabeling
     def get_state(self) -> TensorDict:

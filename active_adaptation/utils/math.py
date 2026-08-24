@@ -274,6 +274,59 @@ def axis_angle_from_quat(quat: torch.Tensor, eps: float = 1.0e-6) -> torch.Tenso
     return quat[..., 1:4] / sin_half_angles_over_angles.unsqueeze(-1)
 
 
+def quat_from_angle_axis(angle: torch.Tensor, axis: torch.Tensor) -> torch.Tensor:
+    """Convert rotations given as angle-axis to quaternions.
+
+    Args:
+        angle: Rotation angle in radians. Shape ``(...,)``.
+        axis: Unit rotation axis. Shape ``(..., 3)``.
+
+    Returns:
+        Quaternion in ``(w, x, y, z)``. Shape ``(..., 4)``.
+    """
+    theta = (angle / 2).unsqueeze(-1)
+    xyz = normalize(axis) * theta.sin()
+    w = theta.cos()
+    return normalize(torch.cat([w, xyz], dim=-1))
+
+
+def apply_delta_pose(
+    source_pos: torch.Tensor,
+    source_rot: torch.Tensor,
+    delta_pose: torch.Tensor,
+    eps: float = 1.0e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply a delta pose to a source frame.
+
+    ``delta_pose[:, :3]`` is a Cartesian displacement; ``delta_pose[:, 3:6]`` is
+    an orientation increment in axis-angle form (radians).
+
+    Args:
+        source_pos: Source position. Shape ``(N, 3)``.
+        source_rot: Source orientation ``(w, x, y, z)``. Shape ``(N, 4)``.
+        delta_pose: Pose delta. Shape ``(N, 6)``.
+        eps: Threshold below which orientation delta is treated as zero.
+
+    Returns:
+        ``(target_pos, target_rot)`` with shapes ``(N, 3)`` and ``(N, 4)``.
+    """
+    target_pos = source_pos + delta_pose[:, :3]
+    rot_actions = delta_pose[:, 3:6]
+    angle = torch.linalg.vector_norm(rot_actions, dim=1)
+    safe_angle = torch.clamp_min(angle, eps)
+    axis = rot_actions / safe_angle.unsqueeze(-1)
+    identity_quat = torch.tensor(
+        [1.0, 0.0, 0.0, 0.0], device=source_pos.device, dtype=source_pos.dtype
+    ).repeat(source_pos.shape[0], 1)
+    rot_delta_quat = torch.where(
+        angle.unsqueeze(-1).repeat(1, 4) > eps,
+        quat_from_angle_axis(angle, axis),
+        identity_quat,
+    )
+    target_rot = quat_mul(rot_delta_quat, source_rot)
+    return target_pos, target_rot
+
+
 def quat_angle_magnitude(quat: torch.Tensor, eps: float = 1.0e-9) -> torch.Tensor:
     """Compute the rotation angle represented by a quaternion.
 
