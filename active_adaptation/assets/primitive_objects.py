@@ -94,7 +94,7 @@ def _isaac_spawn_kwargs(
             solver_velocity_iteration_count=0,
         ),
         collision_props=sim_utils.CollisionPropertiesCfg(
-            contact_offset=0.005,
+            contact_offset=0.02,
             rest_offset=0.0,
         ),
         mass_props=sim_utils.MassPropertiesCfg(mass=mass),

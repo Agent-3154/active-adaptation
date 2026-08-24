@@ -1,6 +1,6 @@
 ---
 name: environment-mdp
-description: Implement and wire MDP terms in active-adaptation (observations, rewards, terminations, actions, commands, randomizations) using the V2 deferred-init API. Use when adding or modifying classes under envs/mdp/, editing cfg/task/ observation/reward/termination/input/command/randomization/sensors blocks, registering scene sensors (envs/sensors/, contact_sensor), debugging env_base step/reset callbacks, cross-backend contact sensor data (Isaac net_forces_w / force_matrix_w vs mjlab force), debug viz (scene.draw_*, camera frustums), Warp/simple-raycaster raycasting, USD mesh extraction, or Isaac/mjlab Viser viewers.
+description: Implement and wire MDP terms in active-adaptation (observations, rewards, terminations, actions, commands, randomizations) using the V2 deferred-init API. Use when adding or modifying classes under envs/mdp/, editing cfg/task/ observation/reward/termination/input/command/randomization/sensors blocks, implementing command `prescribe` for split policy/command control (e.g. command-driven IK via `arm_control`), registering scene sensors (envs/sensors/, contact_sensor), debugging env_base step/reset callbacks, cross-backend contact sensor data (Isaac net_forces_w / force_matrix_w vs mjlab force), debug viz (scene.draw_*, camera frustums), Warp/simple-raycaster raycasting, USD mesh extraction, or Isaac/mjlab Viser viewers.
 ---
 
 # Environment / MDP terms (active-adaptation)
@@ -28,6 +28,7 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 - Adding a new observation / reward / termination / action / command / randomization
 - Porting a legacy `Reward`/`Observation`/… term to V2
 - Wiring or renaming terms in `cfg/task/`
+- Splitting policy vs command actuation (`input.action` + `command.prescribe` → `input.arm_control`, etc.)
 - Declaring task-level scene sensors (`sensors:` — object contact, filtered ground contact, …)
 - Debugging missing callbacks, wrong step order, or registry lookup failures
 - Debug vectors / points / plots / camera frustums across Isaac and mjlab
@@ -63,7 +64,7 @@ Task Progress:
 - [ ] Contact indices: `find_sensor_bodies` (not `contact_sensor.find_bodies`)
 - [ ] Bind sensors by name: `env.scene.sensors[sensor_name]`, entities via `env.scene.entities[entity_name]`
 - [ ] Implement the type-specific compute / apply / sync API
-- [ ] Optional lifecycle: update, reset(env_ids, tensordict), pre_step, post_step, startup, debug_draw
+- [ ] Optional lifecycle: update, reset(env_ids, tensordict), pre_step, post_step, startup, debug_draw, **prescribe(tensordict)** (command only)
 - [ ] If `debug_draw`: use `env.scene.draw_*` / `create_camera_frustum` (not `env.debug_draw`)
 - [ ] Optional: symmetry_transform (obs/action) for symaug
 - [ ] If overriding `sample_init`: write `env.episode_origin[env_ids] = origins` used for spawn
@@ -87,10 +88,21 @@ Sensors live on the **scene** (`env.scene.sensors`), not on assets. MDP terms on
 
 ```yaml
 sensors:
-  object_contact:
-    _target_: contact_sensor   # registry group "sensor"
-    entity: object             # scene entity key (objects.<name> / robot)
-    secondary_entity: terrain  # optional filter (ground / another entity)
+  # Preferred: sensor on the RigidObject (single body) + one partner each
+  object_robot:
+    _target_: contact_sensor
+    entity: object
+    secondary: robot
+  object_ground:
+    _target_: contact_sensor
+    entity: object
+    secondary: terrain
+
+  # Isaac only: several partners on one sensor → force_matrix_w[..., m, :]
+  # object_contacts:
+  #   _target_: contact_sensor
+  #   entity: object
+  #   secondary: [terrain, robot]
 ```
 
 Factories: `active_adaptation/envs/sensors/` (imported from `active_adaptation/__init__.py` and again in backend `setup_scene`). Register with `registry.register("sensor", name, fn)`.
@@ -111,8 +123,8 @@ Shared kwargs → backend `ContactSensorCfg`:
 |-------|---------|---------|
 | `entity` | `robot` | Scene entity to measure |
 | `pattern` | `None` | Bodies; see Isaac prim rule below |
-| `secondary_entity` | `None` | Contact filter (`terrain` or another entity key) |
-| `secondary_pattern` | `None` | Override filter prim / mjlab match |
+| `secondary` | `None` | Partner(s): str or list (`terrain`, `robot`, object keys) |
+| `secondary_pattern` | `None` | str or list aligned with `secondary` |
 | `track_air_time` | `True` | Air / contact timers |
 | `history_length` | `3` | History buffer |
 | `fields` / `reduce` | mjlab only | `("found","force")` / `"netforce"` |
@@ -122,12 +134,13 @@ Shared kwargs → backend `ContactSensorCfg`:
 - Articulation (`robot`): ContactReportAPI is on **child** links → default `{ENV}/Robot/.*`
 - RigidObject (`object`, …): ContactReportAPI is on the **root** → default `{ENV}/object` (not `{ENV}/object/.*`)
 - Isaac needs `activate_contact_sensors=True` on the asset spawn
-- `secondary_entity: terrain` → filters `/World/ground/terrain/GroundPlane/CollisionPlane` (plane) and `/World/ground/terrain/mesh` (generator). Parent `/World/ground/terrain` is an Xform, not the collision leaf.
+- `secondary: terrain` → `/World/ground/terrain/GroundPlane/CollisionPlane` by default (plane). For generator terrain set `secondary_pattern: /World/ground/terrain/mesh`
+- Prefer task YAML as `robot_ground` / `robot_object` (`entity: robot`, `secondary: terrain|object`). On **Isaac**, multi-link `Robot/.*` + one partner is auto-inverted to one-to-many (partner primary, robot links as filters) → `force_matrix_w` `(N, 1, B_robot, 3)`. Do **not** use `secondary: [terrain, object]` on one Isaac sensor — use two sensors. **mjlab** keeps `entity: robot` as written.
 
 **mjlab**
 
-- `ContactMatch(entity=entity, pattern=...)` for primary
-- `secondary_entity: terrain` → literal body `terrain` (`entity=None`)
+- One `ContactMatch` secondary per sensor. Multiple partners → separate `sensors:` entries (factory raises if `secondary` is a list).
+- `secondary: terrain` → literal body `terrain` (`entity=None`)
 
 ### Binding in MDP terms
 
@@ -147,7 +160,7 @@ def _initialize(self, env):
 
 Do **not** hardcode `"robot"` / `"contact_forces"` when the task may use object sensors.
 
-**Isaac filtered contacts:** with a non-empty `filter_prim_paths_expr`, pair-specific forces are in `force_matrix_w` `(N, B, M, 3)`; `net_forces_w` remains the unfiltered total. Prefer `force_matrix_w` (sum over `M` if needed) for object–ground terms. See `observations/contact.py` → `contact_forces`.
+**Isaac filtered contacts:** with a non-empty `filter_prim_paths_expr`, pair-specific forces are in `force_matrix_w` `(N, B, M, 3)`; `net_forces_w` remains the unfiltered total. Prefer `force_matrix_w` (sum / any over `M` if needed) for object–ground or object–robot terms. See `observations/contact.py` → `contact_forces` and `uw_manip` `ManipTracking` (`object_robot`).
 
 ---
 
@@ -195,7 +208,7 @@ def _initialize(self, env):
 | Reward | `reward.<group>.<name>` | `RewardV2.make` | `_compute() -> Tensor` or `(rew, is_active)` | `compute()` applies `weight` + modifier + EMA |
 | Termination | `termination.<name>` | `TerminationV2.make` | `compute(terminated) -> bool Tensor` or `(term, discount)` | `is_timeout=True` → truncated |
 | Action | `input.<name>` | `ActionV2.make` | `process_action`, `apply_action` | Set `action_dim`; often `symmetry_transform` |
-| Command | `command` | `CommandV2.make` | `sync_state`, `update` | Also `sample_init` (must set `env.episode_origin`); see step order |
+| Command | `command` | `CommandV2.make` | `sync_state`, `update`; optional `prescribe` | Also `sample_init` (must set `env.episode_origin`); see [Command timing](#command-timing) and [`prescribe`](#prescribe-command-driven-inputs) |
 | Randomization | `randomization.<name>` | `RandomizationV2.make` | lifecycle hooks as needed | mjlab: declare `mj_fields` if expanding model |
 
 ### Minimal examples
@@ -249,15 +262,21 @@ observation:
 
 Env construction: `_create_mdp_terms()` (instantiate from cfg) → `_setup_simulation()` → `_initialize_mdp_terms()` → `_build_tensor_specs()`.
 
-Per `_step` (after physics substeps):
+Per `_step`:
 
-1. `command_manager.sync_state()` — refresh intermediates from the active command; **do not** change next-step targets
-2. `update` callbacks (obs/reward/rand/… that override `update`)
-3. rewards → terminations (read last step’s next-step command as this step’s target)
-4. `command_manager.update()` — may resample; write **next-step** targets
-5. observations (see post-`update` command)
+**Before physics** (once per env step):
 
-Inside each physics substep: `process_action` (once) → `apply_action` → `pre_step` → sim → `post_step`.
+1. `command_manager.prescribe(tensordict)` — fill missing `task.input` keys (see [`prescribe`](#prescribe-command-driven-inputs))
+2. each `input_manager.process_action(tensordict.get(key))` — includes prescribed + policy values
+3. physics substeps: `apply_action` → `pre_step` → sim → `post_step`
+
+**After physics**:
+
+4. `command_manager.sync_state()` — refresh intermediates; **do not** change next-step targets
+5. `update` callbacks
+6. rewards → terminations (read last step’s next-step command as this step’s target)
+7. `command_manager.update()` — may resample; write **next-step** targets
+8. observations
 
 First `_reset`: run `startup` callbacks once, then for reset envs: `_reset_idx` → `scene.reset` → `reset` callbacks.
 
@@ -285,6 +304,94 @@ def update(self):
     # write targets for the upcoming obs / next reward step
     ...
 ```
+
+---
+
+## `prescribe`: command-driven inputs
+
+Use **`prescribe(tensordict)`** on `CommandV2` when the command should drive one or more **`task.input`** slots that the policy does **not** learn (reference trajectories, hand-crafted IK targets, scripted gripper phase, etc.).
+
+### When to use
+
+| Pattern | Policy `action` | Command `prescribe` | Example |
+|---------|-----------------|---------------------|---------|
+| Full policy control | all `input.*` keys | no-op (default) | locomotion |
+| Split control | base / throttle only | fills `arm_control`, … | `ManipTracking`: policy → `action`, command → `EndEffectorPose` via `arm_control` |
+| Teleop override | may supply keys | only fill **missing** keys | policy can still pass `arm_control` when present |
+
+### Step order (critical)
+
+`prescribe` runs **once at the start of `_step`**, **before** any `input_manager.process_action`:
+
+```python
+# env_base._step
+self.command_manager.prescribe(tensordict)
+for input_key, input_manager in self.input_managers.items():
+    input_manager.process_action(tensordict.get(input_key, None))
+```
+
+So prescribed values must come from command state already updated on the **previous** step’s `update()` (same timing as reward targets). Do **not** write next-step references in `prescribe`; use `update()` for that.
+
+| Hook | Writes next-step refs? | Runs `process_action`? |
+|------|------------------------|-------------------------|
+| `update` | yes (obs / next reward) | no |
+| `prescribe` | no — uses refs from last `update` | fills tensordict only |
+| `sync_state` | no | no |
+
+### Contract
+
+1. **Key names must match `task.input`** — e.g. `arm_control` for an `EndEffectorPose` action term, not a concatenated policy vector.
+2. **Only fill missing keys** — check `tensordict.get(key) is None` before `tensordict.set(...)`. If the learner or teleop already set the key, leave it alone.
+3. **Shape must match the action term** — `(num_envs, action_dim)` for that input manager (e.g. 7D pose: pos₃ + quat₄ in body frame).
+4. **Default is no-op** — override only when the task needs command-driven actuation.
+5. **Not the policy action API** — do not return a single flat action; do not confuse with legacy teleop `get_action`. `prescribe` mutates the step tensordict in place.
+
+### YAML wiring (split control)
+
+```yaml
+input:
+  arm_control:
+    _target_: EndEffectorPose
+    joint_names: "arm_joint[1-6]"
+    body_name: grasp_point
+  action:
+    _target_: ConcatenatedAction
+    actions:
+      - _target_: UnderwaterThrottle
+      - _target_: CorrelatedJointPosition
+        joint_names: "arm_joint[7,8]"
+```
+
+Policy / algo specs use **`action_manager`** (typically `input.action` only). Prescribed keys like `arm_control` are **omitted** from the learned action space.
+
+### Implementation sketch
+
+```python
+class MyTracking(CommandV2):
+    @override
+    def update(self) -> None:
+        # advance clip index; write cmd_eef_pos_b / cmd_eef_quat_b for next step
+        self._write_tracking_refs(None, self._raw_time_steps)
+        self._refresh_body_frame_commands()
+
+    @override
+    def prescribe(self, tensordict: TensorDictBase) -> None:
+        if tensordict.get("arm_control") is None:
+            tensordict.set(
+                "arm_control",
+                torch.cat([self.cmd_eef_pos_b, self.cmd_eef_quat_b], dim=-1),
+            )
+```
+
+Reference: `CommandV2.prescribe` docstring in `envs/mdp/commands/base.py`; example `uw_manip.commands.manip_tracking.ManipTracking`.
+
+### Anti-patterns (`prescribe`)
+
+- Writing next-step trajectory targets in `prescribe` instead of `update`
+- Always overwriting input keys (breaks teleop / ablations that pass `arm_control` from outside)
+- Putting prescribe logic in `sync_state` or `reset` (wrong phase; `process_action` never sees it)
+- Using a single flat `action` tensor in the command when YAML defines separate `input.*` managers
+- Expecting `prescribe` to run inside physics substeps (it runs once per env step, before substeps)
 
 ---
 
@@ -517,6 +624,8 @@ Isaac/mjlab **Viser** robot meshes (viewer internals, not MDP terms): same body-
 - Accessing `env.scene` / assets in `__init__` (scene does not exist yet)
 - Subclassing legacy `Reward` / `Observation` / …
 - Putting command resampling or next-step target writes in `sync_state` (use `update`)
+- Writing reference inputs in `sync_state` / `reset` instead of `prescribe` + `update` (see [`prescribe`](#prescribe-command-driven-inputs))
+- Overwriting prescribed `task.input` keys in `prescribe` when the key is already set (breaks policy override / teleop)
 - Re-evaluating next-step command/obs targets in `reset` “to fix” the first obs (that obs is discarded via `is_init`)
 - Overriding `sample_init` without writing `env.episode_origin[env_ids]` (shared 3DGS / episode-local consumers break)
 - Subtracting `scene.env_origins` for episode-local frames when spawn was randomized — use `env.episode_origin`
