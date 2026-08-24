@@ -98,11 +98,22 @@ class IsaacBackendEnv(_EnvBase):
             cfg.prim_path = "{ENV_REGEX_NS}/" + obj_name
             setattr(scene_cfg, obj_name, cfg)
 
+        import active_adaptation.envs.sensors  # noqa: F401  # register sensor factories
+        from active_adaptation.envs.sensors.warp_base import (
+            WarpSensorSpec,
+            install_warp_sensors,
+            is_warp_sensor_spec,
+        )
+
+        warp_sensor_specs: dict[str, WarpSensorSpec] = {}
         for sensor_name, sensor_spec in self.cfg.get("sensors", {}).items():
             sensor_spec = dict(sensor_spec)
             fn = registry.get("sensor", sensor_spec.pop("_target_"))
-            cfg = fn(backend="isaaclab", name=sensor_name, **sensor_spec)
-            setattr(scene_cfg, sensor_name, cfg)
+            result = fn(backend="isaaclab", name=sensor_name, **sensor_spec)
+            if is_warp_sensor_spec(result):
+                warp_sensor_specs[sensor_name] = result
+            else:
+                setattr(scene_cfg, sensor_name, result)
         
         for observation in self.observation_groups.values():
             for func in observation.funcs.values():
@@ -176,6 +187,7 @@ class IsaacBackendEnv(_EnvBase):
 
         self.sim = IsaacSimAdapter(sim, viser_viewer)
         self.scene = IsaacSceneAdapter(self.scene, viser_viewer, debug_draw)
+        install_warp_sensors(self.scene, warp_sensor_specs, env=self)
         self.terrain_type = self.scene.terrain.cfg.terrain_type
         self.robot = self.scene.articulations["robot"]
 
