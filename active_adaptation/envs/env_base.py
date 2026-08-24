@@ -677,6 +677,8 @@ class _EnvBase(EnvBase, RegistryMixin):
                             self.sim.render_gui()
                 with ScopedTimer("scene.update", sync=PROFILE_SYNC_TIMERS):
                     self.scene.update(self.physics_dt)
+                    if hasattr(self.scene, "update_warp_sensors"):
+                        self.scene.update_warp_sensors()
                 with ScopedTimer("post_step_callbacks", sync=False):
                     [callback(substep) for callback in self._post_step_callbacks]
 
