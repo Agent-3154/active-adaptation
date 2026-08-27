@@ -46,6 +46,21 @@ SESSION_NAME="mn-$(date +%Y%m%d-%H%M%S)"
 REPO_DIR=$(pwd)
 DEFAULT_GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 NODES=()
+FORWARDED_ENV_VARS=(
+    HF_HUB_OFFLINE
+    HF_HUB_DISABLE_TELEMETRY
+    HF_HUB_ETAG_TIMEOUT
+    NCCL_IB_DISABLE
+    NCCL_IB_HCA
+    NCCL_IB_GID_INDEX
+    NCCL_SOCKET_IFNAME
+    NCCL_DEBUG
+    PYTORCH_ALLOC_CONF
+    ACTIVE_ADAPTATION_DISTRIBUTED_TIMEOUT_S
+    AA_PRINT_PERF_INTERVAL
+    AA_PRINT_METRICS_INTERVAL
+    AA_PARAM_SYNC_ITERS
+)
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -149,7 +164,7 @@ for rank in "${!HOSTS[@]}"; do
     log_path="$log_dir/rank${rank}-${host}.log"
 
     train_cmd=(
-        uv --project "$UV_PROJECT" run torchrun
+        uv --project "$UV_PROJECT" run --no-sync torchrun
         "--nnodes=$NNODES"
         "--nproc_per_node=$EXPECTED_NPROC"
         "--node_rank=$rank"
@@ -164,10 +179,20 @@ for rank in "${!HOSTS[@]}"; do
     remote_cmd+="; mkdir -p $(quote "$log_dir")"
     remote_cmd+="; export PATH=\"\$HOME/.local/bin:/snap/bin:\$PATH\""
     remote_cmd+="; export CUDA_VISIBLE_DEVICES=$(quote "$gpu_ids")"
+    for env_var in "${FORWARDED_ENV_VARS[@]}"; do
+        if [ -n "${!env_var:-}" ]; then
+            remote_cmd+="; export $env_var=$(quote "${!env_var}")"
+        fi
+    done
     remote_cmd+="; if [ -z \"\${OMP_NUM_THREADS:-}\" ]; then total_cpus=\$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc); export OMP_NUM_THREADS=\$(( total_cpus / $EXPECTED_NPROC )); if [ \"\$OMP_NUM_THREADS\" -lt 1 ]; then export OMP_NUM_THREADS=1; fi; fi"
     remote_cmd+="; echo host=\$(hostname) rank=$rank cuda_visible_devices=\$CUDA_VISIBLE_DEVICES omp_threads=\$OMP_NUM_THREADS master=$MASTER_ADDR:$MASTER_PORT"
+    remote_cmd+="; set +e"
     remote_cmd+="; $(join_quoted "${train_cmd[@]}") 2>&1 | tee -a $(quote "$log_path")"
+    remote_cmd+="; launch_status=\${PIPESTATUS[0]}"
+    remote_cmd+="; set -e"
+    remote_cmd+="; echo __AA_LAUNCH_EXIT_CODE__=\$launch_status | tee -a $(quote "$log_path")"
+    remote_cmd+="; exit \$launch_status"
 
     echo "rank=$rank host=$host gpu_ids=$gpu_ids tmux=$rank_session log=$log_path"
-    ssh -o BatchMode=yes "$host" "tmux new-session -d -s $(quote "$rank_session") bash -lc $(quote "$remote_cmd")"
+    ssh -o BatchMode=yes -o ConnectTimeout=8 "$host" "tmux new-session -d -s $(quote "$rank_session") bash -lc $(quote "$remote_cmd")"
 done
