@@ -4,6 +4,7 @@ import importlib
 import os
 
 from .base import Reward
+from . import common
 
 
 _dir_path = os.path.dirname(os.path.realpath(__file__))

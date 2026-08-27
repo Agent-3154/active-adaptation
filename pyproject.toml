@@ -4,74 +4,51 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "active_adaptation"
-version = "0.5.0"
+version = "0.8.1"
 authors = [
     {name = "btx0424@SUSTech"}
 ]
 keywords = ["robotics", "rl"]
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "setproctitle",
     "hydra-core",
     "omegaconf",
     "wandb",
-    "moviepy",
-    "av",
     "einops",
     "termcolor",
-    "pygame",
     "onnxruntime",
     "onnxscript",
     "jaxtyping",
-    "torch",
     "tensordict",
     "torchrl",
+    "torch==2.11",
+    "torchvision==0.26.0",
     "imageio",
-    "mujoco",
-    "huggingface_hub",
     "linuxfd",
     "pdbpp",
     "scipy",
     "trimesh",
+    "matplotlib>=3.11.1",
+    "typer",
 ]
 
 [project.optional-dependencies]
-mjlab = [
-    "mjlab==1.3.0",
-    "torch==2.10.*",
-    "warp-lang==1.12.0",
-]
-
-isaaclab = [
-    "isaaclab[isaacsim,all]==2.3.2.post1; python_version == '3.11'",
-    "warp-lang==1.12.0",
-    "xxhash",
+render = [
+    "fvdb-core[viewer]==0.5.1+pt211.cu130",
+    # Robot mesh rasterization for GS composite (needs torch already installed).
+    "nvdiffrast",
+    "ninja",
 ]
 
 [project.scripts]
-aa-create-project = "active_adaptation.cli:aa_create_project"
-aa-discover-projects = "active_adaptation.cli:aa_discover_projects"
-aa-project = "active_adaptation.cli:aa_project"
+aa-project = "active_adaptation.cli:main"
 aa-list-tasks = "active_adaptation.cli:aa_list_tasks"
-aa-pull = "active_adaptation.cli:aa_pull"
-aa-recent-commands = "active_adaptation.cli:aa_recent_commands"
 
 [project.entry-points."active_adaptation.projects"]
 facet = "projects.facet"
 mimic = "projects.mimic"
 metamorph = "projects.metamorph"
-
-[[tool.uv.index]]
-name = "nvidia"
-url = "https://pypi.nvidia.com/"
-
-[tool.uv]
-override-dependencies = [
-    "torch==2.10.*",
-]
-
-[tool.uv.sources]
-isaaclab = { index = "nvidia" }
 
 [tool.setuptools.packages]
 find = { where = ["."], include = [
@@ -88,3 +65,25 @@ find = { where = ["."], include = [
 [tool.pyright]
 # typeCheckingMode = "strict"
 reportIncompatibleMethodOverride = "error"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "fvdb"
+url = "https://d36m13axqqhiit.cloudfront.net/simple"
+explicit = true
+
+[tool.uv]
+# nvdiffrast compiles CUDA extensions against the env's torch (official install).
+no-build-isolation-package = ["nvdiffrast"]
+
+[tool.uv.sources]
+# Force CUDA 12.8-compatible PyTorch wheels instead of default cu13x builds.
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+fvdb-core = { index = "fvdb" }
+nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", rev = "253ac4fcea7de5f396371124af597e6cc957bfae" }

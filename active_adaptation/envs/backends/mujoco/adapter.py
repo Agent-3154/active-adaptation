@@ -13,11 +13,18 @@ class MujocoSimAdapter(SimAdapter):
     def has_gui(self) -> bool:
         return self._sim.has_gui()
 
-    def step(self, render: bool = False) -> None:
-        self._sim.step(render=render)
+    def step(self) -> None:
+        self._sim.step(render=False)
+
+    def render_sensors(self) -> None:
+        # Standalone mujoco backend has no tiled camera products yet.
+        pass
+
+    def render_gui(self) -> None:
+        self._sim.render()
 
     def render(self) -> None:
-        self._sim.render()
+        self.render_gui()
 
     def set_camera_view(self, eye=None, target=None, **kwargs) -> None:
         pass

@@ -77,6 +77,7 @@ VELOCITY_LIMIT = 30.0
 def make_isaaclab_cfg(self_collisions: bool = False):
     from isaaclab.sensors import ContactSensorCfg
     from active_adaptation.assets.asset_cfg import (
+        AssetSpec,
         ArticulationCfg,
         ImplicitActuatorCfg,
         sim_utils,
@@ -131,12 +132,12 @@ def make_isaaclab_cfg(self_collisions: bool = False):
             history_length=3,
         )
     }
-    return asset_cfg, sensors
+    return AssetSpec(config=asset_cfg, sensors=sensors)
 
 
 def make_mjlab_cfg():
     import mujoco
-    from active_adaptation.assets.asset_cfg import EntityCfg
+    from active_adaptation.assets.asset_cfg import AssetSpec, EntityCfg
     from mjlab.entity import EntityArticulationInfoCfg
     from mjlab.utils.spec_config import CollisionCfg
     from mjlab.actuator import BuiltinPositionActuatorCfg
@@ -171,6 +172,7 @@ def make_mjlab_cfg():
                 contype=0,
                 conaffinity=1,
                 condim=3,
+                priority=0,
             ),
         ),
         joint_symmetry_mapping=JOINT_SYMMETRY_MAPPING,
@@ -178,7 +180,7 @@ def make_mjlab_cfg():
         joint_names_simulation=JOINT_NAMES_SIMULATION,
         body_names_simulation=BODY_NAMES_SIMULATION,
     )
-    return cfg
+    return AssetSpec(config=cfg, sensors=())
 
 def make_cfg(backend: Literal["isaaclab", "mjlab"]):
     if backend == "isaaclab":

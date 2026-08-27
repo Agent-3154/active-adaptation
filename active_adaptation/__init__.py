@@ -1,12 +1,6 @@
 import os
-import sys
-import json
-import datetime
 import builtins
 import inspect
-import importlib
-import glob
-import warp as wp
 
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
@@ -15,22 +9,29 @@ from hydra.core.plugins import Plugins
 
 from active_adaptation.project_loading.manifest import CACHE_DIR
 from active_adaptation.project_loading.plugin import ActiveAdaptationSearchPathPlugin
-from active_adaptation.project_loading.runtime import import_environment_projects
+from active_adaptation.project_loading.runtime import (
+    import_environment_projects,
+    resolve_wandb_defaults,
+)
 
 import active_adaptation.learning
 
 OmegaConf.register_new_resolver("frac", lambda s: float(Fraction(s)))
 OmegaConf.register_new_resolver("eval", eval)
+OmegaConf.register_new_resolver("rank", lambda: get_local_rank())
+OmegaConf.register_new_resolver(
+    "rank_select",
+    lambda xs: xs[get_local_rank() % len(xs)],
+)
 Plugins.instance().register(ActiveAdaptationSearchPathPlugin)
 
 _BACKEND = None
 _BACKEND_SET = False
 _CALLED_AT = None
 
-_RANK = int(os.getenv("RANK", os.getenv("LOCAL_RANK", "0")))
 _LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
 _WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
-_MAIN_PROCESS = _RANK == 0
+_MAIN_PROCESS = _LOCAL_RANK == 0
 _ISAACLAB_EXCLUDED_EXTENSIONS = ("omni.warp.core",)
 
 
@@ -44,10 +45,6 @@ def is_distributed():
 
 def get_local_rank():
     return _LOCAL_RANK
-
-
-def get_rank():
-    return _RANK
 
 
 def get_world_size():
@@ -74,40 +71,13 @@ def _apply_default_isaaclab_kit_args(app_config: dict) -> dict:
     return app_config
 
 
-def _expose_isaacsim_extension_modules() -> None:
-    """Expose pip IsaacSim extension packages as importable Python modules."""
-
-    try:
-        import isaacsim
-    except Exception:
-        return
-
-    isaacsim_root = Path(isaacsim.__file__).resolve().parent
-    search_roots = [
-        isaacsim_root / "exts",
-        isaacsim_root / "extscache",
-        isaacsim_root / "kit" / "extscore",
-    ]
-    for root in search_roots:
-        for path in glob.glob(str(root / "*")):
-            if os.path.isdir(path) and path not in sys.path:
-                sys.path.insert(0, path)
-
-    for root in (isaacsim_root / "exts", isaacsim_root / "extscache"):
-        for path in glob.glob(str(root / "*" / "isaacsim")):
-            if os.path.isdir(path) and path not in isaacsim.__path__:
-                isaacsim.__path__.append(path)
-
-
 # Save original print function
 _original_print = builtins.print
 
 
 def _ranked_print(*args, **kwargs):
     """Print function with rank information prefix."""
-    _original_print(
-        f"[RANK {_RANK}/{_WORLD_SIZE} local={_LOCAL_RANK}]:", *args, **kwargs
-    )
+    _original_print(f"[RANK {_LOCAL_RANK}/{_WORLD_SIZE}]:", *args, **kwargs)
 
 
 # Override builtins.print for global effect
@@ -127,9 +97,9 @@ def set_backend(backend: str):
         raise RuntimeError(
             f"set_backend() already called at {_CALLED_AT['filename']}:{_CALLED_AT['lineno']} in {_CALLED_AT['function']}"
         )
-    if not backend in ("isaaclab", "mujoco", "mjlab"):
+    if not backend in ("isaaclab", "mujoco", "mjlab", "motrix"):
         raise ValueError(
-            f"backend must be either 'isaaclab' or 'mujoco' or 'mjlab', got {backend}"
+            f"backend must be either 'isaaclab' or 'mujoco' or 'mjlab' or 'motrix', got {backend}"
         )
     # Record the call site
     stack = inspect.stack()
@@ -145,9 +115,8 @@ def set_backend(backend: str):
 
 
 def get_backend():
-    if not _BACKEND_SET:
-        raise RuntimeError("set_backend() must be called before get_backend()")
-    return _BACKEND
+    """Return None if the backend is not set."""
+    return _BACKEND if _BACKEND_SET else None
 
 
 def init(cfg: DictConfig, auto_rank: bool):
@@ -158,65 +127,64 @@ def init(cfg: DictConfig, auto_rank: bool):
         auto_rank: Whether to automatically modify `cfg.device` according to the local rank.
     """
 
-    if auto_rank:
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.set_device(get_local_rank())
-        except Exception:
-            pass
-
-    wp.init()
-
-    # Store sys.argv to a local file
-    if is_main_process():
-        argv_file = CACHE_DIR / "command_history.json"
-        if argv_file.exists():
-            try:
-                history = json.loads(argv_file.read_text())
-            except Exception:
-                history = []
-        else:
-            history = []
-        entry = {"timestamp": datetime.datetime.now().isoformat(), "args": sys.argv}
-        history.append(entry)
-        argv_file.write_text(json.dumps(history, indent=2))
-
     set_backend(cfg.backend)
     if _BACKEND == "mjlab":
         cfg.device = "cuda"  # force to use GPU for mjlab
     elif _BACKEND == "mujoco":
         cfg.device = "cpu"  # force to use CPU for mujoco
+    elif _BACKEND == "motrix":
+        pass # motrixsim env lives on CPU while policy training can be on GPU
 
-    if auto_rank and (str(cfg.device) == "cuda"):
+    if auto_rank and str(cfg.device).startswith("cuda"):
+        # Remap bare "cuda" / "cuda:0" etc. onto the local visible device index.
         cfg.device = f"cuda:{get_local_rank()}"
 
     if is_distributed():
         import torch
         import torch.distributed as dist
 
+        # NCCL uses torch.cuda.current_device(). Without set_device, every rank
+        # stays on visible cuda:0 → "Duplicate GPU detected".
+        if auto_rank and torch.cuda.is_available():
+            torch.cuda.set_device(get_local_rank())
+
         if dist.is_available() and not dist.is_initialized():
-            timeout_s = os.getenv("ACTIVE_ADAPTATION_DISTRIBUTED_TIMEOUT_S")
-            timeout = None
-            if timeout_s:
-                timeout = datetime.timedelta(seconds=float(timeout_s))
             dist.init_process_group(
                 backend="nccl",
                 # world_size=get_world_size(),
                 # rank=get_local_rank(),
                 init_method="env://",
-                **({"timeout": timeout} if timeout is not None else {}),
             )
 
     if get_backend() == "isaaclab":
         from isaaclab.app import AppLauncher
+        # viser and isaac have some conflicts, so we need to import viser here
+        import viser
 
         app_config = OmegaConf.to_container(cfg.app, resolve=True)
         app_config = _apply_default_isaaclab_kit_args(app_config)
         AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
-        _expose_isaacsim_extension_modules()
+        # SimulationApp can reset torch's current CUDA device to 0; re-bind so
+        # later NCCL collectives (e.g. broadcast_object_list before env create)
+        # do not all land on the same visible GPU.
+        if is_distributed() and auto_rank:
+            import torch
 
-    import_environment_projects()
+            if torch.cuda.is_available():
+                torch.cuda.set_device(get_local_rank())
+
+    import active_adaptation.assets # register assets
+    import active_adaptation.envs.sensors  # register sensors
+    projects = import_environment_projects()
+
+    default_wandb_api_key, default_wandb_project, default_wandb_entity = resolve_wandb_defaults(projects)
+    if default_wandb_api_key is not None and not os.getenv("WANDB_API_KEY"):
+        os.environ["WANDB_API_KEY"] = default_wandb_api_key
+    if default_wandb_entity is not None and not os.getenv("WANDB_ENTITY"):
+        os.environ["WANDB_ENTITY"] = default_wandb_entity
+    if default_wandb_project is not None:
+        wandb_cfg = cfg.get("wandb")
+        if wandb_cfg is not None and "project" in wandb_cfg:
+            wandb_cfg.project = default_wandb_project
 
     return cfg

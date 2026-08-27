@@ -1,49 +1,45 @@
 """Discounted-return variance reward scaling (FlashSAC-style).
 
-Running stats on scalar discounted returns ``G_r`` are used to scale rewards at
-training time: ``reward / max(sqrt(var(G_r) + eps), |G_r|_max / G_max)``.
+Running stats on scalar discounted returns ``G_r`` scale rewards at training
+time: ``reward / sqrt(var(G_r) + eps)``. No task-dependent return cap.
 """
 
 from __future__ import annotations
 
 import os
-from typing import TypeVar
+from collections import OrderedDict
+from typing import Any, TypeVar
 
 import torch
+import torch.distributed as dist
 
 Config = TypeVar("Config")
 
 
-@torch.compile
 def _update_reward_stats(
     reward: torch.Tensor,
     terminated: torch.Tensor,
     truncated: torch.Tensor,
     G_r: torch.Tensor,
-    G_r_max: torch.Tensor,
     gamma: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     done = torch.logical_or(terminated, truncated).float()
-    new_G_r = gamma * (1.0 - done) * G_r + reward
-    new_G_r_max = torch.maximum(G_r_max, torch.max(torch.abs(new_G_r)))
-    return new_G_r, new_G_r_max
+    return gamma * (1.0 - done) * G_r + reward
 
 
-@torch.compile
+def _reward_denominator(G_var: torch.Tensor, eps: float) -> torch.Tensor:
+    """``sqrt(var(G_r) + eps)`` used as the reward scale."""
+    return torch.sqrt(G_var + eps)
+
+
 def _scale_reward(
     rewards: torch.Tensor,
     G_var: torch.Tensor,
-    G_r_max: torch.Tensor,
-    G_max: float,
     eps: float,
 ) -> torch.Tensor:
-    var_denominator = torch.sqrt(G_var + eps)
-    min_required_denominator = G_r_max / G_max
-    denominator = torch.maximum(var_denominator, min_required_denominator)
-    return rewards / denominator
+    return rewards / _reward_denominator(G_var, eps)
 
 
-@torch.compile
 def _update_mean_var_count_from_moments(
     samples: torch.Tensor,
     running_mean: torch.Tensor,
@@ -100,16 +96,13 @@ class RewardNormalizer:
     def __init__(
         self,
         gamma: float,
-        G_max: float,
         load_rms: bool,
         device: torch.device,
         epsilon: float = 1e-8,
     ):
         self.gamma = gamma
         self.G_r = torch.zeros(1, dtype=torch.float32, device=device)
-        self.G_r_max = torch.zeros(1, dtype=torch.float32, device=device)
         self.G_rms = RunningMeanStd(shape=(1,), device=device, dtype=torch.float32)
-        self.G_max = G_max
         self.load_rms = load_rms
         self.epsilon = epsilon
         self.device = device
@@ -120,12 +113,11 @@ class RewardNormalizer:
         terminated: torch.Tensor,
         truncated: torch.Tensor,
     ) -> None:
-        self.G_r, self.G_r_max = _update_reward_stats(
+        self.G_r = _update_reward_stats(
             reward=reward,
             terminated=terminated,
             truncated=truncated,
             G_r=self.G_r,
-            G_r_max=self.G_r_max,
             gamma=self.gamma,
         )
         self.G_rms.update(self.G_r)
@@ -134,26 +126,98 @@ class RewardNormalizer:
         return _scale_reward(
             rewards=rewards,
             G_var=self.G_rms.var,
-            G_r_max=self.G_r_max,
-            G_max=self.G_max,
             eps=self.epsilon,
         )
 
+    def reward_denominator(self) -> torch.Tensor:
+        """Scalar S with ``r_normalized = r_raw / S`` (same S as :meth:`normalize_rewards`)."""
+        return _reward_denominator(self.G_rms.var, self.epsilon)
+
+    def denormalize_return_values(self, values: torch.Tensor) -> torch.Tensor:
+        """Map Q trained on normalized rewards to PPO effective-horizon log scale.
+
+        Undoes return-std reward scaling (``* S``) then multiplies by ``(1 - gamma)``
+        so logged values match on-policy critics trained with
+        ``reward * (1 - gamma)``. Without a normalizer, off-policy already uses
+        that reward scale and needs no conversion.
+        """
+        s = self.reward_denominator().to(device=values.device, dtype=values.dtype)
+        return values * s * (1.0 - float(self.gamma))
+
+    def state_dict(self) -> dict[str, Any]:
+        """Serializable running statistics (checkpoint / :meth:`torch.save`)."""
+        return OrderedDict(
+            [
+                ("G_r", self.G_r.detach().cpu()),
+                ("G_rms_mean", self.G_rms.mean.detach().cpu()),
+                ("G_rms_var", self.G_rms.var.detach().cpu()),
+                ("G_rms_count", self.G_rms.count.detach().cpu()),
+            ]
+        )
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore running stats on :attr:`device` from :meth:`state_dict`.
+
+        Older checkpoints may still contain unused ``G_r_max``; it is ignored.
+        """
+        self.G_r = state["G_r"].to(device=self.device, dtype=torch.float32)
+        self.G_rms.mean = state["G_rms_mean"].to(device=self.device, dtype=torch.float32)
+        self.G_rms.var = state["G_rms_var"].to(device=self.device, dtype=torch.float32)
+        self.G_rms.count = state["G_rms_count"].to(device=self.device, dtype=torch.float32)
+        self.G_rms.device = self.device
+
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        state = {
-            "G_r": self.G_r,
-            "G_r_max": self.G_r_max,
-            "G_rms_mean": self.G_rms.mean,
-            "G_rms_var": self.G_rms.var,
-            "G_rms_count": self.G_rms.count,
-        }
-        torch.save(state, path)
+        torch.save(self.state_dict(), path)
 
     def load(self, path: str) -> None:
-        state = torch.load(path, map_location=self.device)
-        self.G_r = state["G_r"]
-        self.G_r_max = state["G_r_max"]
-        self.G_rms.mean = state["G_rms_mean"]
-        self.G_rms.var = state["G_rms_var"]
-        self.G_rms.count = state["G_rms_count"]
+        self.load_state_dict(torch.load(path, map_location="cpu"))
+
+    def _running_stat_tensors(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self.G_r,
+            self.G_rms.mean,
+            self.G_rms.var,
+            self.G_rms.count,
+        )
+
+    @torch.no_grad()
+    def synchronize(self, mode: str = "broadcast") -> None:
+        """Synchronize running stats across distributed ranks.
+
+        Args:
+            mode: ``"broadcast"`` copies rank-0 stats to every rank (used by
+                SAC after per-rank rollout updates). ``"aggregate"`` merges
+                :attr:`G_rms` with a count-weighted mean/var reduction and
+                averages :attr:`G_r`.
+        """
+        if not dist.is_available() or not dist.is_initialized():
+            raise RuntimeError("Distributed training is not initialized")
+
+        if mode == "broadcast":
+            for tensor in self._running_stat_tensors():
+                dist.broadcast(tensor, src=0)
+        elif mode == "aggregate":
+            dist.all_reduce(self.G_r, op=dist.ReduceOp.AVG)
+
+            mean = self.G_rms.mean.to(dtype=torch.float64)
+            var = self.G_rms.var.to(dtype=torch.float64)
+            count = self.G_rms.count.to(dtype=torch.float64)
+            sqmean = var + mean.square()
+            weighted_mean = mean * count
+            weighted_sqmean = sqmean * count
+            dist.all_reduce(weighted_mean, op=dist.ReduceOp.SUM)
+            dist.all_reduce(weighted_sqmean, op=dist.ReduceOp.SUM)
+            dist.all_reduce(count, op=dist.ReduceOp.SUM)
+
+            count_global = count.clamp_min(1.0)
+            mean_global = weighted_mean / count_global
+            sqmean_global = weighted_sqmean / count_global
+            var_global = (sqmean_global - mean_global.square()).clamp_min(
+                self.G_rms.epsilon
+            )
+            self.G_rms.mean.copy_(mean_global.to(dtype=self.G_rms.mean.dtype))
+            self.G_rms.var.copy_(var_global.to(dtype=self.G_rms.var.dtype))
+            self.G_rms.count.copy_(count.to(dtype=self.G_rms.count.dtype))
+        else:
+            raise ValueError(f"Invalid mode: {mode}")

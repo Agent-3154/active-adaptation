@@ -1,0 +1,51 @@
+# @package _global_
+# Example: teacher PPO -> rollout -> relabel -> RLPD SAC
+#
+# To skip completed stages, comment them out and seed from a prior run:
+#   python scripts/pipeline.py run_state=/path/to/wandb/.../files/run_state.yaml
+#
+# Multi-GPU train stages: set gpus (do not wrap pipeline.py with launch_ddp).
+name: a2_relabel_rlpd
+work_dir: ./outputs_pipeline/${name}/${now:%Y-%m-%d-%H-%M-%S}
+
+stages:
+  - name: train_teacher
+    script: train_ppo.py
+    gpus: "0,1"
+    overrides:
+      - task=A2/A2LocoManip
+      - algo=ppo_symaug
+      # - total_frames=2048 # for debugging
+      # - task.num_envs=16
+      # - wandb.mode=disabled
+
+  - name: rollout
+    script: rollout.py
+    overrides:
+      - task=A2/A2LocoManip
+      # Mixed teacher modes so relabel covers goal reaching (world) and
+      # trajectory following (body/nominal).
+      # - task.command.mode_probs_0=[0.0, 0.0, 1.0]
+      - task.command.mode_probs_1=[0.4, 0.4, 0.2]
+      - task.num_envs=256
+      - algo=ppo_symaug
+      - checkpoint_path=${run_state.checkpoint_path}
+      - ~task.reward.loco.linvel_exp
+      - ~task.reward.loco.linvel_projection
+      - ~task.reward.loco.angvel_z_exp
+
+  - name: relabel
+    script: relabel.py
+    overrides:
+      - task=A2/A2LocoManipSparse
+      - rollout_path=${run_state.rollout_path}
+      - reward_groups=["manip"]
+
+  - name: train_rlpd
+    script: train_offpolicy.py
+    # gpus: "0,1"
+    overrides:
+      - task=A2/A2LocoManipSparse
+      - algo=sac_dist
+      - algo.prior_data=${run_state.relabeled_path}
+      # - algo.prior_data=${run_state.rollout_path}

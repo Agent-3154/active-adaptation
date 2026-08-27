@@ -1,10 +1,17 @@
+from __future__ import annotations
+
 import torch
+from typing import TYPE_CHECKING
 from tensordict import TensorDictBase
 from tensordict.nn import TensorDictModuleBase
 from collections import OrderedDict
 from torch.nn.parallel import DistributedDataParallel as DDP
 from termcolor import colored
 from .common import *
+
+
+if TYPE_CHECKING:
+    from active_adaptation.envs import _EnvBase
 
 
 class PPOBase(TensorDictModuleBase):
@@ -23,7 +30,7 @@ class PPOBase(TensorDictModuleBase):
         """
         raise NotImplementedError("get_rollout_policy must be implemented in subclass")
 
-    def on_stage_start(self, stage: str):
+    def on_stage_start(self, stage: str, env: _EnvBase):
         pass
 
     def step_schedule(self, progress: float):
@@ -52,9 +59,16 @@ class PPOBase(TensorDictModuleBase):
         values = tensordict["state_value"]
         next_values = tensordict["next", "state_value"]
 
-        rewards = tensordict[REWARD_KEY].sum(-1, keepdim=True)
+        rewards = tensordict[REWARD_KEY]
+        if isinstance(rewards, TensorDict):
+            rewards = torch.concat(list(rewards.values()), dim=-1)
+        rewards = rewards.sum(-1, keepdim=True)
+        tensordict["next", "reward_aggregated"] = rewards
         if clamp_reward:
             rewards = rewards.clamp_min(0.0)
+        # scale according to the effective horizon
+        rewards = rewards * (1.0 - self.gae.gamma)
+
         discount = tensordict["next", "discount"]
         terms = tensordict[TERM_KEY]
         dones = tensordict[DONE_KEY]

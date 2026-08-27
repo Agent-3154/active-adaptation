@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from typing import List
+from typing import TYPE_CHECKING, List
 from typing_extensions import override
 
 from active_adaptation.utils.symmetry import SymmetryTransform
@@ -10,19 +10,33 @@ from active_adaptation.utils.symmetry import SymmetryTransform
 from .base import Action
 
 
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import _EnvBase
+
+
 class ConcatenatedAction(Action):
     """Concatenate multiple action managers into a single action space."""
 
-    def __init__(self, env, actions: List):
-        super().__init__(env)
+    def __init__(self, actions: List):
+        super().__init__()
+        self._action_specs = [dict(spec) for spec in actions]
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
         self.action_managers: List[Action] = []
 
-        for spec in actions:
-            cls = Action.registry[spec.pop("_target_")]
-            self.action_managers.append(cls(self.env, **spec))
+        for spec in self._action_specs:
+            cls_name = spec.pop("_target_")
+            action_manager = Action.make(cls_name, **spec)
+            if not action_manager:
+                raise ValueError(f"Action class '{cls_name}' not found")
+            action_manager._initialize(self.env)
+            self.action_managers.append(action_manager)
         self.action_dims = [
             action_manager.action_dim for action_manager in self.action_managers
         ]
+        self.names = sum([action_manager.names for action_manager in self.action_managers], [])
 
     @property
     def action_dim(self):

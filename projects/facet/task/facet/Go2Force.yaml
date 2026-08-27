@@ -110,7 +110,7 @@ randomization:
     static_friction_range:  [0.5, 4.0]
     dynamic_friction_range: [0.5, 4.0]
     restitution_range:      [0.0, 0.5]
-  motor_params:
+  actuator_pd_gains:
     actuator_name: base_legs
     stiffness_range:  
       F[L,R]_hip_joint:   [0.8, 1.2]

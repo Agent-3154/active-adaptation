@@ -1,30 +1,87 @@
 from typing import TYPE_CHECKING
 
 import torch
+import trimesh
 from typing_extensions import override
 
-from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
+from active_adaptation.envs.adapters import SimAdapter, SceneAdapter, CameraFrustumHandle
+from active_adaptation.envs.backends.isaaclab.viewer import IsaacViserViewer
+
 
 if TYPE_CHECKING:
     from isaaclab.scene import InteractiveScene
     from isaaclab.sim import SimulationContext
 
+class IsaacDebugDraw:
+    def __init__(self):
+        from isaacsim.util.debug_draw import _debug_draw
+        self._draw = _debug_draw.acquire_debug_draw_interface()
+    
+    def clear(self):
+        self._draw.clear_lines()
+        self._draw.clear_points()
+
+    def plot(self, x: torch.Tensor, size=2.0, color=(1., 1., 1., 1.)):
+        if not (x.ndim == 2) and (x.shape[1] == 3):
+            raise ValueError("x must be a tensor of shape (N, 3).")
+        x = x.cpu()
+        point_list_0 = x[:-1].tolist()
+        point_list_1 = x[1:].tolist()
+        sizes = [size] * len(point_list_0)
+        colors = [color] * len(point_list_0)
+        self._draw.draw_lines(point_list_0, point_list_1, colors, sizes)
+        
+    def vector(self, x: torch.Tensor, v: torch.Tensor, size=2.0, color=(0., 1., 1., 1.)):
+        x = x.cpu().reshape(-1, 3)
+        v = v.cpu().reshape(-1, 3)
+        if not (x.shape == v.shape):
+            raise ValueError("x and v must have the same shape, got {} and {}.".format(x.shape, v.shape))
+        point_list_0 = x.tolist()
+        point_list_1 = (x + v).tolist()
+        sizes = [size] * len(point_list_0)
+        colors = [color] * len(point_list_0)
+        self._draw.draw_lines(point_list_0, point_list_1, colors, sizes)
+    
+    def point(self, x: torch.Tensor, color=(1., 0., 0., 1.), size=10.0):
+        point_list = x.cpu().reshape(-1, 3).tolist()
+        sizes = [size] * len(point_list)
+        colors = [color] * len(point_list)
+        self._draw.draw_points(point_list, colors, sizes)
+
 
 class IsaacSimAdapter(SimAdapter):
-    def __init__(self, sim: "SimulationContext"):
+    def __init__(self, sim: "SimulationContext", viser_viewer: IsaacViserViewer = None):
         self._sim = sim
+        self._viser_viewer = viser_viewer
+        self._kit_rendered_this_step = False
 
     def get_physics_dt(self) -> float:
         return self._sim.get_physics_dt()
 
     def has_gui(self) -> bool:
-        return self._sim.has_gui()
+        # True for Omniverse Kit GUI *or* browser Viser (debug callbacks / mesh sync).
+        return self._sim.has_gui() or self._viser_viewer is not None
 
-    def step(self, render: bool = False) -> None:
-        self._sim.step(render=render)
+    def step(self) -> None:
+        self._kit_rendered_this_step = False
+        self._sim.step(render=False)
+
+    def render_sensors(self) -> None:
+        # Isaac Lab camera products require a Kit render pass.
+        self._sim.render()
+        self._kit_rendered_this_step = True
+
+    def render_gui(self) -> None:
+        # Kit couples viewport and sensor render; skip a second Kit pass if
+        # render_sensors() already ran this physics step.
+        if not self._kit_rendered_this_step and self._sim.has_gui():
+            self._sim.render()
+            self._kit_rendered_this_step = True
+        if self._viser_viewer is not None:
+            self._viser_viewer.update()
 
     def render(self) -> None:
-        self._sim.render()
+        self.render_gui()
 
     def set_camera_view(self, eye=None, target=None, **kwargs) -> None:
         if eye is not None and target is not None:
@@ -35,8 +92,14 @@ class IsaacSimAdapter(SimAdapter):
 
 
 class IsaacSceneAdapter(SceneAdapter):
-    def __init__(self, scene: "InteractiveScene"):
+    def __init__(
+        self, scene: "InteractiveScene",
+        viser_viewer: IsaacViserViewer = None,
+        debug_draw: IsaacDebugDraw = None,
+    ):
         self._scene: "InteractiveScene" = scene
+        self._viser_viewer = viser_viewer
+        self._debug_draw = debug_draw
 
     @override
     def zero_external_wrenches(self) -> None:
@@ -45,10 +108,29 @@ class IsaacSceneAdapter(SceneAdapter):
                 asset.instantaneous_wrench_composer.reset()
             if hasattr(asset, "permanent_wrench_composer"):
                 asset.permanent_wrench_composer.reset()
-            if getattr(asset, "has_external_wrench", False):
+            if hasattr(asset, "_external_force_b") and hasattr(asset, "_external_torque_b"):
                 asset._external_force_b.zero_()
                 asset._external_torque_b.zero_()
                 asset.has_external_wrench = False
+
+    @override
+    def create_camera_frustum(
+        self,
+        name: str,
+        *,
+        fov_y: float,
+        aspect: float,
+        scale: float = 0.15,
+    ) -> CameraFrustumHandle:
+        if self._viser_viewer is None:
+            raise RuntimeError("`create_camera_frustum` requires a Viser viewer.")
+        handle = self._viser_viewer.register_camera(
+            name,
+            fov_y=fov_y,
+            aspect=aspect,
+            scale=scale,
+        )
+        return CameraFrustumHandle(handle)
 
     @property
     def ground_mesh(self):
@@ -101,6 +183,50 @@ class IsaacSceneAdapter(SceneAdapter):
     @property
     def rigid_objects(self):
         return self._scene.rigid_objects
+    
+    @property
+    def entities(self):
+        return {**self._scene.articulations, **self._scene.rigid_objects}
+
+    @property
+    def sensors(self):
+        from active_adaptation.envs.sensors.warp_base import merge_sensors
+
+        return merge_sensors(self._scene.sensors, getattr(self, "_warp_sensors", None))
+
+    def update_warp_sensors(self) -> None:
+        from active_adaptation.envs.sensors.warp_base import update_warp_sensors
+
+        update_warp_sensors(self)
+
+    def get_visual_meshes(self, name: str) -> list[trimesh.Trimesh]:
+        """Body-local visual trimeshes for ``entities[name]`` (``body_names`` order).
+
+        Uses ``{body}/visuals`` via ``simple_raycaster.utils_usd`` (same layout as
+        raycasting / Viser). Multiply by ``body_link_pose_w`` at runtime.
+        """
+        from active_adaptation.envs.backends.isaaclab.meshes import load_entity_body_meshes
+
+        entity = self.entities[name]
+        return load_entity_body_meshes(
+            entity, suffixes=("visuals",), require_all=True
+        )
+
+    def get_collision_meshes(self, name: str) -> list[trimesh.Trimesh]:
+        """Body-local collision trimeshes for ``entities[name]`` (``body_names`` order).
+
+        Tries ``{body}/collisions`` then ``{body}/collision``. Bodies without a
+        collision prim get an empty trimesh so the list stays aligned with
+        ``num_bodies`` / ``body_link_pose_w``.
+        """
+        from active_adaptation.envs.backends.isaaclab.meshes import load_entity_body_meshes
+
+        entity = self.entities[name]
+        return load_entity_body_meshes(
+            entity,
+            suffixes=("collisions", "collision"),
+            require_all=False,
+        )
 
     def __getattr__(self, name):
         return getattr(self._scene, name)
@@ -165,8 +291,76 @@ class IsaacSceneAdapter(SceneAdapter):
         marker.set_visibility(True)
         return marker
 
+    def create_frame_marker(
+        self,
+        prim_path: str,
+        scale: tuple[float, float, float] = (0.1, 0.1, 0.1),
+    ):
+        """Create an Isaac Lab VisualizationMarkers with a single frame (for GUI debug).
+
+        Returns a VisualizationMarkers instance. Call
+        ``.visualize(translations=..., orientations=...)`` (WXYZ) to update poses.
+        """
+        from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, ISAAC_NUCLEUS_DIR
+        import isaaclab.sim as sim_utils
+        marker = VisualizationMarkers(
+            VisualizationMarkersCfg(
+                prim_path=prim_path,
+                markers={
+                    "frame": sim_utils.UsdFileCfg(
+                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
+                        scale=scale,
+                    )
+                },
+            )
+        )
+        marker.set_visibility(True)
+        return marker
+    
+    def clear_debug(self) -> None:
+        if self._debug_draw is not None:
+            self._debug_draw.clear()
+        if self._viser_viewer is not None:
+            self._viser_viewer.clear()
+
+    def draw_vector(
+        self,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (0.0, 1.0, 1.0, 1.0),
+    ):
+        if self._debug_draw is not None:
+            self._debug_draw.vector(x, v, size, color)
+        if self._viser_viewer is not None:
+            self._viser_viewer.vector(x, v, size, color)
+
+    def draw_point(
+        self,
+        x: torch.Tensor,
+        color: tuple[float, ...] = (1.0, 0.0, 0.0, 1.0),
+        size: float = 10.0,
+    ):
+        if self._debug_draw is not None:
+            self._debug_draw.point(x, color=color, size=size)
+        if self._viser_viewer is not None:
+            self._viser_viewer.point(x, color=color, size=size)
+
+    def draw_plot(
+        self,
+        x: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0),
+    ):
+        if self._debug_draw is not None:
+            self._debug_draw.plot(x, size=size, color=color)
+        if self._viser_viewer is not None:
+            self._viser_viewer.plot(x, size=size, color=color)
+
     @override
-    def get_spawn_origins(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def sample_spawn_origin_candidates(
+        self, env_ids: torch.Tensor
+    ) -> torch.Tensor:
         if self._scene.terrain.terrain_origins is None:
             return self.env_origins[env_ids]
 
@@ -178,6 +372,12 @@ class IsaacSceneAdapter(SceneAdapter):
             device=env_ids.device,
         )
         return terrain_origins[idx]
+
+    def reset_to(self, state: dict, env_ids: torch.Tensor):
+        self._scene.reset_to(state, env_ids=env_ids)
+    
+    def get_state(self, env_ids: torch.Tensor) -> dict:
+        return self._scene.get_state(env_ids=env_ids)
 
 
 __all__ = [

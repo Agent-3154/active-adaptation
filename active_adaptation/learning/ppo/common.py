@@ -28,7 +28,8 @@ from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import TensorDictModuleBase as ModBase
 from torchrl.modules import ProbabilisticActor
 from torchrl.data import Composite
-from typing import List
+from typing import Any, List, Tuple, Union
+from collections.abc import Sequence
 
 OBS_KEY = "policy"  # ("agents", "observation")
 OBS_PRIV_KEY = "priv"
@@ -41,23 +42,83 @@ DONE_KEY = ("next", "done")
 CMD_KEY = "command"
 
 
-def ppo_clipped_loss(ratio: torch.Tensor, adv: torch.Tensor, clip_param: float) -> torch.Tensor:
-    """Loss to minimize; negates the clipped surrogate so gradient descent maximizes it."""
+def resolve_clip_param(clip_param: Any) -> Tuple[float, float]:
+    """Normalize ``clip_param`` to ``(eps_neg, eps_pos)``.
+
+    A scalar ``ε`` is treated as symmetric ``(ε, ε)``. A length-2 sequence
+    ``(eps_neg, eps_pos)`` (tuple, list, or OmegaConf ``ListConfig``) clips
+    the importance ratio to ``[1 - eps_neg, 1 + eps_pos]``.
+    """
+    if isinstance(clip_param, Sequence) and not isinstance(clip_param, (str, bytes)):
+        if len(clip_param) != 2:
+            raise ValueError(
+                f"clip_param sequence must have length 2, got {clip_param!r}"
+            )
+        eps_neg, eps_pos = float(clip_param[0]), float(clip_param[1])
+    else:
+        eps_neg = eps_pos = float(clip_param)
+    if eps_neg < 0.0 or eps_pos < 0.0:
+        raise ValueError(
+            f"clip_param values must be non-negative, got {(eps_neg, eps_pos)!r}"
+        )
+    return eps_neg, eps_pos
+
+
+def ppo_clipped_loss(
+    ratio: torch.Tensor, adv: torch.Tensor, clip_param: Tuple[float, float]
+) -> torch.Tensor:
+    """Loss to minimize; negates the clipped surrogate so gradient descent maximizes it.
+
+    ``clip_param`` may be a scalar ``ε`` (symmetric clip to ``[1-ε, 1+ε]``) or
+    a length-2 sequence ``(eps_neg, eps_pos)`` (asymmetric clip to
+    ``[1-eps_neg, 1+eps_pos]``).
+    """
     assert ratio.shape == adv.shape
+    eps_neg, eps_pos = clip_param
     surr1 = adv * ratio
-    surr2 = adv * ratio.clamp(1.0 - clip_param, 1.0 + clip_param)
-    return -torch.min(surr1, surr2).mean()
+    surr2 = adv * ratio.clamp(1.0 - eps_neg, 1.0 + eps_pos)
+    return -torch.min(surr1, surr2)
 
 
-def spo_loss(ratio: torch.Tensor, adv: torch.Tensor, clip_param: float) -> torch.Tensor:
+def spo_loss(
+    ratio: torch.Tensor, adv: torch.Tensor, clip_param: Tuple[float, float]
+) -> torch.Tensor:
     """
     Simple Policy Optimization Loss from https://arxiv.org/pdf/2401.16025.
     Loss to minimize; negates the SPO objective so gradient descent maximizes it.
+
+    For asymmetric ``clip_param=(eps_neg, eps_pos)``, the quadratic penalty
+    uses ``eps_pos`` when ``ratio > 1`` and ``eps_neg`` when ``ratio < 1``.
     """
     assert ratio.shape == adv.shape
-    obj = ratio * adv - adv.abs() / (2.0 * clip_param) * (ratio - 1.0).square()
-    return -obj.mean()
+    eps_neg, eps_pos = resolve_clip_param(clip_param)
+    if eps_neg == eps_pos:
+        eps = ratio.new_full((), eps_neg)
+    else:
+        eps = torch.where(ratio >= 1.0, ratio.new_full((), eps_pos), ratio.new_full((), eps_neg))
+    obj = ratio * adv - adv.abs() / (2.0 * eps) * (ratio - 1.0).square()
+    return -obj
 
+
+def aspo_loss(
+    ratio: torch.Tensor, adv: torch.Tensor, clip_param: Tuple[float, float]
+) -> torch.Tensor:
+    """
+    Asymmetric Simple Policy Optimization Loss from https://arxiv.org/pdf/2401.16025.
+    Loss to minimize; negates the ASPO objective so gradient descent maximizes it.
+    """
+    return torch.where(
+        adv >= 0.0,
+        ppo_clipped_loss(ratio, adv, clip_param),
+        spo_loss(ratio, adv, clip_param),
+    )
+
+
+PPO_LOSS_MAP = {
+    "ppo": ppo_clipped_loss,
+    "spo": spo_loss,
+    "aspo": aspo_loss,
+}
 
 
 class DtypeConversion(nn.Module):
@@ -303,18 +364,123 @@ def init_(module):
         nn.init.constant_(module.bias, 0.0)
 
 
+def _paired_named_tensors(
+    source_module: nn.Module,
+    target_module: nn.Module,
+    *,
+    include_buffers: bool = True,
+):
+    """Yield ``(name, src, tgt)`` for matching parameters (and optionally buffers).
+
+    Raises if modules are aliased, names/shapes disagree, any pair shares storage,
+    or either side still has lazy / uninitialized parameters or buffers.
+    """
+    if source_module is target_module:
+        raise ValueError(
+            "source_module and target_module are the same object; refusing to copy."
+        )
+
+    def _ensure_initialized(name: str, tensor: torch.Tensor, which: str) -> None:
+        # LazyLinear / Lazy* leave UninitializedParameter/Buffer until first forward.
+        if type(tensor).__name__.startswith("Uninitialized"):
+            raise ValueError(
+                f"{which} {name!r} is still lazy/uninitialized ({type(tensor).__name__}). "
+                "Run a warm-up forward on both modules before hard_copy_/soft_copy_, "
+                "or build them separately with make_*() instead of copy.deepcopy()."
+            )
+
+    src_params = list(source_module.named_parameters())
+    tgt_params = list(target_module.named_parameters())
+    if len(src_params) != len(tgt_params):
+        raise ValueError(
+            f"Parameter count mismatch: source has {len(src_params)}, "
+            f"target has {len(tgt_params)}."
+        )
+
+    pairs = []
+    for (src_name, src), (tgt_name, tgt) in zip(src_params, tgt_params, strict=True):
+        if src_name != tgt_name:
+            raise ValueError(
+                f"Parameter name mismatch: source {src_name!r} vs target {tgt_name!r}. "
+                "Modules must have identical named_parameters() order and names."
+            )
+        _ensure_initialized(src_name, src, "source parameter")
+        _ensure_initialized(tgt_name, tgt, "target parameter")
+        if src.shape != tgt.shape:
+            raise ValueError(
+                f"Parameter shape mismatch for {src_name!r}: {tuple(src.shape)} vs "
+                f"{tuple(tgt.shape)}."
+            )
+        if src is tgt or src.data_ptr() == tgt.data_ptr():
+            raise ValueError(
+                f"Parameter {src_name!r} is shared between source and target "
+                "(same Tensor storage). Copy would be a no-op or corrupt both; "
+                "use separate make_*() construction, not a shallow alias."
+            )
+        pairs.append((src_name, src, tgt))
+
+    if include_buffers:
+        src_bufs = list(source_module.named_buffers())
+        tgt_bufs = list(target_module.named_buffers())
+        if len(src_bufs) != len(tgt_bufs):
+            raise ValueError(
+                f"Buffer count mismatch: source has {len(src_bufs)}, "
+                f"target has {len(tgt_bufs)}."
+            )
+        for (src_name, src), (tgt_name, tgt) in zip(src_bufs, tgt_bufs, strict=True):
+            if src_name != tgt_name:
+                raise ValueError(
+                    f"Buffer name mismatch: source {src_name!r} vs target {tgt_name!r}."
+                )
+            _ensure_initialized(src_name, src, "source buffer")
+            _ensure_initialized(tgt_name, tgt, "target buffer")
+            if src.shape != tgt.shape:
+                raise ValueError(
+                    f"Buffer shape mismatch for {src_name!r}: {tuple(src.shape)} vs "
+                    f"{tuple(tgt.shape)}."
+                )
+            if src is tgt or (
+                src.numel() > 0 and tgt.numel() > 0 and src.data_ptr() == tgt.data_ptr()
+            ):
+                raise ValueError(
+                    f"Buffer {src_name!r} is shared between source and target."
+                )
+            pairs.append((src_name, src, tgt))
+
+    if not pairs:
+        raise ValueError("No parameters or buffers to copy.")
+
+    return pairs
+
+
+@torch.no_grad()
 def hard_copy_(source_module: nn.Module, target_module: nn.Module):
-    for params_source, params_target in zip(
-        source_module.parameters(), target_module.parameters()
-    ):
-        params_target.data.copy_(params_source.data)
+    """In-place ``target ← source`` for all parameters and buffers.
+
+    Validates matching names/shapes and rejects aliased / shared storages.
+    """
+    for _name, src, tgt in _paired_named_tensors(source_module, target_module):
+        tgt.data.copy_(src.data)
 
 
+@torch.no_grad()
 def soft_copy_(source_module: nn.Module, target_module: nn.Module, tau: float = 0.01):
-    for params_source, params_target in zip(
-        source_module.parameters(), target_module.parameters()
-    ):
-        params_target.data.lerp_(params_source.data, tau)
+    """Polyak update: ``target ← (1 - τ) target + τ source`` (in-place).
+
+    Floating tensors use ``lerp_``; non-floating buffers use a hard copy when
+    ``τ == 1``, otherwise are left unchanged. Validates names/shapes and rejects
+    shared storages (same checks as :func:`hard_copy_`).
+    """
+    if not (0.0 < tau <= 1.0):
+        raise ValueError(f"tau must be in (0, 1], got {tau!r}")
+    for _name, src, tgt in _paired_named_tensors(source_module, target_module):
+        if tgt.is_floating_point() and src.is_floating_point():
+            if tau == 1.0:
+                tgt.data.copy_(src.data)
+            else:
+                tgt.data.lerp_(src.data, tau)
+        elif tau == 1.0:
+            tgt.data.copy_(src.data)
 
 
 class L2Norm(nn.Module):
@@ -386,25 +552,6 @@ class NormalExtractor(nn.Module):
         if self.include_loc:
             x_sample = torch.cat([x_sample, x_loc.unsqueeze(-2)], dim=-2)
         return x_sample.flatten(-2), x_loc, x_scale
-
-
-class CatTensors(ModBase):
-    def __init__(self, in_keys, out_key, del_keys=False, sort=True):
-        super().__init__()
-        self.in_keys = in_keys
-        self.out_keys = [out_key]
-
-        self.del_keys = del_keys
-        self.sort = sort
-        if self.sort:
-            self.in_keys = sorted(self.in_keys)
-
-    def forward(self, tensordict: TensorDictBase):
-        out = torch.cat([tensordict.get(k) for k in self.in_keys], dim=-1)
-        tensordict.set(self.out_keys[0], out)
-        if self.del_keys:
-            tensordict.exclude(*self.in_keys, inplace=True)
-        return tensordict
 
 
 def normalize(x: torch.Tensor, subtract_mean: bool = False):

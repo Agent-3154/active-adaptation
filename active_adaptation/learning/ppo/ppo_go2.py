@@ -56,7 +56,7 @@ def grad_norm(parameters):
 
 @dataclass
 class PPOConfig:
-    _target_: str = "active_adaptation.learning.ppo.ppo_go2.PPOPolicy"
+    _target_: str = "active_adaptation.learning.ppo.ppo_go2.PPOConfig"
     name: str = "ppo_go2"
     train_every: int = 32
     ppo_epochs: int = 4
@@ -70,6 +70,9 @@ class PPOConfig:
 
     checkpoint_path: Union[str, None] = None
     in_keys: Tuple[str, ...] = (OBS_KEY, "extero")
+
+    def get_class(self):
+        return PPOPolicy
 
 
 cs = ConfigStore.instance()
@@ -213,7 +216,7 @@ class PPOPolicy(TensorDictModuleBase):
         env=None,
     ):
         super().__init__()
-        self.cfg = PPOConfig(**cfg)
+        self.cfg = cfg
         self.device = device
 
         self.entropy_coef = self.cfg.entropy_coef

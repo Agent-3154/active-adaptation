@@ -1,11 +1,11 @@
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
 import einops
 from tensordict import TensorDictBase
 from torchrl.objectives import hold_out_net
-from jaxtyping import Float
+from jaxtyping import Float, Bool
 from active_adaptation.learning.ppo.common import ACTION_KEY, OBS_KEY
 from active_adaptation.learning.offpolicy.distribution import ScaledTanhNormal
 
@@ -16,7 +16,59 @@ def _policy_dist(actor: nn.Module, obs: torch.Tensor) -> Any:
     return ScaledTanhNormal(loc, scale, upscale=actor.upscale)
 
 
+def prior_bc_mse(
+    action_pred: torch.Tensor,
+    action_demo: torch.Tensor,
+) -> torch.Tensor:
+    """Per-row MSE BC loss.
+
+    ``action_pred``: ``[N, D]`` or ``[K, N, D]`` (mean over K if present).
+    ``action_demo``: ``[N, D]``.
+    Returns ``[N]``.
+    """
+    err = (action_pred - action_demo).square().mean(dim=-1)
+    if err.ndim == 2:
+        err = err.mean(dim=0)
+    return err
+
+
+def prior_bc_nll(
+    dist: Any,
+    action_demo: torch.Tensor,
+) -> torch.Tensor:
+    """Per-row negative log-likelihood BC loss. Returns ``[N]``."""
+    lp = dist.log_prob(action_demo)
+    if lp.shape == action_demo.shape:
+        lp = lp.sum(dim=-1)
+    elif lp.shape != action_demo.shape[:-1]:
+        lp = lp.reshape(action_demo.shape[0], -1).sum(dim=-1)
+    return -lp
+
+
+def prior_bc_loss(
+    kind: str,
+    *,
+    action_pred: torch.Tensor,
+    action_demo: torch.Tensor,
+    dist: Any | None = None,
+) -> torch.Tensor:
+    """Dispatch prior BC loss (``mse`` or ``nll``). Returns ``[N]``."""
+    if kind == "mse":
+        return prior_bc_mse(action_pred, action_demo)
+    if kind == "nll":
+        if dist is None:
+            raise ValueError("prior_bc_loss(kind='nll') requires dist.")
+        return prior_bc_nll(dist, action_demo)
+    raise ValueError(f"Unknown bc_loss={kind!r}; expected 'mse' or 'nll'.")
+
+
 class MultiStepReturn(nn.Module):
+    """Compute n-step return and fixed-horizon action stacks.
+
+    Always consumes ``actions`` with shape ``[T, N, act_dim]`` and returns
+    stacked actions with shape ``[N, T, act_dim]`` where steps beyond episode
+    end are filled by repeating the terminal action.
+    """
     def __init__(self, gamma: float, n_steps: int):
         super().__init__()
         self.n_steps = n_steps
@@ -25,40 +77,66 @@ class MultiStepReturn(nn.Module):
 
     def forward(
         self,
-        next_observations: Float[torch.Tensor, "T N obs_dim"],
         actions: Float[torch.Tensor, "T N act_dim"],
+        next_observations: Float[torch.Tensor, "T N obs_dim"],
         rewards: Float[torch.Tensor, "T N 1"],
         terminated: Float[torch.Tensor, "T N 1"],
         done: Float[torch.Tensor, "T N 1"],
+        env_discount: Optional[Float[torch.Tensor, "T N 1"]] = None,
     ) -> tuple[
+        Float[torch.Tensor, "N T act_dim"],
         Float[torch.Tensor, "N obs_dim"],
         Float[torch.Tensor, "N 1"],
         Float[torch.Tensor, "N 1"],
+        Bool[torch.Tensor, "N 1"],
     ]:
         T, N = next_observations.shape[:2]
         assert T == self.n_steps
 
         device = rewards.device
-        gammas = self.gamma ** torch.arange(self.n_steps, device=device)
+        dtype = rewards.dtype
+        gamma = self.gamma.to(device=device, dtype=dtype)
 
-        cum_not_done = (~done).cumprod(dim=0)
-        cum_reward = (rewards * gammas.reshape(self.n_steps, 1, 1)).cumsum(dim=0)
+        done_bool = done.bool()
+        cum_not_done = (~done_bool).cumprod(dim=0)
+
+        step_discount = torch.full((T, N), gamma, device=device, dtype=dtype)
+        if env_discount is not None:
+            step_discount = step_discount * env_discount.squeeze(-1).to(
+                device=device, dtype=dtype
+            )
+
+        gammas_cumprod = step_discount.cumprod(dim=0)
+        gammas_pow = torch.cat(
+            [torch.ones(1, N, device=device, dtype=dtype), gammas_cumprod[:-1]],
+            dim=0,
+        ).unsqueeze(-1)
+
+        cum_reward = (rewards * gammas_pow).cumsum(dim=0)
         alive_steps = cum_not_done.sum(dim=0)
 
         last_indices = alive_steps.clamp_max(self.n_steps - 1).reshape(N)
         batch_indices = torch.arange(N, device=device)
 
         next_observations = next_observations[last_indices, batch_indices]
-        rewards = cum_reward[last_indices, batch_indices]
+        rewards_out = cum_reward[last_indices, batch_indices]
         terminated = terminated[last_indices, batch_indices]
 
         discount = (
-            self.gamma
-            * gammas[last_indices].reshape_as(terminated)
+            gammas_cumprod[last_indices, batch_indices]
+            .reshape_as(terminated.float())
             * (1.0 - terminated.float())
         )
 
-        return next_observations, rewards, discount
+        assert actions.shape[0] == T and actions.shape[1] == N
+        actions_out = einops.rearrange(actions, "t n d -> n t d").contiguous()
+        last_actions = actions[last_indices, batch_indices]
+        t_idx = torch.arange(T, device=device).unsqueeze(0)  # [1, T]
+        repeat_mask = t_idx > last_indices.unsqueeze(1)  # [N, T]
+        actions_out = torch.where(
+            repeat_mask.unsqueeze(-1), last_actions.unsqueeze(1), actions_out
+        )
+        return actions_out, next_observations, rewards_out, discount, terminated
 
 
 def _actor_q_per_sample(critic: nn.Module, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:

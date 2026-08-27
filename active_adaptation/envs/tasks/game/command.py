@@ -3,6 +3,7 @@ import torch
 from active_adaptation.envs.mdp.commands.base import Command
 from active_adaptation.utils.math import quat_rotate_inverse, sample_quat_yaw
 from active_adaptation.utils.symmetry import SymmetryTransform
+from tensordict import TensorDictBase
 
 
 class Game(Command):
@@ -51,10 +52,11 @@ class Game(Command):
             signs=torch.tensor([1, -1, 1, 1, -1, 1, 1, 1]),
         )
 
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> torch.Tensor:
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
         chase = env_ids % 2 == 0
         init_root_state = self.init_root_state[env_ids]
-        origins = self.env.scene.get_spawn_origins(env_ids)
+        origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
+        self.env.episode_origin[env_ids] = origins
         init_pos_even = origins[chase]
         offset = torch.zeros_like(init_pos_even)
         offset[:, 0].uniform_(3.0, 4.0).mul_(
@@ -64,11 +66,11 @@ class Game(Command):
         init_root_state[chase, :3] += init_pos_even
         init_root_state[~chase, :3] += init_pos_odd
         init_root_state[:, 3:7] = sample_quat_yaw(len(env_ids), device=self.device)
-        return init_root_state
+        self._write_initial_states(init_root_state, env_ids)
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.target_caught_time[env_ids] = 0.0
-        return super().reset(env_ids)
+        return super().reset(env_ids, tensordict)
 
     def update(self):
         self.target_pos_w = torch.stack(
@@ -95,7 +97,7 @@ class Game(Command):
         )
 
     def debug_draw(self):
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_pos_w[::2],
             self.target_diff[::2],
             color=(1, 0, 0, 1),

@@ -1,6 +1,7 @@
 import torch
 
 from typing import TYPE_CHECKING
+from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
@@ -77,15 +78,21 @@ class MotionTrackingCommand(Command):
         self.future_steps = torch.tensor([0, 12, 24, 36])
         self.update()
     
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> torch.Tensor:
-        init_root_state = self.init_root_state[env_ids]
-        origins = self.env.scene.env_origins[env_ids]
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
+        init_root_state = self.init_root_state[env_ids].clone()
+        origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
+        self.env.episode_origin[env_ids] = origins
         motion = self.dataset.get_slice(self.motion_ids[env_ids.cpu()], 0, 1)
         init_root_state[:, :3] = origins + motion.root_pos_w[:, 0].to(self.device)
         init_root_state[:, 3:7] = motion.root_link_quat_w[:, 0].to(self.device)
-        return init_root_state
+        self.asset.write_root_state_to_sim(init_root_state, env_ids=env_ids)
+        self.asset.write_joint_state_to_sim(
+            motion.joint_pos[:, 0].to(self.device),
+            torch.zeros_like(motion.joint_pos[:, 0], device=self.device),
+            env_ids=env_ids,
+        )
     
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.t[env_ids] = 0
 
     @property
@@ -126,10 +133,10 @@ class MotionTrackingCommand(Command):
     #     error = diff.square().sum(-1)
     #     return - (error * first_contact).sum(1, True)
 
-    def update(self):
+    def _load_motion_targets(self):
         self._motion = self.dataset.get_slice(self.motion_ids, self.t, steps=self.future_steps)
         self.target_pos_w = self._motion.root_pos_w.to(self.device) \
-            + self.env.scene.env_origins.reshape(self.num_envs, 1, 3)
+            + self.env.episode_origin.reshape(self.num_envs, 1, 3)
         self.target_pos_b = quat_rotate_inverse(
             self.asset.data.root_link_quat_w.unsqueeze(1),
             (self.target_pos_w - self.asset.data.root_pos_w.unsqueeze(1))
@@ -142,21 +149,26 @@ class MotionTrackingCommand(Command):
         self.target_keypoints_b = self._motion.body_pos_b[:, :, self.keypoint_idx_motion].to(self.device)
         self.target_keypoints_w = self._motion.body_link_pos_w[:, :, self.keypoint_idx_motion].to(self.device)
         self.target_keypoints_w = self.target_keypoints_w \
-            + self.env.scene.env_origins.reshape(self.num_envs, 1, 1, 3)
+            + self.env.episode_origin.reshape(self.num_envs, 1, 1, 3)
         self.target_feet_pos_w = self._motion.body_link_pos_w[:, 0, self.feet_ids_motion].to(self.device) \
-            + self.env.scene.env_origins.reshape(self.num_envs, 1, 3)
+            + self.env.episode_origin.reshape(self.num_envs, 1, 3)
         self.target_joint_pos = self._motion.joint_pos[:, 0, self.joint_idx_motion].to(self.device)
-        
+
+    def update(self):
+        self._load_motion_targets()
+
+    def step(self):
         self.t = torch.clamp_max(self.t + 1, self.dataset.lengths[self.motion_ids]-self.future_steps[-1])
+        self._load_motion_targets()
 
     def debug_draw(self):
-        target_keypoints_w = self._motion.body_link_pos_w[:, 0] + self.env.scene.env_origins.cpu().unsqueeze(1)
-        self.env.debug_draw.point(target_keypoints_w.reshape(-1, 3), color=(1, 0, 0, 1))
+        target_keypoints_w = self._motion.body_link_pos_w[:, 0] + self.env.episode_origin.cpu().unsqueeze(1)
+        self.env.scene.draw_point(target_keypoints_w.reshape(-1, 3), color=(1, 0, 0, 1))
 
         robot_keypoints_w = self.asset.data.body_link_pos_w[:, self.keypoint_idx_asset].cpu()
-        self.env.debug_draw.point(robot_keypoints_w.reshape(-1, 3), color=(0, 1, 0, 1))
+        self.env.scene.draw_point(robot_keypoints_w.reshape(-1, 3), color=(0, 1, 0, 1))
 
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             robot_keypoints_w.reshape(-1, 3),
             target_keypoints_w[:, self.keypoint_idx_motion].reshape(-1, 3) - robot_keypoints_w.reshape(-1, 3),
             color=(0, 0, 1, 1)
@@ -165,7 +177,7 @@ class MotionTrackingCommand(Command):
         in_contact = self.contact_forces.data.current_contact_time[:, self.feet_ids_sensor] > 0.01
         diff = self.target_feet_pos_w - self.asset.data.body_link_pos_w[:, self.feet_ids_asset]
         
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.body_link_pos_w[:, self.feet_ids_asset].reshape(-1, 3),
             (diff * in_contact.unsqueeze(-1)).reshape(-1, 3),
             color=(0, 1, 0, 1),

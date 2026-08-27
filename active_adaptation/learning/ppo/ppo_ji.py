@@ -48,7 +48,7 @@ from .common import *
 
 @dataclass
 class PPOConfig:
-    _target_: str = "active_adaptation.learning.ppo.ppo_ji.PPOPolicy"
+    _target_: str = "active_adaptation.learning.ppo.ppo_ji.PPOConfig"
     name: str = "ppo_ji"
     train_every: int = 32
     ppo_epochs: int = 5
@@ -64,6 +64,10 @@ class PPOConfig:
     hack: bool = False # debug option, which gives actor access to the privileged information
     checkpoint_path: Union[str, None] = None
     in_keys: Tuple[str] = ("command", OBS_KEY, OBS_PRIV_KEY, "ext")
+
+    def get_class(self):
+        return PPOPolicy
+
 
 cs = ConfigStore.instance()
 cs.store("ppo_ji", node=PPOConfig, group="algo")

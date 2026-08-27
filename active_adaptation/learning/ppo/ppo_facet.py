@@ -53,7 +53,7 @@ from .ppo_base import PPOBase
 
 @dataclass
 class PPOConfig:
-    _target_: str = "active_adaptation.learning.ppo.ppo_facet.PPOPolicy"
+    _target_: str = "active_adaptation.learning.ppo.ppo_facet.PPOConfig"
     name: str = "ppo_facet"
     train_every: int = 32
     ppo_epochs: int = 4
@@ -68,6 +68,10 @@ class PPOConfig:
     symaug: bool = True
     phase: str = "train"
     in_keys: Tuple[str, ...] = (OBS_KEY, OBS_PRIV_KEY, "ext", "ext_")
+
+    def get_class(self):
+        return PPOPolicy
+
 
 cs = ConfigStore.instance()
 cs.store("ppo_facet_train", node=PPOConfig(phase="train"), group="algo")
@@ -147,7 +151,7 @@ class PPOPolicy(PPOBase):
         env
     ):
         super().__init__()
-        self.cfg = PPOConfig(**cfg)
+        self.cfg = cfg
         self.device = device
         self.observation_spec = observation_spec
         assert self.cfg.phase in ["train", "adapt", "finetune"]

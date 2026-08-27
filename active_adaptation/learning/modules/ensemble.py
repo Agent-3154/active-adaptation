@@ -4,15 +4,16 @@
 # LICENSE file in the root directory of this source tree.
 
 import warnings
-
 import torch
+import torch.nn as nn
 from tensordict import LazyStackedTensorDict, TensorDict
 from tensordict.nn.common import TensorDictBase, TensorDictModuleBase
 
 from tensordict.nn.params import TensorDictParams
+from typing import Callable
 
 
-class EnsembleModule(TensorDictModuleBase):
+class EnsembleTensorDictModule(TensorDictModuleBase):
     """Module that wraps a module and repeats it to form an ensemble.
 
     Args:
@@ -138,3 +139,22 @@ class EnsembleModule(TensorDictModuleBase):
                 )
             # Reset all self.module descendant parameters
             return self.module.reset_parameters_recursive(parameters)
+
+
+class EnsembleModule(nn.Module):
+    def __init__(self, fn: Callable[..., nn.Module], num_copies: int):
+        super().__init__()
+        modules = [fn() for _ in range(num_copies)]
+        params = torch.stack([TensorDict.from_module(module) for module in modules])
+        self.module= ( modules[0],) # avoid registering duplicate parameters
+        self.params_td = TensorDictParams(params)
+        self.vmapped_forward = torch.vmap(self._func_module_call, in_dims=(None, 0))
+    
+    def _func_module_call(self, input, params: TensorDictParams):
+        m = self.module[0]
+        with params.to_module(m):
+            return m(input)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.vmapped_forward(x, self.params_td)
+

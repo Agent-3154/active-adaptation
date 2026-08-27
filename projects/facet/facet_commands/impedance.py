@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import einops
 
+from tensordict import TensorDictBase
 from active_adaptation.envs.mdp.commands.base import Command
 from active_adaptation.envs.mdp.commands.locomotion import Twist
 import isaaclab.utils.math as math_utils
@@ -220,7 +221,7 @@ class Impedance(Command):
         # currently only used for smoothing the rewards
         return self.asset.data.body_lin_vel_w[:, self.body_ids].mean(1)
 
-    def reset(self, env_ids: torch.Tensor):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.sample_command_world(env_ids)
         # self.sample_command_compliant(env_ids)
         self._cum_error[env_ids] = 0.0
@@ -540,7 +541,7 @@ class Impedance(Command):
         # target = self.asset.data.root_pos_w[0].cpu()
         # self.env.sim.set_camera_view(eye, target)
         # draw command linvel (green)
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_pos_w
             + torch.tensor([0.0, 0.0, 0.2], device=self.device),
             self.ref_lin_vel_w[:, -2],
@@ -548,12 +549,12 @@ class Impedance(Command):
         )
         # return
         # draw vector to setpoint pos (red)
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_pos_w,
             self.command_setpos_w - self.asset.data.root_pos_w,
             color=(1.0, 0.0, 0.0, 1.0),
         )
-        # self.env.debug_draw.vector(
+        # self.env.scene.draw_vector(
         #     self.asset.data.root_pos_w + torch.tensor([0.0, 0.0, 0.3], device=self.device),
         #     # self.spring_force_setpoint - self.asset.data.root_pos_w,
         #     self.set_linvel * (self.command_mode == self.CMD_LINVEL).reshape(self.num_envs, 1),
@@ -567,37 +568,37 @@ class Impedance(Command):
         # )
 
         # draw external forces (orange)
-        # self.env.debug_draw.vector(
+        # self.env.scene.draw_vector(
         #     self.asset.data.root_pos_w + quat_rotate(self.asset.data.root_quat_w, self.constant_force.offset),
         #     self.constant_force.get_force() / (self.virtual_mass * 9.81),
         #     color=(1.0, 0.5, 0.0, 1.0),
         #     size=5.0,
         # )
-        # self.env.debug_draw.vector(
+        # self.env.scene.draw_vector(
         #     self.asset.data.root_pos_w,
         #     self.lin_kp * (self.command_setpos_w - self.asset.data.root_pos_w) / (self.virtual_mass * 9.81),
         #     color=(0.0, 0.5, 1.0, 1.0),
         #     size=5.0,
         # )
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_pos_w + quat_rotate(self.asset.data.root_quat_w, self.constant_force.offset),
             self.force_ext_w / (self.virtual_mass * 9.81),
             color=(1.0, 0.5, 0.0, 1.0),
             size=5.0,
         )
-        # self.env.debug_draw.vector(
+        # self.env.scene.draw_vector(
         #     self.asset.data.root_pos_w,
         #     (self.spring_force.setpoint - self.asset.data.root_pos_w) * self.spring_force.is_valid(),
         #     color=(1.0, 1.0, 1.0, 1.0),
         #     size=5.0,
         # )
-        # self.env.debug_draw.vector(
+        # self.env.scene.draw_vector(
         #     self.asset.data.root_pos_w,
         #     self._spring_force,
         #     color=(1.0, 0.5, 0.0, 1.0),
         #     size=5.0,
         # )
-        # self.env.debug_draw.vector(
+        # self.env.scene.draw_vector(
         #     self.asset.data.root_pos_w,
         #     self.impulse_force.get_force() / (self.virtual_mass * 9.81),
         #     color=(1.0, 0.6, 0.0, 1.0),
@@ -615,7 +616,7 @@ class Impedance(Command):
             #     quat_from_euler_xyz(*self.command_setrpy_w.unbind(-1)),
             #     scales=torch.tensor([[4., 1., 0.1]]).expand(self.num_envs, 3),
             # )
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_pos_w,
             self.asset.data.root_lin_vel_w,
             color=(1.0, 1.0, 0.0, 1.0),
@@ -642,7 +643,7 @@ class ImpedanceImpulse(Impedance):
         self.ep_id[env_ids] = self.ep_id[env_ids] + 1
         return init_root_state
 
-    def reset(self, env_ids, reward_stats=None):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.sample_command_setvel(env_ids)
         self.set_linvel[env_ids, 0] = self.X_VEL
         self.lin_kp[env_ids] = 12.
@@ -841,8 +842,8 @@ class VelocityImpulse(Twist):
         self.ep_id[env_ids] = self.ep_id[env_ids] + 1
         return init_root_state
     
-    def reset(self, env_ids, reward_stats=None):
-        super().reset(env_ids, reward_stats)
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        super().reset(env_ids, tensordict)
         self.constand_force.duration.data[env_ids] = 0.
         self.sample_vel_command(env_ids)
         self.sample_yaw_command(env_ids)
@@ -917,13 +918,13 @@ class VelocityImpulse(Twist):
 
     def debug_draw(self):
         super().debug_draw()
-        # self.env.debug_draw.vector(
+        # self.env.scene.draw_vector(
         #     self.asset.data.root_pos_w,
         #     self.impulse_force.get_force() /  9.81,
         #     color=(1.0, 0.6, 0.0, 1.0),
         #     size=3.0,
         # )
-        self.env.debug_draw.vector(
+        self.env.scene.draw_vector(
             self.asset.data.root_pos_w,
             self.constand_force.get_force() /  9.81,
             color=(1.0, 0.6, 0.0, 1.0),
@@ -952,8 +953,8 @@ class VelocityCollision(Twist):
         # self.ep_id[env_ids] = self.ep_id[env_ids] + 1
         return init_root_state
     
-    def reset(self, env_ids, reward_stats=None):
-        super().reset(env_ids, reward_stats)
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        super().reset(env_ids, tensordict)
         self.sample_vel_command(env_ids)
         self.sample_yaw_command(env_ids)
     

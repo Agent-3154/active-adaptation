@@ -27,23 +27,30 @@ def _discover_group(
 ) -> None:
     for entry_point in importlib.metadata.entry_points(group=group):
         spec = importlib.util.find_spec(entry_point.value)
-        if entry_point.name in projects[target_key]:
-            continue
         if spec is None or spec.origin is None:
             raise ImportError(
                 f"Could not resolve entry point {entry_point.name} -> {entry_point.value}"
             )
         pkg_path = Path(spec.origin).parent.absolute()
-        projects[target_key][entry_point.name] = {
+        existing = projects[target_key].get(entry_point.name, {})
+
+        # Always refresh discovery metadata so manifests remain valid when
+        # projects are discovered from different uv environments.
+        project_info = {
             "value": entry_point.value,
             "path": str(pkg_path),
             "type": project_type,
-            "enabled": enabled,
+            # Preserve user toggles; default only for new entries.
+            "enabled": existing.get("enabled", enabled),
         }
         if find_task_dir:
             task_dir = _task_dir_for_path(pkg_path)
-            projects[target_key][entry_point.name]["task_dir"] = str(task_dir) if task_dir is not None else None
-        print(f"Discovered {label}: {entry_point.name} at {pkg_path}")
+            project_info["task_dir"] = str(task_dir) if task_dir is not None else None
+
+        projects[target_key][entry_point.name] = project_info
+
+        action = "Updated" if existing else "Discovered"
+        print(f"{action} {label}: {entry_point.name} at {pkg_path}")
 
 
 def discover_projects(enabled: bool = False) -> dict[str, dict[str, dict[str, Any]]]:

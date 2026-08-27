@@ -1,7 +1,7 @@
-from .sac import SAC
-# from .flash_sac import FlashSAC
+import os
+import importlib
 
-__all__ = [
-    "SAC",
-    # "FlashSAC",
-]
+dir_path = os.path.dirname(os.path.realpath(__file__))
+for file in os.listdir(dir_path):
+    if file.endswith(".py") and not file.startswith("_"):
+        importlib.import_module(f".{file[:-3]}", __package__)

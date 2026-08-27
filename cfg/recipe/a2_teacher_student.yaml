@@ -1,0 +1,22 @@
+# @package _global_
+name: a2_teacher_student
+work_dir: ./outputs_pipeline/${name}/${now:%Y-%m-%d-%H-%M-%S}
+
+stages:
+  - name: ppo_teacher
+    script: train_ppo.py
+    overrides:
+      - task=A2/A2LocoFlat
+      - task.num_envs=8192
+      - algo=ppo_teacher
+      - total_frames=100_000_000
+      - eval=False
+  
+  - name: ppo_student
+    script: train_ppo.py
+    overrides:
+      - task=A2/A2LocoFlat
+      - task.num_envs=4096
+      - algo=ppo_student
+      - total_frames=50_000_000
+      - checkpoint_path=${run_state.checkpoint_path}

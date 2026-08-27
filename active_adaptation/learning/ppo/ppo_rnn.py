@@ -47,7 +47,7 @@ from .ppo_base import PPOBase
 
 @dataclass
 class PPOConfig:
-    _target_: str = "active_adaptation.learning.ppo.ppo_rnn.PPORNNPolicy"
+    _target_: str = "active_adaptation.learning.ppo.ppo_rnn.PPOConfig"
     name: str = "ppo_rnn"
     train_every: int = 32
     ppo_epochs: int = 4
@@ -60,6 +60,10 @@ class PPOConfig:
     hidden_size: int = 128
 
     checkpoint_path: Union[str, None] = None
+
+    def get_class(self):
+        return PPORNNPolicy
+
 
 cs = ConfigStore.instance()
 cs.store("ppo_gru", node=PPOConfig, group="algo")

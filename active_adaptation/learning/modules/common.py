@@ -6,6 +6,25 @@ from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import TensorDictModuleBase
 
 
+class CatTensors(TensorDictModuleBase):
+    def __init__(self, in_keys, out_key, del_keys=False, sort=True):
+        super().__init__()
+        self.in_keys = in_keys
+        self.out_keys = [out_key]
+
+        self.del_keys = del_keys
+        self.sort = sort
+        if self.sort:
+            self.in_keys = sorted(self.in_keys)
+
+    def forward(self, tensordict: TensorDictBase):
+        out = torch.cat([tensordict.get(k) for k in self.in_keys], dim=-1)
+        tensordict.set(self.out_keys[0], out)
+        if self.del_keys:
+            tensordict.exclude(*self.in_keys, inplace=True)
+        return tensordict
+
+
 class MLP(nn.Module):
     """Multi-Layer Perceptron with configurable layer normalization.
 
@@ -185,19 +204,40 @@ class AmpSafeRMSNorm(nn.RMSNorm):
 
 
 class ConditionalBlock(nn.Module):
+    """Residual FiLM block with optional RMS / layer norm."""
+
     def __init__(
         self,
         hidden_dim: int,
+        expansion: int = 1,
         condition_dim: int = 0,
+        norm: str | None = None,
+        activation: str | type[nn.Module] = nn.SiLU,
+        dropout: float = 0.0,
     ):
         super().__init__()
-        self.norm = AmpSafeRMSNorm(hidden_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.expansion = int(expansion)
+        if norm is None:
+            self.norm = nn.Identity()
+        elif norm.lower() == "rms":
+            self.norm = nn.RMSNorm(hidden_dim)
+        elif norm.lower() == "layer":
+            self.norm = nn.LayerNorm(hidden_dim)
+        else:
+            raise ValueError(f"Invalid norm: {norm}")
+
+        ActClass = activation if isinstance(activation, type) else getattr(nn, activation)
+
         self.layers = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim * expansion),
+            ActClass(),
+            nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
+            nn.Linear(hidden_dim * expansion, hidden_dim),
+            ActClass(),
+            nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
         )
+
         if condition_dim > 0:
             self.cond_proj = nn.Linear(condition_dim, 2 * hidden_dim)
         else:

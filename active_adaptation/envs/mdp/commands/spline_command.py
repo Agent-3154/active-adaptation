@@ -5,6 +5,7 @@ from ..rewards.base import Reward
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
 from active_adaptation.utils.symmetry import SymmetryTransform
 import active_adaptation.utils.spline as spline
+from tensordict import TensorDictBase
 
 
 class SplineCommand(Command):
@@ -40,7 +41,7 @@ class SplineCommand(Command):
             )
             self.control_points_marker.set_visibility(True)
     
-    def reset(self, env_ids):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.spline_t[env_ids] = 0.0
         self.spline_ps[env_ids] = spline.create_from(
             self.asset.data.root_pos_w[env_ids, :2],
@@ -71,9 +72,14 @@ class SplineCommand(Command):
 
         self.target_pos_w = x
         self.target_lin_vel_w = v
-
         self._cum_error = (self.target_pos_w - self.asset.data.root_pos_w)[:, :2].norm(dim=-1, keepdim=True)
+
+    def step(self):
         self.spline_t += self.env.step_dt * self.spline_time_scale
+        x, v = spline.cubic_bezier(self.spline_t, self.spline_ps)
+        v = v * self.spline_time_scale.reshape(self.num_envs, 1, 1)
+        self.target_pos_w = x
+        self.target_lin_vel_w = v
     
     def debug_draw(self):
         if self.env.backend == "isaaclab" and self.env.sim.has_gui():
@@ -85,7 +91,7 @@ class SplineCommand(Command):
                 translations=torch.cat([ctps, wps]),
                 marker_indices=[0] * ctps.shape[0] + [1] * wps.shape[0],
             )
-            self.env.debug_draw.plot(
+            self.env.scene.draw_plot(
                 torch.cat([self.traj_vis, torch.ones(self.traj_vis.shape[0], 1) * 0.5], dim=-1),
                 color=(1., 1., 1., 1.),
             )

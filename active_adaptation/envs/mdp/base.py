@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from tensordict import TensorDictBase
 
 
 if TYPE_CHECKING:
@@ -25,18 +26,49 @@ def is_method_implemented(obj, base_class, method_name: str):
 class MDPComponent:
     """Shared lifecycle hooks and environment access for MDP components."""
 
-    def __init__(self, env: _EnvBase):
-        self.env: _EnvBase = env
+    markovian: bool # whether the component is markovian, i.e, dependent only on the current state
+
+    def __init__(self) -> None:
+        self._initialized = False
+
+    def _initialize(self, env: _EnvBase) -> None:
+        self.env = env
+        self._initialized = True
+
+    @property
+    def initialized(self) -> bool:
+        return self._initialized
 
     @property
     def num_envs(self) -> int:
+        if not self.initialized:
+            raise RuntimeError(f"{type(self).__name__} is not initialized")
         return self.env.num_envs
 
     @property
     def device(self) -> torch.device:
+        if not self.initialized:
+            raise RuntimeError(f"{type(self).__name__} is not initialized")
         return self.env.device
+    
+    def edit_spec(self, scene_config: Any) -> None:
+        """The MDP term may optionally edit the scene config."""
 
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def startup(self) -> None:
+        pass
+
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
+        """Reset per-env state for ``env_ids``.
+
+        Both arguments are required. Terms may read from and write into
+        ``tensordict`` (e.g. controlled / curriculum resets). Most terms leave
+        it unused.
+
+        Note:
+            Initial root/joint state is still set via ``command_manager.sample_init``
+            in ``_reset_idx`` before these callbacks run. A future change will move
+            that responsibility into ``reset``.
+        """
         pass
 
     def update(self) -> None:
@@ -46,9 +78,6 @@ class MDPComponent:
         pass
 
     def post_step(self, substep: int) -> None:
-        pass
-
-    def startup(self) -> None:
         pass
 
     def debug_draw(self) -> None:

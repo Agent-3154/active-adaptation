@@ -26,7 +26,7 @@ input:
     _target_: JointPosition
     action_scaling: {.*_joint: 0.4}
     max_delay: 1
-    alpha_range: [0.5, 1.0]
+    alpha_range: [0.8, 1.0]
 
 command:
   _target_: Twist
@@ -37,11 +37,6 @@ command:
   use_stiffness_ratio: 0.99
   resample_prob: 0.5
   stand_prob: 0.08
-  target_yaw_range: 
-    - [-0.3927,  0.3927]
-    - [ 1.1781,  1.9635]
-    - [ 2.7489,  3.5343]
-    - [ 4.3197,  5.1051]
 
 observation:
   policy:
@@ -68,19 +63,21 @@ reward:
     angvel_z_exp:       {weight: 0.8}
     angvel_xy_l2:       {weight: 0.02}
     linvel_z_l2:        {weight: 2.0}
-    base_height_exp:    {weight: 2.0, target_height: 0.4}
+    base_height_exp:    {weight: 2.0, target_height: 0.4, sigma: 0.4}
   regularization:
-    energy_l1:          {weight: 0.0005}
+    energy_l1:          {weight: 0.0002}
     joint_acc_l2:       {weight: 2.5e-7}
-    joint_torques_l2:   {weight: 2.0e-4}
+    joint_torques_l2:   {weight: 1.0e-4}
     survival:           {weight: 1.0}
     action_rate_l2:     {weight: 0.01}
     action_rate2_l2:    {weight: 0.002}
-    feet_air_time:      {weight: 0.4, body_names: .*_foot, thres: 0.5}
+    feet_air_time:      {weight: 1.0, body_names: .*_foot, thres: 0.5}
+    max_swing_height:   {weight: 4.0, body_names: .*_foot, target_height: 0.15}
     feet_sliding:       {weight: 0.2, body_names: .*_foot}
     undesired_contact:  {body_names: [.*_calf, .*thigh], weight: 0.25}
   debug:
     _enabled_: false
+    joint_vel_l2:       {weight: 1.0, joint_names: .*}
     linvel_projection:  {weight: 0.5}
     feet_contact_count: {weight: 1.0, body_names: .*_foot}
     # feet_swing_height:  {weight: 0.1, target_height: 0.1}
@@ -95,15 +92,12 @@ randomization:
   perturb_body_mass:
     (?!(payload|base_link)).*: [0.8, 1.2]
     base_link: [0.8, 1.2]
-  perturb_body_materials:
+  randomize_materials_isaac:
     body_names: .*_foot
-    # isaac only
     static_friction_range:  [0.5, 3.0]
     dynamic_friction_range: [0.5, 3.0]
     restitution_range:      [0.0, 0.5]
-    # mujoco and mjlab only
-    solref_time_constant_range: [0.015, 0.03]
-    solref_dampratio_range: [0.5, 2.0]
+    homogeneous: true
   actuator_pd_gains:
     stiffness_range:
       .*: [0.8, 1.1]
@@ -117,3 +111,8 @@ randomization:
     F[L,R]_thigh_joint: [-0.05, 0.05]
     R[L,R]_thigh_joint: [-0.05, 0.05]
     .*calf_joint: [-0.05, 0.05]
+  push_body:
+    body_names: "base_link"
+    force_range: [20, 60]
+    min_interval: 100
+    decay: 0.9

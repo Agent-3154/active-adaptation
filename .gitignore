@@ -1,7 +1,9 @@
 tests
-docs
 .vscode
 .omx
+
+# Agent / IDE local dirs (committed skills: .agents/skills/)
+.cursor/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -133,7 +135,7 @@ celerybeat.pid
 .env
 .venv
 env/
-venv/
+# venv/
 ENV/
 env.bak/
 venv.bak/
@@ -171,6 +173,11 @@ cython_debug/
 
 # hydra and wandb
 outputs/
+outputs_train/
+outputs_rollout/
+outputs_eval/
+outputs_play/
+outputs_pipeline/
 wandb/
 artifacts/
 

@@ -1,0 +1,15 @@
+[project]
+name = "aa-isaac60-env"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "active-adaptation",
+    # Keep this pinned to the Isaac 6.0-compatible version.
+    "warp-lang",
+]
+
+[tool.uv.sources]
+active-adaptation = { path = "../..", editable = true }
+
+[tool.uv]
+package = false

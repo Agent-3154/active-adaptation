@@ -10,7 +10,12 @@ import datetime
 import copy
 from pathlib import Path
 
-from omegaconf import OmegaConf, DictConfig
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
+
+from omegaconf import OmegaConf
+from hydra.conf import HydraConf, RunDir
+from hydra.core.config_store import ConfigStore
 
 from torchrl.envs.utils import set_exploration_type, ExplorationType
 
@@ -19,7 +24,80 @@ from active_adaptation.utils.export import export_onnx
 from active_adaptation.utils.timerfd import Timer
 from active_adaptation.utils.helpers import EpisodeStats
 from active_adaptation.learning.modules.vecnorm import VecNorm
-from active_adaptation.utils.wandb import parse_checkpoint
+
+
+DEFAULTS = [
+    {"task": "???"},
+    {"algo": "from_checkpoint"},
+    "_self_",
+]
+
+
+@dataclass
+class IsaacAppConfig:
+    """Isaac Lab AppLauncher settings (resolved from parent config)."""
+
+    headless: bool = "${..headless}"
+    """Mirror ``headless``; passed to Isaac Lab's AppLauncher."""
+    enable_cameras: bool = "${..record_video}"
+    """Mirror ``record_video``; enables camera sensors when recording."""
+
+
+@dataclass
+class PlayTaskOverride:
+    """Play-specific overrides merged into the selected task config."""
+
+    num_envs: int = 4
+    """Number of parallel environments (kept small for interactive playback)."""
+    record_video: bool = "${..record_video}"
+
+@dataclass
+class PlayConfig:
+    """Hydra root config for policy playback and visualization."""
+
+    defaults: List[Any] = field(default_factory=lambda: DEFAULTS)
+    """Hydra defaults list: task config, algo config, then this config."""
+    hydra: HydraConf = field(default_factory=HydraConf)
+    """Hydra runtime settings (output directory, etc.)."""
+    headless: bool = False
+    """Run with a visible GUI window (``false``) or headless (``true``)."""
+    backend: str = "isaaclab"
+    """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
+    device: str = "cpu"
+    """Torch device for policy inference (e.g. ``cuda``, ``cpu``)."""
+    record_video: bool = False
+    """Record an MP4 of the rollout (Isaac backend only)."""
+    app: IsaacAppConfig = field(default_factory=IsaacAppConfig)
+    """Backend-specific application launcher config."""
+    seed: int = 42
+    """Random seed (offset by local rank in distributed runs)."""
+    checkpoint_path: Optional[str] = None
+    """Path or WandB URI to a policy checkpoint.
+
+    Required when ``algo=from_checkpoint`` (the default): ``algo`` is loaded from
+    the run's sidecar ``cfg.yaml``. Pass an explicit ``algo=...`` to override.
+    """
+    export_policy: bool = False
+    """Export the deploy policy to ONNX after loading."""
+    discard_unused_obs: bool = True
+    """Drop observation groups not listed in ``algo.in_keys``."""
+    task: PlayTaskOverride = field(default_factory=PlayTaskOverride)
+    """Task overrides applied on top of the selected task config."""
+    exploration_type: ExplorationType = ExplorationType.MODE
+
+
+cs = ConfigStore.instance()
+cs.store(
+    name="play",
+    node=PlayConfig(
+        hydra=HydraConf(
+            run=RunDir(
+                dir="./outputs_play/${now:%Y-%m-%d}/${now:%H-%M-%S}-${task.name}-${algo.name}"
+            )
+        )
+    )
+)
+
 
 FILE_PATH = Path(__file__).parent
 CONFIG_PATH = FILE_PATH.parent / "cfg"
@@ -40,15 +118,22 @@ def export_policy(env, policy, export_dir):
 
 
 @hydra.main(config_path=str(CONFIG_PATH), config_name="play", version_base=None)
-def main(cfg: DictConfig):
-    aa.init(cfg, auto_rank=True)
-
+def main(cfg: PlayConfig):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
+
+    aa.init(cfg, auto_rank=True)
     
     from active_adaptation.helpers import make_env_policy
-    checkpoint = parse_checkpoint(cfg.checkpoint_path)
-    env, policy = make_env_policy(cfg, checkpoint)
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
     
     if cfg.export_policy:
         export_dir = FILE_PATH / "exports" / str(cfg.task.name)
@@ -59,7 +144,7 @@ def main(cfg: DictConfig):
         if isinstance(k, tuple) and k[0]=="stats"
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
-    rollout_policy = policy.get_rollout_policy("eval")
+    rollout_policy = policy.get_rollout_policy("eval").to(env.device)
     
     env.base_env.eval()
     carry = env.reset()
@@ -68,21 +153,21 @@ def main(cfg: DictConfig):
 
     timer = Timer(env.step_dt)
 
-    # Optional: refresh from URL/wandb in background so play loop never blocks on updates
-    if checkpoint is not None and checkpoint.remote:
-        print("Starting background checkpoint refresh")
-        checkpoint.start_background_refresh(interval_sec=60)
-
-    # Optional video recording (IsaacLab backend only). This remains safe under
+    # Optional video recording (Isaac backend only). This remains safe under
     # KeyboardInterrupt because the recorder is a context manager that flushes
     # buffered frames on exit.
     record_enabled = bool(cfg.get("record_video", False))
     video_dir = FILE_PATH / "videos"
     time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
     video_path = video_dir / f"{cfg.task.name}-{time_str}.mp4"
+    exploration_type = ExplorationType(cfg.get("exploration_type", "MODE"))
 
-    with env.get_recorder(video_path, enabled=record_enabled)as rec, \
-        torch.inference_mode(), set_exploration_type(ExplorationType.DETERMINISTIC):
+    print_interval_s = 2.0
+    last_print_time = time.perf_counter()
+    last_print_step = -1
+
+    with env.get_recorder(video_path, enabled=record_enabled) as rec, \
+        torch.inference_mode(), set_exploration_type(exploration_type):
         try:
             for i in itertools.count():
                 carry = rollout_policy(carry)
@@ -96,6 +181,15 @@ def main(cfg: DictConfig):
                     print("Step", i)
                     for k, v in sorted(episode_stats.pop().items(True, True)):
                         print(k, torch.mean(v).item())
+
+                now = time.perf_counter()
+                elapsed = now - last_print_time
+                if elapsed >= print_interval_s:
+                    n_steps = i - last_print_step
+                    sps = n_steps / elapsed
+                    print(f"step {i} | {sps:.1f}x{env.num_envs}={sps*env.num_envs:.1f} env steps/s")
+                    last_print_time = now
+                    last_print_step = i
 
                 timer.sleep()
         except KeyboardInterrupt:

@@ -7,7 +7,12 @@ import time
 import datetime
 from pathlib import Path
 
-from omegaconf import OmegaConf, DictConfig
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
+
+from omegaconf import OmegaConf
+from hydra.conf import HydraConf, RunDir, JobConf
+from hydra.core.config_store import ConfigStore
 
 from collections import OrderedDict
 from tqdm import tqdm
@@ -18,13 +23,108 @@ from tensordict import TensorDictBase
 from tensordict.nn import TensorDictModuleBase
 
 import active_adaptation as aa
+from active_adaptation.pipeline_io import (
+    RUN_STATE_FILENAME,
+    get_run_state_dir,
+    write_run_state,
+)
 from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.torchrl import tensordict_nbytes
 from active_adaptation.learning.ppo.ppo_base import PPOBase
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+
+DEFAULTS = [
+    {"task": "???"},
+    {"algo": "ppo"},
+    "_self_",
+]
+
+
+@dataclass
+class IsaacAppConfig:
+    """Isaac Lab AppLauncher settings (resolved from parent config)."""
+
+    headless: bool = "${..headless}"
+    """Mirror ``headless``; passed to Isaac Lab's AppLauncher."""
+    enable_cameras: bool = "${..eval_render}"
+    """Mirror ``eval_render``; enables camera sensors for final eval rendering."""
+
+
+@dataclass
+class WandbConfig:
+    """Weights & Biases logging settings."""
+
+    name: str = "${..exp_name}/${now:%m-%d}_${now:%H-%M}"
+    """Run display name (derived from ``exp_name`` and timestamp)."""
+    job_type: str = "train"
+    """WandB job type label."""
+    project: str = "${oc.select:task.project,active_adaptation}"
+    """WandB project; falls back to ``active_adaptation`` if unset on the task."""
+    mode: str = "online"
+    """WandB mode: ``online``, ``offline``, or ``disabled``."""
+    tags: List[str] = field(default_factory=list)
+    """Optional tags attached to the WandB run."""
+
+
+@dataclass
+class TrainConfig:
+    """Hydra root config for PPO training."""
+
+    defaults: List[Any] = field(default_factory=lambda: DEFAULTS)
+    """Hydra defaults list: task config, algo config, then this config."""
+    hydra: HydraConf = field(default_factory=HydraConf)
+    """Hydra runtime settings (output directory, chdir, etc.)."""
+
+    headless: bool = True
+    """Run simulation without a rendering window."""
+    exp_name: str = "${oc.select:task.name,test}-${oc.select:algo.name,none}"
+    """Experiment label used in run names and WandB metadata."""
+    backend: str = "isaaclab"
+    """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
+    device: str = "cuda"
+    """Torch device for training (adjusted per local rank when using CUDA)."""
+
+    app: IsaacAppConfig = field(default_factory=IsaacAppConfig)
+    """Backend-specific application launcher config."""
+    total_frames: int = 150_000_000
+    """Total environment frames to collect across all ranks before stopping."""
+
+    eval: bool = True
+    """Evaluate the policy after training."""
+    eval_render: bool = False
+    """Render the environment during the final post-training evaluation."""
+    checkpoint_interval: int = 50
+    """Overwrite ``checkpoint_latest.pt`` every N training iterations (local only)."""
+    upload_interval: int = 100
+    """Also write/upload a versioned ``checkpoint_{i}.pt`` every N iterations."""
+
+    seed: int = 42
+    """Random seed (offset by local rank in distributed runs)."""
+    checkpoint_path: Optional[str] = None
+    """Path or WandB URI to resume from; ``null`` trains from scratch."""
+    discard_unused_obs: bool = True
+    """Drop observation groups not listed in ``algo.in_keys``."""
+    wandb: WandbConfig = field(default_factory=WandbConfig)
+    """WandB logging configuration."""
+
+
+cs = ConfigStore.instance()
+cs.store(
+    name="train",
+    node=TrainConfig(
+        hydra=HydraConf(
+            run=RunDir(
+                dir="./outputs_train/${now:%Y-%m-%d}/${now:%H-%M-%S}-${task.name}-${algo.name}"
+            ),
+            job=JobConf(chdir=True),
+        )
+    ),
+)
 
 
 FILE_PATH = Path(__file__).resolve().parent
@@ -49,15 +149,28 @@ class StackingCollector:
         self.transitions = transitions
         self.device = env.device
         self._observation_keys = list(env.observation_spec.keys(True, True))
+        self._functional_keys = [
+            key for key, group in env.observation_groups.items()
+            if group.is_functional
+        ]
 
     @torch.no_grad()
     @set_exploration_type(ExplorationType.RANDOM)
     def collect(self, carry: TensorDictBase, rollout_policy: TensorDictModuleBase):
+        rollout_policy = rollout_policy.to(device=self.device)
         data = []
         for _ in range(self.steps):
+            compact = {}
+            if self._functional_keys:
+                with ScopedTimer("materialization"):
+                    for key in self._functional_keys:
+                        compact[key] = carry[key]
+                        carry[key] = self.env.observation_groups[key].materialize(carry)
             with ScopedTimer("policy_inference"):
                 carry = rollout_policy(carry)
+            carry.update(compact)
             td, carry = self.env.step_and_maybe_reset(carry)
+            # td.update(compact)
             private_keys = [
                 key
                 for key in td.keys(True, True)
@@ -86,28 +199,29 @@ class BufferCollector:
         self.steps = steps
         self.transitions = transitions
         self._observation_keys = list(env.observation_spec.keys(True, True))
+        self._functional_keys = [
+            key for key, group in env.observation_groups.items()
+            if group.is_functional
+        ]
         
         buffer = env.fake_tensordict()
         if not transitions:
             buffer["next"] = buffer["next"].exclude(*self._observation_keys)
         self._buffer = buffer.unsqueeze(1).expand(env.shape[0], steps).clone()
-        buffer_nbytes = sum(
-            value.numel() * value.element_size()
-            for _, value in self._buffer.items(True, True)
-            if torch.is_tensor(value)
-        )
-        logging.info(
-            "BufferCollector allocated %.2f MiB on %s",
-            buffer_nbytes / (1024**2),
-            self._buffer.device,
-        )
     
     @torch.no_grad()
     @set_exploration_type(ExplorationType.RANDOM)
     def collect(self, carry: TensorDictBase, rollout_policy: TensorDictModuleBase):
         for i in range(self.steps):
+            compact = {}
+            if self._functional_keys:
+                with ScopedTimer("materialization"):
+                    for key in self._functional_keys:
+                        compact[key] = carry[key]
+                        carry[key] = self.env.observation_groups[key].materialize(carry)
             with ScopedTimer("policy_inference"):
                 carry = rollout_policy(carry)
+            carry.update(compact)
             td, carry = self.env.step_and_maybe_reset(carry)
             private_keys = [
                 key
@@ -122,49 +236,78 @@ class BufferCollector:
         return self._buffer.copy(), carry
 
 
-@hydra.main(config_path=str(CONFIG_PATH), config_name="train", version_base=None)
-def main(cfg: DictConfig):
-    aa.init(cfg, auto_rank=True)
-
+def run(cfg: TrainConfig) -> dict[str, str]:
+    """Train a PPO policy and return checkpoint paths for downstream stages."""
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
+
+    aa.init(cfg, auto_rank=True)
 
     print(
         f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}"
     )
 
+    wandb_run = None
+    proc_name = None # process name for `setproctitle`
     if aa.is_main_process():
-        run = wandb.init(
+        wandb_run = wandb.init(
             job_type=cfg.wandb.job_type,
             project=cfg.wandb.project,
             mode=cfg.wandb.mode,
             tags=cfg.wandb.tags,
         )
-        run.config.update(OmegaConf.to_container(cfg))
-        run.config["world_size"] = aa.get_world_size()
+        run_idx = wandb_run.name.split("-")[-1]
 
-        default_run_name = (
-            f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
-        )
-        run_idx = run.name.split("-")[-1]
-        run.name = f"{run_idx}-{default_run_name}"
-        setproctitle(run.name)
+        wandb_run.config.update(OmegaConf.to_container(cfg))
+        wandb_run.config["world_size"] = aa.get_world_size()
 
-        run_dir = Path(run.dir)
+        timestr = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')
+        wandb_run.name = f"{run_idx}-{cfg.exp_name}-{timestr}"
+        proc_name = f"{run_idx}-{cfg.exp_name}" # shorter for better display
+
+        run_dir = Path(wandb_run.dir)
         run_dir.mkdir(parents=True, exist_ok=True)
         cfg_save_path = run_dir / "cfg.yaml"
         OmegaConf.save(cfg, cfg_save_path)
-        run.save(str(cfg_save_path), policy="now")
-        run.save(str(run_dir / "config.yaml"), policy="now")
+        OmegaConf.save(cfg.task, run_dir / "cfg_task.yaml")
+        OmegaConf.save(cfg.algo, run_dir / "cfg_algo.yaml")
+        wandb_run.save(str(cfg_save_path), policy="now")
+        wandb_run.save(str(run_dir / "config.yaml"), policy="now")
+
+    if aa.is_distributed():
+        import torch.distributed as dist
+
+        # Explicit device: Isaac AppLauncher may leave current_device at 0.
+        name_list = [proc_name]
+        dist.broadcast_object_list(
+            name_list,
+            src=0,
+            device=torch.device(f"cuda:{aa.get_local_rank()}"),
+        )
+        proc_name = name_list[0]
+
+    if proc_name is not None:
+        if aa.is_main_process():
+            setproctitle(proc_name)
+        else:
+            setproctitle(f"{proc_name}-rank{aa.get_local_rank()}")
 
     from active_adaptation.helpers import make_env_policy, evaluate
     from active_adaptation.utils.helpers import EpisodeStats
 
-    env, policy = make_env_policy(cfg)
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
     policy: PPOBase
 
     frames_per_batch = env.num_envs * cfg.algo.train_every
-    total_frames = cfg.get("total_frames", -1) // aa.get_world_size()
+    total_frames = cfg.total_frames // aa.get_world_size()
     total_frames = total_frames // frames_per_batch * frames_per_batch
     total_iters = total_frames // frames_per_batch
     
@@ -182,32 +325,54 @@ def main(cfg: DictConfig):
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
 
-    def save(policy, checkpoint_name: str, *, upload_to_wandb: bool = True):
-        run_dir = Path(run.dir)
-        ckpt_path = run_dir / f"{checkpoint_name}.pt"
+    def save(
+        policy,
+        *,
+        archive_name: str | None = None,
+        upload_to_wandb: bool = False,
+    ) -> tuple[str, str | None]:
+        """Refresh local ``checkpoint_latest.pt``; optionally archive + upload a versioned copy.
+
+        Returns ``(latest_path, archived_path_or_None)``.
+        """
+        run_dir = Path(wandb_run.dir)
         state_dict = OrderedDict()
-        state_dict["wandb"] = {"name": run.name, "id": run.id}
+        state_dict["wandb"] = {"name": wandb_run.name, "id": wandb_run.id}
         state_dict["policy"] = policy.state_dict()
-        
-        torch.save(state_dict, ckpt_path)
-        if upload_to_wandb:
-            run.save(str(ckpt_path), policy="now", base_path=run.dir)
-        
-        latest_link = run_dir / "checkpoint_latest.pt"
-        if latest_link.exists() or latest_link.is_symlink():
-            latest_link.unlink()
-        latest_link.symlink_to(ckpt_path.name)
-        logging.info(f"Saved checkpoint to {ckpt_path}" + (" (wandb)" if upload_to_wandb else ""))
-        return str(ckpt_path)
+
+        latest_path = run_dir / "checkpoint_latest.pt"
+        if latest_path.exists() or latest_path.is_symlink():
+            latest_path.unlink()
+        torch.save(state_dict, latest_path)
+
+        archived_path = None
+        if archive_name is not None:
+            archived_path = run_dir / f"{archive_name}.pt"
+            if archived_path.resolve() != latest_path.resolve():
+                torch.save(state_dict, archived_path)
+            if upload_to_wandb:
+                wandb_run.save(
+                    str(archived_path), policy="now", base_path=wandb_run.dir
+                )
+
+        return str(latest_path), (
+            str(archived_path) if archived_path is not None else None
+        )
 
     assert env.training
 
-    def should_save(i):
+    def should_save(i: int) -> bool:
         if not aa.is_main_process():
             return False
-        return i % checkpoint_interval == 0 or i % upload_interval == 0
+        if checkpoint_interval > 0 and i % checkpoint_interval == 0:
+            return True
+        if upload_interval > 0 and i % upload_interval == 0:
+            return True
+        return False
 
-    ckpt_path = None
+    local_ckpt_path = None
+    local_ckpt_iter: int | None = None
+    uploaded_ckpt_path = None
     carry = env.reset()
     transitions = cfg.algo.get("store_transitions", True)
     collector = StackingCollector(
@@ -215,6 +380,17 @@ def main(cfg: DictConfig):
         steps=cfg.algo.train_every,
         transitions=transitions,
     )
+
+    if aa.is_main_process():
+        fake = env.fake_tensordict()
+        if not transitions:
+            del fake["next"]
+        storage_nbytes = tensordict_nbytes(
+            fake
+            .unsqueeze(1)
+            .expand(env.num_envs, cfg.algo.train_every)
+        )
+        wandb_run.summary["buffer_MiB"] = storage_nbytes / (1024**2)
 
     env_frames = 0
 
@@ -225,7 +401,7 @@ def main(cfg: DictConfig):
 
     for stage in stages:
 
-        policy.on_stage_start(stage)
+        policy.on_stage_start(stage, env)
         rollout_policy = policy.get_rollout_policy(
             "train",
             critic=not transitions,
@@ -236,6 +412,7 @@ def main(cfg: DictConfig):
         else:
             progress = range(total_iters)
 
+        t0 = time.time()
         for i in progress:
             rollout_start = time.perf_counter()
             with ScopedTimer("rollout") as rollout_timer:
@@ -280,33 +457,69 @@ def main(cfg: DictConfig):
             info["performance/iter_time"] = time.perf_counter() - rollout_start
 
             if should_save(i):
-                should_upload = i % upload_interval == 0
-                checkpoint_name = f"checkpoint_{i}" if should_upload else "checkpoint_temp"
-                ckpt_path = save(policy, checkpoint_name, upload_to_wandb=should_upload)
+                should_upload = upload_interval > 0 and i % upload_interval == 0
+                local_ckpt_path, archived = save(
+                    policy,
+                    archive_name=f"checkpoint_{i}" if should_upload else None,
+                    upload_to_wandb=should_upload,
+                )
+                if archived is not None:
+                    uploaded_ckpt_path = archived
+                local_ckpt_iter = i
 
             if aa.is_main_process():
-                ScopedTimer.print_summary(clear=True, depth=2)
+                remaining = (time.time() - t0) / (i + 1) * (total_iters - i)
+                setproctitle(f"{proc_name} ETA {tqdm.format_interval(remaining)}")
+                ScopedTimer.print_summary(clear=True, depth=3)
                 print(
                     OmegaConf.to_yaml(
                         {k: v for k, v in info.items() if isinstance(v, (float, int))}
                     )
                 )
-                print(f"Latest checkpoint: {ckpt_path}")
+                if local_ckpt_path is not None:
+                    if local_ckpt_iter is not None:
+                        print(
+                            f"Local checkpoint (iter {local_ckpt_iter}): {local_ckpt_path}"
+                        )
+                    else:
+                        print(f"Local checkpoint: {local_ckpt_path}")
+                if uploaded_ckpt_path is not None:
+                    print(f"Last uploaded checkpoint: {uploaded_ckpt_path}")
                 info.update(env.extra)
                 info.update(env.stats_ema)  # step-wise exponential moving average of stats
-                run.log(info)
+                wandb_run.log(info)
 
+    run_state: dict[str, str] = {}
     if aa.is_main_process():
-        ckpt_path = save(policy, "checkpoint_final")
-        policy_eval = policy.get_rollout_policy("eval")
-        info, trajs, stats = evaluate(
-            env, policy_eval, render=cfg.eval_render, seed=cfg.seed
+        local_ckpt_path, uploaded_ckpt_path = save(
+            policy, archive_name="checkpoint_final", upload_to_wandb=True
         )
-        info["env_frames"] = env_frames
-        run.log(info)
+        if cfg.eval:
+            policy_eval = policy.get_rollout_policy("eval")
+            eval_info, trajs, stats = evaluate(
+                env, policy_eval, render=cfg.eval_render, seed=cfg.seed
+            )
+            eval_info["env_frames"] = env_frames
+            wandb_run.log(eval_info)
         wandb.finish()
-        print(f"Final checkpoint: {ckpt_path}")
-    exit(0)
+        print(f"Final checkpoint: {uploaded_ckpt_path}")
+        run_state = {
+            "checkpoint_path": uploaded_ckpt_path or local_ckpt_path,
+            "run_dir": str(run_dir),
+            "task": str(cfg.task.name),
+            "algo": str(cfg.algo.name),
+        }
+        run_state_path = write_run_state(run_state, run_dir / RUN_STATE_FILENAME)
+        print(f"Wrote run state to {run_state_path}")
+        pipeline_dir = get_run_state_dir()
+        if pipeline_dir is not None and pipeline_dir.resolve() != run_dir.resolve():
+            write_run_state(run_state, pipeline_dir / RUN_STATE_FILENAME)
+    return run_state
+
+
+@hydra.main(config_path=str(CONFIG_PATH), config_name="train", version_base=None)
+def main(cfg: TrainConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

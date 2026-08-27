@@ -72,10 +72,13 @@ BODY_NAMES_SIMULATION = [
 
 EFFORT_LIMIT = 120.0
 VELOCITY_LIMIT = 30.0
+LEGS_STIFFNESS = 50.0
+LEGS_DAMPING = 1.0
 
 def make_isaaclab_cfg(self_collisions: bool = False):
     from isaaclab.sensors import ContactSensorCfg
     from active_adaptation.assets.asset_cfg import (
+        AssetSpec,
         ArticulationCfg,
         ImplicitActuatorCfg,
         sim_utils
@@ -113,8 +116,8 @@ def make_isaaclab_cfg(self_collisions: bool = False):
                 joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
                 effort_limit_sim=120.0,
                 velocity_limit_sim=30.0,
-                stiffness=50.0,
-                damping=2.0,
+                stiffness=LEGS_STIFFNESS,
+                damping=LEGS_DAMPING,
                 friction=0.01,
                 armature=0.01,
             ),
@@ -131,22 +134,22 @@ def make_isaaclab_cfg(self_collisions: bool = False):
             history_length=3,
         )
     }
-    return asset_cfg, sensors
+    return AssetSpec(config=asset_cfg, sensors=sensors)
 
 
-def make_mjlab_cfg():
+def make_mjlab_cfg(motrix: bool = False):
     import mujoco
-    from active_adaptation.assets.asset_cfg import EntityCfg
+    from active_adaptation.assets.asset_cfg import AssetSpec, EntityCfg
     from mjlab.entity import EntityArticulationInfoCfg
     from mjlab.utils.spec_config import CollisionCfg
-    from mjlab.actuator import BuiltinPositionActuatorCfg
+    from mjlab.actuator import BuiltinPdActuatorCfg
     from mjlab.sensor import ContactSensorCfg, ContactMatch
 
+    mjcf_path = ROBOT_MODEL_DIR / "a2" / "a2.xml"
+
     def spec_fn():
-        mjcf_path = str(ROBOT_MODEL_DIR / "a2" / "a2.xml")
-        spec = mujoco.MjSpec.from_file(str(mjcf_path))
-        return spec
-    
+        return mujoco.MjSpec.from_file(str(mjcf_path))
+
     cfg = EntityCfg(
         init_state=EntityCfg.InitialStateCfg(
             pos=INIT_POS,
@@ -156,7 +159,7 @@ def make_mjlab_cfg():
         spec_fn=spec_fn,
         articulation=EntityArticulationInfoCfg(
             actuators=(
-                BuiltinPositionActuatorCfg(
+                BuiltinPdActuatorCfg(
                     target_names_expr=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"),
                     effort_limit=EFFORT_LIMIT,
                     stiffness=50.0,
@@ -171,7 +174,12 @@ def make_mjlab_cfg():
                 geom_names_expr=(".*_collision.*",),
                 contype=0,
                 conaffinity=1,
-                condim=3,
+                # Harden all collision geoms.
+                solref=(0.01, 1),
+                # Configure feet colliders. Other colliders are frictionless (condim=1).
+                condim={".*_foot_collision$": 6, ".*_collision.*": 1},
+                priority={".*_foot_collision$": 1, ".*": 0},
+                friction={".*_foot_collision$": (1, 5e-3, 5e-4)},
             ),
         ),
         joint_symmetry_mapping=JOINT_SYMMETRY_MAPPING,
@@ -193,20 +201,26 @@ def make_mjlab_cfg():
                 entity=None,
             ),
             fields=("found", "force"),
-            reduce="maxforce",
+            reduce="netforce",
             num_slots=1,
             track_air_time=True,
             history_length=3,
         ),
     )
-    return cfg, sensors
+    if motrix:
+        from active_adaptation.envs.backends.motrix.mjcf import export_entity_mjcf
+
+        cfg.motrix_mjcf_path_fn = lambda c: export_entity_mjcf(c, mjcf_path)
+    return AssetSpec(config=cfg, sensors=sensors)
 
 
-def make_cfg(backend: Literal["isaaclab", "mjlab"]):
+def make_cfg(backend: Literal["isaaclab", "mjlab", "motrix"]):
     if backend == "isaaclab":
         return make_isaaclab_cfg()
     elif backend == "mjlab":
-        return make_mjlab_cfg()
+        return make_mjlab_cfg(motrix=False)
+    elif backend == "motrix":
+        return make_mjlab_cfg(motrix=True)
     else:
         raise ValueError(f"Invalid backend: {backend}")
 

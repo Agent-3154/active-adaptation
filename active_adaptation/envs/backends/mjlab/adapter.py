@@ -4,10 +4,12 @@ import math
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
+import trimesh
 
 from typing_extensions import override
 
-from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
+from active_adaptation.envs.adapters import SimAdapter, SceneAdapter, CameraFrustumHandle
 
 if TYPE_CHECKING:
     from active_adaptation.envs.backends.mjlab.viewer import MjLabViewer
@@ -15,6 +17,210 @@ if TYPE_CHECKING:
     from mjlab.sim import Simulation
     from mjlab.viewer.offscreen_renderer import OffscreenRenderer
     from mjlab.viewer.viewer_config import ViewerConfig
+
+
+class _NoopMarker:
+    """Fallback marker for headless mode or unavailable viewer."""
+
+    def set_visibility(self, visible: bool) -> None:  # noqa: ARG002
+        return
+
+    def visualize(self, *args, **kwargs) -> None:  # noqa: ANN002,ARG002
+        return
+
+
+class _MjlabSphereMarker:
+    """Lightweight marker wrapper with an Isaac-like visualize API."""
+
+    def __init__(
+        self,
+        viewer: "MjLabViewer",
+        name: str,
+        color: tuple[float, float, float],
+        radius: float,
+    ) -> None:
+        self._viewer = viewer
+        self._name = name
+        self._radius = float(radius)
+        rgb = np.asarray(color, dtype=np.float32).clip(0.0, 1.0)
+        self._color = (rgb * 255.0).astype(np.uint8)
+        self._opacity = 1.0
+        self._visible = True
+        self._handle = None
+        self._mesh = None
+
+    def set_visibility(self, visible: bool) -> None:
+        self._visible = bool(visible)
+        if self._handle is not None:
+            self._handle.visible = self._visible
+
+    def visualize(self, translations=None, positions=None) -> None:  # noqa: ANN001
+        points = translations if translations is not None else positions
+        if points is None:
+            return
+
+        points_np = self._to_numpy_points(points)
+        if points_np.shape[0] == 0:
+            if self._handle is not None:
+                self._handle.visible = False
+            return
+
+        self._sync_handle(points_np)
+        if self._handle is not None:
+            self._handle.visible = self._visible
+
+    def _to_numpy_points(self, points: torch.Tensor | np.ndarray) -> np.ndarray:
+        if isinstance(points, torch.Tensor):
+            points = points.detach().cpu().numpy()
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+        return points
+
+    def _sync_handle(self, points: np.ndarray) -> None:
+        count = points.shape[0]
+        if self._handle is None or len(self._handle.batched_positions) != count:
+            self._recreate_handle(points)
+            return
+
+        self._handle.batched_positions = points
+
+    def _recreate_handle(self, points: np.ndarray) -> None:
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None
+
+        if self._mesh is None:
+            import trimesh
+
+            self._mesh = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+
+        count = points.shape[0]
+        self._handle = self._viewer._server.scene.add_batched_meshes_simple(
+            self._name,
+            self._mesh.vertices,
+            self._mesh.faces,
+            batched_wxyzs=np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (count, 1)),
+            batched_positions=points,
+            batched_scales=np.full((count,), self._radius, dtype=np.float32),
+            batched_colors=np.tile(self._color, (count, 1)),
+            opacity=self._opacity,
+            cast_shadow=False,
+            receive_shadow=False,
+            visible=self._visible,
+        )
+
+
+class _MjlabFrameMarker:
+    """Frame marker wrapper backed by Viser batched axes."""
+
+    def __init__(
+        self,
+        viewer: "MjLabViewer",
+        name: str,
+        scale: tuple[float, float, float],
+    ) -> None:
+        self._viewer = viewer
+        self._name = name
+        self._default_scale = np.asarray(scale, dtype=np.float32)
+        self._visible = True
+        self._handle = None
+
+    def set_visibility(self, visible: bool) -> None:
+        self._visible = bool(visible)
+        if self._handle is not None:
+            self._handle.visible = self._visible
+
+    def visualize(
+        self,
+        translations=None,
+        orientations=None,
+        scales=None,
+        positions=None,
+    ) -> None:  # noqa: ANN001
+        points = translations if translations is not None else positions
+        if points is None:
+            return
+
+        points_np = self._to_numpy(points).reshape(-1, 3)
+        if points_np.shape[0] == 0:
+            if self._handle is not None:
+                self._handle.visible = False
+            return
+
+        count = points_np.shape[0]
+        rots_np = self._as_orientations(orientations, count)
+        scales_np = self._as_scales(scales, count)
+        self._sync_handle(points_np, rots_np, scales_np)
+        if self._handle is not None:
+            self._handle.visible = self._visible
+
+    def _to_numpy(self, data: torch.Tensor | np.ndarray) -> np.ndarray:
+        if isinstance(data, torch.Tensor):
+            data = data.detach().cpu().numpy()
+        return np.asarray(data, dtype=np.float32)
+
+    def _as_orientations(self, orientations, count: int) -> np.ndarray:  # noqa: ANN001
+        if orientations is None:
+            return np.tile(
+                np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+                (count, 1),
+            )
+
+        rots = self._to_numpy(orientations).reshape(-1, 4)
+        if rots.shape[0] == 1 and count > 1:
+            rots = np.tile(rots, (count, 1))
+        if rots.shape[0] != count:
+            raise ValueError(
+                f"Frame marker orientations count ({rots.shape[0]}) does not match positions count ({count})."
+            )
+        return rots
+
+    def _as_scales(self, scales, count: int) -> np.ndarray:  # noqa: ANN001
+        if scales is None:
+            return np.tile(self._default_scale, (count, 1))
+
+        scales_np = self._to_numpy(scales)
+        if scales_np.ndim == 1 and scales_np.shape[0] == 3:
+            return np.tile(scales_np, (count, 1))
+        if scales_np.ndim == 1 and scales_np.shape[0] == count:
+            return scales_np
+        if scales_np.ndim == 2 and scales_np.shape == (count, 3):
+            return scales_np
+        raise ValueError(
+            f"Invalid frame marker scales shape {scales_np.shape}; expected (3,), ({count},), or ({count}, 3)."
+        )
+
+    def _sync_handle(
+        self,
+        positions: np.ndarray,
+        wxyzs: np.ndarray,
+        scales: np.ndarray,
+    ) -> None:
+        count = positions.shape[0]
+        if self._handle is None or len(self._handle.batched_positions) != count:
+            self._recreate_handle(positions, wxyzs, scales)
+            return
+
+        self._handle.batched_positions = positions
+        self._handle.batched_wxyzs = wxyzs
+        self._handle.batched_scales = scales
+
+    def _recreate_handle(
+        self,
+        positions: np.ndarray,
+        wxyzs: np.ndarray,
+        scales: np.ndarray,
+    ) -> None:
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None
+
+        self._handle = self._viewer._server.scene.add_batched_axes(
+            self._name,
+            batched_wxyzs=wxyzs,
+            batched_positions=positions,
+            batched_scales=scales,
+            visible=self._visible,
+        )
 
 
 class MjlabSimAdapter(SimAdapter):
@@ -37,12 +243,18 @@ class MjlabSimAdapter(SimAdapter):
     def has_gui(self) -> bool:
         return self.viewer is not None
 
-    def step(self, render: bool = False) -> None:
+    def step(self) -> None:
         self._sim.step()
 
-    def render(self) -> None:
+    def render_sensors(self) -> None:
+        self._sim.sense()
+
+    def render_gui(self) -> None:
         if self.viewer is not None:
             self.viewer.update()
+
+    def render(self) -> None:
+        self.render_gui()
 
     def render_rgb_array(self) -> np.ndarray:
         renderer = self._get_offscreen_renderer()
@@ -96,9 +308,10 @@ class MjlabSimAdapter(SimAdapter):
 
 
 class MjlabSceneAdapter(SceneAdapter):
-    def __init__(self, scene: Scene, sim: Simulation):
+    def __init__(self, scene: Scene, sim: Simulation, viewer: "MjLabViewer" = None):
         self._scene = scene
         self._sim = sim
+        self._viewer = viewer
 
     @override
     def zero_external_wrenches(self) -> None:
@@ -108,9 +321,54 @@ class MjlabSceneAdapter(SceneAdapter):
     @property
     def articulations(self):
         return self._scene.entities
+    
+    @property
+    def entities(self):
+        return self._scene.entities
+
+    @property
+    def sensors(self):
+        from active_adaptation.envs.sensors.warp_base import merge_sensors
+
+        return merge_sensors(self._scene.sensors, getattr(self, "_warp_sensors", None))
+
+    def update_warp_sensors(self) -> None:
+        from active_adaptation.envs.sensors.warp_base import update_warp_sensors
+
+        update_warp_sensors(self)
+
+    def get_visual_meshes(self, name: str) -> list[trimesh.Trimesh]:
+        """Body-local visual trimeshes for ``entities[name]`` (``body_names`` order).
+
+        Visual = ``contype == 0`` and ``conaffinity == 0`` (mjlab convention).
+        Multiply by ``body_link_pose_w`` at runtime.
+        """
+        from active_adaptation.envs.backends.mjlab.meshes import load_entity_body_meshes
+
+        entity = self.entities[name]
+        return load_entity_body_meshes(
+            entity, self._sim.mj_model, role="visual", require_all=True
+        )
+
+    def get_collision_meshes(self, name: str) -> list[trimesh.Trimesh]:
+        """Body-local collision trimeshes for ``entities[name]`` (``body_names`` order).
+
+        Collision = any geom with nonzero ``contype``/``conaffinity``. Bodies without
+        collision geoms get an empty trimesh so the list stays aligned with
+        ``num_bodies`` / ``body_link_pose_w``.
+        """
+        from active_adaptation.envs.backends.mjlab.meshes import load_entity_body_meshes
+
+        entity = self.entities[name]
+        return load_entity_body_meshes(
+            entity, self._sim.mj_model, role="collision", require_all=False
+        )
 
     def __getattr__(self, name):
         return getattr(self._scene, name)
+    
+    def __getitem__(self, key):
+        return self._scene.entities[key]
 
     @property
     def ground_mesh(self):
@@ -177,6 +435,78 @@ class MjlabSceneAdapter(SceneAdapter):
             ),
         )
         return self._ground_mesh
+    
+    def create_sphere_marker(
+        self,
+        prim_path: str,
+        color: tuple[float, float, float],
+        radius: float = 0.05,
+    ):
+        if self._viewer is None:
+            return _NoopMarker()
+        return _MjlabSphereMarker(
+            self._viewer, name=prim_path, color=color, radius=radius
+        )
+
+    def create_frame_marker(
+        self,
+        prim_path: str,
+        scale: tuple[float, float, float] = (0.1, 0.1, 0.1),
+    ):
+        if self._viewer is None:
+            return _NoopMarker()
+        return _MjlabFrameMarker(self._viewer, name=prim_path, scale=scale)
+
+    def create_camera_frustum(
+        self,
+        name: str,
+        *,
+        fov_y: float,
+        aspect: float,
+        scale: float = 0.15,
+    ) -> CameraFrustumHandle:
+        if self._viewer is None:
+            raise RuntimeError("`create_camera_frustum` requires a Viser viewer.")
+        handle = self._viewer.register_camera(
+            name,
+            fov_y=fov_y,
+            aspect=aspect,
+            scale=scale,
+        )
+        return CameraFrustumHandle(handle)
+
+    def clear_debug(self) -> None:
+        if self._viewer is not None:
+            self._viewer.clear_debug()
+            # self._viewer.clear() # not needed
+
+    def draw_vector(
+        self,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (0.0, 1.0, 1.0, 1.0),
+    ):
+        if self._viewer is not None:
+            self._viewer.vector(x, v, size, color)
+
+    def draw_point(
+        self,
+        x: torch.Tensor,
+        color: tuple[float, ...] = (1.0, 0.0, 0.0, 1.0),
+        size: float = 10.0,
+    ):
+        if self._viewer is not None:
+            self._viewer.point(x, color=color, size=size)
+
+    def draw_plot(
+        self,
+        x: torch.Tensor,
+        size: float = 2.0,
+        color: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0),
+    ):
+        if self._viewer is not None:
+            self._viewer.plot(x, size=size, color=color)
 
 
 __all__ = [

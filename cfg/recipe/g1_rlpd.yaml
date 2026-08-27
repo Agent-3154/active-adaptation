@@ -1,0 +1,28 @@
+# @package _global_
+name: g1_rlpd
+work_dir: ./outputs_pipeline/${name}/${now:%Y-%m-%d-%H-%M-%S}
+
+stages:
+  - name: ppo
+    script: train_ppo.py
+    # gpus: "0,1"
+    overrides:
+      - task=G1/G1LocoFlat
+      - algo=ppo_symaug
+
+  - name: rollout
+    script: rollout.py
+    overrides:
+      - task=G1/G1LocoFlat
+      - task.num_envs=256
+      - algo=ppo_symaug
+      - checkpoint_path=${run_state.checkpoint_path}
+
+  - name: sac_rlpd
+    script: train_offpolicy.py
+    # gpus: "0,1"
+    overrides:
+      - task=G1/G1LocoFlat
+      - task.num_envs=2048
+      - algo=sac_dist
+      - algo.prior_data=${run_state.rollout_path}
