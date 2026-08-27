@@ -407,5 +407,15 @@ def aa_list_tasks() -> None:
             print(f"  {task_id}  (from {source_name})")
 
 
+def aa_discover_projects(enabled: bool = False):
+    """Compatibility entry point for existing project setup scripts."""
+    return discover_cmd(enabled=enabled)
+
+
+def aa_project() -> None:
+    """Compatibility entry point for the pre-v0.8 executable name."""
+    main()
+
+
 def main() -> None:
     app()
