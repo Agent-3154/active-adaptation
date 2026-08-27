@@ -472,6 +472,7 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         # MDP: rewards
         reward_cfg = dict(self.cfg.reward)
+        self.mult_dt = reward_cfg.pop("_mult_dt_", True)
         for group_name, group_cfg in reward_cfg.items():
             rg = RewardGroup.create_from(
                 group_name,
@@ -816,7 +817,9 @@ class _EnvBase(EnvBase, RegistryMixin):
             reward = reward_group.compute()
             self.stats[group, "return"].add_(reward)
             if reward_group.enabled:
-                tensordict["reward", group] = reward
+                tensordict["reward", group] = (
+                    reward * self.step_dt if self.mult_dt else reward
+                )
 
         self.stats["episode_len"][:] = self.episode_length_buf.reshape(self.num_envs, 1)
         self.stats["success"][:] = (
