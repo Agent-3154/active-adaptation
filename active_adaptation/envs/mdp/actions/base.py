@@ -22,11 +22,9 @@ class Action(MDPComponent, RegistryMixin):
     action_dim: int
     action_buf: torch.Tensor
 
-    def __init__(self, env: "_EnvBase" | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
         self._names: list[str] | None = None
-        if env is not None:
-            self._initialize(env)
 
     def _initialize(self, env: "_EnvBase") -> None:
         super()._initialize(env)

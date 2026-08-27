@@ -12,9 +12,11 @@ class SplineCommand(Command):
     """
     
     """
-    def __init__(self, env) -> None:
-        super().__init__(env)
+    def __init__(self) -> None:
+        super().__init__()
 
+    def _initialize(self, env) -> None:
+        super()._initialize(env)
         with torch.device(self.device):
             self.spline_ps = torch.zeros(self.num_envs, 4, 2)
             self.spline_t = torch.zeros(self.num_envs, 1)

@@ -408,6 +408,10 @@ class motor_params_implicit(Randomization):
                 )
 
 
+class actuator_params(motor_params_implicit):
+    """Keep the existing Mimic config name on the unified implementation."""
+
+
 class random_motor_failure(Randomization):
     supported_backends = ("isaaclab",)
     def __init__(
@@ -464,7 +468,7 @@ class perturb_body_materials(Randomization):
         # common
         homogeneous: bool=False
     ):
-        raise ValueError("perturb_body_materials is deprecated. Use randomize_materials_isaac or randomize_materials_mjlab instead.")
+        super().__init__()
         self.body_names = body_names
         self.static_friction_range = static_friction_range
         self.dynamic_friction_range = dynamic_friction_range

@@ -19,10 +19,8 @@ if TYPE_CHECKING:
 class Command(MDPComponent, RegistryMixin):
     """Environment-deferred command source for the MDP."""
 
-    def __init__(self, env: _EnvBase | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        if env is not None:
-            self._initialize(env)
 
     def _initialize(self, env: _EnvBase) -> None:
         super()._initialize(env)

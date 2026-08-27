@@ -25,14 +25,10 @@ class Observation(Generic[CT], MDPComponent, RegistryMixin):
 
     def __init__(
         self,
-        env: "_EnvBase" | None = None,
-        *,
         functional: bool = False,
     ) -> None:
         super().__init__()
         self.functional = bool(functional)
-        if env is not None:
-            self._initialize(env)
 
     def _initialize(self, env: "_EnvBase") -> None:
         super()._initialize(env)

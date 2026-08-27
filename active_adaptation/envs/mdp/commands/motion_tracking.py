@@ -17,12 +17,16 @@ from active_adaptation.utils.math import (
 
 
 class MotionTrackingCommand(Command):
-    def __init__(self, env, data_path: str):
-        super().__init__(env)
+    def __init__(self, data_path: str):
+        super().__init__()
+        self.data_path = data_path
+
+    def _initialize(self, env):
+        super()._initialize(env)
         self.contact_forces: ContactSensor = self.env.scene.sensors["contact_forces"]
 
         self.dataset = MotionDataset.create_from_path(
-            data_path,
+            self.data_path,
             target_fps=int(1/self.env.step_dt)
         )
 

@@ -37,7 +37,7 @@ class MDPComponent:
 
     @property
     def initialized(self) -> bool:
-        return self._initialized
+        return getattr(self, "_initialized", False)
 
     @property
     def num_envs(self) -> int:

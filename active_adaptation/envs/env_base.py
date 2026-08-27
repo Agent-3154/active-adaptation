@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import inspect
 import warnings
 from collections import OrderedDict
 from typing import Callable, Dict, Mapping, Any, Optional, cast
@@ -236,8 +235,8 @@ class RewardGroup:
             if func.enabled:
                 rewards.append(reward)
         if len(rewards):
-            self.rew_buf = torch.cat(rewards, 1)
-        return self.rew_buf.sum(dim=1, keepdim=True)
+            return torch.cat(rewards, 1).sum(dim=1, keepdim=True)
+        return torch.zeros(self.env.num_envs, 1, device=self.env.device)
 
     def get_ema_stats(self) -> Dict[str, float]:
         """Flatten per-term EMA metrics (e.g. mean, optional var) for logging."""
@@ -263,7 +262,7 @@ class RewardGroup:
         group_name: str,
         group_cfg: dict,
         *,
-        make_component: Callable[[type[mdp.Reward], str, dict], mdp.Reward | "_PendingComponent" | None],
+        make_component: Callable[[type[mdp.Reward], str, dict], mdp.Reward | None],
         register_component: Callable[[mdp.MDPComponent], None] | None = None,
     ) -> "RewardGroup":
         print(f"Reward group: {group_name}")
@@ -297,18 +296,6 @@ class EnvConfig:
     terrain: Any
     sensors: Optional[Dict[str, Any]]
     objects: Optional[Dict[str, Any]]
-
-
-@dataclass
-class _PendingComponent:
-    cls: type[mdp.MDPComponent]
-    kwargs: dict[str, Any]
-
-    def __getattr__(self, name: str) -> Any:
-        try:
-            return self.kwargs[name]
-        except KeyError as exc:
-            raise AttributeError(name) from exc
 
 
 class _EnvBase(EnvBase, RegistryMixin):
@@ -401,9 +388,13 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     def _setup_visual(self) -> None:
         """Optional photoreal world (3DGS + mesh composite). Collision on ``scene``."""
+        visual_cfg = self.cfg.get("visual", None)
+        if visual_cfg is None:
+            self.visual = None
+            return
         from active_adaptation.envs.visual import make_visual_world
 
-        self.visual = make_visual_world(self.cfg.get("visual", None), device=self.device)
+        self.visual = make_visual_world(visual_cfg, device=self.device)
         if self.visual is None:
             return
         # Eager load so missing PLY fails at env construction, not first obs.
@@ -560,7 +551,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         base_cls: type[mdp.MDPComponent],
         class_name: str,
         kwargs: dict[str, Any],
-    ) -> mdp.MDPComponent | _PendingComponent | None:
+    ) -> mdp.MDPComponent | None:
         if class_name not in base_cls.registry:
             raise ValueError(f"Class '{class_name}' not found in {base_cls.__name__}.registry")
         instance_cls = base_cls.registry[class_name]
@@ -571,20 +562,12 @@ class _EnvBase(EnvBase, RegistryMixin):
                 f"Supported backends: {instance_cls.supported_backends}"
             )
             return None
-        try:
-            return instance_cls(**kwargs)
-        except TypeError as exc:
-            params = list(inspect.signature(instance_cls.__init__).parameters.values())[1:]
-            if params and params[0].name == "env":
-                return _PendingComponent(instance_cls, kwargs)
-            raise exc
+        return instance_cls(**kwargs)
 
     def _bind_component(
         self,
-        component: mdp.MDPComponent | _PendingComponent,
+        component: mdp.MDPComponent,
     ) -> mdp.MDPComponent:
-        if isinstance(component, _PendingComponent):
-            return component.cls(self, **component.kwargs)
         if not component.initialized:
             component._initialize(self)
         return component

@@ -7,10 +7,12 @@ from tensordict import TensorDictBase
 
 
 class Game(Command):
-    def __init__(self, env, catch_radius: float = 0.8) -> None:
-        super().__init__(env)
+    def __init__(self, catch_radius: float = 0.8) -> None:
+        super().__init__()
         self.catch_radius = catch_radius
 
+    def _initialize(self, env) -> None:
+        super()._initialize(env)
         with torch.device(self.device):
             self.role = torch.arange(self.num_envs) % 2
             self.target_caught_time = torch.zeros(self.num_envs, 1)
@@ -89,7 +91,7 @@ class Game(Command):
         ).reshape(self.num_envs, 3)
         self.target_diff = self.target_pos_w - self.asset.data.root_pos_w
         self.distance = self.target_diff[:, :2].norm(dim=-1, keepdim=True)
-        self.target_caught = self.distance < 0.8
+        self.target_caught = self.distance < self.catch_radius
         self.target_caught_time = torch.where(
             self.target_caught,
             self.target_caught_time + self.env.step_dt,

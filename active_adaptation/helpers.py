@@ -134,7 +134,9 @@ def make_env_policy(
                 "Specify `in_keys` (e.g., `policy`, `priv`, or regex `.*`) in `cfg.algo`."
             )
 
-        _, in_keys = resolve_matching_names(in_keys, task_cfg.observation.keys())
+        _, in_keys = resolve_matching_names(
+            in_keys, task_cfg.observation.keys(), preserve_order=True
+        )
         if discard_unused_obs:
             for obs_group_key in list(task_cfg.observation.keys()):
                 # Trailing ``_`` keeps a group for buffer/debug even if unused by the policy.

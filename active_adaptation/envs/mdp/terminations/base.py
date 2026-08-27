@@ -23,16 +23,12 @@ class Termination(Generic[CT], MDPComponent, RegistryMixin):
 
     def __init__(
         self,
-        env: "_EnvBase" | None = None,
-        *,
         is_timeout: bool = False,
         enabled: bool = True,
     ):
         super().__init__()
         self.is_timeout = is_timeout
         self.enabled = enabled
-        if env is not None:
-            self._initialize(env)
 
     def _initialize(self, env: "_EnvBase") -> None:
         super()._initialize(env)

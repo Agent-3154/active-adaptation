@@ -17,10 +17,8 @@ class Randomization(MDPComponent, RegistryMixin):
 
     mj_fields = tuple()
 
-    def __init__(self, env: "_EnvBase" | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        if env is not None:
-            self._initialize(env)
 
     def _initialize(self, env: "_EnvBase") -> None:
         super()._initialize(env)
