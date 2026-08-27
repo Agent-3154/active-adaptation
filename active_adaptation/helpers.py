@@ -1,3 +1,5 @@
+import gc
+
 import torch
 import hydra
 import numpy as np
@@ -28,7 +30,7 @@ class Every:
 
 def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
     OmegaConf.set_struct(cfg, False)
-    cfg.seed = cfg.seed + active_adaptation.get_local_rank()
+    cfg.seed = cfg.seed + active_adaptation.get_rank()
     
     from active_adaptation.envs import _EnvBase
     from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
@@ -89,9 +91,15 @@ def make_env_policy(cfg: DictConfig, checkpoint: CheckpointBase | None = None):
         env=env
     )
     
+    loaded_checkpoint = bool(state_dict)
     if "policy" in state_dict.keys():
         print(colored("[Info]: Load policy from checkpoint.", "green"))
         policy.load_state_dict(state_dict["policy"])
+    del state_dict
+    if loaded_checkpoint:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     if hasattr(policy, "make_tensordict_primer"):
         primer = policy.make_tensordict_primer()

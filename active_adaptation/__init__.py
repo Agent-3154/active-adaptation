@@ -197,11 +197,16 @@ def init(cfg: DictConfig, auto_rank: bool):
         import torch.distributed as dist
 
         if dist.is_available() and not dist.is_initialized():
+            timeout_s = os.getenv("ACTIVE_ADAPTATION_DISTRIBUTED_TIMEOUT_S")
+            timeout = None
+            if timeout_s:
+                timeout = datetime.timedelta(seconds=float(timeout_s))
             dist.init_process_group(
                 backend="nccl",
                 # world_size=get_world_size(),
                 # rank=get_local_rank(),
                 init_method="env://",
+                **({"timeout": timeout} if timeout is not None else {}),
             )
 
     if get_backend() == "isaaclab":
