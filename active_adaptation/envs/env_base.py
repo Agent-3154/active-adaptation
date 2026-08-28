@@ -40,6 +40,34 @@ PROFILE_SYNC_TIMERS = os.environ.get("AA_PROFILE_SYNC_TIMERS", "0").lower() in {
 }
 
 
+def _sanitize_nonfinite_env_rows(tensordict: TensorDictBase) -> torch.Tensor:
+    """Zero invalid transition rows and terminate those environments."""
+    num_envs = tensordict.batch_size[0]
+    invalid = torch.zeros(num_envs, dtype=torch.bool, device=tensordict.device)
+    floating_leaves = []
+    for key, value in tensordict.items(include_nested=True, leaves_only=True):
+        if (
+            isinstance(value, torch.Tensor)
+            and value.is_floating_point()
+            and value.ndim > 0
+            and value.shape[0] == num_envs
+        ):
+            floating_leaves.append((key, value))
+            invalid |= ~torch.isfinite(value).reshape(num_envs, -1).all(dim=1)
+
+    if not invalid.any():
+        return invalid
+
+    for key, value in floating_leaves:
+        row_mask = invalid.reshape(num_envs, *((1,) * (value.ndim - 1)))
+        tensordict.set(key, torch.where(row_mask, torch.zeros_like(value), value))
+    tensordict["terminated"][invalid] = True
+    tensordict["truncated"][invalid] = False
+    tensordict["done"][invalid] = True
+    tensordict["discount"][invalid] = 0.0
+    return invalid
+
+
 def parse_component_spec(name: str, cfg):
     if cfg is None or not hasattr(cfg, "items"):
         raise ValueError(f"Component '{name}' must be a mapping.")
@@ -344,6 +372,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.stats: TensorDict = self.reward_spec["stats"].zero()
         self.input_tensordict = None
         self.extra = {}
+        self._nonfinite_rows_total = 0
         [callback() for callback in self._startup_callbacks]
         self._startup_done = True
 
@@ -795,6 +824,12 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()
+
+        invalid = _sanitize_nonfinite_env_rows(tensordict)
+        invalid_count = int(invalid.sum().item())
+        self._nonfinite_rows_total += invalid_count
+        self.extra["env/nonfinite_rows"] = invalid_count
+        self.extra["env/nonfinite_rows_total"] = self._nonfinite_rows_total
 
         if self._should_debug_draw():
             [callback() for callback in self._debug_draw_callbacks]
