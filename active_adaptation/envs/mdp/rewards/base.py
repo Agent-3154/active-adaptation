@@ -47,27 +47,32 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
     def modifier(self) -> torch.Tensor:
         return self._modifier
 
-    def _update_ema(self, rew: torch.Tensor, count: torch.Tensor | float) -> None:
+    def _update_ema(
+        self, rew: torch.Tensor, is_active: torch.Tensor | None = None
+    ) -> None:
+        finite = torch.isfinite(rew)
+        if is_active is not None:
+            finite &= is_active.bool().expand_as(rew)
+        safe_rew = torch.where(finite, rew, torch.zeros_like(rew))
         dec = self._ema_decay
-        self._ema_sum.mul_(dec).add_(rew.sum())
-        self._ema_cnt.mul_(dec).add_(count)
+        self._ema_sum.mul_(dec).add_(safe_rew.sum())
+        self._ema_cnt.mul_(dec).add_(finite.sum())
         if self._ema_sum_sq is not None:
-            self._ema_sum_sq.mul_(dec).add_(rew.square().sum())
+            self._ema_sum_sq.mul_(dec).add_(safe_rew.square().sum())
 
     def compute(self) -> torch.Tensor:
         result = self._compute()
         if isinstance(result, torch.Tensor):
             rew = result
-            count = float(result.numel())
+            is_active = None
         elif isinstance(result, tuple):
             rew, is_active = result
             rew = rew * is_active.float()
-            count = is_active.sum()
         else:
             raise TypeError(result)
         rew = self.weight * rew * self.modifier
         self._modifier = torch.ones(self.num_envs, 1, device=self.device)
-        self._update_ema(rew, count)
+        self._update_ema(rew, is_active)
         return rew
 
     def get_ema_stats(self) -> Tuple[torch.Tensor, torch.Tensor | None]:
