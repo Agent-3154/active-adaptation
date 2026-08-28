@@ -106,6 +106,9 @@ class MjLabViewer:
         self._debug_line_cols.clear()
         self._debug_point_pts.clear()
         self._debug_point_cols.clear()
+        scene = self.scene
+        if scene is not None:
+            scene.clear()
 
     def vector(
         self,
