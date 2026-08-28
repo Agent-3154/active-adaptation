@@ -37,6 +37,7 @@ class MjlabBackendEnv(_EnvBase):
         super().__init__(cfg, device, headless)
         self.robot = self.scene.articulations["robot"]
         if self.sim.has_gui():
+            self._debug_draw_callbacks.insert(0, self.scene.clear_debug)
             self.sim.viewer.setup()
             self.sim.viewer.update()
 
@@ -159,9 +160,6 @@ class MjlabBackendEnv(_EnvBase):
         install_warp_sensors(self.scene, warp_sensor_specs, env=self)
         self.sim = MjlabSimAdapter(sim, viewer, viewer_cfg=viewer_cfg, scene=scene)
         self.robot = self.scene.articulations["robot"]
-        if viewer is not None:
-            self._debug_draw_callbacks.insert(0, self.scene.clear_debug)
-
         if asset_spec.wrapper is not None:
             self.robot_wrapper = asset_spec.wrapper
             self.robot_wrapper._initialize(robot=self.robot, env=self)
