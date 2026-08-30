@@ -2,7 +2,7 @@
 
 These terms stay **dense** (``functional=False``): features are small enough that
 compact ``fupdate``/``fcompute`` storage is not worth the complexity. Always call
-``super().__init__()`` so :class:`~ObservationV2` sets ``functional`` correctly.
+``super().__init__()`` so :class:`~Observation` sets ``functional`` correctly.
 """
 
 import torch
@@ -13,7 +13,7 @@ from typing_extensions import override
 from tensordict import TensorDictBase
 
 import active_adaptation
-from .base import ObservationV2
+from .base import Observation
 from active_adaptation.utils.math import (
     quat_rotate,
     quat_rotate_inverse,
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class root_pose_w(ObservationV2):
+class root_pose_w(Observation):
     """Root link pose (position, quaternion) in world frame."""
 
     @override
@@ -40,7 +40,7 @@ class root_pose_w(ObservationV2):
         return self.asset.data.root_link_pose_w.reshape(self.num_envs, -1)
 
 
-class root_state_w(ObservationV2):
+class root_state_w(Observation):
     """Root link state (position, quaternion, linear velocity, angular velocity) in world frame."""
 
     @override
@@ -53,7 +53,7 @@ class root_state_w(ObservationV2):
         return self.asset.data.root_link_state_w.reshape(self.num_envs, -1)
 
 
-class root_linacc_substep(ObservationV2):
+class root_linacc_substep(Observation):
     def __init__(self, steps: int | None = None, flatten: bool = False):
         super().__init__()
         self.steps = steps
@@ -82,7 +82,7 @@ class root_linacc_substep(ObservationV2):
         return self.lin_acc_substep
 
 
-class command(ObservationV2):
+class command(Observation):
     def __init__(self, key: str | None = None):
         super().__init__()
         self.key = key
@@ -100,7 +100,7 @@ class command(ObservationV2):
         return self.command_manager.symmetry_transform()
 
 
-class root_angvel_b(ObservationV2):
+class root_angvel_b(Observation):
     def __init__(self, steps: int = 1, noise_std: float = 0.0, yaw_only: bool = False):
         super().__init__()
         self.steps = steps
@@ -140,7 +140,7 @@ class root_angvel_b(ObservationV2):
         return transform.repeat(self.steps)
 
 
-class root_gyro_substep(ObservationV2):
+class root_gyro_substep(Observation):
     def __init__(self, steps: int | None = None, flatten: bool = False):
         super().__init__()
         self.steps = steps
@@ -165,7 +165,7 @@ class root_gyro_substep(ObservationV2):
         return self.gyro
 
 
-class root_gyro_multistep(ObservationV2):
+class root_gyro_multistep(Observation):
     def __init__(self, steps: int = 4, noise_std: float = 0.0):
         super().__init__()
         self.steps = steps
@@ -189,7 +189,7 @@ class root_gyro_multistep(ObservationV2):
         return self.gyro_multistep.reshape(self.num_envs, -1)
 
 
-class projected_gravity_b(ObservationV2):
+class projected_gravity_b(Observation):
     def __init__(self, noise_std: float = 0.0):
         super().__init__()
         self.noise_std = noise_std
@@ -218,7 +218,7 @@ class projected_gravity_b(ObservationV2):
         return gravity
 
 
-class gravity_multistep(ObservationV2):
+class gravity_multistep(Observation):
     def __init__(self, steps: int = 4, interval: int = 1, noise_std: float = 0.0):
         super().__init__()
         self.steps = steps
@@ -251,7 +251,7 @@ class gravity_multistep(ObservationV2):
         return transform.repeat(self.steps)
 
 
-class gravity_substep(ObservationV2):
+class gravity_substep(Observation):
     def __init__(self, steps: int | None = None, flatten: bool = False):
         super().__init__()
         self.steps = steps
@@ -276,7 +276,7 @@ class gravity_substep(ObservationV2):
         return self.gravity
 
 
-class root_linvel_b(ObservationV2):
+class root_linvel_b(Observation):
     def __init__(self, yaw_only: bool = False):
         super().__init__()
         self.yaw_only = yaw_only
@@ -307,7 +307,7 @@ class root_linvel_b(ObservationV2):
         return transform
 
 
-class prev_actions(ObservationV2):
+class prev_actions(Observation):
     def __init__(self, key: str = "action", steps: int = 1, flatten: bool = True):
         super().__init__()
         self.key = key
@@ -331,7 +331,7 @@ class prev_actions(ObservationV2):
         return transform.repeat(self.steps)
 
 
-class cum_error(ObservationV2):
+class cum_error(Observation):
     def compute(self) -> torch.Tensor:
         return self.command_manager._cum_error
 
@@ -339,7 +339,7 @@ class cum_error(ObservationV2):
         return obs
 
 
-class clock(ObservationV2):
+class clock(Observation):
     def __init__(self, frequencies: list[int] = [1, 2, 4]):
         super().__init__()
         self.frequencies = frequencies
@@ -355,6 +355,6 @@ class clock(ObservationV2):
         return torch.cat([t.sin(), t.cos()], dim=1)
 
 
-class command_mode(ObservationV2):
+class command_mode(Observation):
     def compute(self) -> torch.Tensor:
         return self.command_manager.command_mode

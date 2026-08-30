@@ -5,14 +5,14 @@ from typing import TYPE_CHECKING, Optional
 from typing_extensions import override
 
 import active_adaptation
-from active_adaptation.envs.mdp.randomizations.base import RandomizationV2
+from active_adaptation.envs.mdp.randomizations.base import Randomization
 from active_adaptation.envs.mdp.randomizations.common import NestedRangeType
 from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
-if active_adaptation.get_backend() == "isaac":
+if active_adaptation.get_backend() == "isaaclab":
     from isaaclab.utils.string import resolve_matching_names_values
 if active_adaptation.get_backend() == "mjlab":
     from mjlab.utils.lab_api.string import resolve_matching_names_values
@@ -20,7 +20,7 @@ if active_adaptation.get_backend() == "mjlab":
     from mjlab.actuator import BuiltinPositionActuator, BuiltinPdActuator
 
 
-class actuator_pd_gains(RandomizationV2):
+class actuator_pd_gains(Randomization):
     """Randomize PD stiffness and damping gains.
 
     For the **mjlab** backend, only ``BuiltinPositionActuator`` is supported: we
@@ -32,7 +32,7 @@ class actuator_pd_gains(RandomizationV2):
     damping write APIs (not MuJoCo actuators).
     """
 
-    supported_backends = ("isaac", "mjlab")
+    supported_backends = ("isaaclab", "mjlab")
 
     mj_fields = (
         "actuator_gainprm",
@@ -54,7 +54,7 @@ class actuator_pd_gains(RandomizationV2):
 
         if self.env.backend == "mjlab":
             self._init_mjlab()
-        elif self.env.backend == "isaac":
+        elif self.env.backend == "isaaclab":
             self._init_isaac()
 
     def _init_isaac(self):
@@ -131,7 +131,7 @@ class actuator_pd_gains(RandomizationV2):
                 kd_samples = rand * (self.kd_high - self.kd_low) + self.kd_low
                 kd_bias = self.kd_bias_def.unsqueeze(0) * kd_samples
                 self.model.actuator_biasprm[env_ids.unsqueeze(1), self.kd_ctrl_ids, 2] = kd_bias
-        elif self.env.backend == "isaac":
+        elif self.env.backend == "isaaclab":
             if self.stiffness_range is not None:
                 rand = torch.rand(len(env_ids), len(self.stiffness_id), device=self.device)
                 stiffness = rand * self.stiffness_scale + self.stiffness_low

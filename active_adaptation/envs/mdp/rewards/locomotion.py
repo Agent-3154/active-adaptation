@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Optional, List, Union
 from typing_extensions import override
 
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
-from .base import RewardV2
+from .base import Reward
 from active_adaptation.envs.mdp.commands.locomotion import Twist
 from active_adaptation.envs.utils import find_sensor_bodies
 from tensordict import TensorDictBase
@@ -16,13 +16,13 @@ if TYPE_CHECKING:
 Names = Union[str, List[str]]
 
 
-class survival(RewardV2):
+class survival(Reward):
     @override
     def _compute(self):
         return torch.ones(self.num_envs, 1, device=self.device)
 
 
-class linvel_z_l2(RewardV2):
+class linvel_z_l2(Reward):
     def __init__(self, weight: float, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
 
@@ -41,7 +41,7 @@ class linvel_z_l2(RewardV2):
         return -self.linvel_z.square()
 
 
-class angvel_xy_l2(RewardV2):
+class angvel_xy_l2(Reward):
     def __init__(
         self,
         weight: float,
@@ -75,8 +75,8 @@ class angvel_xy_l2(RewardV2):
         return reward.reshape(self.num_envs, 1)
 
 
-class undesired_contact(RewardV2):
-    supported_backends = ("isaac", "mjlab", "motrix")
+class undesired_contact(Reward):
+    supported_backends = ("isaaclab", "mjlab", "motrix")
 
     def __init__(self, body_names: Names, weight: float, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
@@ -103,7 +103,7 @@ class undesired_contact(RewardV2):
         return self.undesired_contact.reshape(self.num_envs, 1)
 
 
-class linvel_exp(RewardV2[Twist]):
+class linvel_exp(Reward[Twist]):
     def __init__(
         self,
         weight: float,
@@ -141,7 +141,7 @@ class linvel_exp(RewardV2[Twist]):
         return rew.reshape(self.num_envs, 1)
 
     def debug_draw(self):
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             linvel_w = self.linvel_w_sum / self.count.clamp_min(1.0)
             self.env.scene.draw_vector(
                 self.asset.data.root_link_pos_w
@@ -151,7 +151,7 @@ class linvel_exp(RewardV2[Twist]):
             )
 
 
-class root_pos_exp(RewardV2):
+class root_pos_exp(Reward):
     def __init__(self, weight: float, dim: int = 2, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.dim = dim
@@ -170,7 +170,7 @@ class root_pos_exp(RewardV2):
         return rew.reshape(self.num_envs, 1)
 
 
-class root_pos_l2(RewardV2):
+class root_pos_l2(Reward):
     def __init__(self, weight: float, dim: int = 2, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.dim = dim
@@ -189,7 +189,7 @@ class root_pos_l2(RewardV2):
         return rew.reshape(self.num_envs, 1)
 
 
-class linvel_projection(RewardV2[Twist]):
+class linvel_projection(Reward[Twist]):
     def __init__(
         self,
         weight: float,
@@ -213,7 +213,7 @@ class linvel_projection(RewardV2[Twist]):
         return rew.reshape(self.num_envs, 1)
 
 
-class angvel_z_exp(RewardV2[Twist]):
+class angvel_z_exp(Reward[Twist]):
     def __init__(
         self,
         weight: float,
@@ -250,7 +250,7 @@ class angvel_z_exp(RewardV2[Twist]):
         return rew.reshape(self.num_envs, 1)
 
 
-class tracking_yaw(RewardV2):
+class tracking_yaw(Reward):
     def __init__(self, weight: float, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
 
@@ -265,7 +265,7 @@ class tracking_yaw(RewardV2):
         return torch.exp(-yaw_diff.square())
 
 
-class body_upright(RewardV2):
+class body_upright(Reward):
     """Reward for keeping the specified body upright."""
 
     def __init__(self, body_name: str, weight: float, track_var: bool = False):
@@ -290,7 +290,7 @@ class body_upright(RewardV2):
         return rew.mean(1, True)
 
 
-class base_height_l1(RewardV2[Twist]):
+class base_height_l1(Reward[Twist]):
     def __init__(
         self,
         weight: float,
@@ -317,7 +317,7 @@ class base_height_l1(RewardV2[Twist]):
         return -error_l1.reshape(self.num_envs, 1)
 
 
-class base_height_exp(RewardV2[Twist]):
+class base_height_exp(Reward[Twist]):
     def __init__(
         self,
         weight: float,
@@ -347,7 +347,7 @@ class base_height_exp(RewardV2[Twist]):
         return rew.reshape(self.num_envs, 1)
 
 
-class is_standing_env(RewardV2):
+class is_standing_env(Reward):
     def __init__(self, weight: float, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
 
@@ -356,7 +356,7 @@ class is_standing_env(RewardV2):
         return self.command_manager.is_standing_env.reshape(self.num_envs, 1)
 
 
-class joint_limits(RewardV2):
+class joint_limits(Reward):
     def __init__(
         self,
         joint_names: str,
@@ -384,7 +384,7 @@ class joint_limits(RewardV2):
         return (violation_min + violation_max).sum(1, keepdim=True)
 
 
-class oscillator(RewardV2):
+class oscillator(Reward):
     def __init__(
         self,
         feet_names: str = ".*_foot",
@@ -460,7 +460,7 @@ class oscillator(RewardV2):
         return phi_dot
 
 
-class quadruped_stand(RewardV2):
+class quadruped_stand(Reward):
     def __init__(self, feet_names: str, weight: float, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.feet_names = feet_names
@@ -487,7 +487,7 @@ class quadruped_stand(RewardV2):
         return cost * self.command_manager.is_standing_env.reshape(self.num_envs, 1)
 
 
-class lateral_swing_height(RewardV2):
+class lateral_swing_height(Reward):
     def __init__(
         self,
         weight: float,

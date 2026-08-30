@@ -7,7 +7,7 @@ from active_adaptation.envs.backends.mjlab.adapter import (
     MjlabSimAdapter,
 )
 from active_adaptation.envs.env_base import _EnvBase
-from active_adaptation.assets.asset_cfg import AssetSpec
+from active_adaptation.assets.asset_cfg import AssetSpec, coerce_asset_spec
 from active_adaptation.registry import Registry
 
 
@@ -37,6 +37,7 @@ class MjlabBackendEnv(_EnvBase):
         super().__init__(cfg, device, headless)
         self.robot = self.scene.articulations["robot"]
         if self.sim.has_gui():
+            self._debug_draw_callbacks.insert(0, self.scene.clear_debug)
             self.sim.viewer.setup()
             self.sim.viewer.update()
 
@@ -76,8 +77,10 @@ class MjlabBackendEnv(_EnvBase):
 
         registry = Registry.instance()
         robot_cfg = dict(self.cfg.robot.copy())
-        asset_factory = registry.get("asset", robot_cfg.pop("name"))
-        asset_spec: AssetSpec = asset_factory(backend="mjlab", **robot_cfg)
+        asset_entry = registry.get("asset", robot_cfg.pop("name"))
+        asset_spec: AssetSpec = coerce_asset_spec(
+            asset_entry, backend="mjlab", **robot_cfg
+        )
         asset_cfg = asset_spec.config
         sensors = {sensor.name: sensor for sensor in asset_spec.sensors}
         terrain = self.cfg.get("terrain", "plane")
@@ -94,11 +97,11 @@ class MjlabBackendEnv(_EnvBase):
         entities = {"robot": asset_cfg}
         for obj_name, obj_spec in self.cfg.get("objects", {}).items():
             obj_spec = dict(obj_spec)
-            fn = registry.get("asset", obj_spec.pop("_target_"))
-            obj_cfg = fn(backend="mjlab", **obj_spec)
-            if isinstance(obj_cfg, AssetSpec):
-                obj_cfg = obj_cfg.config
-            entities[obj_name] = obj_cfg
+            asset_entry = registry.get("asset", obj_spec.pop("_target_"))
+            object_spec = coerce_asset_spec(
+                asset_entry, backend="mjlab", **obj_spec
+            )
+            entities[obj_name] = object_spec.config
 
         import active_adaptation.envs.sensors  # noqa: F401  # register sensor factories
         from active_adaptation.envs.sensors.warp_base import (
@@ -127,9 +130,7 @@ class MjlabBackendEnv(_EnvBase):
             terrain=terrain_cfg,
         )
 
-        for group in self.observation_groups.values():
-            for func in group.funcs.values():
-                func.edit_spec(scene_cfg)
+        self._edit_scene_spec(scene_cfg)
 
         scene = Scene(scene_cfg, device=str(self.device))
         sim = Simulation(
@@ -159,9 +160,6 @@ class MjlabBackendEnv(_EnvBase):
         install_warp_sensors(self.scene, warp_sensor_specs, env=self)
         self.sim = MjlabSimAdapter(sim, viewer, viewer_cfg=viewer_cfg, scene=scene)
         self.robot = self.scene.articulations["robot"]
-        if viewer is not None:
-            self._debug_draw_callbacks.insert(0, self.scene.clear_debug)
-
         if asset_spec.wrapper is not None:
             self.robot_wrapper = asset_spec.wrapper
             self.robot_wrapper._initialize(robot=self.robot, env=self)

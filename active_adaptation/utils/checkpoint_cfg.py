@@ -78,6 +78,16 @@ def load_algo_cfg_from_local_pt(checkpoint_file: Path | str) -> DictConfig:
     if "algo" not in saved:
         raise KeyError(f"{cfg_yaml} has no 'algo' section")
     algo_cfg = saved.algo
+    target = OmegaConf.select(algo_cfg, "_target_")
+    if isinstance(target, str) and target.endswith("Policy"):
+        module, policy_name = target.rsplit(".", 1)
+        algo_cfg._target_ = f"{module}.{policy_name.removesuffix('Policy')}Config"
+    total_iters = OmegaConf.select(saved, "total_iters")
+    if total_iters:
+        for key in ("entropy_decay_start", "entropy_decay_end"):
+            value = OmegaConf.select(algo_cfg, key)
+            if value is not None and float(value) > 1.0:
+                algo_cfg[key] = float(value) / float(total_iters)
     print(
         colored(
             f"[Info]: Loaded algo={OmegaConf.select(algo_cfg, 'name')} from {cfg_yaml}",
@@ -99,4 +109,3 @@ def load_algo_cfg_from_checkpoint(checkpoint_spec: str) -> DictConfig:
             f"Could not resolve checkpoint path for {checkpoint_spec!r}"
         )
     return load_algo_cfg_from_local_pt(local_path)
-

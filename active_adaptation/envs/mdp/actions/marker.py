@@ -7,14 +7,14 @@ from typing_extensions import override
 
 from active_adaptation.utils.math import quat_rotate
 
-from .base import ActionV2
+from .base import Action
 
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class Marker(ActionV2):
+class Marker(Action):
     """
     This is a marker action that visualizes a set of markers in the world frame.
     It does not have a fixed action dimension, and the action is the position of the markers in the world frame.
@@ -37,7 +37,7 @@ class Marker(ActionV2):
         self.has_gui = self.env.sim.has_gui()
         self.action_dim = 3  # not actually limited to 3
 
-        if self.has_gui and self.env.backend == "isaac":
+        if self.has_gui and self.env.backend == "isaaclab":
             from isaaclab.markers import (
                 VisualizationMarkers,
                 VisualizationMarkersCfg,

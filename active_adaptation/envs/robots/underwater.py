@@ -474,7 +474,7 @@ class UnderwaterRobot:
         data = self.robot.data
         with ScopedTimer("underwater.root_flow"):
             root_link_quat_w = data.root_link_quat_w
-            if self.env.backend == "isaac":
+            if self.env.backend == "isaaclab":
                 # Rotate the COM world twist together with flow below instead
                 # of invoking the two derived body-frame properties.
                 root_lin_vel_w = data.root_com_lin_vel_w
@@ -539,7 +539,7 @@ class UnderwaterRobot:
         with ScopedTimer("underwater.body_damping"):
             # Per-body damping on each link's flow-relative twist.
             with ScopedTimer("underwater.body_state"):
-                if self.env.backend == "isaac":
+                if self.env.backend == "isaaclab":
                     # `data.body_link_lin_vel_w` and `data.body_link_ang_vel_w` are slow for isaac, use
                     # `data.body_com_lin_vel_w` and `data.body_com_ang_vel_w` instead.
                     body_lin_vel_w = data.body_com_lin_vel_w
@@ -647,7 +647,7 @@ class UnderwaterRobot:
                 self.robot.write_external_wrench_to_sim(forces_w, torques_w)
 
     def debug_draw(self):
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             rotor_pos_w = self.robot.data.body_link_pos_w[:, self.rotor_indices]
             rotor_quat_w = self.robot.data.body_link_quat_w[:, self.rotor_indices]
             v = torch.tensor([[[1.0, 0.0, 0.0]]], device=self.device)

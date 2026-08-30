@@ -18,7 +18,7 @@ import active_adaptation
 from active_adaptation.utils.math import quat_from_euler_xyz, quat_mul, quat_rotate, quat_rotate_inverse
 from active_adaptation.utils.symmetry import SymmetryTransform
 
-from .base import ObservationV2
+from .base import Observation
 
 
 if TYPE_CHECKING:
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from isaaclab.sensors import TiledCamera
     from active_adaptation.envs.env_base import _EnvBase
 
-if active_adaptation.get_backend() == "isaac":
+if active_adaptation.get_backend() == "isaaclab":
     from isaaclab.utils.warp import raycast_mesh
 
 
@@ -214,7 +214,7 @@ class _JanusDvlMixin:
             )
 
 
-class baro_pressure(ObservationV2):
+class baro_pressure(Observation):
     """Hydrostatic + atmospheric pressure (OceanSim ``BarometerSensor``).
 
     Output shape: ``(num_envs, 1)`` pressure in Pascals.
@@ -276,7 +276,7 @@ class baro_pressure(ObservationV2):
 
     def _read_sim_gravity_mag(self) -> Optional[float]:
         try:
-            if self.env.backend == "isaac":
+            if self.env.backend == "isaaclab":
                 g_vec = self.env.sim.get_physics_context().get_gravity()[1]
                 return float(abs(g_vec))
         except Exception:
@@ -297,7 +297,7 @@ class baro_pressure(ObservationV2):
         return SymmetryTransform(perm=torch.arange(1), signs=[1.0])
 
 
-class dvl_linvel(ObservationV2, _JanusDvlMixin):
+class dvl_linvel(Observation, _JanusDvlMixin):
     """Body-frame linear velocity with Janus beam gating (OceanSim ``DVLsensor``).
 
     Output shape: ``(num_envs, 3)`` body-frame linear velocity (m/s). Zeros on
@@ -333,7 +333,7 @@ class dvl_linvel(ObservationV2, _JanusDvlMixin):
     - **Rate limit:** hold-last when ``freq`` is set (not OceanSim NaNs).
     """
     namespace: str = "underwater"
-    supported_backends = ("isaac",)
+    supported_backends = ("isaaclab",)
 
     def __init__(
         self,
@@ -401,7 +401,7 @@ class dvl_linvel(ObservationV2, _JanusDvlMixin):
         self._debug_draw_beams()
 
 
-class dvl_beam_range(ObservationV2, _JanusDvlMixin):
+class dvl_beam_range(Observation, _JanusDvlMixin):
     """Per-beam DVL ranges (OceanSim ``DVLsensor.get_depth``).
 
     Output shape: ``(num_envs, 4)`` ranges in meters (misses → ``nan_fill``).
@@ -435,7 +435,7 @@ class dvl_beam_range(ObservationV2, _JanusDvlMixin):
     """
 
     namespace: str = "underwater"
-    supported_backends = ("isaac",)
+    supported_backends = ("isaaclab",)
 
     def __init__(
         self,
@@ -498,7 +498,7 @@ class dvl_beam_range(ObservationV2, _JanusDvlMixin):
         self._debug_draw_beams()
 
 
-class uw_camera(ObservationV2):
+class uw_camera(Observation):
     """Underwater RGB camera (OceanSim ``UW_Camera`` + ``UW_render``).
 
     Spawns an Isaac Lab :class:`~isaaclab.sensors.TiledCamera` (via ``edit_spec``),
@@ -560,7 +560,7 @@ class uw_camera(ObservationV2):
     """
 
     namespace: str = "underwater"
-    supported_backends = ("isaac",)
+    supported_backends = ("isaaclab",)
     _instance_count = 0
 
     def __init__(
@@ -777,10 +777,10 @@ class uw_camera(ObservationV2):
         self.camera_handle.image = self._image_hwc_uint8(env_idx)
 
 
-class imaging_sonar(ObservationV2):
+class imaging_sonar(Observation):
     """Imaging sonar (OceanSim ``ImagingSonarSensor``). Stub — not implemented."""
 
-    supported_backends = ("isaac",)
+    supported_backends = ("isaaclab",)
 
     def __init__(
         self,

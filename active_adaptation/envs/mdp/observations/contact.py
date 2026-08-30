@@ -1,7 +1,7 @@
 import torch
 from typing import TYPE_CHECKING
 from typing_extensions import override
-from .base import ObservationV2
+from .base import Observation
 from active_adaptation.utils.math import quat_rotate_inverse
 from active_adaptation.utils.symmetry import cartesian_space_symmetry
 from tensordict import TensorDictBase
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class last_contact_pos(ObservationV2):
+class last_contact_pos(Observation):
     """Buffered body link positions tied to contact, updated every step while the foot is down.
 
     Unlike touchdown-only snapshots, ``last_contact_pos_w`` follows
@@ -49,8 +49,8 @@ class last_contact_pos(ObservationV2):
             self.has_contact = torch.zeros(self.num_envs, len(self.body_ids), dtype=bool)
             self.last_contact_pos_w = torch.zeros(self.num_envs, len(self.contact_ids), 3)
 
-        if self.env.sim.has_gui() and self.env.backend == "isaac":
-            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+        if self.env.sim.has_gui() and self.env.backend == "isaaclab":
+            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
 
             scene: IsaacSceneAdapter = self.env.scene
             self.marker = scene.create_sphere_marker(
@@ -91,7 +91,7 @@ class last_contact_pos(ObservationV2):
 
     def debug_draw(self) -> None:
         """Draw a vector from each body link to its latched last-contact marker and show spheres."""
-        if self.env.sim.has_gui() and self.env.backend == "isaac":
+        if self.env.sim.has_gui() and self.env.backend == "isaaclab":
             self.env.scene.draw_vector(
                 self.body_link_pos_w,
                 self.last_contact_pos_w - self.body_link_pos_w,
@@ -102,8 +102,8 @@ class last_contact_pos(ObservationV2):
             )
 
 
-class contact_indicator(ObservationV2):
-    supported_backends = ("isaac",)
+class contact_indicator(Observation):
+    supported_backends = ("isaaclab",)
 
     def __init__(self, body_names: str):
         super().__init__()
@@ -124,7 +124,7 @@ class contact_indicator(ObservationV2):
         return cartesian_space_symmetry(self.asset, self.body_names, sign=(1,))
 
 
-class contact_forces(ObservationV2):
+class contact_forces(Observation):
     """Net contact force on matched bodies, flattened to ``(num_envs, 3 * B)``.
 
     Reads ``force_matrix_w`` when the sensor has a filter (e.g. object vs
@@ -169,7 +169,7 @@ class contact_forces(ObservationV2):
 
     def compute(self):
         self.body_pos_w = self.asset.data.root_link_pos_w
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             self.forces_w = self.contact_sensor.data.net_forces_w[:, self.sensor_body_ids]
         elif self.env.backend == "mjlab":
             self.forces_w = self.contact_sensor.data.force[:, self.sensor_body_ids]

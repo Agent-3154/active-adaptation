@@ -8,7 +8,7 @@ from typing import Tuple, Literal
 import torch
 from typing_extensions import override
 
-from active_adaptation.envs.mdp.observations.base import ObservationV2
+from active_adaptation.envs.mdp.observations.base import Observation
 from active_adaptation.envs.utils import find_bodies
 from active_adaptation.utils.math import quat_from_euler_xyz, quat_mul, quat_rotate
 from active_adaptation.utils.symmetry import SymmetryTransform
@@ -19,7 +19,7 @@ from active_adaptation.utils.symmetry import SymmetryTransform
 _MOUNT_TO_OPENCV = (0.5, -0.5, 0.5, -0.5)
 
 
-class gs_camera(ObservationV2):
+class gs_camera(Observation):
     """RGB from ``env.visual.render`` (option A: explicit, not ``render_sensors``).
 
     Requires ``task.visual`` so ``env.visual`` is a :class:`VisualWorld` (e.g.

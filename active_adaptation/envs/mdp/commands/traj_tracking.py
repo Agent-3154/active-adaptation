@@ -9,9 +9,9 @@ from typing_extensions import override
 from active_adaptation.planning import QuinticPolynomial
 from active_adaptation.utils.math import quat_rotate_inverse, wrap_to_pi, yaw_quat
 
-from active_adaptation.envs.mdp.commands.base import CommandV2
-from active_adaptation.envs.mdp.rewards.base import RewardV2
-from active_adaptation.envs.mdp.terminations.base import TerminationV2
+from active_adaptation.envs.mdp.commands.base import Command
+from active_adaptation.envs.mdp.rewards.base import Reward
+from active_adaptation.envs.mdp.terminations.base import Termination
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -41,7 +41,7 @@ def _yaw_from_xy(dx: torch.Tensor, dy: torch.Tensor, fallback: torch.Tensor) -> 
     return torch.where(valid, yaw, fb.expand_as(yaw))
 
 
-class TrajTracking(CommandV2):
+class TrajTracking(Command):
     """Track a batched 3D root trajectory (quintic, zero endpoint acceleration).
 
     On reset, samples an endpoint ``(xT, vT)`` and duration and fits a
@@ -148,9 +148,9 @@ class TrajTracking(CommandV2):
         )
 
     @override
-    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
         """Spawn at default root pose; ``reset`` fits the trajectory from here."""
-        return super().sample_init(env_ids)
+        super().sample_init(env_ids, reset_td)
     
     def _resample_target(self, env_ids: torch.Tensor) -> None:
         x0 = self.asset.data.root_link_pos_w[env_ids]
@@ -178,14 +178,14 @@ class TrajTracking(CommandV2):
         # (``is_init``); next-step targets are written in ``update``.
 
     @override
-    def sync_state(self) -> None:
+    def update(self) -> None:
         # Rewards read next-step targets from the previous ``update``.
         self._cum_error = (self.ref_pos_w - self.asset.data.root_link_pos_w).norm(
             dim=-1, keepdim=True
         )
 
     @override
-    def update(self) -> None:
+    def step(self) -> None:
         resample = (
             ((self.env.episode_length_buf + 1) % self.resample_interval == 0) &
             (torch.rand(self.num_envs, device=self.device) < self.resample_prob)
@@ -263,7 +263,7 @@ class TrajTracking(CommandV2):
         )
 
 
-class position_tracking(RewardV2[TrajTracking]):
+class position_tracking(Reward[TrajTracking]):
     """Exponential reward for tracking the commanded next-step trajectory position."""
 
     def __init__(
@@ -289,7 +289,7 @@ class position_tracking(RewardV2[TrajTracking]):
         return torch.exp(-error / self.sigma)
 
 
-class velocity_tracking(RewardV2[TrajTracking]):
+class velocity_tracking(Reward[TrajTracking]):
     """Exponential reward for tracking the commanded next-step trajectory velocity."""
 
     def __init__(
@@ -315,7 +315,7 @@ class velocity_tracking(RewardV2[TrajTracking]):
         return torch.exp(-error / self.sigma)
 
 
-class orientation_tracking(RewardV2[TrajTracking]):
+class orientation_tracking(Reward[TrajTracking]):
     """Exponential reward for tracking the commanded next-step yaw."""
 
     def __init__(
@@ -341,7 +341,7 @@ class orientation_tracking(RewardV2[TrajTracking]):
         return torch.exp(-yaw_err.square() / self.sigma)
 
 
-class position_error_exceeding(TerminationV2[TrajTracking]):
+class position_error_exceeding(Termination[TrajTracking]):
     """Terminate if the position error exceeds a threshold."""
 
     def __init__(

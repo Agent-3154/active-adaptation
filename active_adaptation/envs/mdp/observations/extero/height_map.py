@@ -6,7 +6,7 @@ import torch
 from typing_extensions import override
 
 import active_adaptation
-from ..base import ObservationV2
+from ..base import Observation
 from active_adaptation.utils.math import (
     quat_rotate,
     quat_rotate_inverse,
@@ -18,14 +18,14 @@ if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from active_adaptation.envs.env_base import _EnvBase
 
-if active_adaptation.get_backend() == "isaac":
+if active_adaptation.get_backend() == "isaaclab":
     from isaaclab.utils.warp import raycast_mesh
 
 from simple_raycaster import MultiMeshRaycaster
 
 
-class external_forces(ObservationV2):
-    supported_backends = ("isaac",)
+class external_forces(Observation):
+    supported_backends = ("isaaclab",)
 
     def __init__(self, body_names, divide_by_mass: bool = True, scale: float = 1.0):
         super().__init__()
@@ -57,8 +57,8 @@ class external_forces(ObservationV2):
         return cartesian_space_symmetry(self.asset, self.body_names)
 
 
-class external_torques(ObservationV2):
-    supported_backends = ("isaac",)
+class external_torques(Observation):
+    supported_backends = ("isaaclab",)
 
     def __init__(self, body_names, divide_by_mass: bool = True, scale: float = 0.2):
         super().__init__()
@@ -90,7 +90,7 @@ class external_torques(ObservationV2):
         return cartesian_space_symmetry(self.asset, self.body_names, sign=(-1, 1, -1))
 
 
-class height_scan(ObservationV2):
+class height_scan(Observation):
     """
     Ground height sampled on a 2D grid in the robot's horizontal plane via downward raycasts.
     """
@@ -143,7 +143,7 @@ class height_scan(ObservationV2):
         self.target_assets = []
 
         if self.targets is not None:
-            if self.env.backend == "isaac":
+            if self.env.backend == "isaaclab":
                 from isaacsim.core.utils.stage import get_current_stage
 
                 stage = get_current_stage()
@@ -155,8 +155,8 @@ class height_scan(ObservationV2):
             else:
                 raise NotImplementedError(f"Unsupported backend: {self.env.backend}")
 
-        if self.env.backend == "isaac" and self.env.sim.has_gui():
-            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
+            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
 
             scene: IsaacSceneAdapter = self.env.scene
             self.marker = scene.create_sphere_marker(
@@ -205,7 +205,7 @@ class height_scan(ObservationV2):
         return height_map.reshape(self.num_envs, -1, *self.shape)
 
     def debug_draw(self):
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             self.marker.visualize(self.hit_pos_w.reshape(-1, 3))
 
     def symmetry_transform(self):
@@ -218,8 +218,8 @@ class height_scan(ObservationV2):
         return SymmetryTransform(perm=perm, signs=signs)
 
 
-class forward_scan(ObservationV2):
-    supported_backends = ("isaac",)
+class forward_scan(Observation):
+    supported_backends = ("isaaclab",)
 
     def __init__(
         self,
@@ -257,8 +257,8 @@ class forward_scan(ObservationV2):
         self.directions = directions.reshape(-1, 3).to(self.device)
         self.num_rays = self.directions.shape[0]
 
-        if self.env.backend == "isaac" and self.env.sim.has_gui():
-            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
+            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
 
             scene: IsaacSceneAdapter = self.env.scene
             self.marker = scene.create_sphere_marker(
@@ -296,12 +296,12 @@ class forward_scan(ObservationV2):
         )
 
     def debug_draw(self):
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             pos = self.ray_hits.reshape(-1, 3)
             self.marker.visualize(pos)
 
 
-class feet_height_map(ObservationV2):
+class feet_height_map(Observation):
     """
     Per-foot local height map around each contact point.
     """
@@ -335,8 +335,8 @@ class feet_height_map(ObservationV2):
         self.ray_starts = torch.stack([xx, yy, torch.zeros_like(xx)], dim=-1).reshape(-1, 3)
         self.num_rays = len(self.ray_starts)
 
-        if self.env.backend == "isaac" and self.env.sim.has_gui():
-            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
+            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
 
             scene: IsaacSceneAdapter = self.env.scene
             self.marker = scene.create_sphere_marker(
@@ -364,7 +364,7 @@ class feet_height_map(ObservationV2):
         return feet_height
 
     def debug_draw(self):
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             self.marker.visualize(self.vis_points.reshape(-1, 3))
 
     def symmetry_transform(self):
@@ -385,7 +385,7 @@ class feet_height_map(ObservationV2):
         return None
 
 
-class closest_points(ObservationV2):
+class closest_points(Observation):
     """Closest surface points on target meshes from selected robot bodies.
 
     Probe positions are the link origins of ``body_names``. Each name may be a
@@ -407,7 +407,7 @@ class closest_points(ObservationV2):
         frame (``R_rootᵀ (p* − p_root)``).
     """
 
-    supported_backends = ("isaac",)
+    supported_backends = ("isaaclab",)
 
     def __init__(
         self,
@@ -450,8 +450,8 @@ class closest_points(ObservationV2):
         for target in self.targets:
             self.sensor.add_isaac_entity(self.env.scene[target])
 
-        if self.env.backend == "isaac" and self.env.sim.has_gui():
-            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
+            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
 
             scene: IsaacSceneAdapter = self.env.scene
             self.marker_query = scene.create_sphere_marker(
@@ -494,7 +494,7 @@ class closest_points(ObservationV2):
         return closest_f.reshape(self.num_envs, -1)
 
     def debug_draw(self) -> None:
-        if self.env.backend == "isaac" and hasattr(self, "marker_query"):
+        if self.env.backend == "isaaclab" and hasattr(self, "marker_query"):
             self.marker_query.visualize(self.body_pos_w[0].reshape(-1, 3))
             hit = self.distances[0] < self.far
             if hit.any():

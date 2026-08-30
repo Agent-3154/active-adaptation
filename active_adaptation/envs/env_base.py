@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import os
 import warnings
 from collections import OrderedDict
 from typing import Callable, Dict, Mapping, Any, Optional, cast
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -23,9 +26,8 @@ from active_adaptation.utils.video_recorder import (
 )
 from active_adaptation.envs.utils import GroundQuery
 from active_adaptation.registry import RegistryMixin
-from dataclasses import dataclass
 
-if active_adaptation.get_backend() == "isaac":
+if active_adaptation.get_backend() == "isaaclab":
     import isaacsim.core.utils.torch as torch_utils
 
 
@@ -36,6 +38,34 @@ PROFILE_SYNC_TIMERS = os.environ.get("AA_PROFILE_SYNC_TIMERS", "0").lower() in {
     "yes",
     "on",
 }
+
+
+def _sanitize_nonfinite_env_rows(tensordict: TensorDictBase) -> torch.Tensor:
+    """Zero invalid transition rows and terminate those environments."""
+    num_envs = tensordict.batch_size[0]
+    invalid = torch.zeros(num_envs, dtype=torch.bool, device=tensordict.device)
+    floating_leaves = []
+    for key, value in tensordict.items(include_nested=True, leaves_only=True):
+        if (
+            isinstance(value, torch.Tensor)
+            and value.is_floating_point()
+            and value.ndim > 0
+            and value.shape[0] == num_envs
+        ):
+            floating_leaves.append((key, value))
+            invalid |= ~torch.isfinite(value).reshape(num_envs, -1).all(dim=1)
+
+    if not invalid.any():
+        return invalid
+
+    for key, value in floating_leaves:
+        row_mask = invalid.reshape(num_envs, *((1,) * (value.ndim - 1)))
+        tensordict.set(key, torch.where(row_mask, torch.zeros_like(value), value))
+    tensordict["terminated"][invalid] = True
+    tensordict["truncated"][invalid] = False
+    tensordict["done"][invalid] = True
+    tensordict["discount"][invalid] = 0.0
+    return invalid
 
 
 def parse_component_spec(name: str, cfg):
@@ -61,7 +91,7 @@ class ObsGroup:
     def __init__(
         self,
         name: str,
-        funcs: Dict[str, mdp.ObservationV2],
+        funcs: Dict[str, mdp.Observation],
         max_delay: int = 0,
     ):
         self.name = name
@@ -74,8 +104,7 @@ class ObsGroup:
     def _initialize(self, env: "_EnvBase"):
         self.env = env
         for func in self.funcs.values():
-            if isinstance(func, mdp.ObservationV2):
-                func._initialize(env)
+            func._initialize(env)
 
         flags = [bool(func.functional) for func in self.funcs.values()]
         if any(flags) and not all(flags):
@@ -111,7 +140,7 @@ class ObsGroup:
         self._spec = Composite(spec, shape=[env.num_envs]).to(self.env.device)
         self._shapes = shapes
 
-    def __getitem__(self, key: str) -> mdp.ObservationV2:
+    def __getitem__(self, key: str) -> mdp.Observation:
         return self.funcs[key]
 
     def keys(self):
@@ -205,7 +234,7 @@ class RewardGroup:
     def __init__(
         self,
         name: str,
-        funcs: OrderedDict[str, mdp.RewardV2],
+        funcs: OrderedDict[str, mdp.Reward],
         enabled: bool = True,
         compile: bool = False,
     ):
@@ -218,12 +247,11 @@ class RewardGroup:
     def _initialize(self, env: "_EnvBase"):
         self.env = env
         for func in self.funcs.values():
-            if isinstance(func, mdp.RewardV2):
-                func._initialize(env)
+            func._initialize(env)
         if self.compile:
             self.compute = torch.compile(self.compute, fullgraph=True)
     
-    def __getitem__(self, key: str) -> mdp.RewardV2:
+    def __getitem__(self, key: str) -> mdp.Reward:
         return self.funcs[key]
 
     def compute(self) -> torch.Tensor:
@@ -235,8 +263,8 @@ class RewardGroup:
             if func.enabled:
                 rewards.append(reward)
         if len(rewards):
-            self.rew_buf = torch.cat(rewards, 1)
-        return self.rew_buf.sum(dim=1, keepdim=True)
+            return torch.cat(rewards, 1).sum(dim=1, keepdim=True)
+        return torch.zeros(self.env.num_envs, 1, device=self.env.device)
 
     def get_ema_stats(self) -> Dict[str, float]:
         """Flatten per-term EMA metrics (e.g. mean, optional var) for logging."""
@@ -262,6 +290,7 @@ class RewardGroup:
         group_name: str,
         group_cfg: dict,
         *,
+        make_component: Callable[[type[mdp.Reward], str, dict], mdp.Reward | None],
         register_component: Callable[[mdp.MDPComponent], None] | None = None,
     ) -> "RewardGroup":
         print(f"Reward group: {group_name}")
@@ -273,11 +302,11 @@ class RewardGroup:
 
         for rew_name, rew_cfg in group_cfg.items():
             rew_name, cls_name, rew_kwargs = parse_component_spec(rew_name, rew_cfg)
-            reward = mdp.RewardV2.make(cls_name, **rew_kwargs)
+            reward = make_component(mdp.Reward, cls_name, rew_kwargs)
             if not reward:
                 continue
             funcs[rew_name] = reward
-            if register_component is not None:
+            if register_component is not None and isinstance(reward, mdp.MDPComponent):
                 register_component(reward)
             print(f"\t{rew_name}: \t{reward.weight:.2f}")
 
@@ -309,7 +338,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.headless = headless
 
         self._create_mdp_terms()
-        
+
         self.terrain_type = None
         self.visual = None
         self.setup_scene()
@@ -343,7 +372,9 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.stats: TensorDict = self.reward_spec["stats"].zero()
         self.input_tensordict = None
         self.extra = {}
-        self._startup_done = False
+        self._nonfinite_rows_total = 0
+        [callback() for callback in self._startup_callbacks]
+        self._startup_done = True
 
     @property
     def max_episode_length(self) -> torch.Tensor:
@@ -386,9 +417,13 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     def _setup_visual(self) -> None:
         """Optional photoreal world (3DGS + mesh composite). Collision on ``scene``."""
+        visual_cfg = self.cfg.get("visual", None)
+        if visual_cfg is None:
+            self.visual = None
+            return
         from active_adaptation.envs.visual import make_visual_world
 
-        self.visual = make_visual_world(self.cfg.get("visual", None), device=self.device)
+        self.visual = make_visual_world(visual_cfg, device=self.device)
         if self.visual is None:
             return
         # Eager load so missing PLY fails at env construction, not first obs.
@@ -399,11 +434,12 @@ class _EnvBase(EnvBase, RegistryMixin):
             attach(self.scene)
 
     def _create_mdp_terms(self):
-        self.randomizations: Mapping[str, mdp.RandomizationV2] = OrderedDict()
+        self._scene_components: list[mdp.MDPComponent] = []
+        self.randomizations: Mapping[str, mdp.Randomization] = OrderedDict()
         self.observation_groups: Mapping[str, ObsGroup] = OrderedDict()
         self.reward_groups: Mapping[str, RewardGroup] = OrderedDict()
-        self.input_managers: Mapping[str, mdp.ActionV2] = OrderedDict()
-        self.termination_funcs: Mapping[str, mdp.TerminationV2] = OrderedDict()
+        self.input_managers: Mapping[str, mdp.Action] = OrderedDict()
+        self.termination_funcs: Mapping[str, mdp.Termination] = OrderedDict()
 
         self._enabled_reward_groups = 0
 
@@ -417,34 +453,36 @@ class _EnvBase(EnvBase, RegistryMixin):
         # MDP: command manager
         command_cfg = dict(self.cfg.command)
         class_name = command_cfg.pop("_target_", None)
-        command = mdp.CommandV2.make(class_name, **command_cfg)
+        command = self._make_component(mdp.Command, class_name, command_cfg)
         if not command:
             raise ValueError(f"Command class '{class_name}' not found")
         self.command_manager = command
-        self._pre_step_callbacks.append(self.command_manager.pre_step)
-        self._reset_callbacks.append(self.command_manager.reset)
-        self._debug_draw_callbacks.append(self.command_manager.debug_draw)
+        if isinstance(command, mdp.MDPComponent):
+            self._scene_components.append(command)
 
         # MDP: input managers
         for input_name, input_cfg in dict(self.cfg.get("input", {})).items():
             _, input_cls_name, input_kwargs = parse_component_spec(
                 input_name, input_cfg
             )
-            input_manager = mdp.ActionV2.make(input_cls_name, **input_kwargs)
+            input_manager = self._make_component(
+                mdp.Action, input_cls_name, input_kwargs
+            )
             if not input_manager:
                 continue
             self.input_managers[input_name] = input_manager
-            self._reset_callbacks.append(input_manager.reset)
-            self._debug_draw_callbacks.append(input_manager.debug_draw)
+            if isinstance(input_manager, mdp.MDPComponent):
+                self._scene_components.append(input_manager)
 
         # MDP: randomizations
         for rand_name, rand_cfg in self.cfg.get("randomization", {}).items():
             rand_name, cls_name, rand_kwargs = parse_component_spec(rand_name, rand_cfg)
-            rand = mdp.RandomizationV2.make(cls_name, **rand_kwargs)
+            rand = self._make_component(mdp.Randomization, cls_name, rand_kwargs)
             if not rand:
                 continue
             self.randomizations[rand_name] = rand
-            self._add_mdp_component(rand)
+            if isinstance(rand, mdp.MDPComponent):
+                self._add_mdp_component(rand)
 
         # MDP: observations
         for group_name, group_cfg in self.cfg.observation.items():
@@ -453,19 +491,22 @@ class _EnvBase(EnvBase, RegistryMixin):
                 obs_name, obs_cls_name, obs_kwargs = parse_component_spec(
                     obs_name, obs_cfg
                 )
-                obs = mdp.ObservationV2.make(obs_cls_name, **obs_kwargs)
+                obs = self._make_component(mdp.Observation, obs_cls_name, obs_kwargs)
                 if not obs:
                     continue
                 funcs[obs_name] = obs
-                self._add_mdp_component(obs)
+                if isinstance(obs, mdp.MDPComponent):
+                    self._add_mdp_component(obs)
             self.observation_groups[group_name] = ObsGroup(group_name, funcs)
 
         # MDP: rewards
         reward_cfg = dict(self.cfg.reward)
+        self.mult_dt = reward_cfg.pop("_mult_dt_", True)
         for group_name, group_cfg in reward_cfg.items():
             rg = RewardGroup.create_from(
                 group_name,
                 group_cfg,
+                make_component=self._make_component,
                 register_component=self._add_mdp_component,
             )
             self._enabled_reward_groups += int(rg.enabled)
@@ -475,24 +516,103 @@ class _EnvBase(EnvBase, RegistryMixin):
         termination_cfg = dict(self.cfg.get("termination", {}))
         for term_name, term_cfg in termination_cfg.items():
             term_name, cls_name, term_kwargs = parse_component_spec(term_name, term_cfg)
-            term = mdp.TerminationV2.make(cls_name, **term_kwargs)
+            term = self._make_component(mdp.Termination, cls_name, term_kwargs)
             if not term:
                 continue
             self.termination_funcs[term_name] = term
-            self._add_mdp_component(term)
+            if isinstance(term, mdp.MDPComponent):
+                self._add_mdp_component(term)
+
+    def _edit_scene_spec(self, scene_cfg: Any) -> None:
+        for component in self._scene_components:
+            component.edit_spec(scene_cfg)
 
     def _initialize_mdp_terms(self):
-        self.command_manager._initialize(self)
+        self.command_manager = self._bind_component(self.command_manager)
+        self.input_managers = OrderedDict(
+            (name, self._bind_component(manager))
+            for name, manager in self.input_managers.items()
+        )
+        self.randomizations = OrderedDict(
+            (name, self._bind_component(rand))
+            for name, rand in self.randomizations.items()
+        )
+        for group in self.observation_groups.values():
+            group.funcs = OrderedDict(
+                (name, self._bind_component(obs))
+                for name, obs in group.funcs.items()
+            )
+        for reward_group in self.reward_groups.values():
+            reward_group.funcs = OrderedDict(
+                (name, self._bind_component(reward))
+                for name, reward in reward_group.funcs.items()
+            )
+        self.termination_funcs = OrderedDict(
+            (name, self._bind_component(term))
+            for name, term in self.termination_funcs.items()
+        )
+
+        self._startup_callbacks = []
+        self._reset_callbacks = []
+        self._pre_step_callbacks = []
+        self._post_step_callbacks = []
+        self._update_callbacks = []
+        self._debug_draw_callbacks = []
+
+        self._register_command_component(self.command_manager)
         for input_manager in self.input_managers.values():
-            input_manager._initialize(self)
+            self._add_mdp_component(input_manager)
         for rand in self.randomizations.values():
-            rand._initialize(self)
+            self._add_mdp_component(rand)
         for group in self.observation_groups.values():
             group._initialize(self)
+            for obs in group.funcs.values():
+                self._add_mdp_component(obs)
         for reward_group in self.reward_groups.values():
             reward_group._initialize(self)
+            for reward in reward_group.funcs.values():
+                self._add_mdp_component(reward)
         for term in self.termination_funcs.values():
             term._initialize(self)
+            self._add_mdp_component(term)
+
+    def _make_component(
+        self,
+        base_cls: type[mdp.MDPComponent],
+        class_name: str,
+        kwargs: dict[str, Any],
+    ) -> mdp.MDPComponent | None:
+        if class_name not in base_cls.registry:
+            raise ValueError(f"Class '{class_name}' not found in {base_cls.__name__}.registry")
+        instance_cls = base_cls.registry[class_name]
+        backend = active_adaptation.get_backend()
+        if backend is not None and backend not in instance_cls.supported_backends:
+            warnings.warn(
+                f"Class '{class_name}' does not support backend '{backend}'. "
+                f"Supported backends: {instance_cls.supported_backends}"
+            )
+            return None
+        return instance_cls(**kwargs)
+
+    def _bind_component(
+        self,
+        component: mdp.MDPComponent,
+    ) -> mdp.MDPComponent:
+        if not component.initialized:
+            component._initialize(self)
+        return component
+
+    def _register_command_component(self, command: mdp.Command) -> None:
+        if mdp.is_method_implemented(command, mdp.MDPComponent, "startup"):
+            self._startup_callbacks.append(command.startup)
+        if mdp.is_method_implemented(command, mdp.MDPComponent, "reset"):
+            self._reset_callbacks.append(command.reset)
+        if mdp.is_method_implemented(command, mdp.MDPComponent, "pre_step"):
+            self._pre_step_callbacks.append(command.pre_step)
+        if mdp.is_method_implemented(command, mdp.MDPComponent, "post_step"):
+            self._post_step_callbacks.append(command.post_step)
+        if mdp.is_method_implemented(command, mdp.MDPComponent, "debug_draw"):
+            self._debug_draw_callbacks.append(command.debug_draw)
 
     def _build_tensor_specs(self):
         self.done_spec = Composite(
@@ -544,6 +664,8 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.reward_spec = reward_spec.expand(self.num_envs).to(self.device)
 
     def _add_mdp_component(self, component: mdp.MDPComponent):
+        if component not in self._scene_components:
+            self._scene_components.append(component)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "startup"):
             self._startup_callbacks.append(component.startup)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "reset"):
@@ -595,10 +717,6 @@ class _EnvBase(EnvBase, RegistryMixin):
     def _reset(
         self, tensordict: TensorDictBase | None = None, **kwargs
     ) -> TensorDictBase:
-        if not self._startup_done:
-            [callback() for callback in self._startup_callbacks]
-            self._startup_done = True
-            
         if tensordict is not None:
             env_mask = tensordict.get("_reset").reshape(self.num_envs)
             env_ids = env_mask.nonzero().squeeze(-1)
@@ -616,7 +734,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             )
             self.episode_count += num_envs
 
-            self._reset_idx(env_ids)
+            self._reset_idx(env_ids, tensordict)
             self.scene.reset(env_ids)
             # MDP terms: reset(env_ids, tensordict) — may read/write tensordict
             [callback(env_ids, tensordict) for callback in self._reset_callbacks]
@@ -627,8 +745,13 @@ class _EnvBase(EnvBase, RegistryMixin):
         self._last_gui_render_time = time.perf_counter()
         return tensordict
 
-    def _reset_idx(self, env_ids: torch.Tensor):
-        init_state = self.command_manager.sample_init(env_ids)
+    def _reset_idx(self, env_ids: torch.Tensor, reset_td: TensorDictBase):
+        init_state = self.command_manager.sample_init(env_ids, reset_td)
+        # ponytail: keep legacy sample_init return support until remaining AA
+        # commands are migrated to write simulator state in-place.
+        if init_state is None:
+            self.stats[env_ids] = 0.0
+            return
         if not isinstance(init_state, dict):
             init_state = {"robot": init_state}
         for key, value in init_state.items():
@@ -687,20 +810,26 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
 
-        with ScopedTimer("command.sync_state", sync=False):
-            self.command_manager.sync_state()
+        with ScopedTimer("command.update", sync=False):
+            self.command_manager.update()
         with ScopedTimer("update_callbacks", sync=False):
             [callback() for callback in self._update_callbacks]
 
         tensordict = self._compute_reward(tensordict)
         tensordict = self._compute_termination(tensordict)
-        with ScopedTimer("command.update", sync=False):
-            self.command_manager.update()
+        with ScopedTimer("command.step", sync=False):
+            self.command_manager.step()
     
         tensordict = self._compute_observation(tensordict)
 
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()
+
+        invalid = _sanitize_nonfinite_env_rows(tensordict)
+        invalid_count = int(invalid.sum().item())
+        self._nonfinite_rows_total += invalid_count
+        self.extra["env/nonfinite_rows"] = invalid_count
+        self.extra["env/nonfinite_rows_total"] = self._nonfinite_rows_total
 
         if self._should_debug_draw():
             [callback() for callback in self._debug_draw_callbacks]
@@ -723,7 +852,9 @@ class _EnvBase(EnvBase, RegistryMixin):
             reward = reward_group.compute()
             self.stats[group, "return"].add_(reward)
             if reward_group.enabled:
-                tensordict["reward", group] = reward
+                tensordict["reward", group] = (
+                    reward * self.step_dt if self.mult_dt else reward
+                )
 
         self.stats["episode_len"][:] = self.episode_length_buf.reshape(self.num_envs, 1)
         self.stats["success"][:] = (
@@ -803,7 +934,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         """
         if not enabled:
             return NullVideoRecorder()
-        if self.backend == "isaac":
+        if self.backend == "isaaclab":
             return IsaacVideoRecorder(self, path, enabled=True)
         if self.backend == "mjlab":
             return RgbArrayVideoRecorder(self, path, enabled=True)
@@ -811,7 +942,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         return NullVideoRecorder()
 
     def _set_seed(self, seed: int = -1):
-        if self.backend == "isaac":
+        if self.backend == "isaaclab":
             try:
                 import omni.replicator.core as rep
 
@@ -864,7 +995,7 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     def close(self, *, raise_if_closed: bool = True):
         if not self.is_closed:
-            if self.backend == "isaac":
+            if self.backend == "isaaclab":
                 del self.scene
                 self.sim.clear_all_callbacks()
                 self.sim.clear_instance()

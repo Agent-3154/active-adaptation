@@ -51,12 +51,23 @@ class EpisodeStats:
             self._episodes += done.sum()
         return len(self)
     
-    def pop(self):
-        stats = self._stats / self._episodes
+    def pop(self, distributed: bool = False):
+        stats = self._stats.clone()
+        episodes = self._episodes.clone()
+        if distributed:
+            for _, value in stats.items(True, True):
+                torch.distributed.all_reduce(
+                    value, op=torch.distributed.ReduceOp.SUM
+                )
+            torch.distributed.all_reduce(
+                episodes, op=torch.distributed.ReduceOp.SUM
+            )
+
         self._stats.zero_()
         self._episodes.zero_()
-        return stats.cpu()
+        if episodes.item() == 0:
+            return None
+        return (stats / episodes).cpu()
 
     def __len__(self):
         return self._episodes.item()
-

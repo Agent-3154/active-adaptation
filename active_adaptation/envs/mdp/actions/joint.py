@@ -11,7 +11,7 @@ from active_adaptation.utils.string import resolve_matching_names_values
 from active_adaptation.utils.symmetry import SymmetryTransform, joint_space_symmetry
 from active_adaptation.envs.utils import find_joints
 
-from .base import ActionV2
+from .base import Action
 from tensordict import TensorDictBase
 
 
@@ -77,7 +77,7 @@ class SoftBoundTracker(nn.Module):
         return self.lower, self.upper
 
 
-class _DelayedJointAction(ActionV2):
+class _DelayedJointAction(Action):
     def __init__(
         self,
         action_scaling: Dict[str, float] | float = 0.5,
@@ -659,7 +659,7 @@ class JointVelocity(_DelayedJointAction):
             self.vel_target_bound_tracker.update(jvel_target)
 
 
-class CorrelatedJointPosition(ActionV2):
+class CorrelatedJointPosition(Action):
     """Map a low-dimensional action to correlated joint position targets.
 
     Each controlled joint receives ``default_joint_pos + action_scaling * (action @ matrix.T)``,

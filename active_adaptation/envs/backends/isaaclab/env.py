@@ -1,12 +1,12 @@
 from typing_extensions import override
 from active_adaptation import ROBOT_MODEL_DIR
-from active_adaptation.envs.backends.isaac.adapter import (
+from active_adaptation.envs.backends.isaaclab.adapter import (
     IsaacSceneAdapter,
     IsaacSimAdapter,
     IsaacDebugDraw
 )
 from active_adaptation.envs.env_base import _EnvBase
-from active_adaptation.assets.asset_cfg import AssetSpec
+from active_adaptation.assets.asset_cfg import AssetSpec, coerce_asset_spec
 from active_adaptation.registry import Registry
 from tqdm import tqdm
 
@@ -78,8 +78,10 @@ class IsaacBackendEnv(_EnvBase):
         )
 
         robot_cfg = dict(self.cfg.robot.copy())
-        asset_factory = registry.get("asset", robot_cfg.pop("name"))
-        asset_spec: AssetSpec = asset_factory(backend="isaaclab", **robot_cfg)
+        asset_entry = registry.get("asset", robot_cfg.pop("name"))
+        asset_spec: AssetSpec = coerce_asset_spec(
+            asset_entry, backend="isaaclab", **robot_cfg
+        )
         scene_cfg.robot = asset_spec.config
         sensors = asset_spec.sensors
         for name, sensor_cfg in sensors.items():
@@ -92,8 +94,10 @@ class IsaacBackendEnv(_EnvBase):
         from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 
         for obj_name, spec in self.cfg.get("objects", {}).items():
-            fn = registry.get("asset", spec.pop("_target_"))
-            cfg = fn(backend="isaaclab", **spec)
+            spec = dict(spec)
+            asset_entry = registry.get("asset", spec.pop("_target_"))
+            object_spec = coerce_asset_spec(asset_entry, backend="isaaclab", **spec)
+            cfg = object_spec.config
             assert isinstance(cfg, (ArticulationCfg, RigidObjectCfg)), f"Asset configuration must be an instance of ArticulationCfg or RigidObjectCfg, got {type(cfg)}"
             cfg.prim_path = "{ENV_REGEX_NS}/" + obj_name
             setattr(scene_cfg, obj_name, cfg)
@@ -115,9 +119,7 @@ class IsaacBackendEnv(_EnvBase):
             else:
                 setattr(scene_cfg, sensor_name, result)
         
-        for observation in self.observation_groups.values():
-            for func in observation.funcs.values():
-                func.edit_spec(scene_cfg)
+        self._edit_scene_spec(scene_cfg)
 
         sim_cfg = sim_utils.SimulationCfg(
             dt=self.cfg.sim.isaac_physics_dt,
@@ -174,7 +176,7 @@ class IsaacBackendEnv(_EnvBase):
             print("Set enable_cameras=true to use cameras.")
 
         if self.cfg.viewer.get("viser", False):
-            from active_adaptation.envs.backends.isaac.viewer import IsaacViserViewer
+            from active_adaptation.envs.backends.isaaclab.viewer import IsaacViserViewer
             viser_viewer = IsaacViserViewer(self)
             viser_viewer.setup()
         else:

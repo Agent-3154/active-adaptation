@@ -1,6 +1,6 @@
 # ruff: noqa: F401
 
-from .base import Action, ActionV2
+from .base import Action
 from .composite import ConcatenatedAction
 from .joint import (
     CorrelatedJointPosition,
@@ -19,7 +19,6 @@ from .write import WriteJointPosition, WriteRootState
 
 __all__ = [
     "Action",
-    "ActionV2",
     "ConcatenatedAction",
     "JointPosition",
     "JointReferenceModel",

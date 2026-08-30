@@ -10,11 +10,11 @@ if TYPE_CHECKING:
 
     IsaacEntity = Union[Articulation, RigidObject]
 
-from .base import TerminationV2
+from .base import Termination
 from active_adaptation.envs.utils import find_sensor_bodies, find_bodies
 
 
-class max_episode_length(TerminationV2):
+class max_episode_length(Termination):
     """Termination when episode length exceeds the specified maximum episode length."""
 
     def __init__(self):
@@ -26,7 +26,7 @@ class max_episode_length(TerminationV2):
         return cur_length >= max_length
 
 
-class crash(TerminationV2):
+class crash(Termination):
     """
     Terminate when a monitored link has been in **contact** long enough, optionally with random gating.
     """
@@ -70,10 +70,10 @@ class crash(TerminationV2):
         return terminated
 
 
-class undesired_contact(TerminationV2):
+class undesired_contact(Termination):
     """Soft termination based on the contact forces on the specified body names."""
 
-    supported_backends = ("isaac", "mjlab", "motrix")
+    supported_backends = ("isaaclab", "mjlab", "motrix")
 
     def __init__(
         self,
@@ -112,7 +112,7 @@ class undesired_contact(TerminationV2):
         return terminated, discount.reshape(self.num_envs, 1)
 
 
-class fall_over(TerminationV2):
+class fall_over(Termination):
     def __init__(
         self,
         xy_thres: float = 0.8,
@@ -133,7 +133,7 @@ class fall_over(TerminationV2):
         return fall_over
 
 
-class root_pos_error(TerminationV2):
+class root_pos_error(Termination):
     def __init__(self, threshold: float = 2.0, dim: int = 2):
         super().__init__()
         self.threshold = threshold
@@ -155,7 +155,7 @@ class root_pos_error(TerminationV2):
         return (valid & (pos_error > self.threshold)).reshape(self.num_envs, 1)
 
 
-class cum_error(TerminationV2):
+class cum_error(Termination):
     def __init__(self, thres: float = 0.85, min_steps: int = 50):
         super().__init__()
         self.thres = thres
@@ -172,7 +172,7 @@ class cum_error(TerminationV2):
         return (self.command_manager.cum_error > self.thres).any(-1, True)
 
 
-class joint_acc_exceeds(TerminationV2):
+class joint_acc_exceeds(Termination):
     def __init__(self, thres: float):
         super().__init__()
         self.thres = thres
@@ -187,7 +187,7 @@ class joint_acc_exceeds(TerminationV2):
         return valid & (self.asset.data.joint_acc.abs() > self.thres).any(1, True)
 
 
-class root_height_below(TerminationV2):
+class root_height_below(Termination):
     def __init__(self, thres: float):
         super().__init__()
         self.thres = thres
@@ -203,7 +203,7 @@ class root_height_below(TerminationV2):
         return (height < self.thres).reshape(self.num_envs, 1)
 
 
-class force_contact(TerminationV2):
+class force_contact(Termination):
     def __init__(self, body_names: str, threshold: float):
         super().__init__()
         self.body_names_pattern = body_names
@@ -230,7 +230,7 @@ class force_contact(TerminationV2):
         return in_contact
 
 
-class bodies_too_close(TerminationV2):
+class bodies_too_close(Termination):
     """Terminate when any two of the specified bodies are closer than ``threshold`` (meters)."""
 
     def __init__(self, body_names: str, threshold: float = 0.05):
@@ -299,7 +299,7 @@ def _segment_segment_dist_sq(
     return torch.where(interior, d_unc_sq, d_edge_sq)
 
 
-class segments_cross(TerminationV2):
+class segments_cross(Termination):
     """Terminate when the shortest distance between the two segments is below ``threshold``."""
 
     def __init__(

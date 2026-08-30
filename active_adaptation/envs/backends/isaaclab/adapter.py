@@ -5,7 +5,7 @@ import trimesh
 from typing_extensions import override
 
 from active_adaptation.envs.adapters import SimAdapter, SceneAdapter, CameraFrustumHandle
-from active_adaptation.envs.backends.isaac.viewer import IsaacViserViewer
+from active_adaptation.envs.backends.isaaclab.viewer import IsaacViserViewer
 
 
 if TYPE_CHECKING:
@@ -205,7 +205,7 @@ class IsaacSceneAdapter(SceneAdapter):
         Uses ``{body}/visuals`` via ``simple_raycaster.utils_usd`` (same layout as
         raycasting / Viser). Multiply by ``body_link_pose_w`` at runtime.
         """
-        from active_adaptation.envs.backends.isaac.meshes import load_entity_body_meshes
+        from active_adaptation.envs.backends.isaaclab.meshes import load_entity_body_meshes
 
         entity = self.entities[name]
         return load_entity_body_meshes(
@@ -219,7 +219,7 @@ class IsaacSceneAdapter(SceneAdapter):
         collision prim get an empty trimesh so the list stays aligned with
         ``num_bodies`` / ``body_link_pose_w``.
         """
-        from active_adaptation.envs.backends.isaac.meshes import load_entity_body_meshes
+        from active_adaptation.envs.backends.isaaclab.meshes import load_entity_body_meshes
 
         entity = self.entities[name]
         return load_entity_body_meshes(

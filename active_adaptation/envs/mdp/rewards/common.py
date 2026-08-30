@@ -2,13 +2,13 @@ import torch
 from typing import TYPE_CHECKING, Dict, List, Tuple
 from typing_extensions import override
 
-from active_adaptation.envs.mdp.rewards.base import RewardV2
+from active_adaptation.envs.mdp.rewards.base import Reward
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import EnvBase
 
 
-class action_rate_l2(RewardV2):
+class action_rate_l2(Reward):
     """Penalize the rate of change of the action."""
 
     def __init__(
@@ -37,7 +37,7 @@ class action_rate_l2(RewardV2):
         return rew
 
 
-class action_rate2_l2(RewardV2):
+class action_rate2_l2(Reward):
     """Penalize the second order rate of change of the action."""
 
     def __init__(
@@ -66,7 +66,7 @@ class action_rate2_l2(RewardV2):
         return rew
 
 
-class action_saturation(RewardV2):
+class action_saturation(Reward):
     """Penalize actions that leave the allowed range.
 
     Soft overshoot cost: ``-(relu(low - a) + relu(a - high)).square().sum()``.
@@ -126,7 +126,7 @@ class action_saturation(RewardV2):
         return -violation.square().sum(dim=-1, keepdim=True)
 
 
-class body_angvel_penalty(RewardV2):
+class body_angvel_penalty(Reward):
     """Penalize the angular velocity of the body."""
 
     def __init__(

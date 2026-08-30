@@ -61,7 +61,7 @@ class PlayConfig:
     """Hydra runtime settings (output directory, etc.)."""
     headless: bool = False
     """Run with a visible GUI window (``false``) or headless (``true``)."""
-    backend: str = "isaac"
+    backend: str = "isaaclab"
     """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
     device: str = "cpu"
     """Torch device for policy inference (e.g. ``cuda``, ``cpu``)."""

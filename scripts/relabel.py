@@ -69,7 +69,7 @@ def run(cfg: RelabelConfig) -> dict[str, str]:
 
     command_cfg = dict(cfg.task.command)
     _target_ = command_cfg.pop("_target_")
-    command = mdp.CommandV2.make(_target_, **command_cfg)
+    command = mdp.Command.make(_target_, **command_cfg)
 
     rollout_path = Path(cfg.rollout_path).absolute()
     rollout = torch.load(rollout_path, weights_only=False)

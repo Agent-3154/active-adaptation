@@ -43,6 +43,7 @@ render = [
 
 [project.scripts]
 aa-project = "active_adaptation.cli:main"
+aa-discover-projects = "active_adaptation.cli:aa_discover_projects"
 aa-list-tasks = "active_adaptation.cli:aa_list_tasks"
 
 [project.entry-points."active_adaptation.projects"]

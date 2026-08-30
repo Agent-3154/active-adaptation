@@ -82,7 +82,7 @@ class TrainConfig:
     """Run simulation without a rendering window."""
     exp_name: str = "${oc.select:task.name,test}-${oc.select:algo.name,none}"
     """Experiment label used in run names and WandB metadata."""
-    backend: str = "isaac"
+    backend: str = "isaaclab"
     """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
     device: str = "cuda"
     """Torch device for training (adjusted per local rank when using CUDA)."""

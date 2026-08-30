@@ -21,7 +21,7 @@ from active_adaptation.utils.symmetry import SymmetryTransform
 
 
 import active_adaptation
-if active_adaptation.get_backend() == "isaac":
+if active_adaptation.get_backend() == "isaaclab":
     from isaaclab.markers import (
         BLUE_ARROW_X_MARKER_CFG,
         FRAME_MARKER_CFG,
@@ -266,7 +266,7 @@ class ImpedanceCommandManager(Command):
         
         self.seed = wp.rand_init(0)
 
-        if self.env.sim.has_gui() and self.env.backend == "isaac":
+        if self.env.sim.has_gui() and self.env.backend == "isaaclab":
             self.ref_pos_marker = make_frame_marker("ref_pos")
             self.setpoint_marker = make_point_marker("setpoint", (0.8, 0.0, 0.0))
             self.setpoint_eef_marker = make_point_marker("setpoint_eef", (0.0, 0.8, 0.0))

@@ -67,7 +67,7 @@ class RolloutConfig:
     """Number of env steps to collect; defaults to ``task.max_episode_length``."""
     headless: bool = True
     """Run simulation without a rendering window."""
-    backend: str = "isaac"
+    backend: str = "isaaclab"
     """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
     device: str = "cuda"
     """Torch device for policy inference (e.g. ``cuda``, ``cpu``)."""

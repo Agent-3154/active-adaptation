@@ -23,7 +23,7 @@ from active_adaptation.envs.mdp.commands.locomanip.loco_manip_kernels import (
     sample_world_goal,
     update_world_command,
 )
-from ..base import CommandV2
+from ..base import Command
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -150,7 +150,7 @@ def update_sparse_world_command(
     base_pos_error[tid] = base_err
 
 
-class LocoManipSparseBase(CommandV2):
+class LocoManipSparseBase(Command):
     """Shared EEF-only command surface for random and replay sparse variants."""
 
     # Subclasses must set these before calling ``_resolve_eef_and_allocate_buffers``.
@@ -219,8 +219,8 @@ class LocoManipSparseBase(CommandV2):
         
         self.marker = None
         self.eef_pose_marker = None
-        if self.env.backend == "isaac" and self.env.sim.has_gui():
-            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
+            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
 
             self.scene: IsaacSceneAdapter = self.env.scene
             self.eef_pose_marker = self.scene.create_frame_marker(
@@ -528,7 +528,7 @@ class LocoManipSparse(LocoManipSparseBase):
         self._wp_device = wp.get_device(str(self.device))
         self._warp_seed = 0
 
-        self.sync_state()
+        self.update()
 
     # @override
     # def pre_step(self, substep: int) -> None:
@@ -548,7 +548,7 @@ class LocoManipSparse(LocoManipSparseBase):
         )
 
     @override
-    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
         """Spawn near env origin (goal) or on a tighter ring (traj)."""
         origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
         self.env.episode_origin[env_ids] = origins
@@ -578,7 +578,7 @@ class LocoManipSparse(LocoManipSparseBase):
             robot_init[:, 3:7],
             sample_quat_yaw(len(env_ids), device=self.device),
         )
-        return robot_init
+        self._write_initial_states(robot_init, env_ids)
 
     def sample_commands(self, env_ids: torch.Tensor) -> None:
         """Sample world goals (Warp) and/or trajectory curves for ``env_ids``."""
@@ -703,7 +703,7 @@ class LocoManipSparse(LocoManipSparseBase):
         self._refresh_cmd_eef_pos_b()
 
     @override
-    def sync_state(self) -> None:
+    def update(self) -> None:
         """Tracking / reach flags for rewards at THIS step (no target mutation)."""
         root_pos_w = self.asset.data.root_link_pos_w
         root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w)
@@ -799,10 +799,10 @@ class LocoManipSparse(LocoManipSparseBase):
             self.base_pos_error[traj] = 0.0
 
     @override
-    def update(self) -> None:
+    def step(self) -> None:
         """Advance / resample targets; refresh obs-facing ``cmd_eef_pos_b``.
 
-        Does not recompute tracking — that is ``sync_state`` after the next physics
+        Does not recompute tracking — that is ``update`` after the next physics
         step (same split as ``LocoManipNew``).
         """
         traj = self.sparse_mode == MODE_TRAJECTORY
@@ -984,7 +984,7 @@ class LocoManipSparseReplay(LocoManipSparseBase):
 
         self._wp_device = wp.get_device(str(self.device))
 
-        self.sync_state()
+        self.update()
 
     def _sample_uniform(
         self, num_samples: int, value_range: Tuple[float, float]
@@ -996,7 +996,7 @@ class LocoManipSparseReplay(LocoManipSparseBase):
         )
 
     @override
-    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
         """Spawn near env origins (small polar jitter)."""
         origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
         self.env.episode_origin[env_ids] = origins
@@ -1015,7 +1015,7 @@ class LocoManipSparseReplay(LocoManipSparseBase):
             sample_quat_yaw(n, device=self.device),
         )
         self.sparse_mode[env_ids] = MODE_GOAL_REACHING
-        return robot_init
+        self._write_initial_states(robot_init, env_ids)
 
     def sample_commands(self, env_ids: torch.Tensor) -> None:
         """Apply a catalog relative transform to the current robot pose."""
@@ -1124,7 +1124,7 @@ class LocoManipSparseReplay(LocoManipSparseBase):
         self._refresh_cmd_eef_pos_b()
 
     @override
-    def sync_state(self) -> None:
+    def update(self) -> None:
         """Tracking / reach flags for rewards at THIS step (no target mutation)."""
         root_pos_w = self.asset.data.root_link_pos_w
         root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w)
@@ -1162,7 +1162,7 @@ class LocoManipSparseReplay(LocoManipSparseBase):
         self.eef_pos_reached = self.pos_error_norm < 0.08
 
     @override
-    def update(self) -> None:
+    def step(self) -> None:
         """Resample like ``LocoManipNew``; refresh obs-facing ``cmd_eef_pos_b``."""
         interval = (self.env.episode_length_buf - 20) % self.resample_interval == 0
         resample = interval & (

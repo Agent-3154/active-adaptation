@@ -69,7 +69,7 @@ class EvalConfig:
     """Hydra runtime settings (output directory, etc.)."""
     headless: bool = True
     """Run simulation without a rendering window."""
-    backend: str = "isaac"
+    backend: str = "isaaclab"
     """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
     device: str = "cuda"
     """Torch device for policy inference (e.g. ``cuda``, ``cpu``)."""

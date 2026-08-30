@@ -9,11 +9,11 @@ if TYPE_CHECKING:
     from mjlab.sensor import ContactSensor as MjlabContactSensor
     from active_adaptation.envs.env_base import EnvBase
 
-from .base import RewardV2
+from .base import Reward
 from active_adaptation.envs.utils import find_bodies, find_sensor_bodies
 
 
-class max_swing_height(RewardV2):
+class max_swing_height(Reward):
     def __init__(self, weight: float, body_names: str, target_height: float):
         super().__init__(weight)
         self.body_names_pattern = body_names
@@ -53,8 +53,8 @@ class max_swing_height(RewardV2):
         return self.rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
-class feet_sliding(RewardV2):
-    supported_backends = ("isaac", "mjlab", "motrix")
+class feet_sliding(Reward):
+    supported_backends = ("isaaclab", "mjlab", "motrix")
 
     def __init__(self, body_names: str, weight: float):
         super().__init__(weight)
@@ -79,7 +79,7 @@ class feet_sliding(RewardV2):
             self.contact_data.current_contact_time[:, self.body_contact_ids]
             > self.env.physics_dt
         )
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             feet_speed = self.asset.data.body_com_lin_vel_w[:, self.body_ids].norm(dim=-1)
         elif self.env.backend in ("mjlab", "motrix"):
             feet_speed = self.asset.data.body_link_lin_vel_w[:, self.body_ids].norm(dim=-1)
@@ -87,7 +87,7 @@ class feet_sliding(RewardV2):
         return -sliding.reshape(self.num_envs, 1)
 
 
-class quadruped_trot(RewardV2):
+class quadruped_trot(Reward):
     """Reward either (FL-RR) or (FR-RL) are in contact but not both."""
 
     def __init__(self, weight: float, body_names: str):
@@ -120,7 +120,7 @@ class quadruped_trot(RewardV2):
         return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
-class feet_clearance(RewardV2):
+class feet_clearance(Reward):
     """
     Smooth penalty for feet getting too close.
 
@@ -154,7 +154,7 @@ class feet_clearance(RewardV2):
         return reward
 
 
-class feet_air_time(RewardV2):
+class feet_air_time(Reward):
     def __init__(
         self,
         body_names: str,
@@ -191,8 +191,8 @@ class feet_air_time(RewardV2):
         return reward.reshape(self.num_envs, 1), active
 
 
-class feet_contact_count(RewardV2):
-    supported_backends = ("isaac", "mjlab", "motrix")
+class feet_contact_count(Reward):
+    supported_backends = ("isaaclab", "mjlab", "motrix")
 
     def __init__(self, body_names: str, weight: float):
         super().__init__(weight)
@@ -223,7 +223,7 @@ class feet_contact_count(RewardV2):
         return self.first_contact.sum(1, keepdim=True)
 
 
-class single_foot_contact(RewardV2):
+class single_foot_contact(Reward):
     """Reward for single foot contact. Useful for bi-pedal locomotion."""
 
     def __init__(

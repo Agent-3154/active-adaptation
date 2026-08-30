@@ -12,16 +12,18 @@ class SplineCommand(Command):
     """
     
     """
-    def __init__(self, env) -> None:
-        super().__init__(env)
+    def __init__(self) -> None:
+        super().__init__()
 
+    def _initialize(self, env) -> None:
+        super()._initialize(env)
         with torch.device(self.device):
             self.spline_ps = torch.zeros(self.num_envs, 4, 2)
             self.spline_t = torch.zeros(self.num_envs, 1)
             self.spline_time_scale = torch.ones(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=bool)
 
-        if self.env.sim.has_gui() and self.env.backend == "isaac":
+        if self.env.sim.has_gui() and self.env.backend == "isaaclab":
             from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg, CONTACT_SENSOR_MARKER_CFG
             import isaaclab.sim as sim_utils
             self.control_points_marker = VisualizationMarkers(
@@ -47,7 +49,7 @@ class SplineCommand(Command):
             self.asset.data.root_pos_w[env_ids, :2],
             torch.zeros(len(env_ids), 2, device=self.device),
         )
-        if self.env.backend == "isaac" and self.env.sim.has_gui():
+        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
             t = torch.linspace(0, 1, 25, device=self.device)
             x, v = spline.cubic_bezier(t.unsqueeze(0), self.spline_ps[0:1])
             self.traj_vis = x[0].cpu()
@@ -66,7 +68,7 @@ class SplineCommand(Command):
             signs=torch.tensor([1, -1, 1, 1, -1, 1]),
         )
 
-    def sync_state(self):
+    def update(self):
         x, v = spline.cubic_bezier(self.spline_t, self.spline_ps)
         v = v * self.spline_time_scale.reshape(self.num_envs, 1, 1)
 
@@ -74,7 +76,7 @@ class SplineCommand(Command):
         self.target_lin_vel_w = v
         self._cum_error = (self.target_pos_w - self.asset.data.root_pos_w)[:, :2].norm(dim=-1, keepdim=True)
 
-    def update(self):
+    def step(self):
         self.spline_t += self.env.step_dt * self.spline_time_scale
         x, v = spline.cubic_bezier(self.spline_t, self.spline_ps)
         v = v * self.spline_time_scale.reshape(self.num_envs, 1, 1)
@@ -82,7 +84,7 @@ class SplineCommand(Command):
         self.target_lin_vel_w = v
     
     def debug_draw(self):
-        if self.env.backend == "isaac" and self.env.sim.has_gui():
+        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
             ctps = torch.cat([self.spline_ps.cpu(), 0.5 * torch.ones(*self.spline_ps.shape[:2], 1)], 2)
             ctps = ctps.reshape(-1, 3)
             wps = torch.cat([self.target_pos_w.cpu(), 0.5 * torch.ones(*self.target_pos_w.shape[:2], 1)], 2)

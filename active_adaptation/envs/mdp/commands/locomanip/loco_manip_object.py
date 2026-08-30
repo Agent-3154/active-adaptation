@@ -16,8 +16,8 @@ from active_adaptation.utils.math import (
     yaw_quat,
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
-from active_adaptation.envs.mdp.commands.base import CommandV2
-from active_adaptation.envs.mdp.rewards.base import RewardV2
+from active_adaptation.envs.mdp.commands.base import Command
+from active_adaptation.envs.mdp.rewards.base import Reward
 
 if TYPE_CHECKING:
     from isaaclab.assets import RigidObject
@@ -25,10 +25,10 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import EnvBase
 
 
-class _LocoManipObjectBase(CommandV2):
+class _LocoManipObjectBase(Command):
     """Shared object spawn and layout for object-manipulation commands."""
 
-    supported_backends = ("isaac",)
+    supported_backends = ("isaaclab",)
 
     def __init__(
         self,
@@ -109,8 +109,7 @@ class _LocoManipObjectBase(CommandV2):
         lo, hi = value_range
         return torch.rand(num_samples, device=device) * (hi - lo) + lo
 
-    @override
-    def sample_init(self, env_ids: torch.Tensor) -> dict:
+    def _sample_initial_states(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
         origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
         self.env.episode_origin[env_ids] = origins
         n = len(env_ids)
@@ -128,7 +127,11 @@ class _LocoManipObjectBase(CommandV2):
         robot_init[:, 2] = (
             self.env.get_ground_height_at(robot_init[:, :3]) + default_robot_z
         )
-        return {"robot": robot_init, self.object_name: object_init}     
+        return {"robot": robot_init, self.object_name: object_init}
+
+    @override
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
+        self._write_initial_states(self._sample_initial_states(env_ids), env_ids)
 
     def get_gripper_status(self) -> torch.Tensor:
         """Return gripper closedness in ``[0, 1]`` (0=open, 1=closed)."""
@@ -184,10 +187,10 @@ class LocoManipObject(_LocoManipObjectBase):
     def _initialize(self, env: "EnvBase") -> None:
         super()._initialize(env)
         self.grasp_height_per_env = torch.zeros(self.num_envs, device=self.device)
-        self.sync_state()
+        self.update()
 
-        if self.env.backend == "isaac" and self.env.sim.has_gui():
-            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
+            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
             self.scene: IsaacSceneAdapter = self.env.scene
             self.grasp_point_marker = self.scene.create_sphere_marker(
                 "/Visuals/Command/object_grasp_point",
@@ -241,7 +244,7 @@ class LocoManipObject(_LocoManipObjectBase):
         self.cmd_object_target_w[env_ids] = obj_pos_w + offset
 
     @override
-    def sync_state(self) -> None:
+    def update(self) -> None:
         """Refresh object pose and body-frame target / error terms."""
         self.object_pos_w = self.object.data.root_pos_w
         self.object_quat_w = self.object.data.root_quat_w
@@ -282,7 +285,7 @@ class LocoManipObject(_LocoManipObjectBase):
         )
 
     @override
-    def update(self) -> None:
+    def step(self) -> None:
         self.cmd_object_vel_w = clamp_norm(
             self.object_vel_gain * self.object_target_diff_w,
             max=self.object_vel_limit,
@@ -452,8 +455,8 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
             # 1: grasp and lift
             # 2: lift and move
 
-        if self.env.backend == "isaac" and self.env.sim.has_gui():
-            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
+            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
 
             self.scene: IsaacSceneAdapter = self.env.scene
             self.grasp_point_marker = self.scene.create_sphere_marker(
@@ -529,12 +532,11 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         raise ValueError(f"Invalid key: {key}")
 
     @override
-    def sample_init(self, env_ids: torch.Tensor) -> dict:
-        init_state = super().sample_init(env_ids)
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
+        super().sample_init(env_ids, reset_td)
         self.grasp_height_per_env[env_ids] = self._sample_uniform(
             len(env_ids), self.grasp_height_range, self.device
         )
-        return init_state        
 
     def sample_commands(self, env_ids: torch.Tensor) -> None:
         self.grasp_height_per_env[env_ids] = self._sample_uniform(
@@ -705,7 +707,7 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         self.is_standing_env = self.command_speed < 0.1
 
     @override
-    def sync_state(self) -> None:
+    def update(self) -> None:
         self._read_robot_and_object_state()
         self._sync_command_orientation()
         self._compute_tracking_errors()
@@ -721,7 +723,7 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
 
 
     @override
-    def update(self) -> None:
+    def step(self) -> None:
         self._read_robot_and_object_state()
 
         approach_ids = (self.phase_ids == 0).nonzero(as_tuple=False).squeeze(-1)
@@ -762,7 +764,7 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         return self._state
 
 
-class object_distance_progress(RewardV2[LocoManipObject]):
+class object_distance_progress(Reward[LocoManipObject]):
     """Reward the reduction in object-to-target distance: ``prev_error - curr_error``."""
 
     @override
@@ -803,7 +805,7 @@ class object_distance_progress(RewardV2[LocoManipObject]):
         return rew.reshape(T, N, 1)
 
 
-class object_pos_tracking(RewardV2[LocoManipObject]):
+class object_pos_tracking(Reward[LocoManipObject]):
     """Exponential reward for tracking the commanded object target position."""
 
     def __init__(
@@ -827,7 +829,7 @@ class object_pos_tracking(RewardV2[LocoManipObject]):
         return torch.exp(-error.square() / self.pos_sigma)
 
 
-class object_vel_tracking(RewardV2[LocoManipObject]):
+class object_vel_tracking(Reward[LocoManipObject]):
     """Exponential reward for tracking the commanded object linear velocity."""
 
     def __init__(
@@ -855,7 +857,7 @@ class object_vel_tracking(RewardV2[LocoManipObject]):
         return torch.exp(-error.square() / self.vel_sigma)
 
 
-class object_grasp_pos(RewardV2[LocoManipObject]):
+class object_grasp_pos(Reward[LocoManipObject]):
     """Reward reaching for the grasp point."""
 
     def __init__(

@@ -22,8 +22,8 @@ from active_adaptation.utils.math import (
     quat_from_euler_xyz
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
-from .base import CommandV2
-from ..rewards.base import RewardV2
+from .base import Command
+from ..rewards.base import Reward
 
 from dataclasses import dataclass, replace
 
@@ -121,7 +121,7 @@ class EEFCommandStruct:
         return cmd_eef_pos_w, cmd_eef_pos_b
 
 
-class SingleEEFLocoManip(CommandV2):
+class SingleEEFLocoManip(Command):
     """Command vector: base velocity, yaw rate, EEF position, and EEF forward target.
 
     Dense layout (17D, body/yaw frame):
@@ -266,15 +266,15 @@ class SingleEEFLocoManip(CommandV2):
             self.eef_pos_w - self.asset.data.root_link_pos_w * torch.tensor([1., 1., 0.], device=self.device)
         )
         
-        self.sync_state()
+        self.update()
 
         self.marker = None
         self.standoff_marker = None
         if (
-            self.env.backend == "isaac"
+            self.env.backend == "isaaclab"
             and self.env.sim.has_gui()
         ):
-            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
 
             self.scene: IsaacSceneAdapter = self.env.scene
             self.marker = self.scene.create_sphere_marker(
@@ -403,7 +403,7 @@ class SingleEEFLocoManip(CommandV2):
     
     @override
     def pre_step(self, substep: int) -> None:
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             self.asset.permanent_wrench_composer.set_forces_and_torques(
                 forces=self.payload_force_w.reshape(self.num_envs, 1, 3),
                 torques=torch.zeros(self.num_envs, 1, 3, device=self.device),
@@ -688,7 +688,7 @@ class SingleEEFLocoManip(CommandV2):
         self.base_pos_error[env_ids] = 0.0
 
     @override
-    def sync_state(self) -> None:
+    def update(self) -> None:
         """Refresh tracking errors from post-physics robot state and current targets."""
         self._read_robot_state()
         self._sync_world_frames()
@@ -706,7 +706,7 @@ class SingleEEFLocoManip(CommandV2):
         self._state = TensorDict(d, [self.num_envs], device=self.device).clone()
 
     @override
-    def update(self) -> None:
+    def step(self) -> None:
         """Resample/advance targets for the next physics step, then refresh obs fields."""
         interval = (self.env.episode_length_buf - 20) % self.resample_interval == 0
         resample = interval & self._env_mask_prob(
@@ -728,7 +728,7 @@ class SingleEEFLocoManip(CommandV2):
 
     @override
     def debug_draw(self) -> None:
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             self.env.scene.draw_vector(
                 self.asset.data.root_link_pos_w,
                 self.cmd_linvel_w,
@@ -756,7 +756,7 @@ class SingleEEFLocoManip(CommandV2):
         return self._state
 
 
-class eef_pos_tracking(RewardV2[SingleEEFLocoManip]):
+class eef_pos_tracking(Reward[SingleEEFLocoManip]):
     """Exponential position tracking with a small L1 penalty."""
 
     def __init__(self, weight: float, enabled: bool = True, track_var: bool = False):
@@ -771,7 +771,7 @@ class eef_pos_tracking(RewardV2[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1)
 
 
-class eef_pos_error_l1(RewardV2[SingleEEFLocoManip]):
+class eef_pos_error_l1(Reward[SingleEEFLocoManip]):
     """L1 end-effector position error (metric, not a shaped reward)."""
 
     @override
@@ -787,7 +787,7 @@ def _eef_orient_error(command_manager: SingleEEFLocoManip) -> torch.Tensor:
     return quat_angle_magnitude(quat_error).reshape(command_manager.num_envs, 1)
 
 
-class eef_orient_error(RewardV2[SingleEEFLocoManip]):
+class eef_orient_error(Reward[SingleEEFLocoManip]):
     """Geodesic end-effector orientation error in radians."""
 
     @override
@@ -795,7 +795,7 @@ class eef_orient_error(RewardV2[SingleEEFLocoManip]):
         return _eef_orient_error(self.command_manager)
 
 
-class eef_orient_tracking(RewardV2[SingleEEFLocoManip]):
+class eef_orient_tracking(Reward[SingleEEFLocoManip]):
     """Exponential tracking reward from geodesic EEF orientation error."""
 
     def __init__(
@@ -814,7 +814,7 @@ class eef_orient_tracking(RewardV2[SingleEEFLocoManip]):
         return torch.exp(-error.square() / self.sigma)
 
 
-class eef_pos_orient_tracking(RewardV2[SingleEEFLocoManip]):
+class eef_pos_orient_tracking(Reward[SingleEEFLocoManip]):
     """Multiplicative reward of position and geodesic orientation tracking."""
 
     def __init__(
@@ -872,7 +872,7 @@ class eef_pos_orient_tracking(RewardV2[SingleEEFLocoManip]):
         return rew.reshape(T, N, 1)
 
 
-class eef_pos_forward_tracking(RewardV2[SingleEEFLocoManip]):
+class eef_pos_forward_tracking(Reward[SingleEEFLocoManip]):
     """Multiplicative reward of position and forward tracking."""
 
     def __init__(
@@ -933,7 +933,7 @@ class eef_pos_forward_tracking(RewardV2[SingleEEFLocoManip]):
         return rew.reshape(T, N, 1)
 
 
-class eef_pos_progress(RewardV2[SingleEEFLocoManip]):
+class eef_pos_progress(Reward[SingleEEFLocoManip]):
     """Reward the reduction in EEF position error: ``prev_error - curr_error``."""
     
     @override
@@ -973,7 +973,7 @@ class eef_pos_progress(RewardV2[SingleEEFLocoManip]):
         return rew.reshape(T, N, 1)
 
 
-class eef_pos_reaching(RewardV2[SingleEEFLocoManip]):
+class eef_pos_reaching(Reward[SingleEEFLocoManip]):
     """One-step reward for reaching the EEF position target."""
 
     @override
@@ -982,7 +982,7 @@ class eef_pos_reaching(RewardV2[SingleEEFLocoManip]):
         return rew, self.command_manager.eef_pos_reaching
 
 
-class eef_pos_reached(RewardV2[SingleEEFLocoManip]):
+class eef_pos_reached(Reward[SingleEEFLocoManip]):
     """Reward for staying in an episode after the EEF position target is reached."""
 
     @override
@@ -991,7 +991,7 @@ class eef_pos_reached(RewardV2[SingleEEFLocoManip]):
         return rew, self.command_manager.eef_pos_reached
 
 
-class eef_vel_tracking(RewardV2[SingleEEFLocoManip]):
+class eef_vel_tracking(Reward[SingleEEFLocoManip]):
     """Exponential reward for tracking commanded end-effector velocity."""
 
     def __init__(self, weight: float, enabled: bool = True, track_var: bool = False):
@@ -1006,7 +1006,7 @@ class eef_vel_tracking(RewardV2[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1)
 
 
-class eef_forward_tracking(RewardV2[SingleEEFLocoManip]):
+class eef_forward_tracking(Reward[SingleEEFLocoManip]):
     """Track the commanded end-effector forward direction in world frame."""
 
     def __init__(
@@ -1038,7 +1038,7 @@ class eef_forward_tracking(RewardV2[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
-class eef_up_tracking(RewardV2[SingleEEFLocoManip]):
+class eef_up_tracking(Reward[SingleEEFLocoManip]):
     """Track a global EEF pitch target through the end-effector up direction."""
 
     def __init__(
@@ -1070,7 +1070,7 @@ class eef_up_tracking(RewardV2[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
-class eef_angvel_penalty(RewardV2[SingleEEFLocoManip]):
+class eef_angvel_penalty(Reward[SingleEEFLocoManip]):
     """Penalize end-effector angular velocity to reduce oscillation."""
 
     @override
@@ -1093,7 +1093,7 @@ class eef_angvel_penalty(RewardV2[SingleEEFLocoManip]):
         return rew.reshape(T, N, 1)
 
 
-class eef_grasp(RewardV2[SingleEEFLocoManip]):
+class eef_grasp(Reward[SingleEEFLocoManip]):
     """Binary cross-entropy gripper reward on ``cmd_eef_status`` vs ``eef_status``."""
 
     @override

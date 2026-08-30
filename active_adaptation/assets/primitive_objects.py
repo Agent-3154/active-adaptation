@@ -22,7 +22,7 @@ from active_adaptation.registry import Registry
 
 registry = Registry.instance()
 
-Backend = Literal["isaaclab", "isaac", "mjlab"]
+Backend = Literal["isaaclab", "isaaclab", "mjlab"]
 Axis = Literal["X", "Y", "Z"]
 
 _DEFAULT_MASS = 0.1
@@ -159,6 +159,7 @@ def _make_isaaclab_cfg(
 def _make_mjlab_cfg(
     kind: str,
     *,
+    body_name: str | None,
     size,
     radius: float | None,
     height: float | None,
@@ -182,7 +183,7 @@ def _make_mjlab_cfg(
     geom_type = geom_types[kind]
     geom_size = _mj_geom_size(kind, size=size, radius=radius, height=height)
     geom_quat = _AXIS_QUAT[axis.upper()]
-    body_name = kind
+    body_name = body_name or kind
 
     def spec_fn():
         spec = mujoco.MjSpec()
@@ -224,6 +225,7 @@ def _make_primitive(
     backend: Backend,
     kind: str,
     *,
+    body_name: str | None = None,
     size=None,
     radius: float | None = None,
     height: float | None = None,
@@ -238,7 +240,7 @@ def _make_primitive(
     rgba_t = _rgba(rgba)
     pos_t = _as_float_tuple(pos, 3)
     rot_t = _as_float_tuple(rot, 4)
-    if backend in ("isaaclab", "isaac"):
+    if backend in ("isaaclab", "isaaclab"):
         return _make_isaaclab_cfg(
             kind,
             size=size,
@@ -256,6 +258,7 @@ def _make_primitive(
         del activate_contact_sensors
         return _make_mjlab_cfg(
             kind,
+            body_name=body_name,
             size=size,
             radius=radius,
             height=height,
@@ -271,6 +274,7 @@ def _make_primitive(
 
 def make_box(
     backend: Backend,
+    name: str = "box",
     size: Sequence[float] | float = (0.05, 0.05, 0.05),
     mass: float = _DEFAULT_MASS,
     rgba: Sequence[float] = _DEFAULT_RGBA,
@@ -283,6 +287,7 @@ def make_box(
     return _make_primitive(
         backend,
         "box",
+        body_name=name,
         size=size,
         mass=mass,
         rgba=rgba,

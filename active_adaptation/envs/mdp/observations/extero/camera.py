@@ -9,7 +9,7 @@ import torch
 from jaxtyping import Float
 from typing_extensions import override
 
-from ..base import ObservationV2
+from ..base import Observation
 from active_adaptation.utils.math import (
     quat_mul,
     quat_rotate,
@@ -87,7 +87,7 @@ def _distinct_debug_color(instance_id: int) -> Tuple[float, float, float]:
     hue = (instance_id * 0.618033988749895) % 1.0
     return colorsys.hsv_to_rgb(hue, 0.85, 0.95)
 
-class raycast_camera(ObservationV2):
+class raycast_camera(Observation):
     """Depth (and optionally surface-normal) image rendered by GPU raycasting.
 
     Rays are generated with a pinhole model (:func:`raymap`), mounted on a robot
@@ -127,7 +127,7 @@ class raycast_camera(ObservationV2):
     for env 0.
     """
 
-    supported_backends = ("isaac",)
+    supported_backends = ("isaaclab",)
     _debug_instance_count = 0
 
     supported_dtypes = {
@@ -199,8 +199,8 @@ class raycast_camera(ObservationV2):
             self.body_id = None
 
         self.camera_handle = None
-        if self.env.backend == "isaac" and self.env.sim.has_gui():
-            from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
+            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
 
             scene: IsaacSceneAdapter = self.env.scene
             self.instance_id = raycast_camera._debug_instance_count
@@ -294,7 +294,7 @@ class raycast_camera(ObservationV2):
         return (rgb * 255.0).byte().permute(1, 2, 0).cpu().numpy()
 
     def debug_draw(self) -> None:
-        if self.env.backend != "isaac":
+        if self.env.backend != "isaaclab":
             return
         pos = self.ray_hits_w[0].reshape(-1, 3)
         self.marker.visualize(pos)
@@ -342,7 +342,7 @@ class raycast_camera(ObservationV2):
         return SymmetryTransform(perm=perm, signs=signs, channel_signs=channel_signs)
 
 
-class camera_isaac(ObservationV2):
+class camera_isaac(Observation):
     """Isaac Lab tiled camera observation for the Isaac backend.
 
     Registers a :class:`~isaaclab.sensors.TiledCameraCfg` on the scene during
@@ -369,7 +369,7 @@ class camera_isaac(ObservationV2):
             ``"opengl"``).
     """
 
-    supported_backends = ("isaac",)
+    supported_backends = ("isaaclab",)
     _instance_count = 0
 
     def __init__(
@@ -491,7 +491,7 @@ class camera_isaac(ObservationV2):
         return SymmetryTransform(perm, torch.ones(width))
 
 
-class camera_mjlab(ObservationV2):
+class camera_mjlab(Observation):
     """MjLab camera observation using :class:`~mjlab.sensor.CameraSensor`.
 
     Registers a :class:`~mjlab.sensor.CameraSensorCfg` during scene construction
@@ -605,7 +605,7 @@ class camera_mjlab(ObservationV2):
         return SymmetryTransform(perm, torch.ones(width))
 
 
-class raycast_camera_v2(ObservationV2):
+class raycast_camera_v2(Observation):
     """Read RGB-D from a scene-owned :class:`~active_adaptation.envs.sensors.camera.LambertRaycastCameraSensor`.
 
     Unlike :class:`raycast_camera`, this term does **not** create or own a
