@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`active_adaptation/` contains the core package: environments in `envs/`, RL code in `learning/`, shared helpers in `utils/`, `sensors/`, and `project_loading/`. Hydra config lives under `cfg/` with shared defaults in `cfg/base/`, experiments in `cfg/exp/`, and task definitions in `cfg/task/`. Runtime entry points are in `scripts/` (`train_ppo.py`, `eval.py`, `play.py`, `launch_ddp.sh`). Extension projects live in `projects/` and register through `pyproject.toml`. Large robot and scene assets are expected under `.cache/aa-robot-models/`, not committed into the package.
+`active_adaptation/` contains the core package: environments in `envs/`, RL code in `learning/`, shared helpers in `utils/`, `sensors/`, and `project_loading/`. Hydra config lives under `cfg/` with shared defaults in `cfg/base/`, experiments in `cfg/exp/`, and task definitions in `cfg/task/`. Runtime entry points are in `scripts/` (`train_ppo.py`, `eval.py`, `play.py`, `launch_ddp.sh`). Extension projects live in `projects/` and register through `pyproject.toml`. Composed robot MJCF is built with sibling **`aa-projects/assetx/`** (recipes → `artifacts/`); runtime bundles live under `.cache/aa-robot-models/` (`ROBOT_MODEL_DIR`), registered via `active_adaptation/assets/`. See `README.md` § Asset download and placement.
 
 ## Build, Test, and Development Commands
 Install in a Python 3.11 environment with `pip install -e .`.

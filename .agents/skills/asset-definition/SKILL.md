@@ -1,6 +1,6 @@
 ---
 name: asset-definition
-description: Define and register cross-backend robot/object assets in active-adaptation (Isaac Lab ArticulationCfg + mjlab EntityCfg via AssetSpec). Use when adding or editing files under assets/, wiring robot.name in cfg/task/, setting joint_names_simulation / body_names_simulation, contact sensors, actuators, URDF mimic / MJCF equality constraints, symmetry mappings, AssetSpec wrappers, mjlab spec_fn/CollisionCfg/ContactMatch, floating props, or cleaning up outdated mujoco-backend / in-repo MJCF patterns.
+description: Define and register cross-backend robot/object assets in active-adaptation (Isaac Lab ArticulationCfg + mjlab EntityCfg via AssetSpec). Use when adding or editing files under assets/, wiring robot.name in cfg/task/, setting joint_names_simulation / body_names_simulation, contact sensors, actuators, URDF mimic / MJCF equality constraints, symmetry mappings, AssetSpec wrappers, mjlab spec_fn/CollisionCfg/ContactMatch, floating props, composing MJCF with assetx (aa-projects/assetx), publishing to ROBOT_MODEL_DIR, or cleaning up outdated mujoco-backend / in-repo MJCF patterns.
 ---
 
 # Asset definition (active-adaptation)
@@ -12,10 +12,12 @@ Define robots and scene objects so **Isaac** and **mjlab** share one registry en
 **Primary references**
 - Shared cfg + `AssetSpec`: `active_adaptation/assets/asset_cfg.py`
 - Canonical robot example: `active_adaptation/assets/quadrupeds/a2.py`
+- Composed robot (assetx → AA): `active_adaptation/assets/quadrupeds/a2_manipulator.py` + `aa-projects/assetx/examples/a2_piper.py`
 - Humanoid (multi-actuator): `active_adaptation/assets/humanoids/g1.py`
 - Wrapper pattern: `active_adaptation/assets/underwater/BlueROV.py` + `envs/robots/TEACHME.md`
 - Backend consumers: `envs/backends/isaac/env.py`, `envs/backends/mjlab/env.py`
-- Model cache: `ROBOT_MODEL_DIR` → `<repo>/.cache/aa-robot-models/` (HF `btx0424/aa-robot-models`)
+- **Model composition (assetx):** `aa-projects/assetx/` — recipes assemble/transform MJCF; see [assetx pipeline](#assetx-model-pipeline)
+- Model cache (runtime): `ROBOT_MODEL_DIR` → `<repo>/.cache/aa-robot-models/` (HF `btx0424/aa-robot-models` for published bundles)
 - **mjlab source of truth** (sibling repo): `mjlab/src/mjlab/{entity,actuator,sensor,scene,utils/spec_config}.py`; zoo examples `mjlab/asset_zoo/robots/*/`; docs `mjlab/docs/source/{entity,actuators,sensors,scene}.rst`
 
 Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdated cleanup, and templates.
@@ -27,6 +29,8 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 ## When to use
 
 - Adding a new robot or object under `active_adaptation/assets/`
+- Composing a new MJCF variant (base + arm, gripper swap, rename EE / grasp frames) with **assetx** before registering in AA
+- Publishing an assetx artifact into `ROBOT_MODEL_DIR` and wiring `make_isaaclab_cfg` / `make_mjlab_cfg`
 - Porting an asset so it runs on both Isaac and mjlab
 - Fixing policy transfer bugs caused by joint/body order mismatch
 - Wiring `robot.name` in `cfg/task/**/*.yaml`
@@ -41,7 +45,7 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 2. **Two factories + dispatcher** — `make_isaaclab_cfg()`, `make_mjlab_cfg()`, `make_cfg(backend: Literal["isaaclab", "mjlab"])`. Backends call with `"isaaclab"` or `"mjlab"` (not `"isaac"`).
 3. **Always set simulation order** — `joint_names_simulation` and `body_names_simulation` on both backend cfgs (same lists). MDP terms resolve against these via `find_joints` / `find_bodies`.
 4. **Share cross-backend constants** — `INIT_POS`, `INIT_JOINT_POS`, symmetry maps, effort/stiffness/damping, and the simulation name lists live at module top; only spawn/spec/actuator *types* differ per backend.
-5. **Models live in `ROBOT_MODEL_DIR`** — USD + MJCF under `.cache/aa-robot-models/<robot>/`. Do not vendor large meshes into `assets/` for new robots.
+5. **Runtime models live in `ROBOT_MODEL_DIR`** — USD + MJCF under `.cache/aa-robot-models/<robot>/`. Do not vendor large meshes into `active_adaptation/assets/`. **Compose** new MJCF in **assetx** (`aa-projects/assetx/examples/`, `artifacts/`), then copy or publish the saved bundle into `ROBOT_MODEL_DIR` (see [assetx pipeline](#assetx-model-pipeline)).
 6. **Register + import** — `registry.register("asset", "<name>", make_cfg)` and import the module from the package `__init__.py` so registration runs.
 7. **Name parity** — joint/body names used by MDP, init regexes, and sensors must match across USD and MJCF (order may differ; the simulation lists fix layout). We always assume the USD joint and body names match those of the MJCF (if provided). So do not bother checking them.
 8. **No new mujoco-backend assets** — ignore `elif aa.get_backend() == "mujoco"` in `asset_cfg.py` for new work; prefer deleting it when cleaning.
@@ -55,7 +59,8 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 
 ```
 Task Progress:
-- [ ] Place USD + MJCF (and meshes) under ROBOT_MODEL_DIR / <robot>/
+- [ ] If composing: write an assetx recipe (examples/) → `robot.save(artifacts/<name>/)` → copy/sync to ROBOT_MODEL_DIR/<name>/ (+ USD for Isaac)
+- [ ] Else: place USD + MJCF (and meshes) under ROBOT_MODEL_DIR/<robot>/ (HF download or vendor export)
 - [ ] Create assets/<family>/<robot>.py with shared INIT_*, JOINT/BODY_NAMES_SIMULATION, symmetry
 - [ ] make_isaaclab_cfg → ArticulationCfg (UsdFileCfg) + ContactSensorCfg dict
 - [ ] make_mjlab_cfg → EntityCfg (spec_fn → MjSpec) + ContactSensorCfg tuple
@@ -74,6 +79,13 @@ Task Progress:
 ## Architecture
 
 ```
+vendor MJCF / USD          assetx recipe (aa-projects/assetx)
+        │                            │
+        └────────────┬───────────────┘
+                     ▼
+        ROBOT_MODEL_DIR/<robot>/  (model.xml, meshes/, *.usd)
+                     │
+                     ▼
 cfg/task/*.yaml  robot.name: unitree_a2
         │
         ▼
@@ -88,6 +100,38 @@ registry.get("asset", name) → make_cfg(backend=...)
         ▼
 IsaacBackendEnv / MjLabBackendEnv  → scene.robot / entities["robot"]
 ```
+
+### assetx model pipeline
+
+**assetx** (`aa-projects/assetx/`) owns **MJCF composition** — assemble base + arm, rename bodies, add `grasp_point`, normalize collision geom names, export URDF. **active-adaptation** owns **simulation registration** — `AssetSpec`, actuators, contact sensors, symmetry, `joint_names_simulation`.
+
+| Stage | Tool | Output |
+|-------|------|--------|
+| Compose MJCF | assetx recipe (`assemble`, `Compose([...])`, `MujocoAsset.save`) | `artifacts/<name>/model.xml`, `meshes/`, optional `model.urdf` |
+| Isaac USD | assetx `tools/mjcf2usd.py` or `tools/urdf2usd.py` (`pip install -e ".[usd]"`) | `<name>.usd` beside the MJCF |
+| Runtime cache | copy or HF publish | `<repo>/.cache/aa-robot-models/<name>/` |
+| AA factory | `assets/<family>/<robot>.py` | `registry.register("asset", …)` pointing at `ROBOT_MODEL_DIR` |
+
+**Recipe conventions (match AA expectations):**
+
+- Strip vendor **actuators and sensors** in the assetx load step — AA adds PD actuators and scene sensors via `AssetSpec` (see `examples/a2_piper.py`).
+- Name collision geoms `{body}_collision` / `{body}_collision{N}`; feet `{leg}_foot_collision` so mjlab `CollisionCfg(geom_names_expr=(".*_collision",))` and contact sensors match.
+- Keep body/joint names stable across the saved MJCF and exported USD; set `JOINT_NAMES_SIMULATION` / `BODY_NAMES_SIMULATION` from the **saved** model, not the vendor XML.
+- `save()` copies meshes into the artifact dir — symlink or copy that tree into `ROBOT_MODEL_DIR`; do not point `spec_fn` at mutable `artifacts/` during training.
+
+**Example (A2 + Piper):**
+
+```bash
+cd aa-projects/assetx && pip install -e .
+python examples/a2_piper.py --no-viewer   # → artifacts/a2_piper/model.xml
+pip install -e ".[usd]"
+python tools/mjcf2usd.py -p artifacts/a2_piper/model.xml   # → USD beside MJCF
+mkdir -p ../active-adaptation/.cache/aa-robot-models/a2_piper
+cp -r artifacts/a2_piper/* ../active-adaptation/.cache/aa-robot-models/a2_piper/
+# rename USD if needed to match factory (a2_manipulator expects a2_piper.usd)
+```
+
+Reference factory: `assets/quadrupeds/a2_manipulator.py` (`robot.name: unitree_a2_piper` or equivalent registry key). Full assetx API: `aa-projects/assetx/AGENTS.md`, `README.md`.
 
 `AssetSpec` fields:
 
@@ -260,6 +304,9 @@ When editing assets, prefer migrating away from:
 |---------|--------|
 | `asset_cfg` `mujoco` / `MJArticulationCfg` branch | Isaac + mjlab only |
 | In-repo `assets/Go2/`, `assets/G1/**` MJCF/URDF as source of truth | `ROBOT_MODEL_DIR` (g1 still points at `assets/G1` — migrate when touching) |
+| Hand-editing monolithic MJCF copies per robot variant | assetx recipe + `save()`; publish to `ROBOT_MODEL_DIR` |
+| Pointing `spec_fn` at `aa-projects/assetx/artifacts/` during training | Copy/sync saved bundle into `.cache/aa-robot-models/` |
+| Leaving vendor actuators/sensors in composed MJCF | Strip in assetx load; configure actuators/sensors in `AssetSpec` |
 | `assets/spawn.py` custom cloner | Standard Isaac Lab spawn / scene; not part of AssetSpec |
 | Factories returning bare cfg for robots | Always `AssetSpec` |
 | mjlab factory with `sensors=()` while Isaac has contact | Add matching contact sensor |
@@ -279,6 +326,9 @@ Full notes: [reference.md](reference.md#outdated-and-cleanup).
 - Different name lists or different init regex coverage between Isaac and mjlab
 - Using backend-native joint order in MDP (breaks transfer) — see `environment-mdp`
 - Committing large USD/MJCF/meshes into `assets/` instead of the HF cache layout
+- Hand-editing composed MJCF in `ROBOT_MODEL_DIR` without an assetx recipe (loses reproducibility)
+- Training against live `assetx/artifacts/` paths (mutable; not shared via HF cache)
+- Omitting Isaac USD export after an assetx MJCF-only recipe (Isaac factory needs `*.usd` in the same folder)
 - Registering without importing the module
 - Passing `backend="isaac"` (must be `"isaaclab"`)
 - New assets targeting the deprecated standalone mujoco backend

@@ -237,7 +237,7 @@ class LambertRaycastCameraSensor:
         self._camera.initialize()
 
     def _build_mesh_registry(self, scene: Any) -> _MeshPoseRegistry:
-        if self.env.backend in ("isaaclab", "isaaclab"):
+        if self.env.backend == "isaaclab":
             from simple_raycaster import MultiMeshRaycasterV2
 
             registry = MultiMeshRaycasterV2(device=self.device)
