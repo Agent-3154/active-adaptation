@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import torch
 import numpy as np
 import logging
@@ -9,7 +8,7 @@ from typing_extensions import override
 
 import active_adaptation
 from active_adaptation.utils.math import quat_rotate_inverse
-from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.profiling import PROFILE_SYNC_TIMERS, ScopedTimer
 
 import active_adaptation.utils.string as string_utils
 from tensordict import TensorDictBase
@@ -50,12 +49,6 @@ if TYPE_CHECKING:
 
 RangeType = Tuple[float, float]
 NestedRangeType = Union[RangeType, Dict[str, RangeType]]
-PROFILE_SYNC_TIMERS = os.environ.get("AA_PROFILE_SYNC_TIMERS", "0").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 
 
 def _mjlab_expand_model_fields(env, *fields: str):

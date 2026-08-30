@@ -32,7 +32,7 @@ Decision-value-driven experiments
 2. Do not exhaustively explore directions with low marginal information gain. When a group of experiments is unlikely to improve performance, clarify direction, or inform follow-up work, especially when it would only reconfirm that an approach is infeasible or ineffective, stop instead of running exhaustive validation.
 
 ## Training Experiment Notes
-When launching training remotely, follow these operational rules:
+When launching training remotely, follow these operational rules. For agent-oriented launch/monitor/kill workflows and `profiling.jsonl` sim perf tuning, see [.agents/skills/run-experiments/SKILL.md](.agents/skills/run-experiments/SKILL.md).
 
 - Before every launch, check live GPU occupancy with `nvidia-smi` and relevant `pgrep`/`tmux ls`; do not overlap GPUs with existing runs.
 - Use an experiment directory under `projects/hdmi/scripts/experiments/<date>_<name>/` for launch scripts, records, plots, and a live markdown log. Keep run keys, hosts, GPU ids, seeds, W&B ids, status, and exact commands in that log.

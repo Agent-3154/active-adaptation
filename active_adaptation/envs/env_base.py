@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import warnings
 from collections import OrderedDict
 from typing import Callable, Dict, Mapping, Any, Optional, cast
@@ -17,7 +16,7 @@ import active_adaptation
 import active_adaptation.envs.mdp as mdp
 import active_adaptation.utils.symmetry as symmetry_utils
 from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
-from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.profiling import PROFILE_SYNC_TIMERS, ScopedTimer
 from active_adaptation.utils.video_recorder import (
     VideoRecorder,
     NullVideoRecorder,
@@ -32,12 +31,6 @@ if active_adaptation.get_backend() == "isaaclab":
 
 
 EMA_DECAY = 0.99
-PROFILE_SYNC_TIMERS = os.environ.get("AA_PROFILE_SYNC_TIMERS", "0").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 
 
 def _sanitize_nonfinite_env_rows(tensordict: TensorDictBase) -> torch.Tensor:
@@ -257,7 +250,7 @@ class RewardGroup:
     def compute(self) -> torch.Tensor:
         rewards = []
         for key, func in self.funcs.items():
-            with ScopedTimer(f"{self.name}.{key}", sync=False):
+            with ScopedTimer(f"{self.name}.{key}", sync=PROFILE_SYNC_TIMERS):
                 reward = func.compute()
             self.env.stats[self.name, key].add_(reward)
             if func.enabled:
@@ -639,7 +632,9 @@ class _EnvBase(EnvBase, RegistryMixin):
         if mdp.is_method_implemented(component, mdp.MDPComponent, "post_step"):
             self._post_step_callbacks.append(component.post_step)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "update"):
-            cb = ScopedTimer(component.__class__.__name__)(component.update)
+            cb = ScopedTimer(component.__class__.__name__, sync=PROFILE_SYNC_TIMERS)(
+                component.update
+            )
             self._update_callbacks.append(cb)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "debug_draw"):
             self._debug_draw_callbacks.append(component.debug_draw)
@@ -743,14 +738,14 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     @ScopedTimer("env._step", sync=PROFILE_SYNC_TIMERS)
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
-        with ScopedTimer("process_action", sync=False):
+        with ScopedTimer("process_action", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.prescribe(tensordict)
             for input_key, input_manager in self.input_managers.items():
                 input_manager.process_action(tensordict.get(input_key, None))
         
-        with ScopedTimer("simulation", sync=False):
+        with ScopedTimer("simulation", sync=PROFILE_SYNC_TIMERS):
             for substep in range(self.decimation):
-                with ScopedTimer("pre_step_callbacks", sync=False):
+                with ScopedTimer("pre_step_callbacks", sync=PROFILE_SYNC_TIMERS):
                     self.scene.zero_external_wrenches()
                     self._apply_action(substep)
                     [callback(substep) for callback in self._pre_step_callbacks]
@@ -766,7 +761,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                     self.scene.update(self.physics_dt)
                     if hasattr(self.scene, "update_warp_sensors"):
                         self.scene.update_warp_sensors()
-                with ScopedTimer("post_step_callbacks", sync=False):
+                with ScopedTimer("post_step_callbacks", sync=PROFILE_SYNC_TIMERS):
                     [callback(substep) for callback in self._post_step_callbacks]
 
         self.episode_length_buf.add_(1)
@@ -774,14 +769,14 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
 
-        with ScopedTimer("command.update", sync=False):
+        with ScopedTimer("command.update", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.update()
-        with ScopedTimer("update_callbacks", sync=False):
+        with ScopedTimer("update_callbacks", sync=PROFILE_SYNC_TIMERS):
             [callback() for callback in self._update_callbacks]
 
         tensordict = self._compute_reward(tensordict)
         tensordict = self._compute_termination(tensordict)
-        with ScopedTimer("command.step", sync=False):
+        with ScopedTimer("command.step", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.step()
     
         tensordict = self._compute_observation(tensordict)

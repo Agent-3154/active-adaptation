@@ -28,6 +28,13 @@ from active_adaptation.pipeline_io import (
     get_run_state_dir,
     write_run_state,
 )
+from active_adaptation.utils.experiment_logging import (
+    RUN_STATUS_FILENAME,
+    export_iteration_monitoring,
+    metrics_export_enabled,
+    assess_health,
+    write_run_status,
+)
 from active_adaptation.utils.profiling import ScopedTimer
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -164,6 +171,8 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         OmegaConf.save(cfg, cfg_save_path)
         wandb_run.save(str(cfg_save_path), policy="now")
         wandb_run.save(str(run_dir / "config.yaml"), policy="now")
+    else:
+        run_dir = None
 
     from active_adaptation.helpers import make_env_policy, evaluate
     from active_adaptation.utils.helpers import EpisodeStats
@@ -244,6 +253,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     uploaded_ckpt_path = None
     carry = env.reset()
     env_frames = 0
+    last_algo_metrics: dict[str, float | int] = {}
     private_keys = None
     observation_keys = list(env.observation_spec.keys(True, True))
 
@@ -343,8 +353,22 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                         print(f"Local checkpoint: {local_ckpt_path}")
                 if uploaded_ckpt_path is not None:
                     print(f"Last uploaded checkpoint: {uploaded_ckpt_path}")
-                info.update(env.extra)
-                info.update(env.stats_ema)  # step-wise exponential moving average of stats
+                env_extra = dict(env.extra)
+                stats_ema = dict(env.stats_ema)
+                if metrics_export_enabled() and run_dir is not None:
+                    last_algo_metrics = export_iteration_monitoring(
+                        run_dir,
+                        iter_idx=i,
+                        env_frames=info["env_frames"],
+                        info=info,
+                        env_extra=env_extra,
+                        stats_ema=stats_ema,
+                        backend=cfg.backend,
+                        num_envs=env.num_envs,
+                        state="running",
+                    )
+                info.update(env_extra)
+                info.update(stats_ema)
                 wandb_run.log(info)
 
     run_state: dict[str, str] = {}
@@ -358,6 +382,19 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         )
         info["env_frames"] = env_frames
         wandb_run.log(info)
+        if metrics_export_enabled() and run_dir is not None:
+            health, health_issues = assess_health(last_algo_metrics)
+            write_run_status(
+                run_dir / RUN_STATUS_FILENAME,
+                state="completed",
+                iter_idx=total_iters - 1,
+                env_frames=env_frames * aa.get_world_size(),
+                metrics=last_algo_metrics or {"env_frames": env_frames * aa.get_world_size()},
+                health=health,
+                health_issues=health_issues,
+                backend=cfg.backend,
+                num_envs=env.num_envs,
+            )
         wandb.finish()
         print(f"Final checkpoint: {uploaded_ckpt_path}")
         run_state = {

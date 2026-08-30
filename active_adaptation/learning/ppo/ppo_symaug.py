@@ -73,6 +73,7 @@ from active_adaptation.learning.utils.distributed import check_parameters, unwra
 from active_adaptation.learning.utils.dormancy import DormancyTracker
 from active_adaptation.utils.string import resolve_matching_names
 from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.memory_profiling import memory_scope
 from active_adaptation.utils.symmetry import SymmetryTransform
 
 import active_adaptation as aa
@@ -345,7 +346,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.actor.to(self.device)
         self.critic.to(self.device)
 
-        with ScopedTimer("compute_advantage"):
+        with ScopedTimer("compute_advantage"), memory_scope("train_op/compute_advantage"):
             self.compute_advantage(tensordict, self.critic, "adv", "ret", self.cfg.clamp_reward)
             action = tensordict[ACTION_KEY]
             adv_unnormalized = tensordict["adv"]
@@ -374,34 +375,35 @@ class PPOPolicy(TensorDictModuleBase):
         ret_var = ret_valid.var().clamp_min(1e-7)
 
         td = tensordict.select(*self.training_keys)
-        for epoch in range(self.cfg.ppo_epochs):
-            compute_diagnostics = epoch == self.cfg.ppo_epochs - 1
-            need_kl = self.desired_kl is not None
-            batch = make_batch(td, self.cfg.num_minibatches)
-            epoch_kls = []
-            for minibatch in batch:
-                minibatch = self._augment_symmetry(minibatch)
-                info = self.update(
-                    minibatch, compute_diagnostics or need_kl, ret_var
-                )
-                if compute_diagnostics:
-                    infos.append(info)
-                if need_kl:
-                    epoch_kls.append(info["actor/approx_kl"])
+        with memory_scope("train_op/ppo_epochs"):
+            for epoch in range(self.cfg.ppo_epochs):
+                compute_diagnostics = epoch == self.cfg.ppo_epochs - 1
+                need_kl = self.desired_kl is not None
+                batch = make_batch(td, self.cfg.num_minibatches)
+                epoch_kls = []
+                for minibatch in batch:
+                    minibatch = self._augment_symmetry(minibatch)
+                    info = self.update(
+                        minibatch, compute_diagnostics or need_kl, ret_var
+                    )
+                    if compute_diagnostics:
+                        infos.append(info)
+                    if need_kl:
+                        epoch_kls.append(info["actor/approx_kl"])
 
-            if need_kl:
-                kl = sum(epoch_kls) / len(epoch_kls)
-                if aa.is_distributed():
-                    distr.all_reduce(kl, op=distr.ReduceOp.SUM)
-                    kl = kl / self.world_size
-                actor_lr = self.opt.param_groups[0]["lr"]
-                if kl > self.desired_kl * 2.0:
-                    actor_lr = max(1e-5, actor_lr / 1.5)
-                elif kl < self.desired_kl / 2.0 and kl > 0.0:
-                    actor_lr = min(1e-2, actor_lr * 1.5)
-                self.opt.param_groups[0]["lr"] = actor_lr
+                if need_kl:
+                    kl = sum(epoch_kls) / len(epoch_kls)
+                    if aa.is_distributed():
+                        distr.all_reduce(kl, op=distr.ReduceOp.SUM)
+                        kl = kl / self.world_size
+                    actor_lr = self.opt.param_groups[0]["lr"]
+                    if kl > self.desired_kl * 2.0:
+                        actor_lr = max(1e-5, actor_lr / 1.5)
+                    elif kl < self.desired_kl / 2.0 and kl > 0.0:
+                        actor_lr = min(1e-2, actor_lr * 1.5)
+                    self.opt.param_groups[0]["lr"] = actor_lr
         
-        with torch.no_grad():
+        with memory_scope("train_op/post_update"), torch.no_grad():
             tensordict_ = self.actor(tensordict.copy())
             dist = IndependentNormal(tensordict_["loc"], tensordict_["scale"])
             log_probs_after = dist.log_prob(action)

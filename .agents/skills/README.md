@@ -9,12 +9,13 @@ Portable playbooks for coding agents. **Canonical location:** `.agents/skills/` 
 | On-policy (PPO) | [onpolicy-algorithms/SKILL.md](onpolicy-algorithms/SKILL.md) | `learning/ppo/`, `train_ppo.py`, GAE, sym aug, Muon |
 | Off-policy (SAC) | [offpolicy-algorithms/SKILL.md](offpolicy-algorithms/SKILL.md) | `learning/offpolicy/`, `train_offpolicy.py`, replay, RLPD |
 | WandB diagnostics | [wandb-diagnostics/SKILL.md](wandb-diagnostics/SKILL.md) | Debugging/analysis from WandB run history (grad norms, losses, KL/entropy, explained variance) |
+| Run experiments | [run-experiments/SKILL.md](run-experiments/SKILL.md) | Launch/monitor/kill training runs, `profiling.jsonl`, smoke-vs-full, sim perf tuning loop |
 | Environment / MDP | [environment-mdp/SKILL.md](environment-mdp/SKILL.md) | `envs/mdp/`, `cfg/task/` obs/reward/term/action/command/rand |
 | Asset definition | [asset-definition/SKILL.md](asset-definition/SKILL.md) | `assets/`, `AssetSpec`, Isaac+mjlab robots, `*_names_simulation`, **assetx** composition → `ROBOT_MODEL_DIR` |
 
 Each skill has a `reference.md` with file maps and diagrams.
 
-Also see [TEACHME.md](../../active_adaptation/learning/TEACHME.md) (shared style) and [AGENTS.md](../../AGENTS.md) (repo-wide conventions).
+Also see [TEACHME.md](../../active_adaptation/learning/TEACHME.md) (shared style), [AGENTS.md](../../AGENTS.md) (repo-wide conventions), and [.agents/skills/run-experiments/SKILL.md](.agents/skills/run-experiments/SKILL.md) (launch/monitor training experiments).
 
 ---
 
@@ -41,7 +42,7 @@ Do **not** invoke `active-adaptation/.venv/bin/python` for Isaac/mjlab smokes. S
    - Monorepo parent (`lab51/`): symlink or copy skills — see FAQ below.
 
 2. **Invocation**
-   - `/offpolicy-algorithms`, `/onpolicy-algorithms`, `/environment-mdp`, or `/asset-definition` in chat
+   - `/offpolicy-algorithms`, `/onpolicy-algorithms`, `/run-experiments`, `/environment-mdp`, or `/asset-definition` in chat
    - `@.agents/skills/onpolicy-algorithms/SKILL.md`
    - “Follow the on-policy agent skill”
 
@@ -69,6 +70,7 @@ active-adaptation/
 │   ├── offpolicy-algorithms/
 │   ├── environment-mdp/
 │   ├── asset-definition/
+│   ├── run-experiments/
 │   └── wandb-diagnostics/
 └── AGENTS.md                 # links agents here
 ```
