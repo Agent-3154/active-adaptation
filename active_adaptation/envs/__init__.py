@@ -4,7 +4,7 @@ from .env_base import _EnvBase
 from . import terrain
 
 _BACKEND_ENV_EXPORTS = {
-    "IsaacBackendEnv": "active_adaptation.envs.backends.isaac",
+    "IsaacBackendEnv": "active_adaptation.envs.backends.isaaclab",
     "MujocoBackendEnv": "active_adaptation.envs.backends.mujoco",
     "MjlabBackendEnv": "active_adaptation.envs.backends.mjlab",
     "MotrixBackendEnv": "active_adaptation.envs.backends.motrix",

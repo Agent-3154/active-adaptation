@@ -2,7 +2,7 @@ import torch
 
 from typing import TYPE_CHECKING
 from typing_extensions import override
-from .base import ObservationV2
+from .base import Observation
 from active_adaptation.utils.math import normal_noise
 from active_adaptation.utils.symmetry import joint_space_symmetry
 from active_adaptation.envs.utils import find_joints
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class joint_observation(ObservationV2):
+class joint_observation(Observation):
     def __init__(self, joint_names: str):
         super().__init__()
         self.joint_names_pattern = joint_names

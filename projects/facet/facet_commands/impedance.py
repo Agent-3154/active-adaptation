@@ -161,7 +161,7 @@ class Impedance(Command):
             self.command_transition /= self.command_transition.sum(dim=-1, keepdim=True)
         
         self.vis_arrow = None
-        if self.env.backend != "isaac":
+        if self.env.backend != "isaaclab":
             self.USE_MARKERS = False
         if self.env.sim.has_gui() and self.USE_MARKERS:
             from isaaclab.markers.config import (
@@ -531,7 +531,7 @@ class Impedance(Command):
         self.spring_force[env_ids] = spring_force
 
     def debug_draw(self):
-        if not self.env.backend == "isaac":
+        if not self.env.backend == "isaaclab":
             return
         eye = (
             self.asset.data.root_pos_w[0].cpu() 
@@ -636,7 +636,7 @@ class ImpedanceImpulse(Impedance):
         self.ep_id = torch.zeros(self.num_envs, 1, device=self.device, dtype=int)
         self.step_cnt = 0
 
-    def sample_init(self, env_ids):
+    def sample_init(self, env_ids, reset_td=None):
         init_root_state = self.init_root_state[env_ids]
         origins = self.env.scene.env_origins[env_ids]
         init_root_state[:, :3] += origins
@@ -752,7 +752,7 @@ class ImpedanceCollision(Impedance):
         self.trajs = []
         self.step_cnt = 0
 
-    def sample_init(self, env_ids):
+    def sample_init(self, env_ids, reset_td=None):
         init_root_state = self.init_root_state[env_ids]
         if self.env.scene.terrain.cfg.terrain_type == "plane":
             origins = self.env.scene.env_origins[env_ids]
@@ -831,7 +831,7 @@ class VelocityImpulse(Twist):
         self.ep_id = torch.zeros(self.num_envs, 1, device=self.device, dtype=int)
         self.step_cnt = 0
 
-    def sample_init(self, env_ids):
+    def sample_init(self, env_ids, reset_td=None):
         init_root_state = self.init_root_state[env_ids]
         if self.env.scene.terrain.cfg.terrain_type == "plane":
             origins = self.env.scene.env_origins[env_ids]
@@ -942,7 +942,7 @@ class VelocityCollision(Twist):
         self.trajs = []
         self.step_cnt = 0
 
-    def sample_init(self, env_ids):
+    def sample_init(self, env_ids, reset_td=None):
         init_root_state = self.init_root_state[env_ids]
         if self.env.scene.terrain.cfg.terrain_type == "plane":
             origins = self.env.scene.env_origins[env_ids]

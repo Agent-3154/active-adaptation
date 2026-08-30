@@ -7,7 +7,7 @@ import torch
 from typing import TYPE_CHECKING, Optional, Sequence, Tuple
 from typing_extensions import override
 
-from active_adaptation.envs.mdp.randomizations.base import RandomizationV2
+from active_adaptation.envs.mdp.randomizations.base import Randomization
 from active_adaptation.envs.mdp.randomizations.common import (
     NestedRangeType,
     sample_uniform,
@@ -18,9 +18,9 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class randomize_materials_isaac(RandomizationV2):
+class randomize_materials_isaac(Randomization):
 
-    supported_backends = ("isaac",)
+    supported_backends = ("isaaclab",)
 
     def __init__(
         self,
@@ -90,7 +90,7 @@ class randomize_materials_isaac(RandomizationV2):
         self.asset.data.body_materials = materials.to(self.device)
 
 
-class randomize_materials_mjlab(RandomizationV2):
+class randomize_materials_mjlab(Randomization):
     """Randomize MuJoCo ``geom_friction`` for geoms attached to selected bodies.
 
     ``geom_friction`` axes are ``(slide, spin, roll)`` — not Isaac static/dynamic/

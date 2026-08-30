@@ -7,14 +7,14 @@ from typing_extensions import override
 
 from active_adaptation.utils.symmetry import SymmetryTransform
 
-from .base import ActionV2
+from .base import Action
 
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class ConcatenatedAction(ActionV2):
+class ConcatenatedAction(Action):
     """Concatenate multiple action managers into a single action space."""
 
     def __init__(self, actions: List):
@@ -24,11 +24,11 @@ class ConcatenatedAction(ActionV2):
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
-        self.action_managers: List[ActionV2] = []
+        self.action_managers: List[Action] = []
 
         for spec in self._action_specs:
             cls_name = spec.pop("_target_")
-            action_manager = ActionV2.make(cls_name, **spec)
+            action_manager = Action.make(cls_name, **spec)
             if not action_manager:
                 raise ValueError(f"Action class '{cls_name}' not found")
             action_manager._initialize(self.env)

@@ -1,4 +1,8 @@
 tests
+scripts/exports/
+scripts/experiments/
+experiments/
+docs
 .vscode
 .omx
 
@@ -10,7 +14,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# projects/hdmi/
+projects/hdmi/
 outputs
 outputs_play
 

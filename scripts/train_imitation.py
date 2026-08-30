@@ -103,7 +103,7 @@ class TrainConfig:
         "${oc.select:task.name,test}-"
         "${oc.select:student.name,none}"
     )
-    backend: str = "isaac"
+    backend: str = "isaaclab"
     device: str = "cuda"
 
     app: IsaacAppConfig = field(default_factory=IsaacAppConfig)
@@ -170,7 +170,7 @@ def make_env_teacher_student(
     student_checkpoint = parse_checkpoint(student_checkpoint_path)
 
     _ensure_backend_env_imported(backend)
-    if backend == "isaac":
+    if backend == "isaaclab":
         env_cls = _EnvBase.registry[task_cfg.get("env_class", "IsaacBackendEnv")]
         env_device = str(device)
     elif backend == "mujoco":

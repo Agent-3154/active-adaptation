@@ -5,14 +5,14 @@ import torch
 from typing import TYPE_CHECKING
 from typing_extensions import override
 
-from .base import ActionV2
+from .base import Action
 
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class WriteRootState(ActionV2):
+class WriteRootState(Action):
     def __init__(self):
         super().__init__()
 
@@ -36,7 +36,7 @@ class WriteRootState(ActionV2):
         self.asset.write_root_velocity_to_sim(self.target_root_velocity)
 
 
-class WriteJointPosition(ActionV2):
+class WriteJointPosition(Action):
     def __init__(self):
         super().__init__()
 

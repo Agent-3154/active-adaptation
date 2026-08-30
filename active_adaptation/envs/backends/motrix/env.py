@@ -28,6 +28,7 @@ class MotrixBackendEnv(_EnvBase):
             entities={"robot": asset_cfg},
             sensors=tuple(sensors)
         )
+        self._edit_scene_spec(scene_cfg)
         self.scene = MotrixScene(scene_cfg)
         self.sim = MotrixSim(self.scene, headless=self.headless)
 

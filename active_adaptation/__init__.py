@@ -97,9 +97,9 @@ def set_backend(backend: str):
         raise RuntimeError(
             f"set_backend() already called at {_CALLED_AT['filename']}:{_CALLED_AT['lineno']} in {_CALLED_AT['function']}"
         )
-    if not backend in ("isaac", "mujoco", "mjlab", "motrix"):
+    if not backend in ("isaaclab", "mujoco", "mjlab", "motrix"):
         raise ValueError(
-            f"backend must be either 'isaac' or 'mujoco' or 'mjlab' or 'motrix', got {backend}"
+            f"backend must be either 'isaaclab' or 'mujoco' or 'mjlab' or 'motrix', got {backend}"
         )
     # Record the call site
     stack = inspect.stack()
@@ -156,7 +156,7 @@ def init(cfg: DictConfig, auto_rank: bool):
                 init_method="env://",
             )
 
-    if get_backend() == "isaac":
+    if get_backend() == "isaaclab":
         from isaaclab.app import AppLauncher
         # viser and isaac have some conflicts, so we need to import viser here
         import viser

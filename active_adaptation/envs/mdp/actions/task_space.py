@@ -21,13 +21,13 @@ from active_adaptation.utils.math import (
     quat_rotate_inverse,
 )
 
-from .base import ActionV2
+from .base import Action
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class EndEffectorPose(ActionV2):
+class EndEffectorPose(Action):
     """Absolute end-effector pose command in the articulation body frame.
 
     Policy actions are desired EE poses expressed in the robot root / body
@@ -50,7 +50,7 @@ class EndEffectorPose(ActionV2):
     ``EndEffectorPoseDelta`` term for that.
     """
 
-    supported_backends = ("isaac", "mjlab")
+    supported_backends = ("isaaclab", "mjlab")
 
     def __init__(
         self,
@@ -174,7 +174,7 @@ class EndEffectorPose(ActionV2):
 
     def _setup_jacobian_indexing(self) -> None:
         """Cache backend-specific Jacobian / body indices."""
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             # PhysX omits the root body column for fixed-base articulations and
             # prepends 6 floating-base DoFs for mobile bases.
             if self.asset.is_fixed_base:
@@ -315,7 +315,7 @@ class EndEffectorPose(ActionV2):
 
     def _jacobian_pos_world(self) -> torch.Tensor:
         """Geometric position Jacobian of the EE in the world frame."""
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             return self.asset.root_physx_view.get_jacobians()[
                 :, self._jacobi_body_idx, :3, self._jacobi_joint_ids
             ]
@@ -339,7 +339,7 @@ class EndEffectorPose(ActionV2):
 
     def _jacobian_rot_world(self) -> torch.Tensor:
         """Geometric rotational Jacobian of the EE in the world frame."""
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             return self.asset.root_physx_view.get_jacobians()[
                 :, self._jacobi_body_idx, 3:6, self._jacobi_joint_ids
             ]

@@ -5,7 +5,7 @@ from collections import defaultdict
 
 
 class IsaacKeyboardManager:
-    """Manages keyboard state via Omniverse carb input. Use for Isaac backend teleop."""
+    """Manages keyboard state via Omniverse carb input. Use for IsaacLab backend teleop."""
 
     def __init__(self) -> None:
         import carb

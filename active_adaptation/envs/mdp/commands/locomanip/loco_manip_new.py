@@ -6,7 +6,7 @@ from typing_extensions import override
 import torch
 import warp as wp
 
-from active_adaptation.envs.mdp.commands.base import CommandV2
+from active_adaptation.envs.mdp.commands.base import Command
 from active_adaptation.envs.mdp.commands.locomanip.loco_manip_kernels import (
     quat_wxyz_to_xyzw,
     sample_world_goal,
@@ -196,7 +196,7 @@ def update_command(
         base_pos_error[tid] = 0.0
 
 
-class LocoManipNew(CommandV2):
+class LocoManipNew(Command):
     """A refactored and simplified version of the LocoManip command manager.
 
     Orientation targets stay at the nominal body-frame rest pose for now
@@ -452,8 +452,8 @@ class LocoManipNew(CommandV2):
         self._cmd_linvel_lines = None
         self._eef_target_lines = None
         if self.env.sim.has_gui():
-            if self.env.backend == "isaac":
-                from active_adaptation.envs.backends.isaac import IsaacSceneAdapter
+            if self.env.backend == "isaaclab":
+                from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
 
                 self.scene: IsaacSceneAdapter = self.env.scene
                 self.eef_pose_marker = self.scene.create_frame_marker(
@@ -559,7 +559,7 @@ class LocoManipNew(CommandV2):
         )
 
     @override
-    def sync_state(self) -> None:
+    def update(self) -> None:
         # Tracking / standing for rewards at THIS step.
         self.command_speed = self.cmd_linvel_b.norm(dim=-1, keepdim=True)
         self.is_standing_env = (self.command_speed < 0.1) & (
@@ -612,7 +612,7 @@ class LocoManipNew(CommandV2):
         self.eef_status = self.get_gripper_status()
 
     @override
-    def update(self) -> None: # for readability, do not extract methods
+    def step(self) -> None: # for readability, do not extract methods
         self._mode_schedule_step += 1
         interval = (self.env.episode_length_buf - 20) % self.resample_interval == 0
         resample = interval & (
@@ -685,7 +685,7 @@ class LocoManipNew(CommandV2):
         cmd_eef_pos_w[:, 2] = self.cmd_eef_pos_b[:, 2]
         cmd_eef_rot_w = quat_mul(root_yaw_q, self.cmd_eef_rot_b)
 
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             self.env.scene.draw_vector(
                 root_pos_w,
                 self.cmd_linvel_w,

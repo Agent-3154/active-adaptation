@@ -38,7 +38,7 @@ class Every:
 
 def _ensure_backend_env_imported(backend: str):
     backend_modules = {
-        "isaac": "active_adaptation.envs.backends.isaac",
+        "isaaclab": "active_adaptation.envs.backends.isaaclab",
         "mujoco": "active_adaptation.envs.backends.mujoco",
         "mjlab": "active_adaptation.envs.backends.mjlab",
         "motrix": "active_adaptation.envs.backends.motrix",
@@ -108,7 +108,7 @@ def make_env_policy(
         policy_cls = algo_cfg.get_class()
         
         _ensure_backend_env_imported(backend)
-        if backend == "isaac":
+        if backend == "isaaclab":
             env_cls = _EnvBase.registry[task_cfg.get("env_class", "IsaacBackendEnv")]
             env_device = str(device)
         elif backend == "mujoco":
@@ -134,7 +134,9 @@ def make_env_policy(
                 "Specify `in_keys` (e.g., `policy`, `priv`, or regex `.*`) in `cfg.algo`."
             )
 
-        _, in_keys = resolve_matching_names(in_keys, task_cfg.observation.keys())
+        _, in_keys = resolve_matching_names(
+            in_keys, task_cfg.observation.keys(), preserve_order=True
+        )
         if discard_unused_obs:
             for obs_group_key in list(task_cfg.observation.keys()):
                 # Trailing ``_`` keeps a group for buffer/debug even if unused by the policy.

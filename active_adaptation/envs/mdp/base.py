@@ -28,19 +28,31 @@ class MDPComponent:
 
     markovian: bool # whether the component is markovian, i.e, dependent only on the current state
 
-    def __init__(self, env: _EnvBase):
-        self.env: _EnvBase = env
+    def __init__(self) -> None:
+        self._initialized = False
+
+    def _initialize(self, env: _EnvBase) -> None:
+        self.env = env
+        self._initialized = True
+
+    @property
+    def initialized(self) -> bool:
+        return getattr(self, "_initialized", False)
 
     @property
     def num_envs(self) -> int:
+        if not self.initialized:
+            raise RuntimeError(f"{type(self).__name__} is not initialized")
         return self.env.num_envs
 
     @property
     def device(self) -> torch.device:
+        if not self.initialized:
+            raise RuntimeError(f"{type(self).__name__} is not initialized")
         return self.env.device
     
     def edit_spec(self, scene_config: Any) -> None:
-        "The MDP term may optionally edit the scene config to, for example, add its own sensors."
+        """The MDP term may optionally edit the scene config."""
 
     def startup(self) -> None:
         pass

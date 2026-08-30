@@ -1,7 +1,7 @@
 import torch
 from typing import TYPE_CHECKING
 from typing_extensions import override
-from .base import ObservationV2
+from .base import Observation
 from active_adaptation.utils.symmetry import cartesian_space_symmetry
 from active_adaptation.envs.utils import find_bodies
 from active_adaptation.utils.math import quat_rotate_inverse, yaw_quat
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class body_observation(ObservationV2):
+class body_observation(Observation):
     def __init__(self, body_names: str):
         super().__init__()
         self.body_names_pattern = body_names

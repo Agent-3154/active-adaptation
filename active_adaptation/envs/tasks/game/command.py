@@ -7,16 +7,18 @@ from tensordict import TensorDictBase
 
 
 class Game(Command):
-    def __init__(self, env, catch_radius: float = 0.8) -> None:
-        super().__init__(env)
+    def __init__(self, catch_radius: float = 0.8) -> None:
+        super().__init__()
         self.catch_radius = catch_radius
 
+    def _initialize(self, env) -> None:
+        super()._initialize(env)
         with torch.device(self.device):
             self.role = torch.arange(self.num_envs) % 2
             self.target_caught_time = torch.zeros(self.num_envs, 1)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=bool)
 
-        if self.env.sim.has_gui() and self.env.backend == "isaac":
+        if self.env.sim.has_gui() and self.env.backend == "isaaclab":
             from isaaclab.markers import RED_ARROW_X_MARKER_CFG, VisualizationMarkers
 
             self.frame_marker = VisualizationMarkers(
@@ -52,7 +54,7 @@ class Game(Command):
             signs=torch.tensor([1, -1, 1, 1, -1, 1, 1, 1]),
         )
 
-    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
         chase = env_ids % 2 == 0
         init_root_state = self.init_root_state[env_ids]
         origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
@@ -66,7 +68,7 @@ class Game(Command):
         init_root_state[chase, :3] += init_pos_even
         init_root_state[~chase, :3] += init_pos_odd
         init_root_state[:, 3:7] = sample_quat_yaw(len(env_ids), device=self.device)
-        return init_root_state
+        self._write_initial_states(init_root_state, env_ids)
 
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.target_caught_time[env_ids] = 0.0
@@ -89,7 +91,7 @@ class Game(Command):
         ).reshape(self.num_envs, 3)
         self.target_diff = self.target_pos_w - self.asset.data.root_pos_w
         self.distance = self.target_diff[:, :2].norm(dim=-1, keepdim=True)
-        self.target_caught = self.distance < 0.8
+        self.target_caught = self.distance < self.catch_radius
         self.target_caught_time = torch.where(
             self.target_caught,
             self.target_caught_time + self.env.step_dt,

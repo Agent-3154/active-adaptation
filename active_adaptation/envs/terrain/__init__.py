@@ -12,7 +12,7 @@ terrain_files = glob.glob(os.path.join(current_dir, "*.py"))
 # Import TERRAINS from each file
 TERRAINS_MUJOCO = {}
 
-if active_adaptation.get_backend() == "isaac":
+if active_adaptation.get_backend() == "isaaclab":
     from . import regular
     from . wrapper import BetterTerrainGenerator, BetterTerrainImporter
 elif active_adaptation.get_backend() == "mujoco":

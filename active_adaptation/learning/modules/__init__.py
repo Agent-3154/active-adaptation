@@ -1,6 +1,6 @@
 from .vecnorm import VecNorm, VecNormRMS
 from .distributions import *
-from .common import SymmetryWrapper, ConditionalBlock, CatTensors
+from .common import SymmetryWrapper, ConditionalBlock, CatTensors, AmpSafeRMSNorm
 from .rnn import GRUCore
 from .fusion import FiLM, CrossAttention
 from .common import MLP, ResidualMLP, DtypeConversion, FlattenBatch, SimbaMLP
@@ -27,6 +27,7 @@ __all__ = [
     "DtypeConversion",
     "FlattenBatch",
     "SimbaMLP",
+    "AmpSafeRMSNorm",
     "ConditionalBlock",
     "CatTensors",
     "HyperDense",

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import abc
-import torch
-
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+import torch
 from tensordict import TensorDictBase
 
 from active_adaptation.registry import RegistryMixin
@@ -22,109 +21,35 @@ CT = TypeVar("CT", bound=Command)
 
 
 class Observation(Generic[CT], MDPComponent, RegistryMixin):
-    def __init__(self, env):
-        super().__init__(env)
-        self.command_manager: CT = env.command_manager
+    """Environment-deferred observation term."""
 
-    @abc.abstractmethod
-    def compute(self) -> torch.Tensor:
-        raise NotImplementedError
-
-    def symmetry_transform(self) -> SymmetryTransform:
-        """Return the mirror transform for this observation term's output slice.
-
-        The transform describes how this observation changes under the task's
-        left/right symmetry. It must have the same width and ordering as the
-        tensor returned by :meth:`compute`. Implementations usually build a
-        :class:`SymmetryTransform` from a permutation and sign flips: swap
-        left/right quantities, negate lateral or yaw-like components, and leave
-        invariant scalars unchanged.
-
-        Observation groups concatenate term outputs in config order, so each
-        observation returns only its local transform; :class:`ObsGroup`
-        concatenates those local transforms into the full observation transform.
-        Components with no meaningful symmetry should override this method and
-        raise ``NotImplementedError`` explicitly.
-        """
-        return NotImplementedError
-
-
-class ObservationV2(Generic[CT], MDPComponent, RegistryMixin):
-    """Environment-deferred observation term.
-
-    Like :class:`Observation`, subclasses implement :meth:`compute`.
-
-    Unlike :class:`Observation`, instances are constructed **without** an
-    environment. Environment-bound state (``env``, ``command_manager``) is
-    created in :meth:`_initialize`, which the environment calls once at
-    startup. This allows observation logic to be reused without instantiating
-    a simulator.
-
-    Subclasses that need ``num_envs``/``device`` or sim handles should override
-    :meth:`_initialize` and call ``super()._initialize(env)`` first.
-
-    When ``functional=True``, the env stores compact state via :meth:`fupdate`
-    and densifies on demand via :meth:`fcompute` (which may still read
-    ``command_manager`` / motion buffers). Dense groups keep using
-    :meth:`compute`.
-    """
-
-    def __init__(self, functional: bool = False) -> None:
-        self._initialized = False
+    def __init__(
+        self,
+        functional: bool = False,
+    ) -> None:
+        super().__init__()
         self.functional = bool(functional)
 
     def _initialize(self, env: "_EnvBase") -> None:
-        """Bind to ``env``. Called once at startup."""
-        self.env = env
+        super()._initialize(env)
         self.command_manager: CT = env.command_manager
-        self._initialized = True
-
-    @property
-    def initialized(self) -> bool:
-        """``True`` after :meth:`_initialize` has been called."""
-        return self._initialized
 
     @abc.abstractmethod
     def compute(self) -> torch.Tensor:
         raise NotImplementedError
 
     def fupdate(self, tensordict: TensorDictBase) -> None:
-        """Write compact tensors needed by :meth:`fcompute` into ``tensordict``.
-
-        Only used when :attr:`functional` is ``True``. May read env / command
-        state; should write only tensor (or nested TensorDict) entries.
-        """
         raise NotImplementedError(
             f"{type(self).__name__} sets functional=True but does not implement fupdate"
         )
 
     def fcompute(self, tensordict: TensorDictBase) -> torch.Tensor:
-        """Densify compact state from ``tensordict`` into a feature vector.
-
-        Only used when :attr:`functional` is ``True``. May still read
-        ``command_manager`` (e.g. motion libraries) that are awkward to store.
-        """
         raise NotImplementedError(
             f"{type(self).__name__} sets functional=True but does not implement fcompute"
         )
 
     def symmetry_transform(self) -> SymmetryTransform:
-        """Return the mirror transform for this observation term's output slice.
-
-        The transform describes how this observation changes under the task's
-        left/right symmetry. It must have the same width and ordering as the
-        tensor returned by :meth:`compute` / :meth:`fcompute`. Implementations
-        usually build a :class:`SymmetryTransform` from a permutation and sign
-        flips: swap left/right quantities, negate lateral or yaw-like
-        components, and leave invariant scalars unchanged.
-
-        Observation groups concatenate term outputs in config order, so each
-        observation returns only its local transform; :class:`ObsGroup`
-        concatenates those local transforms into the full observation transform.
-        Components with no meaningful symmetry should override this method and
-        raise ``NotImplementedError`` explicitly.
-        """
         return NotImplementedError
 
 
-__all__ = ["Observation", "ObservationV2"]
+__all__ = ["Observation"]

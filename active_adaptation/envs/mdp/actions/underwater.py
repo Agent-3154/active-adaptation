@@ -7,7 +7,7 @@ from typing_extensions import override
 
 from active_adaptation.utils.symmetry import SymmetryTransform
 
-from .base import ActionV2
+from .base import Action
 from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from active_adaptation.envs.robots.underwater import UnderwaterRobotData
 
 
-class UnderwaterThrottle(ActionV2):
+class UnderwaterThrottle(Action):
     """Throttle action for underwater robots.
 
     The action directly controls per-rotor normalized throttle in ``[-1, 1]``.

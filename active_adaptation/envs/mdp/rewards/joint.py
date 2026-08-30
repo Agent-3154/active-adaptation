@@ -6,10 +6,10 @@ if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from active_adaptation.envs.env_base import EnvBase
 
-from .base import RewardV2
+from .base import Reward
 
 
-class joint_acc_l2(RewardV2):
+class joint_acc_l2(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
@@ -28,8 +28,8 @@ class joint_acc_l2(RewardV2):
         return r
 
 
-class energy_l1(RewardV2):
-    supported_backends = ("isaac", "mujoco", "mjlab")
+class energy_l1(Reward):
+    supported_backends = ("isaaclab", "mujoco", "mjlab")
 
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
@@ -40,7 +40,7 @@ class energy_l1(RewardV2):
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(self.joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-        if self.env.backend in ("isaac", "mujoco"):
+        if self.env.backend in ("isaaclab", "mujoco"):
             self.get_torques = lambda: self.asset.data.applied_torque[:, self.joint_ids]
         elif self.env.backend == "mjlab":
             self.get_torques = lambda: self.asset.data.actuator_force[:, self.joint_ids]
@@ -54,7 +54,7 @@ class energy_l1(RewardV2):
         return -(power).sum(1, keepdim=True)
 
 
-class energy_l2(RewardV2):
+class energy_l2(Reward):
     """Penalize joint energy (L2); stronger regularization than :class:`energy_l1`."""
 
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
@@ -76,7 +76,7 @@ class energy_l2(RewardV2):
         return -(power).square().sum(1, keepdim=True)
 
 
-class joint_vel_l2(RewardV2):
+class joint_vel_l2(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
@@ -91,7 +91,7 @@ class joint_vel_l2(RewardV2):
         return -joint_vel.square().sum(1, True)
 
 
-class joint_vel_limits(RewardV2):
+class joint_vel_limits(Reward):
     def __init__(
         self,
         weight: float,
@@ -123,7 +123,7 @@ class joint_vel_limits(RewardV2):
         return rew
 
 
-class joint_tau_limits(RewardV2):
+class joint_tau_limits(Reward):
     def __init__(
         self,
         weight: float,
@@ -157,7 +157,7 @@ class joint_tau_limits(RewardV2):
         return rew
 
 
-class joint_torque_disc(RewardV2):
+class joint_torque_disc(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
@@ -202,7 +202,7 @@ class joint_torque_disc(RewardV2):
         return -discrepancy.sum(1, True)
 
 
-class joint_deviation_l1(RewardV2):
+class joint_deviation_l1(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
@@ -222,7 +222,7 @@ class joint_deviation_l1(RewardV2):
         return -deviation.abs().sum(1, True)
 
 
-class joint_deviation_l2(RewardV2):
+class joint_deviation_l2(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
@@ -242,7 +242,7 @@ class joint_deviation_l2(RewardV2):
         return -deviation.square().sum(1, True)
 
 
-class joint_deviation_cum(RewardV2):
+class joint_deviation_cum(Reward):
     """Penalize cumulative joint deviation above a threshold."""
 
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
@@ -272,8 +272,8 @@ class joint_deviation_cum(RewardV2):
         return -self.cum_deviation.sum(1, True)
 
 
-class joint_torques_l2(RewardV2):
-    supported_backends = ("isaac", "mujoco", "mjlab")
+class joint_torques_l2(Reward):
+    supported_backends = ("isaaclab", "mujoco", "mjlab")
 
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
@@ -284,7 +284,7 @@ class joint_torques_l2(RewardV2):
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.joint_ids = self.asset.find_joints(self.joint_names)[0]
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-        if self.env.backend in ("isaac", "mujoco"):
+        if self.env.backend in ("isaaclab", "mujoco"):
             self.get_torques = lambda: self.asset.data.applied_torque[:, self.joint_ids]
         elif self.env.backend == "mjlab":
             self.get_torques = lambda: self.asset.data.actuator_force[:, self.joint_ids]

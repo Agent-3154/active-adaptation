@@ -78,10 +78,11 @@ class LocoManipBusketScripted(LocoManipObjectScripted):
         self._sample_lift_offsets(all_env_ids)
 
     @override
-    def sample_init(self, env_ids: torch.Tensor) -> dict:
-        init_state = super().sample_init(env_ids)
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
+        init_state = self._sample_initial_states(env_ids)
         if self.platform_name is None:
-            return init_state
+            self._write_initial_states(init_state, env_ids)
+            return
 
         object_init = init_state[self.object_name]
         platform_init = self.platform_init_root_state[env_ids].clone()
@@ -98,7 +99,7 @@ class LocoManipBusketScripted(LocoManipObjectScripted):
         platform_init[:, 7:] = 0.0
         object_init[:, 2] += self.platform_height
         init_state[self.platform_name] = platform_init
-        return init_state
+        self._write_initial_states(init_state, env_ids)
 
     @override
     def sample_commands(self, env_ids: torch.Tensor) -> None:

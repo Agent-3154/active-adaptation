@@ -195,6 +195,14 @@ class SimbaMLP(nn.Module):
         return x
 
 
+class AmpSafeRMSNorm(nn.RMSNorm):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        weight = self.weight
+        if weight is not None and weight.dtype != input.dtype:
+            weight = weight.to(dtype=input.dtype)
+        return F.rms_norm(input, self.normalized_shape, weight, self.eps)
+
+
 class ConditionalBlock(nn.Module):
     """Residual FiLM block with optional RMS / layer norm."""
 

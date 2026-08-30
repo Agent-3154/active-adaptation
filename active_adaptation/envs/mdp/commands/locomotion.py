@@ -21,7 +21,7 @@ from active_adaptation.utils.math import (
     MultiUniform,
 )
 import active_adaptation.utils.symmetry as symmetry_utils
-from .base import CommandV2
+from .base import Command
 
 
 @wp.kernel(enable_backward=False)
@@ -83,7 +83,7 @@ def resample_yaw_command_uniform_kernel(
     fixed_yaw_speed[tid] = wp.randf(seed_, angvel_min, angvel_max)
     
 
-class Twist(CommandV2):
+class Twist(Command):
     """Body-frame linear velocity, yaw rate, and base-height commands for locomotion.
 
     ``sync_state`` integrates tracking errors and curriculum distance metrics from the
@@ -135,7 +135,7 @@ class Twist(CommandV2):
     @override
     def _initialize(self, env: "_EnvBase") -> None:
         super()._initialize(env)
-        self.curriculum = self._curriculum_enabled and self.env.backend == "isaac"
+        self.curriculum = self._curriculum_enabled and self.env.backend == "isaaclab"
 
         if self.curriculum:
             self.terrain = self.env.scene.terrain
@@ -172,7 +172,7 @@ class Twist(CommandV2):
         # Keep host seed as a Python int; kernels derive per-thread RNG via wp.rand_init(seed, tid).
         self._warp_seed = 0
 
-        if self.teleop and self.env.backend == "isaac":
+        if self.teleop and self.env.backend == "isaaclab":
             self.key_mappings_pos = {
                 "W": torch.tensor(
                     [self.linvel_x_range[1], 0.0, 0.0], device=self.device
@@ -223,7 +223,7 @@ class Twist(CommandV2):
         ], dim=-1)
 
     @override
-    def sample_init(self, env_ids):
+    def sample_init(self, env_ids, reset_td=None) -> None:
         if self.curriculum and self.env.episode_count > 1: # and self.env.training:
             distance_traveled = self.distance_traveled[env_ids]
             distance_commanded = self.distance_commanded[env_ids].clamp_min(1.0)
@@ -237,7 +237,7 @@ class Twist(CommandV2):
         self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
         self.distance_commanded[env_ids] = 0.0
         self.distance_traveled[env_ids] = 0.0
-        return super().sample_init(env_ids)
+        super().sample_init(env_ids, reset_td)
 
     @override
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
@@ -251,7 +251,7 @@ class Twist(CommandV2):
         self.is_standing_env[env_ids] = True
 
     @override
-    def sync_state(self) -> None:
+    def update(self) -> None:
         # Tracking error and curriculum integrals use the command that was active during sim.
         self.body_heading_w = self.asset.data.heading_w.unsqueeze(1)
         self.lin_vel_w = self.asset.data.root_com_lin_vel_w
@@ -273,10 +273,10 @@ class Twist(CommandV2):
         self.distance_traveled = self.distance_traveled + self.current_speed * self.env.step_dt
 
     @override
-    def update(self) -> None:
+    def step(self) -> None:
         # Advance commands for the next physics step; observations read this state.
         if self.teleop:
-            if self.env.backend != "isaac":
+            if self.env.backend != "isaaclab":
                 self._step_twist_command()
             else:
                 self._step_teleop()
@@ -432,7 +432,7 @@ class Twist(CommandV2):
             ],
             1,
         )
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             self.env.scene.draw_vector(
                 start,
                 self.cmd_linvel_w,
@@ -474,7 +474,7 @@ class Twist(CommandV2):
         return tensordict
 
 
-class PositionVelocityTracking(CommandV2):
+class PositionVelocityTracking(Command):
     """Track a moving world-frame reference position and velocity.
 
     Internally maintains ``ref_pos_w`` / ``ref_yaw_w`` targets that advance each step.
@@ -503,7 +503,7 @@ class PositionVelocityTracking(CommandV2):
     @override
     def _initialize(self, env: "_EnvBase") -> None:
         super()._initialize(env)
-        self.curriculum = self._curriculum_enabled and self.env.backend == "isaac"
+        self.curriculum = self._curriculum_enabled and self.env.backend == "isaaclab"
 
         if self.curriculum:
             from isaaclab.terrains import TerrainImporter
@@ -536,7 +536,7 @@ class PositionVelocityTracking(CommandV2):
             self.distance_traveled = torch.zeros(self.num_envs, 1)
 
         if self.env.sim.has_gui():
-            if self.env.backend == "isaac":
+            if self.env.backend == "isaaclab":
                 from isaaclab.markers import (
                     VisualizationMarkers,
                     VisualizationMarkersCfg,
@@ -578,7 +578,7 @@ class PositionVelocityTracking(CommandV2):
         return transform
     
     @override
-    def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
         if self.curriculum and self.env.episode_count > 1: # and self.env.training:
             distance_traveled = self.distance_traveled[env_ids]
             distance_commanded = self.distance_commanded[env_ids].clamp_min(1.0)
@@ -592,7 +592,7 @@ class PositionVelocityTracking(CommandV2):
         self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
         self.distance_commanded[env_ids] = 0.0
         self.distance_traveled[env_ids] = 0.0
-        return super().sample_init(env_ids)
+        super().sample_init(env_ids, reset_td)
 
     @override
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
@@ -603,7 +603,7 @@ class PositionVelocityTracking(CommandV2):
         self.is_standing_env[env_ids] = False
     
     @override
-    def sync_state(self) -> None:
+    def update(self) -> None:
         self.cmd_linvel_w = (
             (self.ref_pos_w - self.asset.data.root_link_pos_w)
             + self.ref_linvel_w
@@ -621,7 +621,7 @@ class PositionVelocityTracking(CommandV2):
         self.cmd_yawvel_b = self.cmd_yawvel_w.clone()
 
     @override
-    def update(self) -> None:
+    def step(self) -> None:
         self.ref_linvel_b = (
             self.ref_linvel_b
             + clamp_norm((self.ref_linvel_b_next - self.ref_linvel_b) * 0.1, max=0.1)
@@ -658,7 +658,7 @@ class PositionVelocityTracking(CommandV2):
 
     @override
     def debug_draw(self):
-        if self.env.backend == "isaac":
+        if self.env.backend == "isaaclab":
             self.marker.visualize(self.ref_pos_w)
 
     @override
