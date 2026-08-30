@@ -12,7 +12,22 @@ set -euo pipefail
 GPU_IDS=$1
 SCRIPT=$2
 shift 2
-UV_PROJECT=$(pwd)
+REPO_DIR=$(pwd)
+
+# Prefer explicit override, then the uv project that launched this script
+# (e.g. `uv run --project venv/isaac51 ...`), else repo root.
+UV_PROJECT="${AA_UV_PROJECT:-}"
+if [ -z "$UV_PROJECT" ] && [ -n "${VIRTUAL_ENV:-}" ]; then
+    case "$VIRTUAL_ENV" in
+        "$REPO_DIR"/venv/*/.venv)
+            UV_PROJECT="${VIRTUAL_ENV#$REPO_DIR/}"
+            UV_PROJECT="${UV_PROJECT%/.venv}"
+            ;;
+    esac
+fi
+if [ -z "$UV_PROJECT" ]; then
+    UV_PROJECT="$REPO_DIR"
+fi
 
 if [ "$#" -gt 0 ]; then
     CANDIDATE_UV_PROJECT=$1
@@ -52,8 +67,9 @@ if [ -z "${OMP_NUM_THREADS:-}" ]; then
     export OMP_NUM_THREADS
 fi
 
-# Find a free port
-FREE_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+# Find a free port (use the active Python env when available).
+PYTHON_BIN=${PYTHON_BIN:-$(command -v python 2>/dev/null || command -v python3)}
+FREE_PORT=$("$PYTHON_BIN" -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
 
 # set CUDA_VISIBLE_DEVICES
 # and launch torchrun

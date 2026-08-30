@@ -124,12 +124,20 @@ uv run --project venv/isaac51 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
 uv run --project venv/mjlab scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
 
 # multi-GPU helper (DDP via torchrun)
-uv run --project venv/isaac51 ./scripts/launch_ddp.sh 0,1 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
+# Always launch through the backend uv project — IsaacLab lives in venv/isaac51 only.
+uv run --project venv/isaac51 scripts/launch_ddp.sh 0,1 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
+uv run --project venv/mjlab scripts/launch_ddp.sh 2,3 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
 ```
 
 Notes:
 
 - Prefer `uv run --project <env-dir>` for reproducible backend runs.
+- **`launch_ddp.sh` must use a backend env** (`venv/isaac51`, `venv/mjlab`, …). The root repo env is tooling-only and does not include IsaacLab.
+- When invoked as `uv run --project venv/isaac51 scripts/launch_ddp.sh …`, the script auto-detects that backend for all `torchrun` workers.
+- Optional overrides if auto-detection is not enough:
+  - `AA_UV_PROJECT=venv/isaac51 uv run --project venv/isaac51 scripts/launch_ddp.sh …`
+  - `uv run --project venv/isaac51 scripts/launch_ddp.sh 0,1 venv/isaac51 scripts/train_ppo.py …` (positional project path before Hydra overrides)
+- Do **not** run bare `./scripts/launch_ddp.sh …` without `--project venv/<backend>` — workers will miss backend-only packages such as `isaaclab`.
 - Use `uv run --with <extra> ...` only for temporary one-off tools, not core backend dependencies.
 - Keep backend-specific `warp-lang` pins in each backend env (`venv/isaac51`, `venv/isaac60`, `venv/mjlab`), not in the root project.
 
@@ -174,7 +182,7 @@ Notes:
 
 - `uv sync --project venv/isaac51` manages the tested Isaac track dependencies.
 - IsaacLab itself may still require its own setup for `PYTHONPATH`, Isaac Sim linking, and extension discovery.
-- The important constraint is that IsaacLab and this repo must use the same `venv/isaac51` environment.
+- The important constraint is that IsaacLab and this repo must use the same `venv/isaac51` environment (including multi-GPU: `uv run --project venv/isaac51 scripts/launch_ddp.sh …`).
 
 ### MJLab setup
 
