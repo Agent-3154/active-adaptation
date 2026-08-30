@@ -150,6 +150,11 @@ class body_angvel_penalty(Reward):
         self.mask = torch.tensor(self.mask, device=self.device)
 
     def _compute(self) -> torch.Tensor:
-        body_angvel = self.asset.data.body_ang_vel_w[:, self.body_ids]
+        if self.env.backend == "isaaclab":
+            body_angvel = self.asset.data.body_com_ang_vel_w[:, self.body_ids]
+        elif self.env.backend == "mjlab":
+            body_angvel = self.asset.data.body_link_ang_vel_w[:, self.body_ids]
+        else:
+            raise ValueError(f"Unsupported backend: {self.env.backend}")
         rew = -(body_angvel * self.mask).square().sum(dim=-1, keepdim=True)
         return rew.sum(1).reshape(self.num_envs, 1)

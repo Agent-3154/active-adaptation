@@ -8,6 +8,9 @@ Companion to [SKILL.md](SKILL.md). File map, backend wiring, templates, and clea
 
 | Path | Role |
 |------|------|
+| `aa-projects/assetx/` | MJCF compose/transform recipes; `artifacts/` for local builds; `AGENTS.md` / `README.md` |
+| `aa-projects/assetx/examples/*.py` | Canonical recipes (e.g. `a2_piper`, `b2_kinova`, `g1_inspire_hand`) |
+| `aa-projects/assetx/tools/mjcf2usd.py` | MJCF → USD for Isaac (`pip install -e ".[usd]"`) |
 | `active_adaptation/assets/asset_cfg.py` | Backend-gated `ArticulationCfg` (Isaac) / `EntityCfg` (mjlab); `AssetSpec`; order helpers |
 | `active_adaptation/assets/__init__.py` | Imports family packages (registration side effects) |
 | `active_adaptation/assets/quadrupeds/*.py` | Unitree A2/B2/Go2 (+ manipulators) |
@@ -379,19 +382,41 @@ SPATIAL_SYMMETRY_MAPPING = mirrored({
 
 ## Model assets (`ROBOT_MODEL_DIR`)
 
+### Ecosystem split
+
+| Layer | Repo / path | Responsibility |
+|-------|-------------|----------------|
+| Compose | `aa-projects/assetx` | Vendor fetch, `assemble`, transforms, `MujocoAsset.save`, optional URDF / USD export |
+| Publish | `.cache/aa-robot-models/` (`ROBOT_MODEL_DIR`) | Immutable runtime bundle per robot name |
+| Register | `active_adaptation/assets/*.py` | `AssetSpec`, actuators, sensors, symmetry, `*_names_simulation` |
+
+```
+vendor MJCF ──► assetx recipe ──► artifacts/<name>/ ──► ROBOT_MODEL_DIR/<name>/ ──► AssetSpec factory
+                                      │                        │
+                                      └── model.urdf             └── *.usd (Isaac, via mjcf2usd / urdf2usd)
+```
+
+**Collision geom naming (assetx → mjlab):** USD→MJCF and transform pipelines emit `{body}_collision`, feet `{leg}_foot_collision`. Match with `CollisionCfg(geom_names_expr=(".*_collision",))` and Isaac `activate_contact_sensors=True`.
+
+**Actuators/sensors:** assetx recipes typically `RemoveActuators` / `RemoveSensors` on vendor load; AA factories add PD actuators and `contact_forces` (Isaac dict / mjlab tuple). Do not duplicate vendor IMU/torque sensors in the saved MJCF unless an MDP term reads them.
+
+**Worked example:** `assetx/examples/a2_piper.py` → `artifacts/a2_piper/` → copy to `aa-robot-models/a2_piper/` → `assets/quadrupeds/a2_manipulator.py`.
+
+### Cache layout
+
 ```
 <repo>/.cache/aa-robot-models/
   a2/a2.usd  a2/a2.xml
   b2/...
   go2_unilab/go2.xml
-  a2_piper/...
+  a2_piper/model.xml  a2_piper.usd  meshes/...
   underwater/BlueROV.usd
   scene/*.hdr
 ```
 
-Source: Hugging Face dataset `btx0424/aa-robot-models`. See repo `README.md` § Asset download.
+Source for published bundles: Hugging Face dataset `btx0424/aa-robot-models`. See repo `README.md` § Asset download.
 
-New robots: add files to that layout (and the HF dataset if shared); point factories at `ROBOT_MODEL_DIR / "<name>" / ...`.
+New robots: build with assetx (or vendor export), place under that layout (and the HF dataset if shared); point factories at `ROBOT_MODEL_DIR / "<name>" / ...`.
 
 ---
 
@@ -449,5 +474,6 @@ After adding an asset:
 
 - [environment-mdp](../environment-mdp/SKILL.md) — MDP terms and index helpers
 - [onpolicy-algorithms](../onpolicy-algorithms/SKILL.md) — symmetry augmentation consumers
+- `aa-projects/assetx/AGENTS.md` — assetx layout, conversion CLIs, coding rules
 - mjlab docs: `docs/source/entity/index.rst`, `actuators.rst`, `sensors/index.rst`, `scene.rst`, `faq.rst`
 - mjlab zoo equality example: `asset_zoo/robots/i2rt_yam/xmls/yam.xml`

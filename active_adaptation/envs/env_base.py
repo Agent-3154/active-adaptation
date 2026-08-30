@@ -528,41 +528,13 @@ class _EnvBase(EnvBase, RegistryMixin):
             component.edit_spec(scene_cfg)
 
     def _initialize_mdp_terms(self):
-        self.command_manager = self._bind_component(self.command_manager)
-        self.input_managers = OrderedDict(
-            (name, self._bind_component(manager))
-            for name, manager in self.input_managers.items()
-        )
-        self.randomizations = OrderedDict(
-            (name, self._bind_component(rand))
-            for name, rand in self.randomizations.items()
-        )
-        for group in self.observation_groups.values():
-            group.funcs = OrderedDict(
-                (name, self._bind_component(obs))
-                for name, obs in group.funcs.items()
-            )
-        for reward_group in self.reward_groups.values():
-            reward_group.funcs = OrderedDict(
-                (name, self._bind_component(reward))
-                for name, reward in reward_group.funcs.items()
-            )
-        self.termination_funcs = OrderedDict(
-            (name, self._bind_component(term))
-            for name, term in self.termination_funcs.items()
-        )
-
-        self._startup_callbacks = []
-        self._reset_callbacks = []
-        self._pre_step_callbacks = []
-        self._post_step_callbacks = []
-        self._update_callbacks = []
-        self._debug_draw_callbacks = []
-
+        self.command_manager._initialize(self)
         self._register_command_component(self.command_manager)
         for input_manager in self.input_managers.values():
+            input_manager._initialize(self)
             self._add_mdp_component(input_manager)
         for rand in self.randomizations.values():
+            rand._initialize(self)
             self._add_mdp_component(rand)
         for group in self.observation_groups.values():
             group._initialize(self)
@@ -593,14 +565,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             )
             return None
         return instance_cls(**kwargs)
-
-    def _bind_component(
-        self,
-        component: mdp.MDPComponent,
-    ) -> mdp.MDPComponent:
-        if not component.initialized:
-            component._initialize(self)
-        return component
 
     def _register_command_component(self, command: mdp.Command) -> None:
         if mdp.is_method_implemented(command, mdp.MDPComponent, "startup"):

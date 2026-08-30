@@ -230,7 +230,7 @@ def contact_sensor(
     isaac_pattern, mjlab_pattern = _resolve_body_pattern(entity, pattern)
     secondaries = _normalize_secondaries(secondary, secondary_pattern)
 
-    if backend in ("isaaclab", "isaaclab"):
+    if backend == "isaaclab":
         from isaaclab.sensors import ContactSensorCfg
 
         prim_path, filter_paths = _isaac_primary_and_filters(
