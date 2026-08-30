@@ -30,8 +30,9 @@ _BACKEND_SET = False
 _CALLED_AT = None
 
 _LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
+_GLOBAL_RANK = int(os.getenv("RANK", str(_LOCAL_RANK)))
 _WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
-_MAIN_PROCESS = _LOCAL_RANK == 0
+_MAIN_PROCESS = _GLOBAL_RANK == 0
 _ISAACLAB_EXCLUDED_EXTENSIONS = ("omni.warp.core",)
 
 
