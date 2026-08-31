@@ -104,6 +104,7 @@ def make_env_policy(
                 )
             algo_cfg = load_algo_cfg_from_local_pt(local_pt)
 
+        _algo_cfg = algo_cfg
         algo_cfg = hydra.utils.instantiate(algo_cfg)
         policy_cls = algo_cfg.get_class()
         
@@ -151,6 +152,7 @@ def make_env_policy(
                         )
                     )
         algo_cfg.in_keys = in_keys
+        _algo_cfg.in_keys = in_keys # for wandb config
 
         base_env = env_cls(task_cfg, env_device, headless=headless)
         checkpoint = checkpoint_future.result()

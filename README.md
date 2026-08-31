@@ -28,6 +28,8 @@ Note: The main branch is fast-moving and therefore **almost constantly broken so
   - [MJLab setup](#mjlab-setup)
   - [Optional VSCode setup](#optional-vscode-setup)
 - [Asset download and placement](#asset-download-and-placement)
+  - [Download published bundles (Hugging Face)](#download-published-bundles-hugging-face)
+  - [Compose new robots with assetx](#compose-new-robots-with-assetx)
 - [Project management](#project-management)
   - [Why packaging / entry points](#why-packaging--entry-points)
   - [Project layout](#project-layout)
@@ -59,6 +61,8 @@ ${workspaceFolder}/
 ```
 
 Extension projects (tasks, MDP terms, custom algos) usually live as sibling repos, e.g. `aa-projects/<name>/`, and are registered through Python packaging — see [Project management](#project-management).
+
+Robot **model composition** lives in [`aa-projects/assetx/`](../aa-projects/assetx/) (sibling repo in the lab51 workspace). Simulation registration (actuators, sensors, symmetry) stays in `active_adaptation/assets/` — see [Compose new robots with assetx](#compose-new-robots-with-assetx).
 
 ### Recommended: uv multi-environment workflow
 
@@ -120,12 +124,20 @@ uv run --project venv/isaac51 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
 uv run --project venv/mjlab scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
 
 # multi-GPU helper (DDP via torchrun)
-uv run --project venv/isaac51 ./scripts/launch_ddp.sh 0,1 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
+# Always launch through the backend uv project — IsaacLab lives in venv/isaac51 only.
+uv run --project venv/isaac51 scripts/launch_ddp.sh 0,1 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo
+uv run --project venv/mjlab scripts/launch_ddp.sh 2,3 scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab
 ```
 
 Notes:
 
 - Prefer `uv run --project <env-dir>` for reproducible backend runs.
+- **`launch_ddp.sh` must use a backend env** (`venv/isaac51`, `venv/mjlab`, …). The root repo env is tooling-only and does not include IsaacLab.
+- When invoked as `uv run --project venv/isaac51 scripts/launch_ddp.sh …`, the script auto-detects that backend for all `torchrun` workers.
+- Optional overrides if auto-detection is not enough:
+  - `AA_UV_PROJECT=venv/isaac51 uv run --project venv/isaac51 scripts/launch_ddp.sh …`
+  - `uv run --project venv/isaac51 scripts/launch_ddp.sh 0,1 venv/isaac51 scripts/train_ppo.py …` (positional project path before Hydra overrides)
+- Do **not** run bare `./scripts/launch_ddp.sh …` without `--project venv/<backend>` — workers will miss backend-only packages such as `isaaclab`.
 - Use `uv run --with <extra> ...` only for temporary one-off tools, not core backend dependencies.
 - Keep backend-specific `warp-lang` pins in each backend env (`venv/isaac51`, `venv/isaac60`, `venv/mjlab`), not in the root project.
 
@@ -170,7 +182,7 @@ Notes:
 
 - `uv sync --project venv/isaac51` manages the tested Isaac track dependencies.
 - IsaacLab itself may still require its own setup for `PYTHONPATH`, Isaac Sim linking, and extension discovery.
-- The important constraint is that IsaacLab and this repo must use the same `venv/isaac51` environment.
+- The important constraint is that IsaacLab and this repo must use the same `venv/isaac51` environment (including multi-GPU: `uv run --project venv/isaac51 scripts/launch_ddp.sh …`).
 
 ### MJLab setup
 
@@ -207,7 +219,7 @@ Edit `.vscode/settings.json` on demand:
 
 ## Asset download and placement
 
-Some robots and scene files are **not** shipped inside this repository (to keep the clone small). They are loaded from a fixed cache directory next to the package.
+Some robots and scene files are **not** shipped inside this repository (to keep the clone small). At runtime, Isaac and mjlab load them from a fixed cache directory next to the package.
 
 ### Where files must live
 
@@ -217,17 +229,26 @@ After `pip install -e .`, the code resolves assets from:
 
 That path is `ROBOT_MODEL_DIR` in code (`CACHE_DIR` is the repo’s `.cache/` folder). Do not rename `aa-robot-models` unless you also change the code.
 
-### What to download
+### Ecosystem: assetx → cache → AssetSpec
+
+| Layer | Location | Role |
+|-------|----------|------|
+| **Compose** | `aa-projects/assetx/` | Python recipes: assemble base + arm, rename links, add grasp frames, export MJCF/URDF |
+| **Publish** | `.cache/aa-robot-models/<robot>/` | Durable bundle used by training (`model.xml`, `meshes/`, `*.usd`) |
+| **Register** | `active_adaptation/assets/*.py` | `AssetSpec` factories: actuators, contact sensors, `joint_names_simulation`, symmetry |
+
+Use **assetx** when you need a new composed variant (e.g. quadruped + manipulator). Use the **Hugging Face cache** when a bundle is already published. Factories in `assets/` must point at `ROBOT_MODEL_DIR`, not at mutable `assetx/artifacts/` paths.
+
+### Download published bundles (Hugging Face)
 
 - **Source:** [Hugging Face dataset `btx0424/aa-robot-models`](https://huggingface.co/datasets/btx0424/aa-robot-models)
 - **Layout under `aa-robot-models/`** (paths used today):
   - `a2/` — Unitree A2 MJCF/USD (`a2.xml`, `a2.usd`)
   - `b2/` — Unitree B2 MJCF/USD (`b2.xml`, `b2_flattened.usda`)
+  - `a2_piper/` — A2 + AgileX Piper (`model.xml`, `a2_piper.usd`, `meshes/`) — built from the [assetx `a2_piper` recipe](../aa-projects/assetx/examples/a2_piper.py)
   - `scene/` — e.g. `kloofendal_43d_clear_puresky_4k.hdr` (dome light / sky for the Isaac backend)
 
 If the archive or clone has an extra top-level folder, unpack or move contents so those directories sit **directly** under `.cache/aa-robot-models/`.
-
-### How to get them
 
 From the **root of the cloned `active-adaptation` repo** (where `.cache/` is created automatically):
 
@@ -238,6 +259,39 @@ huggingface-cli download btx0424/aa-robot-models --repo-type dataset --local-dir
 ```
 
 You can instead **clone or copy** the dataset contents into `.cache/aa-robot-models/`, or put the data elsewhere and replace `.cache/aa-robot-models` with a **symlink** to that folder.
+
+### Compose new robots with assetx
+
+[**assetx**](../aa-projects/assetx/) (`aa-projects/assetx/`) builds reproducible MJCF from vendor bases + Python recipes. See [`assetx/README.md`](../aa-projects/assetx/README.md) and [`assetx/AGENTS.md`](../aa-projects/assetx/AGENTS.md).
+
+Typical workflow for a new robot name (example: A2 + Piper):
+
+```bash
+# 1. Build MJCF (writes aa-projects/assetx/artifacts/a2_piper/)
+cd ../aa-projects/assetx
+pip install -e .
+python examples/a2_piper.py --no-viewer
+
+# 2. Export USD for Isaac (optional extra; needs pxr)
+pip install -e ".[usd]"
+python tools/mjcf2usd.py -p artifacts/a2_piper/model.xml
+# rename/move USD if your AssetSpec expects a specific filename (e.g. a2_piper.usd)
+
+# 3. Publish into active-adaptation’s runtime cache
+mkdir -p ../active-adaptation/.cache/aa-robot-models/a2_piper
+cp -r artifacts/a2_piper/* ../active-adaptation/.cache/aa-robot-models/a2_piper/
+
+# 4. Register in active-adaptation (if not already present)
+#    assets/quadrupeds/a2_manipulator.py → robot.name in cfg/task/
+```
+
+Conventions that keep Isaac ↔ mjlab transfer working:
+
+- **Strip vendor actuators/sensors** in the assetx recipe — active-adaptation adds PD actuators and scene contact sensors via `AssetSpec`.
+- **Collision geom names** from assetx follow `{body}_collision` / `{leg}_foot_collision` so mjlab `CollisionCfg` and contact sensors match.
+- Set `joint_names_simulation` / `body_names_simulation` from the **saved** MJCF, then wire MDP terms through `find_joints` / `find_bodies` (see `.agents/skills/asset-definition/SKILL.md`).
+
+Other recipes: `examples/b2_kinova.py`, `examples/g1_inspire_hand.py`, `examples/b2z1.py`. Downstream tools (e.g. cuRobo in `aa-projects/uw_manip/`) can consume `artifacts/<name>/model.urdf` without copying into the HF cache first.
 
 ## Project management
 

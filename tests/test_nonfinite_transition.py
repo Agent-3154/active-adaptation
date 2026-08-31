@@ -1,7 +1,9 @@
+from types import SimpleNamespace
+
 import torch
 from tensordict import TensorDict
 
-from active_adaptation.envs.env_base import _sanitize_nonfinite_env_rows
+from active_adaptation.envs.env_base import _apply_nan_guard, _parse_nan_guard
 
 
 def test_nonfinite_transition_rows_are_zeroed_and_terminated():
@@ -21,7 +23,7 @@ def test_nonfinite_transition_rows_are_zeroed_and_terminated():
         batch_size=[3],
     )
 
-    invalid = _sanitize_nonfinite_env_rows(td)
+    invalid = _apply_nan_guard(td, mode="sanitize")
 
     assert invalid.tolist() == [False, True, True]
     assert td["reward"].tolist() == [[1.0], [0.0], [0.0]]
@@ -31,3 +33,7 @@ def test_nonfinite_transition_rows_are_zeroed_and_terminated():
     assert td["truncated"].squeeze(-1).tolist() == [True, False, False]
     assert td["done"].squeeze(-1).tolist() == [False, True, True]
     assert td["discount"].squeeze(-1).tolist() == [1.0, 0.0, 0.0]
+
+
+def test_nan_guard_defaults_to_error_until_task_opts_in():
+    assert _parse_nan_guard(SimpleNamespace()) == "error"

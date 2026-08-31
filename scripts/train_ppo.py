@@ -28,7 +28,29 @@ from active_adaptation.pipeline_io import (
     get_run_state_dir,
     write_run_state,
 )
-from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.experiment_logging import (
+    RUN_STATUS_FILENAME,
+    metrics_export_enabled,
+    export_iteration_monitoring,
+    write_run_status,
+    assess_health,
+)
+from active_adaptation.utils.profiling import (
+    PROFILE_JSONL_FILENAME,
+    ScopedTimer,
+    profile_export_enabled,
+    profile_print_enabled,
+    profile_print_every,
+)
+from active_adaptation.utils.memory_profiling import (
+    MEMORY_JSONL_FILENAME,
+    ScopedMemoryTimer,
+    append_memory_jsonl,
+    build_iter_memory_record,
+    cuda_memory_snapshot,
+    memory_export_enabled,
+    reset_cuda_peak_memory,
+)
 from active_adaptation.utils.torchrl import tensordict_nbytes
 from active_adaptation.learning.ppo.ppo_base import PPOBase
 
@@ -247,8 +269,25 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}"
     )
 
+    from active_adaptation.helpers import make_env_policy, evaluate
+    from active_adaptation.utils.helpers import EpisodeStats
+
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
+    policy: PPOBase
+
     wandb_run = None
-    proc_name = None # process name for `setproctitle`
+    proc_name = None  # process name for `setproctitle`
+    profiling_jsonl_path = None
+    memory_jsonl_path = None
+    run_dir = None
     if aa.is_main_process():
         wandb_run = wandb.init(
             job_type=cfg.wandb.job_type,
@@ -263,7 +302,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
 
         timestr = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')
         wandb_run.name = f"{run_idx}-{cfg.exp_name}-{timestr}"
-        proc_name = f"{run_idx}-{cfg.exp_name}" # shorter for better display
+        proc_name = f"{run_idx}-{cfg.exp_name}"  # shorter for better display
 
         run_dir = Path(wandb_run.dir)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -273,6 +312,10 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         OmegaConf.save(cfg.algo, run_dir / "cfg_algo.yaml")
         wandb_run.save(str(cfg_save_path), policy="now")
         wandb_run.save(str(run_dir / "config.yaml"), policy="now")
+        profiling_jsonl_path = run_dir / PROFILE_JSONL_FILENAME
+        memory_jsonl_path = (
+            run_dir / MEMORY_JSONL_FILENAME if memory_export_enabled() else None
+        )
 
     if aa.is_distributed():
         import torch.distributed as dist
@@ -291,20 +334,6 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             setproctitle(proc_name)
         else:
             setproctitle(f"{proc_name}-rank{aa.get_local_rank()}")
-
-    from active_adaptation.helpers import make_env_policy, evaluate
-    from active_adaptation.utils.helpers import EpisodeStats
-
-    env, policy = make_env_policy(
-        task_cfg=cfg.task,
-        algo_cfg=cfg.algo,
-        seed=cfg.seed,
-        headless=cfg.headless,
-        device=cfg.device,
-        discard_unused_obs=cfg.discard_unused_obs,
-        checkpoint_path=cfg.checkpoint_path,
-    )
-    policy: PPOBase
 
     frames_per_batch = env.num_envs * cfg.algo.train_every
     total_frames = cfg.total_frames // aa.get_world_size()
@@ -381,6 +410,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         transitions=transitions,
     )
 
+    buffer_MiB: float | None = None
     if aa.is_main_process():
         fake = env.fake_tensordict()
         if not transitions:
@@ -390,9 +420,11 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             .unsqueeze(1)
             .expand(env.num_envs, cfg.algo.train_every)
         )
-        wandb_run.summary["buffer_MiB"] = storage_nbytes / (1024**2)
+        buffer_MiB = storage_nbytes / (1024**2)
+        wandb_run.summary["buffer_MiB"] = buffer_MiB
 
     env_frames = 0
+    last_algo_metrics: dict[str, float | int] = {}
 
     if hasattr(policy.cfg, "stages"):
         stages = policy.cfg.stages
@@ -415,6 +447,9 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         t0 = time.time()
         for i in progress:
             rollout_start = time.perf_counter()
+            phase_snapshots: dict[str, dict[str, float]] = {}
+            if memory_export_enabled():
+                reset_cuda_peak_memory()
             with ScopedTimer("rollout") as rollout_timer:
                 data, carry = collector.collect(carry, rollout_policy)
                 if not transitions:
@@ -431,6 +466,8 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                         next_state_value,
                     )
             rollout_time = rollout_timer.last_time
+            if memory_export_enabled() and aa.is_main_process():
+                phase_snapshots["after_rollout"] = cuda_memory_snapshot()
 
             episode_stats.add(data)
             env_frames += data.numel()
@@ -441,9 +478,28 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                     key = "train/" + ("/".join(k) if isinstance(k, tuple) else k)
                     info[key] = torch.mean(v.float()).item()
 
+            if memory_export_enabled():
+                ScopedMemoryTimer.clear_summary()
             with ScopedTimer("training") as training_timer:
                 info.update(policy.train_op(data))
             training_time = training_timer.last_time
+            train_op_scopes: list[dict[str, object]] = []
+            if memory_export_enabled() and aa.is_main_process():
+                phase_snapshots["after_training"] = cuda_memory_snapshot()
+                train_op_scopes = ScopedMemoryTimer.collect_summary()
+                if memory_jsonl_path is not None:
+                    append_memory_jsonl(
+                        memory_jsonl_path,
+                        build_iter_memory_record(
+                            iter_idx=i,
+                            env_frames=env_frames * aa.get_world_size(),
+                            num_envs=env.num_envs,
+                            buffer_MiB=buffer_MiB,
+                            phase_snapshots=phase_snapshots,
+                            train_op_scopes=train_op_scopes or None,
+                        ),
+                    )
+                ScopedMemoryTimer.clear_summary()
 
             if hasattr(policy, "step_schedule"):
                 policy.step_schedule(i / total_iters)
@@ -470,7 +526,26 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             if aa.is_main_process():
                 remaining = (time.time() - t0) / (i + 1) * (total_iters - i)
                 setproctitle(f"{proc_name} ETA {tqdm.format_interval(remaining)}")
-                ScopedTimer.print_summary(clear=True, depth=3)
+                if profile_export_enabled() and profiling_jsonl_path is not None:
+                    profile = ScopedTimer.collect_summary(depth=-1)
+                    record = {
+                        "iter": i,
+                        "env_frames": info["env_frames"],
+                        "backend": cfg.backend,
+                        "num_envs": env.num_envs,
+                        "train_every": cfg.algo.train_every,
+                        "performance": {
+                            "rollout_fps": info["performance/rollout_fps"],
+                            "rollout_time": info["performance/rollout_time"],
+                            "training_time": info["performance/training_time"],
+                            "iter_time": info["performance/iter_time"],
+                        },
+                        **profile,
+                    }
+                    ScopedTimer.append_profiling_jsonl(profiling_jsonl_path, record)
+                if profile_print_enabled() and (i % profile_print_every() == 0):
+                    ScopedTimer.print_summary(clear=False, depth=3)
+                ScopedTimer.clear_summary()
                 print(
                     OmegaConf.to_yaml(
                         {k: v for k, v in info.items() if isinstance(v, (float, int))}
@@ -485,8 +560,24 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                         print(f"Local checkpoint: {local_ckpt_path}")
                 if uploaded_ckpt_path is not None:
                     print(f"Last uploaded checkpoint: {uploaded_ckpt_path}")
-                info.update(env.extra)
-                info.update(env.stats_ema)  # step-wise exponential moving average of stats
+                env_extra = dict(env.extra)
+                stats_ema = dict(env.stats_ema)
+                if metrics_export_enabled() and run_dir is not None:
+                    memory_snapshot = phase_snapshots.get("after_training")
+                    last_algo_metrics = export_iteration_monitoring(
+                        run_dir,
+                        iter_idx=i,
+                        env_frames=info["env_frames"],
+                        info=info,
+                        env_extra=env_extra,
+                        stats_ema=stats_ema,
+                        backend=cfg.backend,
+                        num_envs=env.num_envs,
+                        state="running",
+                        memory_snapshot=memory_snapshot,
+                    )
+                info.update(env_extra)
+                info.update(stats_ema)
                 wandb_run.log(info)
 
     run_state: dict[str, str] = {}
@@ -501,6 +592,19 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             )
             eval_info["env_frames"] = env_frames
             wandb_run.log(eval_info)
+        if metrics_export_enabled() and run_dir is not None:
+            health, health_issues = assess_health(last_algo_metrics)
+            write_run_status(
+                run_dir / RUN_STATUS_FILENAME,
+                state="completed",
+                iter_idx=total_iters - 1,
+                env_frames=env_frames * aa.get_world_size(),
+                metrics=last_algo_metrics or {"env_frames": env_frames * aa.get_world_size()},
+                health=health,
+                health_issues=health_issues,
+                backend=cfg.backend,
+                num_envs=env.num_envs,
+            )
         wandb.finish()
         print(f"Final checkpoint: {uploaded_ckpt_path}")
         run_state = {

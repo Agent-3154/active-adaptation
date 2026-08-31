@@ -141,9 +141,10 @@ class MjlabBackendEnv(_EnvBase):
                 contact_sensor_maxmatch=80,
                 mujoco=MujocoCfg(
                     timestep=self.cfg.sim.get("mujoco_physics_dt", 0.005),
-                    iterations=10,
-                    ls_iterations=20,
+                    iterations=self.cfg.sim.get("mujoco_iterations", 10),
+                    ls_iterations=self.cfg.sim.get("mujoco_ls_iterations", 20),
                 ),
+                broadphase=self.cfg.sim.get("broadphase", None), # nxn, sap_tile, sap_segmented
             ),
             model=scene.compile(),
             device=str(self.device),

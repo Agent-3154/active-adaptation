@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import warnings
 from collections import OrderedDict
-from typing import Callable, Dict, Mapping, Any, Optional, cast
+from typing import Callable, Dict, Literal, Mapping, Any, Optional, cast
 from dataclasses import dataclass
 
 import numpy as np
@@ -16,8 +16,9 @@ from torchrl.envs import EnvBase
 import active_adaptation
 import active_adaptation.envs.mdp as mdp
 import active_adaptation.utils.symmetry as symmetry_utils
+from termcolor import colored
 from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
-from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.profiling import PROFILE_SYNC_TIMERS, ScopedTimer
 from active_adaptation.utils.video_recorder import (
     VideoRecorder,
     NullVideoRecorder,
@@ -32,19 +33,52 @@ if active_adaptation.get_backend() == "isaaclab":
 
 
 EMA_DECAY = 0.99
-PROFILE_SYNC_TIMERS = os.environ.get("AA_PROFILE_SYNC_TIMERS", "0").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+
+NanGuardMode = Literal["sanitize", "error", "off"]
+_NAN_GUARD_MODES = frozenset({"sanitize", "error", "off"})
+NAN_GUARD_ENV = "AA_NAN_GUARD"
 
 
-def _sanitize_nonfinite_env_rows(tensordict: TensorDictBase) -> torch.Tensor:
-    """Zero invalid transition rows and terminate those environments."""
+class NonFiniteTransitionError(RuntimeError):
+    """Raised when ``nan_guard=error`` and a transition contains non-finite values."""
+
+    def __init__(self, *, env_ids: list[int], keys: list[Any]) -> None:
+        self.env_ids = env_ids
+        self.keys = keys
+        key_str = ", ".join(_format_tensordict_key(key) for key in keys)
+        super().__init__(
+            f"Non-finite values in transition for env_ids={env_ids} "
+            f"(keys: {key_str}). Set task.nan_guard=sanitize to isolate bad envs, "
+            f"or fix the offending MDP term / simulation."
+        )
+
+
+def _format_tensordict_key(key: Any) -> str:
+    if isinstance(key, tuple):
+        return "/".join(str(part) for part in key)
+    return str(key)
+
+
+def _parse_nan_guard(cfg: Any) -> NanGuardMode:
+    raw = os.environ.get(NAN_GUARD_ENV)
+    if raw is None:
+        raw = getattr(cfg, "nan_guard", "error")
+    mode = str(raw).lower()
+    if mode not in _NAN_GUARD_MODES:
+        raise ValueError(
+            f"nan_guard must be one of {sorted(_NAN_GUARD_MODES)}, got {raw!r}"
+        )
+    return cast(NanGuardMode, mode)
+
+
+def _nonfinite_env_mask(
+    tensordict: TensorDictBase,
+) -> tuple[torch.Tensor, list[tuple[Any, torch.Tensor]], list[tuple[Any, torch.Tensor]]]:
+    """Return invalid env mask, floating leaves, and keys that had non-finite values."""
     num_envs = tensordict.batch_size[0]
     invalid = torch.zeros(num_envs, dtype=torch.bool, device=tensordict.device)
-    floating_leaves = []
+    floating_leaves: list[tuple[Any, torch.Tensor]] = []
+    offender_keys: list[tuple[Any, torch.Tensor]] = []
     for key, value in tensordict.items(include_nested=True, leaves_only=True):
         if (
             isinstance(value, torch.Tensor)
@@ -53,11 +87,38 @@ def _sanitize_nonfinite_env_rows(tensordict: TensorDictBase) -> torch.Tensor:
             and value.shape[0] == num_envs
         ):
             floating_leaves.append((key, value))
-            invalid |= ~torch.isfinite(value).reshape(num_envs, -1).all(dim=1)
+            bad = ~torch.isfinite(value).reshape(num_envs, -1).all(dim=1)
+            if bad.any():
+                offender_keys.append((key, bad))
+            invalid |= bad
+    return invalid, floating_leaves, offender_keys
 
+
+def _apply_nan_guard(
+    tensordict: TensorDictBase,
+    *,
+    mode: NanGuardMode,
+) -> torch.Tensor:
+    """Handle non-finite transition rows according to ``mode``."""
+    if mode == "off":
+        return torch.zeros(
+            tensordict.batch_size[0],
+            dtype=torch.bool,
+            device=tensordict.device,
+        )
+
+    invalid, floating_leaves, offender_keys = _nonfinite_env_mask(tensordict)
     if not invalid.any():
         return invalid
 
+    if mode == "error":
+        env_ids = invalid.nonzero(as_tuple=False).reshape(-1).tolist()
+        raise NonFiniteTransitionError(
+            env_ids=env_ids,
+            keys=[key for key, _ in offender_keys],
+        )
+
+    num_envs = tensordict.batch_size[0]
     for key, value in floating_leaves:
         row_mask = invalid.reshape(num_envs, *((1,) * (value.ndim - 1)))
         tensordict.set(key, torch.where(row_mask, torch.zeros_like(value), value))
@@ -257,7 +318,7 @@ class RewardGroup:
     def compute(self) -> torch.Tensor:
         rewards = []
         for key, func in self.funcs.items():
-            with ScopedTimer(f"{self.name}.{key}", sync=False):
+            with ScopedTimer(f"{self.name}.{key}", sync=PROFILE_SYNC_TIMERS):
                 reward = func.compute()
             self.env.stats[self.name, key].add_(reward)
             if func.enabled:
@@ -325,6 +386,8 @@ class EnvConfig:
     sensors: Optional[Dict[str, Any]]
     objects: Optional[Dict[str, Any]]
 
+    nan_guard: NanGuardMode = "error"
+    """How to handle non-finite transition rows: ``sanitize``, ``error``, or ``off``."""
 
 class _EnvBase(EnvBase, RegistryMixin):
     def __init__(self, cfg: EnvConfig, device: str, headless: bool = True):
@@ -336,6 +399,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.backend = active_adaptation.get_backend()
         self.cfg = cfg
         self.headless = headless
+        self.nan_guard = _parse_nan_guard(cfg)
 
         self._create_mdp_terms()
 
@@ -435,6 +499,7 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     def _create_mdp_terms(self):
         self._scene_components: list[mdp.MDPComponent] = []
+        self._callback_component_ids: set[int] = set()
         self.randomizations: Mapping[str, mdp.Randomization] = OrderedDict()
         self.observation_groups: Mapping[str, ObsGroup] = OrderedDict()
         self.reward_groups: Mapping[str, RewardGroup] = OrderedDict()
@@ -502,6 +567,13 @@ class _EnvBase(EnvBase, RegistryMixin):
         # MDP: rewards
         reward_cfg = dict(self.cfg.reward)
         self.mult_dt = reward_cfg.pop("_mult_dt_", True)
+        if self.mult_dt:
+            msg = (
+                "reward._mult_dt_ / env.mult_dt is deprecated and will be removed in a future release. "
+                "It is the policy's responsibility to properly scale rewards."
+            )
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            print(colored(f"Warning: {msg}", "yellow"))
         for group_name, group_cfg in reward_cfg.items():
             rg = RewardGroup.create_from(
                 group_name,
@@ -528,41 +600,13 @@ class _EnvBase(EnvBase, RegistryMixin):
             component.edit_spec(scene_cfg)
 
     def _initialize_mdp_terms(self):
-        self.command_manager = self._bind_component(self.command_manager)
-        self.input_managers = OrderedDict(
-            (name, self._bind_component(manager))
-            for name, manager in self.input_managers.items()
-        )
-        self.randomizations = OrderedDict(
-            (name, self._bind_component(rand))
-            for name, rand in self.randomizations.items()
-        )
-        for group in self.observation_groups.values():
-            group.funcs = OrderedDict(
-                (name, self._bind_component(obs))
-                for name, obs in group.funcs.items()
-            )
-        for reward_group in self.reward_groups.values():
-            reward_group.funcs = OrderedDict(
-                (name, self._bind_component(reward))
-                for name, reward in reward_group.funcs.items()
-            )
-        self.termination_funcs = OrderedDict(
-            (name, self._bind_component(term))
-            for name, term in self.termination_funcs.items()
-        )
-
-        self._startup_callbacks = []
-        self._reset_callbacks = []
-        self._pre_step_callbacks = []
-        self._post_step_callbacks = []
-        self._update_callbacks = []
-        self._debug_draw_callbacks = []
-
+        self.command_manager._initialize(self)
         self._register_command_component(self.command_manager)
         for input_manager in self.input_managers.values():
+            input_manager._initialize(self)
             self._add_mdp_component(input_manager)
         for rand in self.randomizations.values():
+            rand._initialize(self)
             self._add_mdp_component(rand)
         for group in self.observation_groups.values():
             group._initialize(self)
@@ -593,14 +637,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             )
             return None
         return instance_cls(**kwargs)
-
-    def _bind_component(
-        self,
-        component: mdp.MDPComponent,
-    ) -> mdp.MDPComponent:
-        if not component.initialized:
-            component._initialize(self)
-        return component
 
     def _register_command_component(self, command: mdp.Command) -> None:
         if mdp.is_method_implemented(command, mdp.MDPComponent, "startup"):
@@ -666,6 +702,12 @@ class _EnvBase(EnvBase, RegistryMixin):
     def _add_mdp_component(self, component: mdp.MDPComponent):
         if component not in self._scene_components:
             self._scene_components.append(component)
+
+        component_id = id(component)
+        if component_id in self._callback_component_ids:
+            return
+        self._callback_component_ids.add(component_id)
+
         if mdp.is_method_implemented(component, mdp.MDPComponent, "startup"):
             self._startup_callbacks.append(component.startup)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "reset"):
@@ -675,7 +717,9 @@ class _EnvBase(EnvBase, RegistryMixin):
         if mdp.is_method_implemented(component, mdp.MDPComponent, "post_step"):
             self._post_step_callbacks.append(component.post_step)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "update"):
-            cb = ScopedTimer(component.__class__.__name__)(component.update)
+            cb = ScopedTimer(component.__class__.__name__, sync=PROFILE_SYNC_TIMERS)(
+                component.update
+            )
             self._update_callbacks.append(cb)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "debug_draw"):
             self._debug_draw_callbacks.append(component.debug_draw)
@@ -779,14 +823,14 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     @ScopedTimer("env._step", sync=PROFILE_SYNC_TIMERS)
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
-        with ScopedTimer("process_action", sync=False):
+        with ScopedTimer("process_action", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.prescribe(tensordict)
             for input_key, input_manager in self.input_managers.items():
                 input_manager.process_action(tensordict.get(input_key, None))
         
-        with ScopedTimer("simulation", sync=False):
+        with ScopedTimer("simulation", sync=PROFILE_SYNC_TIMERS):
             for substep in range(self.decimation):
-                with ScopedTimer("pre_step_callbacks", sync=False):
+                with ScopedTimer("pre_step_callbacks", sync=PROFILE_SYNC_TIMERS):
                     self.scene.zero_external_wrenches()
                     self._apply_action(substep)
                     [callback(substep) for callback in self._pre_step_callbacks]
@@ -802,7 +846,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                     self.scene.update(self.physics_dt)
                     if hasattr(self.scene, "update_warp_sensors"):
                         self.scene.update_warp_sensors()
-                with ScopedTimer("post_step_callbacks", sync=False):
+                with ScopedTimer("post_step_callbacks", sync=PROFILE_SYNC_TIMERS):
                     [callback(substep) for callback in self._post_step_callbacks]
 
         self.episode_length_buf.add_(1)
@@ -810,14 +854,14 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
 
-        with ScopedTimer("command.update", sync=False):
+        with ScopedTimer("command.update", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.update()
-        with ScopedTimer("update_callbacks", sync=False):
+        with ScopedTimer("update_callbacks", sync=PROFILE_SYNC_TIMERS):
             [callback() for callback in self._update_callbacks]
 
         tensordict = self._compute_reward(tensordict)
         tensordict = self._compute_termination(tensordict)
-        with ScopedTimer("command.step", sync=False):
+        with ScopedTimer("command.step", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.step()
     
         tensordict = self._compute_observation(tensordict)
@@ -825,7 +869,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()
 
-        invalid = _sanitize_nonfinite_env_rows(tensordict)
+        invalid = _apply_nan_guard(tensordict, mode=self.nan_guard)
         invalid_count = int(invalid.sum().item())
         self._nonfinite_rows_total += invalid_count
         self.extra["env/nonfinite_rows"] = invalid_count

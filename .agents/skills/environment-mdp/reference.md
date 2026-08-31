@@ -128,6 +128,8 @@ def parse_component_spec(name, cfg):
 ```
 
 - Reward groups: `_enabled_`, `_compile_` are group-level flags (popped before terms).
+- Reward block: `_mult_dt_` (deprecated) is popped before groups.
+- Task root: `nan_guard` — `sanitize` (default), `error`, or `off`; override with `AA_NAN_GUARD`.
 - Command: top-level `_target_` required.
 - Observation: YAML key is the term name in the concatenated group; `_target_` selects the class when different.
 

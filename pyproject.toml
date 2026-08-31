@@ -31,6 +31,7 @@ dependencies = [
     "trimesh",
     "matplotlib>=3.11.1",
     "typer",
+    "simple-raycaster>=0.3.0,<0.4",
 ]
 
 [project.optional-dependencies]
@@ -88,3 +89,5 @@ torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 fvdb-core = { index = "fvdb" }
 nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", rev = "253ac4fcea7de5f396371124af597e6cc957bfae" }
+# Monorepo default: sibling checkout under lab51/. Standalone installs: use git tag v0.3.0 instead.
+simple-raycaster = { path = "../simple-raycaster", editable = true }

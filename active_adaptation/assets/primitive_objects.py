@@ -22,7 +22,7 @@ from active_adaptation.registry import Registry
 
 registry = Registry.instance()
 
-Backend = Literal["isaaclab", "isaaclab", "mjlab"]
+Backend = Literal["isaaclab", "mjlab"]
 Axis = Literal["X", "Y", "Z"]
 
 _DEFAULT_MASS = 0.1
@@ -240,7 +240,7 @@ def _make_primitive(
     rgba_t = _rgba(rgba)
     pos_t = _as_float_tuple(pos, 3)
     rot_t = _as_float_tuple(rot, 4)
-    if backend in ("isaaclab", "isaaclab"):
+    if backend == "isaaclab":
         return _make_isaaclab_cfg(
             kind,
             size=size,
