@@ -6,6 +6,22 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **`task.nan_guard`** — controls non-finite transition handling in `_EnvBase`:
+  - `sanitize` (default): zero invalid rows and terminate those envs (existing behavior)
+  - `error`: raise `NonFiniteTransitionError` with offending `env_ids` and tensor keys
+  - `off`: skip the guard entirely
+  - Override via env var `AA_NAN_GUARD`.
+
+### Deprecated
+
+- **`reward._mult_dt_` / `env.mult_dt`** — multiplying per-step rewards by `step_dt` in `_compute_reward` is deprecated and will be removed. Set `reward._mult_dt_: false` in task config and scale rewards in the policy / algorithm instead.
+
+---
+
 ## [0.8.1] — 2026-08-30
 
 First consolidated **v0.8** release line. This branch merges months of HDMI / MimicLite parity work, deferred MDP construction, mjlab hardening, and project-packaging improvements that were not on `main` (`0.7.0`).

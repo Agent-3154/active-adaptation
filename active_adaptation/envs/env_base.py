@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 import warnings
 from collections import OrderedDict
-from typing import Callable, Dict, Mapping, Any, Optional, cast
+from typing import Callable, Dict, Literal, Mapping, Any, Optional, cast
 from dataclasses import dataclass
 
 import numpy as np
@@ -15,6 +16,7 @@ from torchrl.envs import EnvBase
 import active_adaptation
 import active_adaptation.envs.mdp as mdp
 import active_adaptation.utils.symmetry as symmetry_utils
+from termcolor import colored
 from active_adaptation.envs.adapters import SimAdapter, SceneAdapter
 from active_adaptation.utils.profiling import PROFILE_SYNC_TIMERS, ScopedTimer
 from active_adaptation.utils.video_recorder import (
@@ -32,12 +34,51 @@ if active_adaptation.get_backend() == "isaaclab":
 
 EMA_DECAY = 0.99
 
+NanGuardMode = Literal["sanitize", "error", "off"]
+_NAN_GUARD_MODES = frozenset({"sanitize", "error", "off"})
+NAN_GUARD_ENV = "AA_NAN_GUARD"
 
-def _sanitize_nonfinite_env_rows(tensordict: TensorDictBase) -> torch.Tensor:
-    """Zero invalid transition rows and terminate those environments."""
+
+class NonFiniteTransitionError(RuntimeError):
+    """Raised when ``nan_guard=error`` and a transition contains non-finite values."""
+
+    def __init__(self, *, env_ids: list[int], keys: list[Any]) -> None:
+        self.env_ids = env_ids
+        self.keys = keys
+        key_str = ", ".join(_format_tensordict_key(key) for key in keys)
+        super().__init__(
+            f"Non-finite values in transition for env_ids={env_ids} "
+            f"(keys: {key_str}). Set task.nan_guard=sanitize to isolate bad envs, "
+            f"or fix the offending MDP term / simulation."
+        )
+
+
+def _format_tensordict_key(key: Any) -> str:
+    if isinstance(key, tuple):
+        return "/".join(str(part) for part in key)
+    return str(key)
+
+
+def _parse_nan_guard(cfg: Any) -> NanGuardMode:
+    raw = os.environ.get(NAN_GUARD_ENV)
+    if raw is None:
+        raw = getattr(cfg, "nan_guard", "sanitize")
+    mode = str(raw).lower()
+    if mode not in _NAN_GUARD_MODES:
+        raise ValueError(
+            f"nan_guard must be one of {sorted(_NAN_GUARD_MODES)}, got {raw!r}"
+        )
+    return cast(NanGuardMode, mode)
+
+
+def _nonfinite_env_mask(
+    tensordict: TensorDictBase,
+) -> tuple[torch.Tensor, list[tuple[Any, torch.Tensor]], list[tuple[Any, torch.Tensor]]]:
+    """Return invalid env mask, floating leaves, and keys that had non-finite values."""
     num_envs = tensordict.batch_size[0]
     invalid = torch.zeros(num_envs, dtype=torch.bool, device=tensordict.device)
-    floating_leaves = []
+    floating_leaves: list[tuple[Any, torch.Tensor]] = []
+    offender_keys: list[tuple[Any, torch.Tensor]] = []
     for key, value in tensordict.items(include_nested=True, leaves_only=True):
         if (
             isinstance(value, torch.Tensor)
@@ -46,11 +87,38 @@ def _sanitize_nonfinite_env_rows(tensordict: TensorDictBase) -> torch.Tensor:
             and value.shape[0] == num_envs
         ):
             floating_leaves.append((key, value))
-            invalid |= ~torch.isfinite(value).reshape(num_envs, -1).all(dim=1)
+            bad = ~torch.isfinite(value).reshape(num_envs, -1).all(dim=1)
+            if bad.any():
+                offender_keys.append((key, bad))
+            invalid |= bad
+    return invalid, floating_leaves, offender_keys
 
+
+def _apply_nan_guard(
+    tensordict: TensorDictBase,
+    *,
+    mode: NanGuardMode,
+) -> torch.Tensor:
+    """Handle non-finite transition rows according to ``mode``."""
+    if mode == "off":
+        return torch.zeros(
+            tensordict.batch_size[0],
+            dtype=torch.bool,
+            device=tensordict.device,
+        )
+
+    invalid, floating_leaves, offender_keys = _nonfinite_env_mask(tensordict)
     if not invalid.any():
         return invalid
 
+    if mode == "error":
+        env_ids = invalid.nonzero(as_tuple=False).reshape(-1).tolist()
+        raise NonFiniteTransitionError(
+            env_ids=env_ids,
+            keys=[key for key, _ in offender_keys],
+        )
+
+    num_envs = tensordict.batch_size[0]
     for key, value in floating_leaves:
         row_mask = invalid.reshape(num_envs, *((1,) * (value.ndim - 1)))
         tensordict.set(key, torch.where(row_mask, torch.zeros_like(value), value))
@@ -318,6 +386,8 @@ class EnvConfig:
     sensors: Optional[Dict[str, Any]]
     objects: Optional[Dict[str, Any]]
 
+    nan_guard: NanGuardMode = "sanitize"
+    """How to handle non-finite transition rows: ``sanitize``, ``error``, or ``off``."""
 
 class _EnvBase(EnvBase, RegistryMixin):
     def __init__(self, cfg: EnvConfig, device: str, headless: bool = True):
@@ -329,6 +399,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.backend = active_adaptation.get_backend()
         self.cfg = cfg
         self.headless = headless
+        self.nan_guard = _parse_nan_guard(cfg)
 
         self._create_mdp_terms()
 
@@ -495,6 +566,13 @@ class _EnvBase(EnvBase, RegistryMixin):
         # MDP: rewards
         reward_cfg = dict(self.cfg.reward)
         self.mult_dt = reward_cfg.pop("_mult_dt_", True)
+        if self.mult_dt:
+            msg = (
+                "reward._mult_dt_ / env.mult_dt is deprecated and will be removed in a future release. "
+                "It is the policy's responsibility to properly scale rewards."
+            )
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            print(colored(f"Warning: {msg}", "yellow"))
         for group_name, group_cfg in reward_cfg.items():
             rg = RewardGroup.create_from(
                 group_name,
@@ -784,7 +862,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()
 
-        invalid = _sanitize_nonfinite_env_rows(tensordict)
+        invalid = _apply_nan_guard(tensordict, mode=self.nan_guard)
         invalid_count = int(invalid.sum().item())
         self._nonfinite_rows_total += invalid_count
         self.extra["env/nonfinite_rows"] = invalid_count

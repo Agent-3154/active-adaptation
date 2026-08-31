@@ -269,8 +269,25 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}"
     )
 
+    from active_adaptation.helpers import make_env_policy, evaluate
+    from active_adaptation.utils.helpers import EpisodeStats
+
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
+    policy: PPOBase
+
     wandb_run = None
-    proc_name = None # process name for `setproctitle`
+    proc_name = None  # process name for `setproctitle`
+    profiling_jsonl_path = None
+    memory_jsonl_path = None
+    run_dir = None
     if aa.is_main_process():
         wandb_run = wandb.init(
             job_type=cfg.wandb.job_type,
@@ -285,7 +302,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
 
         timestr = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')
         wandb_run.name = f"{run_idx}-{cfg.exp_name}-{timestr}"
-        proc_name = f"{run_idx}-{cfg.exp_name}" # shorter for better display
+        proc_name = f"{run_idx}-{cfg.exp_name}"  # shorter for better display
 
         run_dir = Path(wandb_run.dir)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -299,10 +316,6 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         memory_jsonl_path = (
             run_dir / MEMORY_JSONL_FILENAME if memory_export_enabled() else None
         )
-    else:
-        profiling_jsonl_path = None
-        memory_jsonl_path = None
-        run_dir = None
 
     if aa.is_distributed():
         import torch.distributed as dist
@@ -321,20 +334,6 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             setproctitle(proc_name)
         else:
             setproctitle(f"{proc_name}-rank{aa.get_local_rank()}")
-
-    from active_adaptation.helpers import make_env_policy, evaluate
-    from active_adaptation.utils.helpers import EpisodeStats
-
-    env, policy = make_env_policy(
-        task_cfg=cfg.task,
-        algo_cfg=cfg.algo,
-        seed=cfg.seed,
-        headless=cfg.headless,
-        device=cfg.device,
-        discard_unused_obs=cfg.discard_unused_obs,
-        checkpoint_path=cfg.checkpoint_path,
-    )
-    policy: PPOBase
 
     frames_per_batch = env.num_envs * cfg.algo.train_every
     total_frames = cfg.total_frames // aa.get_world_size()

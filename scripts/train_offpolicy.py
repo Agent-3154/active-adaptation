@@ -147,7 +147,21 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         f"is_distributed: {aa.is_distributed()}, local_rank: {aa.get_local_rank()}/{aa.get_world_size()}"
     )
 
+    from active_adaptation.helpers import make_env_policy, evaluate
+    from active_adaptation.utils.helpers import EpisodeStats
+
+    env, policy = make_env_policy(
+        task_cfg=cfg.task,
+        algo_cfg=cfg.algo,
+        seed=cfg.seed,
+        headless=cfg.headless,
+        device=cfg.device,
+        discard_unused_obs=cfg.discard_unused_obs,
+        checkpoint_path=cfg.checkpoint_path,
+    )
+
     wandb_run = None
+    run_dir = None
     if aa.is_main_process():
         wandb_run = wandb.init(
             job_type=cfg.wandb.job_type,
@@ -171,21 +185,6 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         OmegaConf.save(cfg, cfg_save_path)
         wandb_run.save(str(cfg_save_path), policy="now")
         wandb_run.save(str(run_dir / "config.yaml"), policy="now")
-    else:
-        run_dir = None
-
-    from active_adaptation.helpers import make_env_policy, evaluate
-    from active_adaptation.utils.helpers import EpisodeStats
-
-    env, policy = make_env_policy(
-        task_cfg=cfg.task,
-        algo_cfg=cfg.algo,
-        seed=cfg.seed,
-        headless=cfg.headless,
-        device=cfg.device,
-        discard_unused_obs=cfg.discard_unused_obs,
-        checkpoint_path=cfg.checkpoint_path,
-    )
 
     total_iters = cfg.total_frames // (aa.get_world_size() * env.num_envs)
     
