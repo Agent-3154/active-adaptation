@@ -31,7 +31,7 @@ dependencies = [
     "trimesh",
     "matplotlib>=3.11.1",
     "typer",
-    "simple-raycaster>=0.2.0,<0.3",
+    "simple-raycaster>=0.3.0,<0.4",
 ]
 
 [project.optional-dependencies]
@@ -89,4 +89,4 @@ torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 fvdb-core = { index = "fvdb" }
 nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", rev = "253ac4fcea7de5f396371124af597e6cc957bfae" }
-simple-raycaster = { git = "https://github.com/Agent-3154/simple-raycaster.git", rev = "eaa22e187214895b7258ac4a2aa8ccb2ff8f56b4" }
+simple-raycaster = { git = "https://github.com/btx0424/simple-raycaster.git", rev = "fde9e817472817471fae3030f4175f7465db622b" }
