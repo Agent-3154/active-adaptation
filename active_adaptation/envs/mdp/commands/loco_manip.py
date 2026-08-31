@@ -1070,29 +1070,6 @@ class eef_up_tracking(Reward[SingleEEFLocoManip]):
         return rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 
-class eef_angvel_penalty(Reward[SingleEEFLocoManip]):
-    """Penalize end-effector angular velocity to reduce oscillation."""
-
-    @override
-    def _initialize(self, env: "EnvBase"):
-        super()._initialize(env)
-        self.asset = self.command_manager.asset
-        self.eef_body_idx = self.command_manager.eef_body_idx
-
-    @override
-    def _compute(self) -> torch.Tensor:
-        angvel = self.asset.data.body_link_ang_vel_w[:, self.eef_body_idx]
-        rew = -angvel.square().sum(dim=-1, keepdim=True)
-        return rew.reshape(self.num_envs, 1)
-    
-    def relabel(self, tensordict: TensorDict) -> TensorDict:
-        T, N = tensordict.shape[:2]
-        eef_state_w = tensordict["command_state", "eef_state_w"]
-        eef_angvel_w = eef_state_w[..., 10:13]
-        rew = -eef_angvel_w.square().sum(dim=-1, keepdim=True)
-        return rew.reshape(T, N, 1)
-
-
 class eef_grasp(Reward[SingleEEFLocoManip]):
     """Binary cross-entropy gripper reward on ``cmd_eef_status`` vs ``eef_status``."""
 

@@ -92,7 +92,7 @@ reward:
   manip:
     eef_pos_orient_tracking: {weight: 1.5}
     eef_grasp:          {weight: 1.0}
-    eef_angvel_penalty: {weight: 0.002}
+    body_angvel_penalty: {weight: 0.002, body_names: grasp_point}
   regularization:
     energy_l1:          {weight: 0.0005}
     joint_acc_l2:       {weight: 2.5e-7, joint_names: "(?!(arm_joint[7,8])).*" } # exclude gripper joints

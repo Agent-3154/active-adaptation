@@ -87,6 +87,8 @@ class body_pos_b(body_link_pos_b):
 
 
 class body_vel_b(body_observation):
+    supported_backends = ("isaaclab", "mjlab")
+
     def __init__(self, body_names: str, yaw_only: bool = False):
         super().__init__(body_names)
         self.yaw_only = yaw_only
@@ -103,7 +105,12 @@ class body_vel_b(body_observation):
             self.root_link_quat_w = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
         else:
             self.root_link_quat_w = self.asset.data.root_link_quat_w.unsqueeze(1)
-        self.body_link_vel_w = self.asset.data.body_link_vel_w[:, self.body_ids]
+        if self.env.backend == "isaaclab":
+            self.body_link_vel_w = self.asset.data.body_com_vel_w[:, self.body_ids]
+        elif self.env.backend == "mjlab":
+            self.body_link_vel_w = self.asset.data.body_link_vel_w[:, self.body_ids]
+        else:
+            raise ValueError(f"Invalid backend: {self.env.backend}")
 
     @override
     def compute(self):
