@@ -70,6 +70,11 @@ class SymmetryTransform(nn.Module):
         flips, including channel signs, are dropped).
         """
         return SymmetryTransform(self.perm.clone(), torch.ones_like(self.signs))
+    
+    @classmethod
+    def rot6d(cls):
+        """TODO: add docstrings"""
+        return cls(perm=[0, 1, 2, 3, 4, 5], signs=[1, -1, 1, -1, 1, -1])
 
 
 def mirrored(symmetry_mapping: dict):

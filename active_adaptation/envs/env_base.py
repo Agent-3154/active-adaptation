@@ -224,6 +224,10 @@ class ObsGroup:
         if self._is_functional is None:
             raise RuntimeError(f"ObsGroup '{self.name}' is not initialized")
         return self._is_functional
+    
+    def update(self, tensordict: TensorDictBase) -> None:
+        for func in self.funcs.values():
+            func.update()
 
     def compute(self, tensordict: TensorDictBase, timestamp: int) -> TensorDictBase:
         if self._is_functional:
@@ -315,6 +319,10 @@ class RewardGroup:
     def __getitem__(self, key: str) -> mdp.Reward:
         return self.funcs[key]
 
+    def update(self, tensordict: TensorDictBase) -> None:
+        for func in self.funcs.values():
+            func.update()
+
     def compute(self) -> torch.Tensor:
         rewards = []
         for key, func in self.funcs.items():
@@ -372,6 +380,7 @@ class RewardGroup:
             print(f"\t{rew_name}: \t{reward.weight:.2f}")
 
         return cls(group_name, funcs, enabled, compile)
+
 
 @dataclass
 class EnvConfig:
@@ -717,11 +726,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             self._pre_step_callbacks.append(component.pre_step)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "post_step"):
             self._post_step_callbacks.append(component.post_step)
-        if mdp.is_method_implemented(component, mdp.MDPComponent, "update"):
-            cb = ScopedTimer(component.__class__.__name__, sync=PROFILE_SYNC_TIMERS)(
-                component.update
-            )
-            self._update_callbacks.append(cb)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "debug_draw"):
             self._debug_draw_callbacks.append(component.debug_draw)
 
@@ -857,15 +861,27 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         with ScopedTimer("command.update", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.update(tensordict)
-        with ScopedTimer("update_callbacks", sync=PROFILE_SYNC_TIMERS):
-            [callback() for callback in self._update_callbacks]
-
+        
+        # for input_manager in self.input_managers.values():
+        #     input_manager.update(tensordict)
+        
+        for group in self.reward_groups.values():
+            group.update(tensordict)
         tensordict = self._compute_reward(tensordict)
+        
+        for termination_func in self.termination_funcs.values():
+            termination_func.update()
         tensordict = self._compute_termination(tensordict)
+        
         with ScopedTimer("command.step", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.step()
     
+        for group in self.observation_groups.values():
+            group.update(tensordict)
         tensordict = self._compute_observation(tensordict)
+
+        for random_func in self.randomizations.values():
+            random_func.update()
 
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()

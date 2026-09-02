@@ -29,7 +29,7 @@ class MjlabBackendEnv(_EnvBase):
         if callable(getattr(wrapper, "post_step", None)):
             self._post_step_callbacks.append(wrapper.post_step)
         if callable(getattr(wrapper, "update", None)):
-            self._update_callbacks.append(wrapper.update)
+            self._post_group_update_callbacks.append(wrapper.update)
         if callable(getattr(wrapper, "debug_draw", None)):
             self._debug_draw_callbacks.append(wrapper.debug_draw)
 

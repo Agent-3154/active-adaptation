@@ -46,6 +46,7 @@ class Command(MDPComponent, RegistryMixin):
             tensors_out = (tensors_out,)
         for out_key, tensor_out in zip(self.out_keys, tensors_out, strict=True):
             tensordict.set(out_key, tensor_out)
+        return tensordict
 
     @abstractmethod
     def _update(self) -> None:
