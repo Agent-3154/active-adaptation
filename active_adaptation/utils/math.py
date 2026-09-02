@@ -74,10 +74,28 @@ def quat_rotate_inverse(quat: torch.Tensor, vec: torch.Tensor):
 
 
 def normalize(x: torch.Tensor) -> torch.Tensor:
+    """Normalize a d-dimensional vector.
+
+    Args:
+        x: The vector to normalize. Shape is (..., d).
+
+    Returns:
+        The normalized vector. Shape is (..., d).
+    """
     return x / x.norm(dim=-1, keepdim=True).clamp(1e-6)
 
 
 def clamp_norm(x: torch.Tensor, min: float=0., max: float=torch.inf):
+    """Clamp the norm of a d-dimensional vector.
+
+    Args:
+        x: The vector to clamp. Shape is (..., d).
+        min: The minimum norm.
+        max: The maximum norm.
+    
+    Returns:
+        The clamped vector. Shape is (..., d).
+    """
     unit = x / (x_norm := x.norm(dim=-1, keepdim=True)).clamp(1e-6)
     x = torch.where(x_norm < min, unit * min, x)
     x = torch.where(x_norm > max, unit * max, x)

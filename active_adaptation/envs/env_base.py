@@ -693,6 +693,7 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         for term_name in self.termination_funcs.keys():
             reward_spec["stats", "termination", term_name] = scalar.clone()
+        reward_spec["stats", "termination", "command"] = scalar.clone()
 
         reward_spec["discount"] = Unbounded(1, device=self.device)
         reward_spec["stats", "success"] = scalar.clone()
@@ -855,7 +856,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict = TensorDict({}, self.num_envs, device=self.device)
 
         with ScopedTimer("command.update", sync=PROFILE_SYNC_TIMERS):
-            self.command_manager.update()
+            self.command_manager.update(tensordict)
         with ScopedTimer("update_callbacks", sync=PROFILE_SYNC_TIMERS):
             [callback() for callback in self._update_callbacks]
 
@@ -909,9 +910,18 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     @ScopedTimer("env.compute_termination", sync=PROFILE_SYNC_TIMERS)
     def _compute_termination(self, tensordict: TensorDictBase) -> TensorDictBase:
-        truncated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
-        terminated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
-        discount = torch.ones((self.num_envs, 1), device=self.device)
+        if (terminated := tensordict.get("terminated", None)) is None:
+            terminated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
+        if (truncated := tensordict.get("truncated", None)) is None:
+            truncated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
+        if (discount := tensordict.get("discount", None)) is None:
+            discount = torch.ones((self.num_envs, 1), device=self.device)
+        
+        terminated = terminated.reshape(self.num_envs, 1)
+        truncated = truncated.reshape(self.num_envs, 1)
+        discount = discount.reshape(self.num_envs, 1)
+
+        self.stats["termination", "command"] = terminated.float()
         for key, func in self.termination_funcs.items():
             result = func.compute(terminated)
             if isinstance(result, tuple):

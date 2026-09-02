@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Sequence
 
 import torch
 from tensordict import TensorDict, TensorDictBase
@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 class Command(MDPComponent, RegistryMixin):
     """Environment-deferred command source for the MDP."""
 
+    in_keys: Optional[Sequence[str]] = None
+    out_keys: Optional[Sequence[str]] = None
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -29,8 +32,23 @@ class Command(MDPComponent, RegistryMixin):
         self.init_joint_pos = self.asset.data.default_joint_pos.clone()
         self.init_joint_vel = self.asset.data.default_joint_vel.clone()
 
+    def update(self, tensordict: TensorDictBase) -> None:
+        """Do not override this method."""
+        if self.in_keys is not None:
+            tensors_in = (tensordict.get(in_key) for in_key in self.in_keys)
+        else:
+            tensors_in = ()
+        tensors_out = self._update(*tensors_in)
+
+        if tensors_out is None and self.out_keys is not None:
+            return
+        if not isinstance(tensors_out, tuple):
+            tensors_out = (tensors_out,)
+        for out_key, tensor_out in zip(self.out_keys, tensors_out, strict=True):
+            tensordict.set(out_key, tensor_out)
+
     @abstractmethod
-    def update(self) -> None:
+    def _update(self) -> None:
         """Refresh current command-dependent tensors after simulation."""
 
     def step(self) -> None:
