@@ -1,3 +1,5 @@
+from typing import Any
+
 from typing_extensions import override
 from active_adaptation import ROBOT_MODEL_DIR
 from active_adaptation.envs.backends.isaaclab.adapter import (
@@ -103,19 +105,14 @@ class IsaacBackendEnv(_EnvBase):
             setattr(scene_cfg, obj_name, cfg)
 
         import active_adaptation.envs.sensors  # noqa: F401  # register sensor factories
-        from active_adaptation.envs.sensors.warp_base import (
-            WarpSensorSpec,
-            install_warp_sensors,
-            is_warp_sensor_spec,
-        )
 
-        warp_sensor_specs: dict[str, WarpSensorSpec] = {}
+        extra_sensors: dict[str, Any] = {}
         for sensor_name, sensor_spec in self.cfg.get("sensors", {}).items():
             sensor_spec = dict(sensor_spec)
             fn = registry.get("sensor", sensor_spec.pop("_target_"))
             result = fn(backend="isaaclab", name=sensor_name, **sensor_spec)
-            if is_warp_sensor_spec(result):
-                warp_sensor_specs[sensor_name] = result
+            if callable(getattr(result, "initialize", None)):
+                extra_sensors[sensor_name] = result
             else:
                 setattr(scene_cfg, sensor_name, result)
         
@@ -189,7 +186,9 @@ class IsaacBackendEnv(_EnvBase):
 
         self.sim = IsaacSimAdapter(sim, viser_viewer)
         self.scene = IsaacSceneAdapter(self.scene, viser_viewer, debug_draw)
-        install_warp_sensors(self.scene, warp_sensor_specs, env=self)
+        for name, sensor in extra_sensors.items():
+            sensor.initialize(self)
+            self.scene._extra_sensors[name] = sensor
         self.terrain_type = self.scene.terrain.cfg.terrain_type
         self.robot = self.scene.articulations["robot"]
 

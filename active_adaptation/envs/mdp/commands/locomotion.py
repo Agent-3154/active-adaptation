@@ -251,7 +251,7 @@ class Twist(Command):
         self.is_standing_env[env_ids] = True
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         # Tracking error and curriculum integrals use the command that was active during sim.
         self.body_heading_w = self.asset.data.heading_w.unsqueeze(1)
         self.lin_vel_w = self.asset.data.root_com_lin_vel_w

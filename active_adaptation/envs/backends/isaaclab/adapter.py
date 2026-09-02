@@ -100,6 +100,7 @@ class IsaacSceneAdapter(SceneAdapter):
         self._scene: "InteractiveScene" = scene
         self._viser_viewer = viser_viewer
         self._debug_draw = debug_draw
+        self._extra_sensors = {}
 
     @override
     def zero_external_wrenches(self) -> None:
@@ -190,14 +191,12 @@ class IsaacSceneAdapter(SceneAdapter):
 
     @property
     def sensors(self):
-        from active_adaptation.envs.sensors.warp_base import merge_sensors
+        return {**self._scene.sensors, **self._extra_sensors}
 
-        return merge_sensors(self._scene.sensors, getattr(self, "_warp_sensors", None))
-
-    def update_warp_sensors(self) -> None:
-        from active_adaptation.envs.sensors.warp_base import update_warp_sensors
-
-        update_warp_sensors(self)
+    def update(self, dt: float) -> None:
+        super().update(dt)
+        for sensor in self._extra_sensors.values():
+            sensor.update(dt)
 
     def get_visual_meshes(self, name: str) -> list[trimesh.Trimesh]:
         """Body-local visual trimeshes for ``entities[name]`` (``body_names`` order).
@@ -209,7 +208,7 @@ class IsaacSceneAdapter(SceneAdapter):
 
         entity = self.entities[name]
         return load_entity_body_meshes(
-            entity, suffixes=("visuals",), require_all=True
+            entity, suffixes=("visuals",), require_all=False
         )
 
     def get_collision_meshes(self, name: str) -> list[trimesh.Trimesh]:

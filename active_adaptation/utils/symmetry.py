@@ -73,7 +73,10 @@ class SymmetryTransform(nn.Module):
     
     @classmethod
     def rot6d(cls):
-        """TODO: add docstrings"""
+        """
+        Return a SymmetryTransform that transforms a 6D rotation vector into its 
+        left-right symmetric counterpart.
+        """
         return cls(perm=[0, 1, 2, 3, 4, 5], signs=[1, -1, 1, -1, 1, -1])
 
 

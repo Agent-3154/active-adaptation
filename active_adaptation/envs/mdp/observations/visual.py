@@ -13,9 +13,8 @@ from active_adaptation.envs.utils import find_bodies
 from active_adaptation.utils.math import quat_from_euler_xyz, quat_mul, quat_rotate
 from active_adaptation.utils.symmetry import SymmetryTransform
 
-# Mount frame (+X forward, +Y left, +Z up; same as ``raycast_camera``) →
-# OpenCV / Viser optical (+Z forward, +Y down, +X right). Same quat as
-# ``raycast_camera``'s frustum ``ros_to_cam``.
+# Mount frame (+X forward, +Y left, +Z up; same as Lambert raycast sensors) →
+# OpenCV / Viser optical (+Z forward, +Y down, +X right).
 _MOUNT_TO_OPENCV = (0.5, -0.5, 0.5, -0.5)
 
 
@@ -26,7 +25,7 @@ class gs_camera(Observation):
     :class:`~active_adaptation.envs.visual.fvdb_gs.FvdbGaussianWorld`).
 
     Camera pose = body world pose × mount offset. With zero offsets the mount
-    matches :class:`~active_adaptation.envs.mdp.observations.extero.raycast_camera`:
+    matches :class:`~active_adaptation.envs.sensors.camera.LambertRaycastCameraSensor`:
     **+X forward, +Y left, +Z up**. ``offset_rpy`` (degrees, XYZ) is applied in
     that mount frame. Internally converted to OpenCV for ``env.visual.render``
     and the Viser frustum.

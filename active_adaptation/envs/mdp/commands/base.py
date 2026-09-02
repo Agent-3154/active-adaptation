@@ -40,7 +40,7 @@ class Command(MDPComponent, RegistryMixin):
             tensors_in = ()
         tensors_out = self._update(*tensors_in)
 
-        if tensors_out is None and self.out_keys is not None:
+        if tensors_out is None and self.out_keys is None:
             return
         if not isinstance(tensors_out, tuple):
             tensors_out = (tensors_out,)

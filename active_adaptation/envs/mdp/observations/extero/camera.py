@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import colorsys
 import math
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Sequence, Tuple
 
 import einops
 import torch
@@ -11,9 +11,6 @@ from typing_extensions import override
 
 from ..base import Observation
 from active_adaptation.utils.math import (
-    quat_mul,
-    quat_rotate,
-    quat_rotate_inverse,
     quat_from_euler_xyz,
     root_pose_from_view_z_up,
 )
@@ -81,265 +78,6 @@ def raymap(width: int, height: int, fov: float) -> Float[torch.Tensor, "height w
 
     return directions
 
-
-def _distinct_debug_color(instance_id: int) -> Tuple[float, float, float]:
-    """Pick a saturated, high-contrast RGB color for debug markers."""
-    hue = (instance_id * 0.618033988749895) % 1.0
-    return colorsys.hsv_to_rgb(hue, 0.85, 0.95)
-
-class raycast_camera(Observation):
-    """Depth (and optionally surface-normal) image rendered by GPU raycasting.
-
-    Rays are generated with a pinhole model (:func:`raymap`), mounted on a robot
-    body with a fixed rotation/translation offset, and cast against the ground
-    plus optional dynamic entities via ``simple_raycaster``.
-
-    Output shape:
-
-    * ``normal=False`` — ``[num_envs, 1, H, W]`` ray-hit distances in
-      ``[0, far]``.
-    * ``normal=True`` — ``[num_envs, 1 + 3, H, W]``: the distance channel
-      concatenated with the hit surface normal expressed in the **camera frame**
-      (+X forward, +Y left, +Z up, mount rotation included). Normals are
-      oriented to face the camera (``n · ray_dir <= 0``) and are zero for rays
-      that miss.
-
-    Args:
-        resolution: Image size as ``(width, height)``.
-        fov_deg: Horizontal field of view in degrees (vertical follows from the
-            aspect ratio).
-        offset_pos: Fixed camera position offset in the body frame.
-        offset_rpy: Fixed roll/pitch/yaw mount rotation of the camera relative
-            to the body frame, in degrees (XYZ convention).
-        body_name: Body to mount the camera on. Defaults to the root link.
-        near: Rays start ``near`` meters along the ray direction (avoids
-            self-hits with the mounting body).
-        far: Maximum ray distance; misses return ``far``.
-        normal: If True, append camera-frame surface normals as 3 extra
-            channels.
-        dtype: Output dtype (``float32`` or ``float16``).
-        targets: Optional scene entity names to raycast against in addition to
-            ``/World/ground``.
-
-    Debug visualization (GUI / Viser): hit points are drawn as sphere markers,
-    and a camera frustum shows the depth image (``normal=False``, near = bright)
-    or the normal map (``normal=True``, RGB = camera-frame ``n * 0.5 + 0.5``)
-    for env 0.
-    """
-
-    supported_backends = ("isaaclab",)
-    _debug_instance_count = 0
-
-    supported_dtypes = {
-        "float32": torch.float32,
-        "float16": torch.float16,
-    }
-
-    def __init__(
-        self,
-        resolution: Tuple[int, int],
-        fov_deg: float,
-        offset_pos: Tuple[float, float, float] = (0.0, 0.0, 0.0),
-        offset_rpy: Tuple[float, float, float] = (0.0, 0.0, 0.0),
-        body_name: Optional[str] = None,
-        near: float = 0.01,
-        far: float = 100.0,
-        normal: bool = False,
-        dtype: torch.dtype | str = torch.float16,
-        targets: Optional[List[str]] = None,
-    ):
-        super().__init__()
-        self.resolution = resolution
-        self.fov_deg = fov_deg
-        self.offset_pos = tuple(float(x) for x in offset_pos)
-        self.offset_rpy = tuple(float(x) for x in offset_rpy)
-        self.body_name = body_name
-        self.near = near
-        self.far = far
-        self.dtype = dtype
-        self.normal = normal
-        self.targets = targets
-
-    @override
-    def _initialize(self, env: "_EnvBase"):
-        super()._initialize(env)
-        self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.dtype = (
-            self.supported_dtypes[self.dtype] if isinstance(self.dtype, str) else self.dtype
-        )
-        assert self.dtype in self.supported_dtypes.values(), f"Unsupported dtype: {self.dtype}"
-        assert self.far - self.near > 1e-6, "Far must be greater than near"
-
-        width, height = self.resolution
-        self.raymap = raymap(width, height, self.fov_deg / 180.0 * torch.pi).to(self.device)
-        euler = torch.tensor(self.offset_rpy, device=self.device) / 180.0 * torch.pi
-        # body → camera mount rotation; also needed to express normals in the camera frame
-        self.mount_quat = quat_from_euler_xyz(euler).reshape(1, 1, 4)
-        self.raymap = quat_rotate(self.mount_quat, self.raymap)
-        self._offset_pos = torch.tensor(self.offset_pos, device=self.device)
-
-        self.shape = self.raymap.shape[:2]
-        assert self.shape == (height, width), "Resolution must match the raymap shape"
-        self.num_rays = self.raymap.shape[0] * self.raymap.shape[1]
-
-        from simple_raycaster import MultiMeshRaycasterV2
-
-        self.raycaster = MultiMeshRaycasterV2(device=self.device)
-        self.raycaster.add_isaac_static("/World/ground")
-        if self.targets is not None:
-            for target in self.targets:
-                target_asset = self.env.scene[target]
-                self.raycaster.add_isaac_entity(target_asset)
-
-        if self.body_name is not None:
-            self.body_id = self.asset.find_bodies(self.body_name)[0]
-            assert len(self.body_id) == 1, f"Multiple bodies found for name {self.body_name}"
-            self.body_id = self.body_id[0]
-        else:
-            self.body_id = None
-
-        self.camera_handle = None
-        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
-            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
-
-            scene: IsaacSceneAdapter = self.env.scene
-            self.instance_id = raycast_camera._debug_instance_count
-            raycast_camera._debug_instance_count += 1
-            marker_color = _distinct_debug_color(self.instance_id)
-            self.marker = scene.create_sphere_marker(
-                f"/Visuals/Command/raycast_camera_{self.instance_id}",
-                marker_color,
-                radius=0.02,
-            )
-
-            # Viser frustum showing the depth (or normal) image. The frustum
-            # uses the ROS camera convention (+Z forward, +Y down); compose the
-            # mount rotation with the fixed ROS → raymap-frame rotation.
-            fov_x = self.fov_deg / 180.0 * math.pi
-            aspect = width / max(height, 1)
-            fov_y = 2.0 * math.atan(math.tan(fov_x * 0.5) / aspect)
-            ros_to_cam = torch.tensor([0.5, -0.5, 0.5, -0.5], device=self.device)
-            self._frustum_quat = quat_mul(self.mount_quat.reshape(4), ros_to_cam)
-            try:
-                self.camera_handle = self.env.scene.create_camera_frustum(
-                    f"raycast_camera_{self.instance_id}",
-                    fov_y=fov_y,
-                    aspect=aspect,
-                )
-            except Exception as e:
-                print(f"Error creating camera frustum: {e}")
-                self.camera_handle = None
-
-    def compute(self) -> torch.Tensor:
-        """Cast the ray bundle and assemble the image observation.
-
-        Returns:
-            ``[num_envs, 1, H, W]`` hit distances, or ``[num_envs, 4, H, W]``
-            with camera-frame normals appended when ``normal=True``.
-        """
-        if self.body_id is not None:
-            body_pos_w = self.asset.data.body_link_pos_w[:, self.body_id]
-            body_quat = self.asset.data.body_link_quat_w[:, self.body_id]
-        else:
-            body_pos_w = self.asset.data.root_link_pos_w
-            body_quat = self.asset.data.root_link_quat_w
-        self.ray_dirs_w = quat_rotate(
-            body_quat.unsqueeze(1), self.raymap.reshape(1, self.num_rays, 3)
-        )
-        offset_w = quat_rotate(body_quat, self._offset_pos.unsqueeze(0))
-        self.ray_starts_w = (
-            body_pos_w.reshape(self.num_envs, 1, 3)
-            + offset_w.reshape(self.num_envs, 1, 3)
-            + self.ray_dirs_w * self.near
-        )
-
-        hit_pos_w, hit_distance, hit_normal_w = self.raycaster.raycast_fused(
-            ray_starts_w=self.ray_starts_w,
-            ray_dirs_w=self.ray_dirs_w,
-            min_dist=0.0,
-            max_dist=self.far,
-        )
-        self.ray_hits_w = hit_pos_w
-
-        hit_distance = hit_distance.nan_to_num(posinf=self.far).to(self.dtype)
-        depth = hit_distance.reshape(self.num_envs, 1, self.shape[0], self.shape[1])
-        if not self.normal:
-            self._image = depth
-            return depth
-
-        # Raw face normals have winding-dependent sign; orient them towards the
-        # camera so n · ray_dir <= 0. Misses stay zero.
-        flip = (hit_normal_w * self.ray_dirs_w).sum(-1, keepdim=True) > 0
-        hit_normal_w = torch.where(flip, -hit_normal_w, hit_normal_w)
-        # world → body → camera frame
-        hit_normal_b = quat_rotate_inverse(body_quat.unsqueeze(1), hit_normal_w)
-        hit_normal_c = quat_rotate_inverse(self.mount_quat, hit_normal_b)
-        hit_normal_c = (
-            hit_normal_c.reshape(self.num_envs, self.shape[0], self.shape[1], 3)
-            .permute(0, 3, 1, 2)
-            .to(self.dtype)
-        )
-        self._image = torch.cat([depth, hit_normal_c], dim=1)
-        return self._image
-
-    def _debug_image_hwc_uint8(self, env_idx: int) -> "np.ndarray":
-        """Render the latest observation of one env as an HWC uint8 RGB image."""
-        img = self._image[env_idx].float()  # [C, H, W]
-        if self.normal:
-            # camera-frame normals in [-1, 1] → RGB; misses (zero normals) → gray
-            rgb = img[1:4] * 0.5 + 0.5
-        else:
-            # near = bright, far / miss = dark
-            rgb = (1.0 - img[0] / self.far).clamp(0.0, 1.0).unsqueeze(0).expand(3, -1, -1)
-        return (rgb * 255.0).byte().permute(1, 2, 0).cpu().numpy()
-
-    def debug_draw(self) -> None:
-        if self.env.backend != "isaaclab":
-            return
-        pos = self.ray_hits_w[0].reshape(-1, 3)
-        self.marker.visualize(pos)
-
-        if self.camera_handle is None:
-            return
-        env_idx = 0
-        if self.body_id is not None:
-            body_pos = self.asset.data.body_link_pos_w[env_idx, self.body_id]
-            body_quat = self.asset.data.body_link_quat_w[env_idx, self.body_id]
-        else:
-            body_pos = self.asset.data.root_link_pos_w[env_idx]
-            body_quat = self.asset.data.root_link_quat_w[env_idx]
-        self.camera_handle.position = body_pos + quat_rotate(body_quat, self._offset_pos)
-        self.camera_handle.wxyz = quat_mul(body_quat, self._frustum_quat)
-        self.camera_handle.image = self._debug_image_hwc_uint8(env_idx)
-
-    def symmetry_transform(self):
-        """Mirror transform for the image observation.
-
-        Under the left-right (xz-plane) mirror of the world, the camera sees
-        the horizontally flipped image: the raymap places +Y (left) along
-        decreasing width, so the transform permutes the width (last) dim.
-        Distance is invariant per mirrored pixel; camera-frame normals keep
-        their forward/up components but negate the lateral (y) component,
-        expressed via per-channel signs on ``[.., C, H, W]``.
-
-        Only valid for a mirror-symmetric mount: zero roll/yaw and zero
-        lateral position offset.
-        """
-        roll, _, yaw = self.offset_rpy
-        if roll != 0.0 or yaw != 0.0 or self._offset_pos[1].item() != 0.0:
-            raise NotImplementedError(
-                "raycast_camera symmetry requires a mirror-symmetric mount: "
-                f"roll=yaw=0 and zero lateral offset, got offset_rpy={self.offset_rpy}, "
-                f"offset_pos={self._offset_pos.tolist()}"
-            )
-        perm = torch.arange(self.shape[1]).flip(0)
-        signs = torch.ones(self.shape[1])
-        x = torch.arange(self.shape[0] * self.shape[1]).reshape(1, 1, *self.shape)
-        y = x.flip(3)
-        assert torch.all(y == x[..., perm]), "raycast_camera symmetry permutation mismatch"
-        # channels: (distance, nx, ny, nz) — negate the lateral normal component
-        channel_signs = torch.tensor([1.0, 1.0, -1.0, 1.0]) if self.normal else None
-        return SymmetryTransform(perm=perm, signs=signs, channel_signs=channel_signs)
 
 
 class camera_isaac(Observation):
@@ -605,46 +343,71 @@ class camera_mjlab(Observation):
         return SymmetryTransform(perm, torch.ones(width))
 
 
-class raycast_camera_v2(Observation):
-    """Read RGB-D from a scene-owned :class:`~active_adaptation.envs.sensors.camera.LambertRaycastCameraSensor`.
+class raycast_camera(Observation):
+    """Lambert RGB-D from a shared :class:`~active_adaptation.envs.sensors.camera.LambertRaycastCameraSensor`.
 
-    Unlike :class:`raycast_camera`, this term does **not** create or own a
-    raycaster. Declare the sensor in task YAML under ``sensors:``::
+    The observation owns the virtual camera mount and calls
+    :meth:`~active_adaptation.envs.sensors.camera.LambertRaycastCameraSensor.render`
+    each step. Multiple obs terms may share one sensor/renderer.
 
         sensors:
-          front_rgbd:
+          shared_camera:
             _target_: lambert_raycast_camera
-            entity: robot
-            body_name: base_link
             resolution: [128, 96]
-            fov_y_deg: 70.0
-            targets: [terrain]
+            targets: [terrain, robot]
 
         observation:
-          policy:
-            raycast_camera_v2:
-              sensor_name: front_rgbd
+          head_camera_:
+            raycast_camera:
+              sensor_name: shared_camera
+              body_name: gripper_base
               data_type: depth
-
-    Args:
-        sensor_name: Key in ``env.scene.sensors`` (must be a Lambert raycast camera).
-        data_type: ``\"depth\"`` → ``[N, 1, H, W]``; ``\"rgb\"`` → ``[N, 3, H, W]``;
-            ``\"rgbd\"`` → ``[N, 4, H, W]`` (RGB then depth); ``\"mask\"`` →
-            ``[N, 1, H, W]`` float occupancy.
     """
+
+    supported_backends = ("isaaclab", "mjlab")
+    _DATA_TYPES = frozenset({"depth", "rgb", "rgbd", "mask", "normal"})
 
     def __init__(
         self,
         sensor_name: str,
-        data_type: str = "depth",
+        body_name: str | None = None,
+        pattern: str | None = None,
+        entity: str = "robot",
+        offset_pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        offset_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        data_type: str | Sequence[str] = "depth",
     ) -> None:
         super().__init__()
-        if data_type not in ("depth", "rgb", "rgbd", "mask"):
-            raise ValueError(
-                f"data_type must be depth|rgb|rgbd|mask, got {data_type!r}"
+        if body_name is None and pattern is None:
+            raise ValueError("raycast_camera requires body_name or pattern")
+        if isinstance(data_type, str):
+            data_types = (data_type,)
+        else:
+            data_types = tuple(str(x) for x in data_type)
+        unknown = set(data_types) - self._DATA_TYPES
+        if unknown:
+            raise ValueError(f"unknown data_type entries {sorted(unknown)}")
+        if "normal" in data_types:
+            raise NotImplementedError(
+                "raycast_camera normal output is not implemented for Lambert RGB-D"
             )
+        if not data_types:
+            raise ValueError("data_type must be non-empty")
         self.sensor_name = sensor_name
-        self.data_type = data_type
+        self.body_name = body_name
+        self.pattern = pattern
+        self.entity_name = entity
+        self.offset_pos = tuple(float(x) for x in offset_pos)
+        self.offset_rpy = tuple(float(x) for x in offset_rpy)
+        self.data_types = data_types
+        self._body_id: int | None = None
+        self._mount_entity = None
+        self._last_rgb: torch.Tensor | None = None
+        self._last_depth: torch.Tensor | None = None
+        self._last_mask: torch.Tensor | None = None
+        self._cam_pos_w: torch.Tensor | None = None
+        self._cam_quat_w: torch.Tensor | None = None
+        self.camera_handle = None
 
     @override
     def _initialize(self, env: "_EnvBase") -> None:
@@ -654,57 +417,92 @@ class raycast_camera_v2(Observation):
         sensor = self.env.scene.sensors.get(self.sensor_name)
         if sensor is None:
             raise KeyError(
-                f"raycast_camera_v2: sensor {self.sensor_name!r} not in "
+                f"raycast_camera: sensor {self.sensor_name!r} not in "
                 f"scene.sensors (have {sorted(self.env.scene.sensors)})"
             )
         if not isinstance(sensor, LambertRaycastCameraSensor):
             raise TypeError(
-                f"raycast_camera_v2 expects LambertRaycastCameraSensor, "
+                f"raycast_camera expects LambertRaycastCameraSensor, "
                 f"got {type(sensor).__name__} for {self.sensor_name!r}"
             )
         self.sensor: LambertRaycastCameraSensor = sensor
-        self.camera_handle = None
-        if not self.env.sim.has_gui():
-            return
-        aspect = self.sensor.width / max(self.sensor.height, 1)
-        fov_y = math.radians(self.sensor.fov_y_deg)
-        try:
-            self.camera_handle = self.env.scene.create_camera_frustum(
-                f"raycast_camera_v2_{self.sensor_name}",
-                fov_y=fov_y,
-                aspect=aspect,
+
+        mount = self.env.scene.entities[self.entity_name]
+        if self.body_name is not None:
+            body_ids, body_names = mount.find_bodies(self.body_name)
+        else:
+            body_ids, body_names = mount.find_bodies(self.pattern)
+        if len(body_ids) != 1:
+            raise ValueError(
+                f"raycast_camera on {self.entity_name!r}: expected one mount body, "
+                f"got {body_names}"
             )
-        except Exception as e:
-            print(f"Error creating camera frustum: {e}")
-            self.camera_handle = None
+        self._body_id = int(body_ids[0])
+        self._mount_entity = mount
+
+        if self.env.sim.has_gui():
+            aspect = self.sensor.width / max(self.sensor.height, 1)
+            fov_y = math.radians(self.sensor.fov_y_deg)
+            try:
+                self.camera_handle = self.env.scene.create_camera_frustum(
+                    f"raycast_camera_{self.sensor_name}_{id(self)}",
+                    fov_y=fov_y,
+                    aspect=aspect,
+                )
+            except Exception as e:
+                print(f"Error creating camera frustum: {e}")
+                self.camera_handle = None
+
+    def _format_output(self) -> torch.Tensor:
+        assert self._last_depth is not None
+        parts: list[torch.Tensor] = []
+        for key in self.data_types:
+            if key == "depth":
+                parts.append(self._last_depth.unsqueeze(1))
+            elif key == "rgb":
+                assert self._last_rgb is not None
+                parts.append(self._last_rgb.permute(0, 3, 1, 2).contiguous())
+            elif key == "mask":
+                assert self._last_mask is not None
+                parts.append(self._last_mask.float().unsqueeze(1))
+            elif key == "rgbd":
+                assert self._last_rgb is not None
+                rgb = self._last_rgb.permute(0, 3, 1, 2)
+                parts.append(torch.cat([rgb, self._last_depth.unsqueeze(1)], dim=1))
+        return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
 
     def _debug_image_hwc_uint8(self, env_idx: int) -> "np.ndarray":
-        """Latest observation of one env as HWC uint8 RGB for the Viser frustum."""
-        data = self.sensor.data
-        if self.data_type in ("rgb", "rgbd"):
-            rgb = data.rgb[env_idx].float().clamp(0.0, 1.0)
-        elif self.data_type == "mask":
-            rgb = data.mask[env_idx].float().unsqueeze(-1).expand(-1, -1, 3)
+        assert self._last_depth is not None
+        if "rgb" in self.data_types or "rgbd" in self.data_types:
+            assert self._last_rgb is not None
+            rgb = self._last_rgb[env_idx].float().clamp(0.0, 1.0)
+        elif "mask" in self.data_types:
+            assert self._last_mask is not None
+            rgb = self._last_mask[env_idx].float().unsqueeze(-1).expand(-1, -1, 3)
         else:
-            # near = bright, far / miss = dark
-            rgb = (1.0 - data.depth[env_idx] / max(self.sensor.far, 1e-6)).clamp(
+            rgb = (1.0 - self._last_depth[env_idx] / max(self.sensor.far, 1e-6)).clamp(
                 0.0, 1.0
             ).unsqueeze(-1).expand(-1, -1, 3)
         return (rgb * 255.0).byte().cpu().numpy()
 
     @override
     def compute(self) -> torch.Tensor:
-        data = self.sensor.data
-        if self.data_type == "depth":
-            return data.depth.unsqueeze(1)
-        if self.data_type == "rgb":
-            return data.rgb.permute(0, 3, 1, 2).contiguous()
-        if self.data_type == "mask":
-            return data.mask.float().unsqueeze(1)
-        # rgbd
-        rgb = data.rgb.permute(0, 3, 1, 2)
-        depth = data.depth.unsqueeze(1)
-        return torch.cat([rgb, depth], dim=1)
+        assert self._body_id is not None and self._mount_entity is not None
+        cam_pos_w, cam_quat_w = type(self.sensor).mount_pose(
+            self._mount_entity,
+            self._body_id,
+            self.offset_pos,
+            self.offset_rpy,
+            device=self.device,
+            num_envs=self.num_envs,
+        )
+        rgb, depth, mask = self.sensor.render(cam_pos_w, cam_quat_w)
+        self._last_rgb = rgb
+        self._last_depth = depth
+        self._last_mask = mask
+        self._cam_pos_w = cam_pos_w
+        self._cam_quat_w = cam_quat_w
+        return self._format_output()
 
     @override
     def symmetry_transform(self) -> SymmetryTransform:
@@ -714,7 +512,7 @@ class raycast_camera_v2(Observation):
     
     @override
     def debug_draw(self) -> None:
-        if self.camera_handle is None:
+        if self.camera_handle is None or self._cam_pos_w is None or self._cam_quat_w is None:
             return
         env_idx = 0
         viser = getattr(self.env.sim, "_viser_viewer", None) or getattr(
@@ -727,8 +525,7 @@ class raycast_camera_v2(Observation):
                 scene = getattr(viser, "_scene", None)
                 if scene is not None and hasattr(scene, "env_idx"):
                     env_idx = int(scene.env_idx)
-        self.camera_handle.position = self.sensor.cam_pos_w[env_idx]
-        # Lambert RaycastCamera is OpenCV (+Z fwd, +Y down) = Viser ROS frustum.
-        self.camera_handle.wxyz = self.sensor.cam_quat_w[env_idx]
+        self.camera_handle.position = self._cam_pos_w[env_idx]
+        self.camera_handle.wxyz = self._cam_quat_w[env_idx]
         self.camera_handle.image = self._debug_image_hwc_uint8(env_idx)
 

@@ -33,7 +33,7 @@ def _load_entity_body_meshes(entity) -> list[tuple[str, Any]]:
     """Extract body-local visual trimeshes (shared helper with scene adapter)."""
     from active_adaptation.envs.backends.isaaclab.meshes import load_entity_body_meshes
 
-    meshes = load_entity_body_meshes(entity, suffixes=("visuals",), require_all=True)
+    meshes = load_entity_body_meshes(entity, suffixes=("visuals",), require_all=False)
     return list(zip(entity.body_names, meshes))
 
 

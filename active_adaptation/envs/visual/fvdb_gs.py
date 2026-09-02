@@ -2,7 +2,8 @@
 
 Mesh RGB-D is rendered by ``simple_raycaster`` (``diffrast`` / ``raycast``);
 this module only depth-composites that RGB-D over the Gaussian image. None of
-these replace the MDP depth obs ``extero.raycast_camera``.
+these replace the legacy MDP depth obs ``extero.raycast_camera`` (removed; use
+``raycast_camera`` + ``lambert_raycast_camera`` sensor).
 """
 
 from __future__ import annotations

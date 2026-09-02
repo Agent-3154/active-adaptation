@@ -1,6 +1,6 @@
 import math
 import mujoco
-from typing import cast
+from typing import Any, cast
 
 from active_adaptation.envs.backends.mjlab.adapter import (
     MjlabSceneAdapter,
@@ -104,21 +104,16 @@ class MjlabBackendEnv(_EnvBase):
             entities[obj_name] = object_spec.config
 
         import active_adaptation.envs.sensors  # noqa: F401  # register sensor factories
-        from active_adaptation.envs.sensors.warp_base import (
-            WarpSensorSpec,
-            install_warp_sensors,
-            is_warp_sensor_spec,
-        )
 
-        warp_sensor_specs: dict[str, WarpSensorSpec] = {}
+        extra_sensors: dict[str, Any] = {}
         for sensor_name, sensor_spec in self.cfg.get("sensors", {}).items():
             sensor_spec = dict(sensor_spec)
             fn = registry.get("sensor", sensor_spec.pop("_target_"))
             result = fn(
                 backend="mjlab", name=sensor_name, **sensor_spec
             )
-            if is_warp_sensor_spec(result):
-                warp_sensor_specs[sensor_name] = result
+            if callable(getattr(result, "initialize", None)):
+                extra_sensors[sensor_name] = result
             else:
                 sensors[sensor_name] = result
 
@@ -158,7 +153,9 @@ class MjlabBackendEnv(_EnvBase):
         viewer_cfg = self._make_viewer_cfg(ViewerConfig)
         viewer = MjLabViewer(self, sim) if not self.headless else None
         self.scene = MjlabSceneAdapter(scene, sim, viewer=viewer)
-        install_warp_sensors(self.scene, warp_sensor_specs, env=self)
+        for name, sensor in extra_sensors.items():
+            sensor.initialize(self)
+            self.scene._extra_sensors[name] = sensor
         self.sim = MjlabSimAdapter(sim, viewer, viewer_cfg=viewer_cfg, scene=scene)
         self.robot = self.scene.articulations["robot"]
         if asset_spec.wrapper is not None:

@@ -388,23 +388,9 @@ class feet_height_map(Observation):
 class closest_points(Observation):
     """Closest surface points on target meshes from selected robot bodies.
 
-    Probe positions are the link origins of ``body_names``. Each name may be a
-    regex (Isaac ``find_bodies``). ``targets`` are scene entity keys whose
-    visuals are registered with :class:`~simple_raycaster.MeshProximitySensor`.
-
-    ``clipping_range=(near, far)`` sets the query radius to ``far``. Hits closer
-    than ``near`` are clamped to ``near``. Misses (no surface within ``far``)
-    report ``far`` when ``distance_only``, else a zero vector.
-
-    Returns:
-
-    * ``distance_only=True``: clamped distances ``[N, n_bodies]``.
-    * ``distance_only=False``: flattened closest-point positions
-      ``[N, n_bodies * 3]`` —
-      * ``frame="body"``: each point in its body frame
-        (``R_bodyᵀ (p* − p_body)``).
-      * ``frame="root"``: each point relative to the robot root in the root
-        frame (``R_rootᵀ (p* − p_root)``).
+    .. note::
+       **Update required.** Pending ``MeshProximitySensor`` rewrite for
+       :class:`~active_adaptation.envs.mesh_registry.MeshRegistry` explicit poses.
     """
 
     supported_backends = ("isaaclab",)
@@ -431,39 +417,11 @@ class closest_points(Observation):
 
     @override
     def _initialize(self, env: "_EnvBase"):
-        super()._initialize(env)
-        self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.body_ids, self.body_names = self.asset.find_bodies(
-            self.body_names_cfg, preserve_order=True
+        raise NotImplementedError(
+            "closest_points depends on MeshProximitySensor, which is pending "
+            "migration to MeshRegistry explicit mesh poses. "
+            "See simple_raycaster.MESH_PROXIMITY_UPDATE_REQUIRED."
         )
-        if len(self.body_ids) == 0:
-            raise ValueError(f"No bodies matched {self.body_names_cfg!r}")
-        self.body_ids = torch.tensor(self.body_ids, device=self.device)
-        self.num_bodies = len(self.body_ids)
-        self.near, self.far = self.clipping_range
-
-        from simple_raycaster import MeshProximitySensor
-
-        self.sensor = MeshProximitySensor(device=self.device)
-        if len(self.targets) == 0:
-            raise ValueError("closest_points requires at least one target entity")
-        for target in self.targets:
-            self.sensor.add_isaac_entity(self.env.scene[target])
-
-        if self.env.backend == "isaaclab" and self.env.sim.has_gui():
-            from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
-
-            scene: IsaacSceneAdapter = self.env.scene
-            self.marker_query = scene.create_sphere_marker(
-                "/Visuals/Command/closest_points_query",
-                (0.2, 0.8, 0.2),
-                radius=0.01,
-            )
-            self.marker_hit = scene.create_sphere_marker(
-                "/Visuals/Command/closest_points_hit",
-                (0.9, 0.2, 0.1),
-                radius=0.01,
-            )
 
     @override
     def compute(self) -> torch.Tensor:

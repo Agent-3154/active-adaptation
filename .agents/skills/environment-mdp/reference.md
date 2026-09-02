@@ -299,19 +299,21 @@ Terms may read/write `tensordict`. Most leave it unused.
 
 ## Raycasting / USD meshes
 
-External package: [`simple-raycaster`](https://github.com/btx0424/simple-raycaster) (installed into the uv env with active-adaptation; not a workspace-local path). Public exports: `MultiMeshRaycaster`, `MultiMeshRaycasterV2`. Authoritative notes: upstream `AGENTS.md`.
+External package: [`simple-raycaster`](https://github.com/btx0424/simple-raycaster) (installed into the uv env with active-adaptation; not a workspace-local path). Public exports: `MultiMeshRaycaster`, `RaycastCamera`, `MeshProximitySensor` (rewrite pending). Authoritative notes: upstream `AGENTS.md`.
 
 ### Package modules (import paths)
 
 ```
 simple_raycaster.raycaster       # MultiMeshRaycaster — caller supplies mesh_pos_w / mesh_quat_w
-simple_raycaster.raycaster_v2    # MultiMeshRaycasterV2 — Isaac entity poses auto-gathered
-simple_raycaster.proximity       # MeshProximitySensor — closest-point / signed-distance queries
+simple_raycaster.proximity       # MeshProximitySensor — rewrite pending (MeshRegistry + explicit poses)
+simple_raycaster.raycast_camera  # RaycastCamera — Lambert RGB-D (explicit mesh poses)
 simple_raycaster.kernels         # Warp raycast + fused transform + proximity kernels
 simple_raycaster.helpers         # trimesh2wp, quat_rotate_inverse, voxelize_*
 simple_raycaster.utils_usd       # find_matching_prims, get_trimesh_from_prim, usd2trimesh, usd2wp
 simple_raycaster.utils_mjc       # get_trimesh_from_body (MuJoCo)
 ```
+
+Mesh geometry + poses in AA: `active_adaptation.envs.mesh_registry.MeshRegistry`.
 
 ### USD extraction pipeline (`utils_usd`)
 

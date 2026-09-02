@@ -557,27 +557,29 @@ For Isaac range / depth / occupancy sensing (and for extracting robot visual mes
 
 | Class | When |
 |-------|------|
-| `MultiMeshRaycasterV2` | Inside Isaac Lab: register static + entity meshes once; poses come from `entity.data.body_link_pose_w` |
-| `MultiMeshRaycaster` | Manual poses, offline USD/MJCF, or incremental `add_from_path` |
+| `MeshRegistry` + `MultiMeshRaycaster` / `RaycastCamera` | AA scenes: register targets once, refresh poses each step, pass explicit `mesh_pos_w` / `mesh_quat_w` |
+| `MultiMeshRaycaster` alone | Standalone scripts, offline USD/MJCF, manual poses |
+| `LambertRaycastCameraSensor` + `raycast_camera` obs | MDP RGB-D cameras (shared renderer, per-obs mounts) |
 
-Prefer **`raycast_fused`** in training loops. Quaternions are **WXYZ**. Call `wp.init()` once per process before the first Warp launch. Use `device="cuda"`.
+`MeshProximitySensor` / `closest_points` obs: **update required** — pending rewrite on `MeshRegistry` (see `simple_raycaster.MESH_PROXIMITY_UPDATE_REQUIRED`).
 
-### Isaac registration (V2)
+Prefer **`raycast_fused`** / **`RaycastCamera.render`** in training loops. Quaternions are **WXYZ**. Call `wp.init()` once per process before the first Warp launch. Use `device="cuda"`.
 
-In `_initialize` (scene must exist):
+### Mesh registration (AA)
 
 ```python
-from simple_raycaster import MultiMeshRaycasterV2
+from active_adaptation.envs.mesh_registry import MeshRegistry
 
-self.raycaster = MultiMeshRaycasterV2(device=self.device)
-self.raycaster.add_isaac_static("/World/ground")          # world-baked static mesh, identity pose
-self.raycaster.add_isaac_entity(self.env.scene.articulations["robot"])  # one mesh per body
-# hit_pos, hit_dist = self.raycaster.raycast_fused(ray_starts_w, ray_dirs_w, min_dist=..., max_dist=...)
+registry = MeshRegistry.for_scene(env.scene, backend=env.backend, device=env.device)
+indices = registry.ensure_targets(env.scene, ("terrain", "robot"))
+registry.update_poses(env.num_envs)
+mesh_pos_w, mesh_quat_w = registry.poses_for_indices(indices)
+# MultiMeshRaycaster.raycast_fused(..., mesh_pos_w=..., mesh_quat_w=...)
 ```
 
-- `add_isaac_entity` loads `{body}/visuals` under `entity.root_physx_view.prim_paths[0]`; matched visual count **must** equal `entity.num_bodies`.
+- Entity meshes come from `scene.get_visual_meshes(name)` (body-local); poses from `entity.data.body_link_pose_w`.
+- Terrain: Isaac uses `scene.ground_mesh`; mjlab uses collision trimesh → `trimesh2wp`.
 - Batch `N` on rays must equal `entity.num_instances` (`num_envs`).
-- Do not call V2’s private `_add_mesh` / `_add_from_path` without updating `entities` (registration validation will fail).
 
 ### USD → trimesh (body-local visuals / collisions)
 
@@ -592,7 +594,7 @@ Low-level extraction still lives in `simple_raycaster.utils_usd` (also used by V
 
 1. `find_matching_prims(regex, stage)` — stage traverse with anchored regex.
 2. `get_trimesh_from_prim(prim)` — collect `Mesh`/`Cube` under the prim (follows instance prototypes), convert via `usd2trimesh`, apply **local** transform relative to the parent prim (`world * parent⁻¹`), concatenate + `merge_vertices`.
-3. Result is in **body / parent frame**; at runtime multiply by `body_link_pose_w` (or let V2 do it).
+3. Result is in **body / parent frame**; at runtime multiply by `body_link_pose_w` (or use `MeshRegistry.update_poses`).
 4. Visuals: `{body}/visuals` (required). Collisions: `{body}/collisions` then `{body}/collision`.
 
 Static terrain: combine under e.g. `/World/ground` and keep identity pose (geometry already world-framed).
@@ -603,7 +605,8 @@ mjlab: `env.scene.get_visual_meshes` / `get_collision_meshes` → `envs/backends
 
 | Pattern | Where | Notes |
 |---------|--------|------|
-| V2 entity + static | `observations/extero.py` → `raycast_camera` | Preferred for robots/objects |
+| `LambertRaycastCameraSensor` + `raycast_camera` obs | `sensors/camera.py`, `observations/extero/camera.py` | Shared renderer; obs owns mount |
+| `MeshRegistry` + explicit poses | `mesh_registry.py` | Geometry + pose cache for Warp consumers |
 | V1 + `env.ground_mesh` | `height_scan`, DVL in `underwater.py` | Ground-only or manual poses; DVL still uses IsaacLab `raycast_mesh` on `ground_mesh` |
 | Scene ground Warp mesh | `IsaacSceneAdapter.ground_mesh` | Plane or USD mesh at `/World/ground` |
 
@@ -612,7 +615,7 @@ Isaac/mjlab **Viser** robot meshes (viewer internals, not MDP terms): same body-
 ### Anti-patterns (raycast / mesh)
 
 - Using Isaac Lab `RayCaster` when multiple dynamic meshes are needed
-- Passing world-space meshes into V2 entity slots (entity meshes must be body-local)
+- Passing world-space meshes into entity slots (meshes must be body-local)
 - Extracting USD before `AppLauncher` / stage exists (`from pxr import Usd` needs Isaac or standalone `usd-core`)
 - CPU Warp device for batched training raycasts
 - Forgetting `wp.init()` or re-adding meshes without re-`initialize()` (mesh-id array stale)

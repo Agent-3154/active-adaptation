@@ -7,6 +7,7 @@ Meshes are in the body frame for use with ``body_link_pose_w``.
 
 from __future__ import annotations
 
+import warnings
 from typing import Sequence
 
 import numpy as np
@@ -14,7 +15,7 @@ import trimesh
 
 
 def entity_body_prim_paths(entity, suffix: str) -> list[str]:
-    """Build ``{body}/{suffix}`` prim paths (same rules as MultiMeshRaycasterV2).
+    """Build ``{body}/{suffix}`` prim paths for Isaac articulation / rigid bodies.
 
     Isaac articulations often use a container root prim (e.g. ``.../Robot``) whose
     name is not ``body_names[0]``. In that case children live at
@@ -52,7 +53,8 @@ def load_entity_body_meshes(
         suffixes: Prim name candidates under each body, tried in order
             (e.g. ``(\"visuals\",)`` or ``(\"collisions\", \"collision\")``).
         require_all: If True, missing / ambiguous prims raise. If False,
-            missing bodies get an empty trimesh (keeps ``num_bodies`` alignment).
+            missing or empty bodies get an empty trimesh (keeps ``num_bodies``
+            alignment) and emit a warning.
 
     Returns:
         List of length ``entity.num_bodies`` in ``body_names`` order.
@@ -103,6 +105,12 @@ def load_entity_body_meshes(
                 raise ValueError(
                     f"No mesh prim for body '{body_name}' under any of {tried}{detail}"
                 )
+            warnings.warn(
+                f"Body '{body_name}': no mesh geometry under {tried}"
+                + (f" ({last_err})" if last_err is not None else "")
+                + "; using empty trimesh.",
+                stacklevel=2,
+            )
             meshes.append(_empty_trimesh())
         else:
             meshes.append(mesh)
