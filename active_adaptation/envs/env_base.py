@@ -575,14 +575,9 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         # MDP: rewards
         reward_cfg = dict(self.cfg.reward)
-        self.mult_dt = reward_cfg.pop("_mult_dt_", True)
-        if self.mult_dt:
-            msg = (
-                "reward._mult_dt_ / env.mult_dt is deprecated and will be removed in a future release. "
-                "It is the policy's responsibility to properly scale rewards."
-            )
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
-            print(colored(f"Warning: {msg}", "yellow"))
+        self.mult_dt = reward_cfg.pop("_mult_dt_", None)
+        if self.mult_dt is not None:
+            raise ValueError("reward._mult_dt_ / env.mult_dt is removed. It is the policy's responsibility to properly scale rewards.")
         for group_name, group_cfg in reward_cfg.items():
             rg = RewardGroup.create_from(
                 group_name,
@@ -863,23 +858,27 @@ class _EnvBase(EnvBase, RegistryMixin):
         # for input_manager in self.input_managers.values():
         #     input_manager.update(tensordict)
         
-        for group in self.reward_groups.values():
-            group.update(tensordict)
+        with ScopedTimer("reward.update", sync=PROFILE_SYNC_TIMERS):
+            for group in self.reward_groups.values():
+                group.update(tensordict)
         tensordict = self._compute_reward(tensordict)
         
-        for termination_func in self.termination_funcs.values():
-            termination_func.update()
+        with ScopedTimer("termination.update", sync=PROFILE_SYNC_TIMERS):
+            for termination_func in self.termination_funcs.values():
+                termination_func.update()
         tensordict = self._compute_termination(tensordict)
         
         with ScopedTimer("command.step", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.step()
-    
-        for group in self.observation_groups.values():
-            group.update(tensordict)
+
+        with ScopedTimer("observation.update", sync=PROFILE_SYNC_TIMERS):
+            for group in self.observation_groups.values():
+                group.update(tensordict)
         tensordict = self._compute_observation(tensordict)
 
-        for random_func in self.randomizations.values():
-            random_func.update()
+        with ScopedTimer("random.update", sync=PROFILE_SYNC_TIMERS):
+            for random_func in self.randomizations.values():
+                random_func.update()
 
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()
@@ -911,9 +910,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             reward = reward_group.compute()
             self.stats[group, "return"].add_(reward)
             if reward_group.enabled:
-                tensordict["reward", group] = (
-                    reward * self.step_dt if self.mult_dt else reward
-                )
+                tensordict["reward", group] = reward
 
         self.stats["episode_len"][:] = self.episode_length_buf.reshape(self.num_envs, 1)
         self.stats["success"][:] = (
