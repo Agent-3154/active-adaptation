@@ -20,15 +20,20 @@ def entity_body_prim_paths(entity, suffix: str) -> list[str]:
     name is not ``body_names[0]``. In that case children live at
     ``{root}/{body_name}/{suffix}``. When the root prim *is* the first body, fall
     back to string-replace like V2.
+
+    Empty ``suffix`` means the body prim itself (useful for USD meshes hanging
+    directly under the link, or Isaac shape assets whose geom lives under
+    ``geometry/`` but can also be discovered from the body root).
     """
     template_path = entity.root_physx_view.prim_paths[0]
     root_prim_name = template_path.rstrip("/").split("/")[-1]
+    trail = f"/{suffix}" if suffix else ""
     if root_prim_name == entity.body_names[0]:
         return [
-            template_path.replace(root_prim_name, body_name) + f"/{suffix}"
+            template_path.replace(root_prim_name, body_name) + trail
             for body_name in entity.body_names
         ]
-    return [f"{template_path}/{body_name}/{suffix}" for body_name in entity.body_names]
+    return [f"{template_path}/{body_name}{trail}" for body_name in entity.body_names]
 
 
 def _resolve_body_prims(entity, suffixes: Sequence[str], stage):
@@ -164,3 +169,86 @@ def load_entity_body_geom_parts(
         body_names.append(body_name)
         parts_per_body.append(parts)
     return body_indices, body_names, parts_per_body
+
+
+# Default suffixes for Viser / MeshRegistry visuals:
+# robots → ``visuals``; Isaac shape RigidObjects / custom USD → body root
+# (subtree includes ``geometry/``; parts stay in the body frame for
+# ``body_link_pose_w``).
+VISUAL_GEOM_SUFFIXES: tuple[str, ...] = ("visuals", "")
+
+
+def load_prim_geom_parts(
+    prim_path: str,
+    *,
+    child_suffixes: Sequence[str] = ("", "geometry", "visuals"),
+    require_all: bool = False,
+):
+    """Extract geom parts under a USD prim (e.g. ``AssetBaseCfg`` extras).
+
+    Tries ``prim_path`` first so parts are expressed in the same frame as
+    ``XformPrimView.get_world_poses()`` on that prim. Falls back to
+    ``geometry`` / ``visuals`` children when needed.
+    """
+    try:
+        from isaacsim.core.utils.stage import get_current_stage
+        from simple_raycaster.utils_usd import find_matching_prims, get_geom_parts_from_prim
+    except ImportError as e:
+        raise ImportError(
+            "Isaac prim mesh extraction requires Isaac Sim and "
+            "simple-raycaster (utils_usd)."
+        ) from e
+
+    stage = get_current_stage()
+    tried: list[str] = []
+    last_err: Exception | None = None
+    for suffix in child_suffixes:
+        path = f"{prim_path}/{suffix}" if suffix else prim_path
+        tried.append(path)
+        prims = find_matching_prims(path, stage)
+        if len(prims) == 0:
+            continue
+        if len(prims) != 1:
+            raise ValueError(
+                f"Expected exactly one prim at '{path}', found {len(prims)}."
+            )
+        try:
+            parts = get_geom_parts_from_prim(prims[0])
+        except ValueError as e:
+            last_err = e
+            parts = []
+        if parts:
+            return parts
+
+    if require_all:
+        detail = f" (extract failed: {last_err})" if last_err is not None else ""
+        raise ValueError(f"No mesh geometry under any of {tried}{detail}")
+    warnings.warn(
+        f"No mesh geometry under {tried}"
+        + (f" ({last_err})" if last_err is not None else "")
+        + "; skipping prim.",
+        stacklevel=2,
+    )
+    return []
+
+
+def load_prim_trimesh(
+    prim_path: str,
+    *,
+    child_suffixes: Sequence[str] = ("", "geometry", "visuals"),
+    require_all: bool = True,
+) -> trimesh.Trimesh:
+    """Combined body-local trimesh under a USD prim (AssetBase extras)."""
+    parts = load_prim_geom_parts(
+        prim_path, child_suffixes=child_suffixes, require_all=require_all
+    )
+    if not parts:
+        raise ValueError(f"No mesh geometry under {prim_path!r}")
+    meshes = [p.mesh for p in parts]
+    combined: trimesh.Trimesh = (
+        meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
+    )
+    if len(combined.vertices) == 0 or len(combined.faces) == 0:
+        raise ValueError(f"Empty mesh under {prim_path!r}")
+    combined.merge_vertices()
+    return combined

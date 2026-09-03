@@ -50,10 +50,18 @@ class IsaacDebugDraw:
 
 
 class IsaacSimAdapter(SimAdapter):
-    def __init__(self, sim: "SimulationContext", viser_viewer: IsaacViserViewer = None):
+    def __init__(self, sim: "SimulationContext"):
         self._sim = sim
-        self._viser_viewer = viser_viewer
+        self._viser_viewer: IsaacViserViewer | None = None
         self._kit_rendered_this_step = False
+    
+    @property
+    def viser_viewer(self):
+        return self._viser_viewer
+
+    @viser_viewer.setter
+    def viser_viewer(self, viser_viewer: IsaacViserViewer):
+        self._viser_viewer = viser_viewer
 
     def get_physics_dt(self) -> float:
         return self._sim.get_physics_dt()
@@ -94,13 +102,20 @@ class IsaacSimAdapter(SimAdapter):
 class IsaacSceneAdapter(SceneAdapter):
     def __init__(
         self, scene: "InteractiveScene",
-        viser_viewer: IsaacViserViewer = None,
         debug_draw: IsaacDebugDraw = None,
     ):
         self._scene: "InteractiveScene" = scene
-        self._viser_viewer = viser_viewer
+        self._viser_viewer: IsaacViserViewer | None = None
         self._debug_draw = debug_draw
         self._extra_sensors = {}
+    
+    @property
+    def viser_viewer(self):
+        return self._viser_viewer
+
+    @viser_viewer.setter
+    def viser_viewer(self, viser_viewer: IsaacViserViewer):
+        self._viser_viewer = viser_viewer
 
     @override
     def zero_external_wrenches(self) -> None:
@@ -203,15 +218,19 @@ class IsaacSceneAdapter(SceneAdapter):
     ) -> tuple[list[int], list[str], list[trimesh.Trimesh]]:
         """Body-local visual trimeshes for ``entities[name]``.
 
-        Uses ``{body}/visuals`` via ``simple_raycaster.utils_usd``. Bodies without
-        mesh geometry are skipped. Returns ``(body_indices, body_names, meshes)``;
+        Tries ``{body}/visuals``, then the body prim itself (covers Isaac shape
+        assets under ``geometry/`` and custom USD meshes). Bodies without mesh
+        geometry are skipped. Returns ``(body_indices, body_names, meshes)``;
         index poses with ``body_link_pose_w[:, body_indices]``.
         """
-        from active_adaptation.envs.backends.isaaclab.meshes import load_entity_body_meshes
+        from active_adaptation.envs.backends.isaaclab.meshes import (
+            VISUAL_GEOM_SUFFIXES,
+            load_entity_body_meshes,
+        )
 
         entity = self.entities[name]
         return load_entity_body_meshes(
-            entity, suffixes=("visuals",), require_all=False
+            entity, suffixes=VISUAL_GEOM_SUFFIXES, require_all=False
         )
 
     def get_collision_meshes(

@@ -100,7 +100,12 @@ class IsaacBackendEnv(_EnvBase):
             asset_entry = registry.get("asset", spec.pop("_target_"))
             object_spec = coerce_asset_spec(asset_entry, backend="isaaclab", **spec)
             cfg = object_spec.config
-            assert isinstance(cfg, (ArticulationCfg, RigidObjectCfg)), f"Asset configuration must be an instance of ArticulationCfg or RigidObjectCfg, got {type(cfg)}"
+            # ArticulationCfg / RigidObjectCfg: interactive. AssetBaseCfg: static
+            # extras (collision-only pedestals, lights, USD mounts) → scene._extras.
+            assert isinstance(cfg, (ArticulationCfg, RigidObjectCfg, AssetBaseCfg)), (
+                "Asset configuration must be ArticulationCfg, RigidObjectCfg, or "
+                f"AssetBaseCfg, got {type(cfg)}"
+            )
             cfg.prim_path = "{ENV_REGEX_NS}/" + obj_name
             setattr(scene_cfg, obj_name, cfg)
 
@@ -172,20 +177,21 @@ class IsaacBackendEnv(_EnvBase):
         except ModuleNotFoundError:
             print("Set enable_cameras=true to use cameras.")
 
-        if self.cfg.viewer.get("viser", False):
-            from active_adaptation.envs.backends.isaaclab.viewer import IsaacViserViewer
-            viser_viewer = IsaacViserViewer(self)
-            viser_viewer.setup()
-        else:
-            viser_viewer = None
-        
         if sim.has_gui(): # native isaac gui
             debug_draw = IsaacDebugDraw()
         else:
             debug_draw = None
 
-        self.sim = IsaacSimAdapter(sim, viser_viewer)
-        self.scene = IsaacSceneAdapter(self.scene, viser_viewer, debug_draw)
+        self.sim = IsaacSimAdapter(sim)
+        self.scene = IsaacSceneAdapter(self.scene, debug_draw)
+        
+        if self.cfg.viewer.get("viser", False):
+            from active_adaptation.envs.backends.isaaclab.viewer import IsaacViserViewer
+            viser_viewer = IsaacViserViewer(self)
+            viser_viewer.setup()
+            self.sim.viser_viewer = viser_viewer
+            self.scene.viser_viewer = viser_viewer
+
         for name, sensor in extra_sensors.items():
             sensor.initialize(self)
             self.scene._extra_sensors[name] = sensor

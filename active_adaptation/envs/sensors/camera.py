@@ -126,7 +126,7 @@ class LambertRaycastCameraSensor:
     def mount_pose(
         entity: Any,
         body_id: int,
-        offset_pos: Sequence[float],
+        offset_pos: Sequence[float], # TODO: convert to tensor outside of this function
         offset_rpy: Sequence[float],
         *,
         device: torch.device,

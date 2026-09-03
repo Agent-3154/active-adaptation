@@ -1,9 +1,11 @@
 """Browser Viser viewer for the Isaac backend (mjlab-parity).
 
-Uploads robot body visuals via ``simple_raycaster.utils_usd``: Mesh / Capsule /
-Cone are tessellated into batched trimeshes; Cube / Sphere / Cylinder use Viser
-native primitives when possible. Each step writes ``body_link_pose_w`` (composed
-with per-geom local poses for natives).
+Uploads body visuals for all scene entities (robot, rigid objects) and static
+``AssetBaseCfg`` extras (e.g. collision-only pedestals) via
+``simple_raycaster.utils_usd``: Mesh / Capsule / Cone are tessellated into
+batched trimeshes; Cube / Sphere / Cylinder use Viser native primitives when
+possible. Each step writes entity ``body_link_pose_w`` or extra
+``get_world_poses`` (composed with per-geom local poses for natives).
 
 Requires the ``viser`` and ``simple-raycaster`` packages in the environment.
 """
@@ -22,6 +24,19 @@ if TYPE_CHECKING:
 import viser
 from active_adaptation.utils.math import quat_mul, quat_rotate
 
+# Lights / non-mesh extras registered on the Isaac InteractiveScene.
+_SKIP_EXTRA_NAMES = frozenset(
+    {
+        "sky_light",
+        "light",
+        "distant_light",
+        "dome_light",
+        "disk_light",
+        "sphere_light",
+        "cylinder_light",
+    }
+)
+
 
 def _rgba_to_rgb255(color: tuple[float, ...] | list[float]) -> tuple[int, int, int]:
     r, g, b = float(color[0]), float(color[1]), float(color[2])
@@ -32,8 +47,12 @@ def _rgba_to_rgb255(color: tuple[float, ...] | list[float]) -> tuple[int, int, i
 
 @dataclass
 class _VisualEntry:
-    """One uploaded visual under a robot body."""
+    """One uploaded visual under an entity body or static extra."""
 
+    # Articulation / RigidObject, or None when driven by ``extra_view``.
+    entity: Any | None
+    # XformPrimView for AssetBase extras (collision-only props, USD mounts).
+    extra_view: Any | None
     body_id: int
     kind: Literal["mesh", "box", "sphere", "cylinder"]
     # Batched mesh handle, or list[num_envs] native handles.
@@ -46,7 +65,7 @@ class IsaacViserViewer:
     """Synchronous Isaac browser viewer (analogous to ``MjLabViewer``).
 
     Prefer Viser natives for Cube/Sphere/Cylinder; tessellate everything else.
-    Poses come from ``entity.data.body_link_pose_w``.
+    Poses come from ``entity.data.body_link_pose_w`` or extra ``get_world_poses``.
     """
 
     _DEFAULT_COLOR = (180, 180, 190)
@@ -59,7 +78,6 @@ class IsaacViserViewer:
         self.env_idx: int = 0
         self.show_all_envs: bool = False
 
-        self._entity = None
         self._visuals: list[_VisualEntry] = []
         self._mesh_batch: int = 0
 
@@ -89,33 +107,74 @@ class IsaacViserViewer:
             return
 
         from active_adaptation.envs.backends.isaaclab.meshes import (
+            VISUAL_GEOM_SUFFIXES,
             load_entity_body_geom_parts,
+            load_prim_geom_parts,
         )
 
-        self._entity = self.env.scene.articulations["robot"]
-        body_ids, body_names, parts_per_body = load_entity_body_geom_parts(
-            self._entity, suffixes=("visuals",), require_all=False
-        )
-        self._upload_body_parts(body_ids, body_names, parts_per_body)
+        scene = self.env.scene
+        self._visuals = []
+        self._mesh_batch = self.env.num_envs
+
+        for entity_name, entity in scene.entities.items():
+            body_ids, body_names, parts_per_body = load_entity_body_geom_parts(
+                entity, suffixes=VISUAL_GEOM_SUFFIXES, require_all=False
+            )
+            self._upload_body_parts(
+                entity_name,
+                entity=entity,
+                extra_view=None,
+                body_ids=body_ids,
+                body_names=body_names,
+                parts_per_body=parts_per_body,
+            )
+
+        # Static AssetBaseCfg props (e.g. collision-only pedestal) live in extras.
+        extras = getattr(scene, "extras", {}) or {}
+        entity_names = set(scene.entities.keys())
+        for extra_name, view in extras.items():
+            if extra_name in _SKIP_EXTRA_NAMES or extra_name in entity_names:
+                continue
+            try:
+                prim_paths = view.prim_paths
+            except Exception:
+                continue
+            if not prim_paths:
+                continue
+            parts = load_prim_geom_parts(prim_paths[0], require_all=False)
+            if not parts:
+                continue
+            self._upload_body_parts(
+                extra_name,
+                entity=None,
+                extra_view=view,
+                body_ids=[0],
+                body_names=[extra_name],
+                parts_per_body=[parts],
+            )
+
         self._try_add_ground()
         self._setup_gui()
         self._is_setup = True
 
     def _upload_body_parts(
         self,
+        entity_name: str,
+        *,
+        entity: Any | None,
+        extra_view: Any | None,
         body_ids: list[int],
         body_names: list[str],
         parts_per_body: list,
     ) -> None:
         batch = self.env.num_envs
-        self._visuals = []
         identity = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         zeros = np.zeros(3, dtype=np.float64)
         color = self._DEFAULT_COLOR
 
         for body_id, body_name, parts in zip(body_ids, body_names, parts_per_body):
             for part_i, part in enumerate(parts):
-                name = f"/robot/{body_name}/p{part_i}_{part.type_name}"
+                name = f"/{entity_name}/{body_name}/p{part_i}_{part.type_name}"
                 # Viser has no batched box/sphere/cylinder API. Prefer natives for
                 # modest env counts; otherwise tessellate into one batched mesh.
                 use_native = batch <= 64 and part.viser_kind in (
@@ -140,6 +199,8 @@ class IsaacViserViewer:
                     ]
                     self._visuals.append(
                         _VisualEntry(
+                            entity=entity,
+                            extra_view=extra_view,
                             body_id=body_id,
                             kind="box",
                             handle=handles,
@@ -164,6 +225,8 @@ class IsaacViserViewer:
                     ]
                     self._visuals.append(
                         _VisualEntry(
+                            entity=entity,
+                            extra_view=extra_view,
                             body_id=body_id,
                             kind="sphere",
                             handle=handles,
@@ -190,6 +253,8 @@ class IsaacViserViewer:
                     ]
                     self._visuals.append(
                         _VisualEntry(
+                            entity=entity,
+                            extra_view=extra_view,
                             body_id=body_id,
                             kind="cylinder",
                             handle=handles,
@@ -199,6 +264,7 @@ class IsaacViserViewer:
                     )
                 else:
                     # Mesh / Capsule / Cone / non-uniform / large-batch primitives.
+                    # Tessellated mesh verts are already body-local; identity local.
                     batched_wxyzs = np.tile(identity.astype(np.float32), (batch, 1))
                     batched_pos = np.zeros((batch, 3), dtype=np.float32)
                     handle = self._server.scene.add_batched_meshes_trimesh(
@@ -209,6 +275,8 @@ class IsaacViserViewer:
                     )
                     self._visuals.append(
                         _VisualEntry(
+                            entity=entity,
+                            extra_view=extra_view,
                             body_id=body_id,
                             kind="mesh",
                             handle=handle,
@@ -216,7 +284,6 @@ class IsaacViserViewer:
                             local_quat_wxyz=identity.copy(),
                         )
                     )
-        self._mesh_batch = batch
 
     def add_gaussian_splat(self, gs, *, name: str = "/visual/gaussians") -> None:
         """Upload an fvdb ``GaussianSplat3d`` for browser visualization (debug).
@@ -520,14 +587,29 @@ class IsaacViserViewer:
         if not self._is_setup:
             raise RuntimeError("IsaacViserViewer.setup() has not been called.")
 
-        poses = self._entity.data.body_link_pose_w
         idx = int(np.clip(self.env_idx, 0, self.env.num_envs - 1))
         park = np.array([1.0e4, 1.0e4, 1.0e4], dtype=np.float64)
         ident = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
 
+        # Cache poses once per entity / extra view for this frame.
+        entity_poses: dict[int, torch.Tensor] = {}
+        extra_poses: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
         for entry in self._visuals:
-            body_pos = poses[:, entry.body_id, :3]
-            body_quat = poses[:, entry.body_id, 3:7]
+            if entry.entity is not None:
+                key = id(entry.entity)
+                if key not in entity_poses:
+                    entity_poses[key] = entry.entity.data.body_link_pose_w
+                poses = entity_poses[key]
+                body_pos = poses[:, entry.body_id, :3]
+                body_quat = poses[:, entry.body_id, 3:7]
+            else:
+                assert entry.extra_view is not None
+                key = id(entry.extra_view)
+                if key not in extra_poses:
+                    extra_poses[key] = entry.extra_view.get_world_poses()
+                body_pos, body_quat = extra_poses[key]
+
             local_pos_t = torch.as_tensor(
                 entry.local_pos, device=body_pos.device, dtype=body_pos.dtype
             )

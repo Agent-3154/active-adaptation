@@ -98,6 +98,7 @@ The first observation after reset is intentionally discarded in training (`is_in
 - **`venv/isaac60`** (Isaac Lab 3 / Sim 6) is tracked on branch **`v0.9`**, not validated on `v0.8`.
 - **`main`** is not kept in sync with `v0.8`; new work should branch from **`v0.8`** (or later release branches).
 - Some legacy config paths (policy class as Hydra `_target_`) still work via fallbacks but should migrate to algo cfg objects.
+- **`MeshRegistry` static extras (Isaac Lab 2.3.2):** `XformPrimView.get_world_poses()` may only return env_0; `_register_extra` expands poses with `env_origins`. Replace with a full multi-env pose query when available (`mesh_registry.py`).
 
 ---
 

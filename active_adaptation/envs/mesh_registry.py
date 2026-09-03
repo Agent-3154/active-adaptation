@@ -8,9 +8,20 @@ RGB-D sensors, future proximity / lidar terms). Cameras and raycasters in
 Lifecycle::
 
     registry = MeshRegistry.for_scene(scene, backend=env.backend, device=env.device)
-    indices = registry.ensure_targets(scene, ("terrain", "robot"))
+    indices = registry.ensure_targets(scene, ("terrain", "robot", "pedestal"))
     registry.update_poses(num_envs)          # once per control step
     pos, quat = registry.poses_for_indices(indices)
+
+Targets:
+
+* ``terrain`` — static ground (identity pose; mesh already world-framed).
+* ``scene.entities[name]`` — articulations / rigid objects; poses from
+  ``body_link_pose_w`` each ``update_poses``.
+* ``scene.extras[name]`` — Isaac ``AssetBaseCfg`` collision-only props; mesh
+  loaded once and world poses snapped once at registration (they do not move).
+  **Known issue:** Isaac Lab 2.3.2 ``XformPrimView.get_world_poses()`` may
+  return only a single env; poses are currently expanded via ``env_origins``
+  (see ``_register_extra``). Replace when the view reports all instances.
 
 ``scene.update()`` calls :meth:`LambertRaycastCameraSensor.update` on warp
 sensors, which refreshes cached mesh poses.
@@ -45,8 +56,14 @@ class MeshRegistry:
         self.torch_device = torch.device(self.device)
 
         self.meshes_wp: list[Any] = []
+        # One entry per registered *group* (terrain / entity / extra). A group
+        # may contribute multiple meshes (multi-body entities); pose tensors
+        # are (N, K, …) with K = number of meshes in that group.
         self.entities: list[Any | None] = []
         self._entity_body_indices: list[tuple[int, ...] | None] = []
+        # Fixed world poses for static extras (None → refresh or terrain zeros).
+        self._fixed_pos_w: list[torch.Tensor | None] = []
+        self._fixed_quat_w: list[torch.Tensor | None] = []
         self._target_indices: dict[str, tuple[int, ...]] = {}
 
         self.mesh_pos_w: torch.Tensor | None = None
@@ -88,7 +105,7 @@ class MeshRegistry:
         return _MeshBindView([self.meshes_wp[i] for i in idx])
 
     def update_poses(self, num_envs: int) -> None:
-        """Refresh :attr:`mesh_pos_w` / :attr:`mesh_quat_w` from entity state."""
+        """Refresh :attr:`mesh_pos_w` / :attr:`mesh_quat_w` from entity / fixed state."""
         n = int(num_envs)
         m = self.n_meshes
         device = self.torch_device
@@ -105,8 +122,22 @@ class MeshRegistry:
 
         mesh_pos_w: list[torch.Tensor] = []
         mesh_quat_w: list[torch.Tensor] = []
-        for entity, body_indices in zip(self.entities, self._entity_body_indices):
-            if entity is None:
+        for entity, body_indices, fixed_pos, fixed_quat in zip(
+            self.entities,
+            self._entity_body_indices,
+            self._fixed_pos_w,
+            self._fixed_quat_w,
+        ):
+            if fixed_pos is not None:
+                assert fixed_quat is not None
+                if fixed_pos.shape[0] != n:
+                    raise ValueError(
+                        f"MeshRegistry batch {n} != fixed-pose instance count "
+                        f"{fixed_pos.shape[0]}"
+                    )
+                mesh_pos_w.append(fixed_pos)
+                mesh_quat_w.append(fixed_quat)
+            elif entity is None:
                 mesh_pos_w.append(torch.zeros(n, 1, 3, device=device))
                 mesh_quat_w.append(zero_quat.view(1, 1, 4).expand(n, 1, 4))
             else:
@@ -136,12 +167,33 @@ class MeshRegistry:
         start = self.n_meshes
         if target == _TERRAIN_KEY:
             self._register_terrain(scene)
-        else:
+        elif target in scene.entities:
             self._register_entity(scene, target)
+        elif target in (getattr(scene, "extras", None) or {}):
+            self._register_extra(scene, target)
+        else:
+            extras = getattr(scene, "extras", None) or {}
+            raise KeyError(
+                f"MeshRegistry target {target!r} not found in scene.entities "
+                f"{sorted(scene.entities)} or scene.extras {sorted(extras)}"
+            )
         end = self.n_meshes
         if end == start:
             raise ValueError(f"target {target!r} registered zero meshes")
         return tuple(range(start, end))
+
+    def _append_group(
+        self,
+        *,
+        entity: Any | None,
+        body_indices: tuple[int, ...] | None,
+        fixed_pos: torch.Tensor | None = None,
+        fixed_quat: torch.Tensor | None = None,
+    ) -> None:
+        self.entities.append(entity)
+        self._entity_body_indices.append(body_indices)
+        self._fixed_pos_w.append(fixed_pos)
+        self._fixed_quat_w.append(fixed_quat)
 
     def _register_terrain(self, scene: Any) -> None:
         if self.backend == "isaaclab":
@@ -151,8 +203,7 @@ class MeshRegistry:
 
             mesh = self._terrain_trimesh(scene)
             self.meshes_wp.append(trimesh2wp(mesh, self.device))
-        self.entities.append(None)
-        self._entity_body_indices.append(None)
+        self._append_group(entity=None, body_indices=None)
 
     def _register_entity(self, scene: Any, target: str) -> None:
         from simple_raycaster.helpers import trimesh2wp
@@ -184,8 +235,50 @@ class MeshRegistry:
             raise ValueError(
                 f"Entity {target!r} has no non-empty visual meshes for warp rendering"
             )
-        self.entities.append(entity)
-        self._entity_body_indices.append(tuple(kept_indices))
+        self._append_group(entity=entity, body_indices=tuple(kept_indices))
+
+    def _register_extra(self, scene: Any, target: str) -> None:
+        """Register a static Isaac ``AssetBaseCfg`` extra (collision-only prop).
+
+        Geometry and world poses are captured once at registration — these prims
+        do not move during the episode.
+        """
+        if self.backend != "isaaclab":
+            raise KeyError(
+                f"Static extra target {target!r} requires isaaclab "
+                f"(AssetBaseCfg / scene.extras); backend={self.backend!r}"
+            )
+        from simple_raycaster.helpers import trimesh2wp
+
+        from active_adaptation.envs.backends.isaaclab.meshes import load_prim_trimesh
+
+        view = scene.extras[target]
+        prim_paths = getattr(view, "prim_paths", None)
+        if not prim_paths:
+            raise ValueError(f"Extra {target!r} has no prim_paths for mesh extraction")
+
+        mesh = load_prim_trimesh(prim_paths[0], require_all=True)
+        self.meshes_wp.append(trimesh2wp(mesh, self.device))
+
+        # TODO(known-issue): Isaac Lab 2.3.2 XformPrimView.get_world_poses()
+        # often returns only env_0 ([1, 3] / [1, 4]) instead of all instances.
+        # Workaround: broadcast that pose across envs via env_origins offsets.
+        # Better fix: use a prim view that resolves every ENV_REGEX_NS instance
+        # (or wait for an Isaac Lab fix) and call get_world_poses() once with
+        # shape (num_envs, …). Safe only while extras stay static.
+        pos_w, quat_w = view.get_world_poses()
+        pos_w = (pos_w - scene.env_origins[0] + scene.env_origins).reshape(-1, 1, 3)
+        quat_w = quat_w.expand(pos_w.shape[0], 1, 4)
+
+        # (num_envs, 1, 3/4) — one pose for the combined extra mesh.
+        fixed_pos = pos_w.to(device=self.torch_device).contiguous()
+        fixed_quat = quat_w.to(device=self.torch_device).contiguous()
+        self._append_group(
+            entity=None,
+            body_indices=None,
+            fixed_pos=fixed_pos,
+            fixed_quat=fixed_quat,
+        )
 
     @staticmethod
     def _terrain_trimesh(scene: Any) -> trimesh.Trimesh:

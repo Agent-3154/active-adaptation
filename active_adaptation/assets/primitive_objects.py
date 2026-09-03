@@ -1,9 +1,13 @@
-"""Procedural primitive rigid objects (box, sphere, cylinder, capsule).
+"""Procedural primitive shapes (box, sphere, cylinder, capsule).
 
-Factories return a bare Isaac ``RigidObjectCfg`` or mjlab ``EntityCfg`` (not
-``AssetSpec``), matching ``dummy_objects`` / ``hoi_object``. Size parameters use
-Isaac / USD conventions (full extents, full cylinder/capsule height) and are
-converted to MuJoCo half-sizes internally.
+Factories return a bare Isaac ``RigidObjectCfg`` / ``AssetBaseCfg`` or mjlab
+``EntityCfg`` (not ``AssetSpec``), matching ``dummy_objects`` / ``hoi_object``.
+Size parameters use Isaac / USD conventions (full extents, full cylinder/capsule
+height) and are converted to MuJoCo half-sizes internally.
+
+By default shapes are floating rigid bodies. Pass ``collision_only=True`` for a
+static collider (Isaac: CollisionAPI only via ``AssetBaseCfg``; mjlab: fixed-base
+body, no freejoint — auto-wrapped as mocap).
 
 YAML example::
 
@@ -12,6 +16,11 @@ YAML example::
         _target_: box
         size: [0.05, 0.05, 0.05]
         mass: 0.1
+      pedestal:
+        _target_: box
+        size: [0.1, 0.1, 0.1]
+        pos: [0.0, 0.0, 0.05]
+        collision_only: true
 """
 
 from __future__ import annotations
@@ -78,11 +87,31 @@ def _isaac_spawn_kwargs(
     rgba: tuple[float, float, float, float],
     disable_gravity: bool,
     activate_contact_sensors: bool,
+    collision_only: bool,
 ) -> dict:
     import isaaclab.sim as sim_utils
 
-    return dict(
+    kw: dict = dict(
+        collision_props=sim_utils.CollisionPropertiesCfg(
+            contact_offset=0.02,
+            rest_offset=0.0,
+        ),
+        visual_material=sim_utils.PreviewSurfaceCfg(
+            diffuse_color=rgba[:3],
+            opacity=rgba[3],
+        ),
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+    )
+    if collision_only:
+        # CollisionAPI only — no RigidBodyAPI / mass / contact reporter.
+        return kw
+    kw.update(
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            rigid_body_enabled=True,
             disable_gravity=disable_gravity,
             retain_accelerations=False,
             linear_damping=0.001,
@@ -93,22 +122,29 @@ def _isaac_spawn_kwargs(
             solver_position_iteration_count=4,
             solver_velocity_iteration_count=0,
         ),
-        collision_props=sim_utils.CollisionPropertiesCfg(
-            contact_offset=0.02,
-            rest_offset=0.0,
-        ),
         mass_props=sim_utils.MassPropertiesCfg(mass=mass),
-        visual_material=sim_utils.PreviewSurfaceCfg(
-            diffuse_color=rgba[:3],
-            opacity=rgba[3],
-        ),
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
         activate_contact_sensors=activate_contact_sensors,
     )
+    return kw
+
+
+def _isaac_shape_cfg(kind: str, axis: str, size, radius: float | None, height: float | None, spawn_kw: dict):
+    import isaaclab.sim as sim_utils
+
+    axis = axis.upper()
+    if kind == "box":
+        return sim_utils.CuboidCfg(size=_as_float_tuple(size, 3), **spawn_kw)
+    if kind == "sphere":
+        return sim_utils.SphereCfg(radius=float(radius), **spawn_kw)
+    if kind == "cylinder":
+        return sim_utils.CylinderCfg(
+            radius=float(radius), height=float(height), axis=axis, **spawn_kw
+        )
+    if kind == "capsule":
+        return sim_utils.CapsuleCfg(
+            radius=float(radius), height=float(height), axis=axis, **spawn_kw
+        )
+    raise ValueError(f"Unknown primitive kind: {kind}")
 
 
 def _make_isaaclab_cfg(
@@ -124,32 +160,24 @@ def _make_isaaclab_cfg(
     rot: tuple[float, float, float, float],
     disable_gravity: bool,
     activate_contact_sensors: bool,
+    collision_only: bool,
 ):
-    from isaaclab.assets import RigidObjectCfg
-    import isaaclab.sim as sim_utils
+    from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 
     spawn_kw = _isaac_spawn_kwargs(
         mass=mass,
         rgba=rgba,
         disable_gravity=disable_gravity,
         activate_contact_sensors=activate_contact_sensors,
+        collision_only=collision_only,
     )
-    axis = axis.upper()
-    if kind == "box":
-        spawn = sim_utils.CuboidCfg(size=_as_float_tuple(size, 3), **spawn_kw)
-    elif kind == "sphere":
-        spawn = sim_utils.SphereCfg(radius=float(radius), **spawn_kw)
-    elif kind == "cylinder":
-        spawn = sim_utils.CylinderCfg(
-            radius=float(radius), height=float(height), axis=axis, **spawn_kw
-        )
-    elif kind == "capsule":
-        spawn = sim_utils.CapsuleCfg(
-            radius=float(radius), height=float(height), axis=axis, **spawn_kw
-        )
-    else:
-        raise ValueError(f"Unknown primitive kind: {kind}")
+    spawn = _isaac_shape_cfg(kind, axis, size, radius, height, spawn_kw)
 
+    if collision_only:
+        return AssetBaseCfg(
+            spawn=spawn,
+            init_state=AssetBaseCfg.InitialStateCfg(pos=pos, rot=rot),
+        )
     return RigidObjectCfg(
         spawn=spawn,
         init_state=RigidObjectCfg.InitialStateCfg(pos=pos, rot=rot),
@@ -169,6 +197,7 @@ def _make_mjlab_cfg(
     pos: tuple[float, float, float],
     rot: tuple[float, float, float, float],
     disable_gravity: bool,
+    collision_only: bool,
 ):
     import mujoco
     from active_adaptation.assets.asset_cfg import EntityCfg
@@ -188,16 +217,25 @@ def _make_mjlab_cfg(
     def spec_fn():
         spec = mujoco.MjSpec()
         body = spec.worldbody.add_body(name=body_name)
-        if disable_gravity:
-            body.gravcomp = 1.0
-        body.add_freejoint(name=f"{body_name}_joint")
-        geom_kw = dict(
-            name=f"{body_name}_collision",
-            type=geom_type,
-            size=geom_size,
-            mass=mass,
-            rgba=rgba,
-        )
+        if collision_only:
+            # Fixed-base collider; mjlab auto-wraps as mocap for per-env pose.
+            geom_kw = dict(
+                name=f"{body_name}_collision",
+                type=geom_type,
+                size=geom_size,
+                rgba=rgba,
+            )
+        else:
+            if disable_gravity:
+                body.gravcomp = 1.0
+            body.add_freejoint(name=f"{body_name}_joint")
+            geom_kw = dict(
+                name=f"{body_name}_collision",
+                type=geom_type,
+                size=geom_size,
+                mass=mass,
+                rgba=rgba,
+            )
         if geom_quat is not None:
             geom_kw["quat"] = geom_quat
         body.add_geom(**geom_kw)
@@ -236,6 +274,7 @@ def _make_primitive(
     rot: Sequence[float] = _DEFAULT_ROT,
     disable_gravity: bool = False,
     activate_contact_sensors: bool = True,
+    collision_only: bool = False,
 ):
     rgba_t = _rgba(rgba)
     pos_t = _as_float_tuple(pos, 3)
@@ -253,6 +292,7 @@ def _make_primitive(
             rot=rot_t,
             disable_gravity=disable_gravity,
             activate_contact_sensors=activate_contact_sensors,
+            collision_only=collision_only,
         )
     if backend == "mjlab":
         del activate_contact_sensors
@@ -268,6 +308,7 @@ def _make_primitive(
             pos=pos_t,
             rot=rot_t,
             disable_gravity=disable_gravity,
+            collision_only=collision_only,
         )
     raise ValueError(f"Invalid backend: {backend}")
 
@@ -282,8 +323,12 @@ def make_box(
     rot: Sequence[float] = _DEFAULT_ROT,
     disable_gravity: bool = False,
     activate_contact_sensors: bool = True,
+    collision_only: bool = False,
 ):
-    """Floating cuboid. ``size`` is full (x, y, z) extents in meters."""
+    """Cuboid. ``size`` is full (x, y, z) extents in meters.
+
+    ``collision_only=True`` → static collider (no rigid body / no freejoint).
+    """
     return _make_primitive(
         backend,
         "box",
@@ -295,6 +340,7 @@ def make_box(
         rot=rot,
         disable_gravity=disable_gravity,
         activate_contact_sensors=activate_contact_sensors,
+        collision_only=collision_only,
     )
 
 
@@ -307,7 +353,9 @@ def make_sphere(
     rot: Sequence[float] = _DEFAULT_ROT,
     disable_gravity: bool = False,
     activate_contact_sensors: bool = True,
+    collision_only: bool = False,
 ):
+    """Sphere. ``collision_only=True`` → static collider."""
     return _make_primitive(
         backend,
         "sphere",
@@ -318,6 +366,7 @@ def make_sphere(
         rot=rot,
         disable_gravity=disable_gravity,
         activate_contact_sensors=activate_contact_sensors,
+        collision_only=collision_only,
     )
 
 
@@ -332,8 +381,12 @@ def make_cylinder(
     rot: Sequence[float] = _DEFAULT_ROT,
     disable_gravity: bool = False,
     activate_contact_sensors: bool = True,
+    collision_only: bool = False,
 ):
-    """Floating cylinder. ``height`` is the full length along ``axis``."""
+    """Cylinder. ``height`` is the full length along ``axis``.
+
+    ``collision_only=True`` → static collider.
+    """
     return _make_primitive(
         backend,
         "cylinder",
@@ -346,6 +399,7 @@ def make_cylinder(
         rot=rot,
         disable_gravity=disable_gravity,
         activate_contact_sensors=activate_contact_sensors,
+        collision_only=collision_only,
     )
 
 
@@ -360,8 +414,12 @@ def make_capsule(
     rot: Sequence[float] = _DEFAULT_ROT,
     disable_gravity: bool = False,
     activate_contact_sensors: bool = True,
+    collision_only: bool = False,
 ):
-    """Floating capsule. ``height`` is the cylindrical section (USD convention)."""
+    """Capsule. ``height`` is the cylindrical section (USD convention).
+
+    ``collision_only=True`` → static collider.
+    """
     return _make_primitive(
         backend,
         "capsule",
@@ -374,6 +432,7 @@ def make_capsule(
         rot=rot,
         disable_gravity=disable_gravity,
         activate_contact_sensors=activate_contact_sensors,
+        collision_only=collision_only,
     )
 
 
