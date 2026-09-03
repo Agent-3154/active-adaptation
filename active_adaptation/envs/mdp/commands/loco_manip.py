@@ -832,7 +832,7 @@ class eef_pos_orient_tracking(Reward[SingleEEFLocoManip]):
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
-        self._base_height_rew = self.env.reward_groups["loco"]["base_height_exp"]
+        # self._base_height_rew = self.env.reward_groups["loco"]["base_height_exp"]
         self.update()
 
     @override

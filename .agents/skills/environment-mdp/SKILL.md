@@ -586,8 +586,8 @@ mesh_pos_w, mesh_quat_w = registry.poses_for_indices(indices)
 Prefer scene adapter APIs (shared helper `envs/backends/isaac/meshes.py`):
 
 ```python
-visuals = env.scene.get_visual_meshes("robot")       # list[trimesh], body_names order
-collisions = env.scene.get_collision_meshes("robot") # empty mesh if body has no collision prim
+visuals = env.scene.get_visual_meshes("robot")       # (body_ids, names, meshes) — skips empty
+collisions = env.scene.get_collision_meshes("robot") # same sparse contract; no empty placeholders
 ```
 
 Low-level extraction still lives in `simple_raycaster.utils_usd` (also used by Viser):

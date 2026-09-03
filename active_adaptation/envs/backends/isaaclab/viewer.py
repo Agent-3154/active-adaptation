@@ -1,25 +1,26 @@
 """Browser Viser viewer for the Isaac backend (mjlab-parity).
 
-Uploads robot body visuals once via ``simple_raycaster.utils_usd`` (Mesh/Cube
-only, no materials), then each step writes ``body_link_pose_w`` into batched
-mesh handles. Also provides DebugDraw-compatible primitives and camera
-frustum registration for observation image debug.
+Uploads robot body visuals via ``simple_raycaster.utils_usd``: Mesh / Capsule /
+Cone are tessellated into batched trimeshes; Cube / Sphere / Cylinder use Viser
+native primitives when possible. Each step writes ``body_link_pose_w`` (composed
+with per-geom local poses for natives).
 
 Requires the ``viser`` and ``simple-raycaster`` packages in the environment.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import numpy as np
 import torch
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
-    import viser as _viser_types
 
 import viser
+from active_adaptation.utils.math import quat_mul, quat_rotate
 
 
 def _rgba_to_rgb255(color: tuple[float, ...] | list[float]) -> tuple[int, int, int]:
@@ -29,20 +30,26 @@ def _rgba_to_rgb255(color: tuple[float, ...] | list[float]) -> tuple[int, int, i
     return (int(r), int(g), int(b))
 
 
-def _load_entity_body_meshes(entity) -> list[tuple[str, Any]]:
-    """Extract body-local visual trimeshes (shared helper with scene adapter)."""
-    from active_adaptation.envs.backends.isaaclab.meshes import load_entity_body_meshes
+@dataclass
+class _VisualEntry:
+    """One uploaded visual under a robot body."""
 
-    meshes = load_entity_body_meshes(entity, suffixes=("visuals",), require_all=False)
-    return list(zip(entity.body_names, meshes))
+    body_id: int
+    kind: Literal["mesh", "box", "sphere", "cylinder"]
+    # Batched mesh handle, or list[num_envs] native handles.
+    handle: Any
+    local_pos: np.ndarray  # (3,) body-local; zeros for baked meshes
+    local_quat_wxyz: np.ndarray  # (4,) body-local; identity for baked meshes
 
 
 class IsaacViserViewer:
     """Synchronous Isaac browser viewer (analogous to ``MjLabViewer``).
 
-    Mesh extraction uses ``simple_raycaster.utils_usd`` (Mesh/Cube only,
-    untextured). Poses come from ``entity.data.body_link_pose_w``.
+    Prefer Viser natives for Cube/Sphere/Cylinder; tessellate everything else.
+    Poses come from ``entity.data.body_link_pose_w``.
     """
+
+    _DEFAULT_COLOR = (180, 180, 190)
 
     def __init__(self, env: "_EnvBase"):
         self.env = env
@@ -53,8 +60,7 @@ class IsaacViserViewer:
         self.show_all_envs: bool = False
 
         self._entity = None
-        self._body_names: list[str] = []
-        self._mesh_handles: list[Any] = []
+        self._visuals: list[_VisualEntry] = []
         self._mesh_batch: int = 0
 
         self._ground_handle: Any | None = None
@@ -82,14 +88,135 @@ class IsaacViserViewer:
         if self._is_setup:
             return
 
-        self._entity = self.env.scene.articulations["robot"]
-        body_meshes = _load_entity_body_meshes(self._entity)
-        self._body_names = [name for name, _ in body_meshes]
+        from active_adaptation.envs.backends.isaaclab.meshes import (
+            load_entity_body_geom_parts,
+        )
 
-        self._upload_body_meshes(body_meshes)
+        self._entity = self.env.scene.articulations["robot"]
+        body_ids, body_names, parts_per_body = load_entity_body_geom_parts(
+            self._entity, suffixes=("visuals",), require_all=False
+        )
+        self._upload_body_parts(body_ids, body_names, parts_per_body)
         self._try_add_ground()
         self._setup_gui()
         self._is_setup = True
+
+    def _upload_body_parts(
+        self,
+        body_ids: list[int],
+        body_names: list[str],
+        parts_per_body: list,
+    ) -> None:
+        batch = self.env.num_envs
+        self._visuals = []
+        identity = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        zeros = np.zeros(3, dtype=np.float64)
+        color = self._DEFAULT_COLOR
+
+        for body_id, body_name, parts in zip(body_ids, body_names, parts_per_body):
+            for part_i, part in enumerate(parts):
+                name = f"/robot/{body_name}/p{part_i}_{part.type_name}"
+                # Viser has no batched box/sphere/cylinder API. Prefer natives for
+                # modest env counts; otherwise tessellate into one batched mesh.
+                use_native = batch <= 64 and part.viser_kind in (
+                    "box",
+                    "sphere",
+                    "cylinder",
+                )
+                if (
+                    use_native
+                    and part.viser_kind == "box"
+                    and part.box_dimensions is not None
+                ):
+                    handles = [
+                        self._server.scene.add_box(
+                            f"{name}/e{e}",
+                            color=color,
+                            dimensions=part.box_dimensions,
+                            position=(0.0, 0.0, 0.0),
+                            wxyz=(1.0, 0.0, 0.0, 0.0),
+                        )
+                        for e in range(batch)
+                    ]
+                    self._visuals.append(
+                        _VisualEntry(
+                            body_id=body_id,
+                            kind="box",
+                            handle=handles,
+                            local_pos=part.local_pos.copy(),
+                            local_quat_wxyz=part.local_quat_wxyz.copy(),
+                        )
+                    )
+                elif (
+                    use_native
+                    and part.viser_kind == "sphere"
+                    and part.sphere_radius is not None
+                ):
+                    handles = [
+                        self._server.scene.add_icosphere(
+                            f"{name}/e{e}",
+                            radius=float(part.sphere_radius),
+                            color=color,
+                            position=(0.0, 0.0, 0.0),
+                            wxyz=(1.0, 0.0, 0.0, 0.0),
+                        )
+                        for e in range(batch)
+                    ]
+                    self._visuals.append(
+                        _VisualEntry(
+                            body_id=body_id,
+                            kind="sphere",
+                            handle=handles,
+                            local_pos=part.local_pos.copy(),
+                            local_quat_wxyz=part.local_quat_wxyz.copy(),
+                        )
+                    )
+                elif (
+                    use_native
+                    and part.viser_kind == "cylinder"
+                    and part.cylinder_radius is not None
+                    and part.cylinder_height is not None
+                ):
+                    handles = [
+                        self._server.scene.add_cylinder(
+                            f"{name}/e{e}",
+                            radius=float(part.cylinder_radius),
+                            height=float(part.cylinder_height),
+                            color=color,
+                            position=(0.0, 0.0, 0.0),
+                            wxyz=(1.0, 0.0, 0.0, 0.0),
+                        )
+                        for e in range(batch)
+                    ]
+                    self._visuals.append(
+                        _VisualEntry(
+                            body_id=body_id,
+                            kind="cylinder",
+                            handle=handles,
+                            local_pos=part.local_pos.copy(),
+                            local_quat_wxyz=part.local_quat_wxyz.copy(),
+                        )
+                    )
+                else:
+                    # Mesh / Capsule / Cone / non-uniform / large-batch primitives.
+                    batched_wxyzs = np.tile(identity.astype(np.float32), (batch, 1))
+                    batched_pos = np.zeros((batch, 3), dtype=np.float32)
+                    handle = self._server.scene.add_batched_meshes_trimesh(
+                        name,
+                        part.mesh,
+                        batched_wxyzs=batched_wxyzs,
+                        batched_positions=batched_pos,
+                    )
+                    self._visuals.append(
+                        _VisualEntry(
+                            body_id=body_id,
+                            kind="mesh",
+                            handle=handle,
+                            local_pos=zeros.copy(),
+                            local_quat_wxyz=identity.copy(),
+                        )
+                    )
+        self._mesh_batch = batch
 
     def add_gaussian_splat(self, gs, *, name: str = "/visual/gaussians") -> None:
         """Upload an fvdb ``GaussianSplat3d`` for browser visualization (debug).
@@ -183,23 +310,6 @@ class IsaacViserViewer:
                 # GUI callbacks run off the env step thread — only flip the flag.
                 # Mesh handles stay sized to num_envs; update() parks hidden envs.
                 self.show_all_envs = bool(self._gui_show_all.value)
-
-    def _upload_body_meshes(self, body_meshes: list[tuple[str, Any]]) -> None:
-        # Always allocate num_envs instances so toggling show_all never needs
-        # remove/recreate (Viser GUI callbacks can race env-step update()).
-        batch = self.env.num_envs
-        self._mesh_handles = []
-        identity = np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (batch, 1))
-        zeros = np.zeros((batch, 3), dtype=np.float32)
-        for body_name, mesh in body_meshes:
-            handle = self._server.scene.add_batched_meshes_trimesh(
-                f"/robot/{body_name}",
-                mesh,
-                batched_wxyzs=identity,
-                batched_positions=zeros,
-            )
-            self._mesh_handles.append(handle)
-        self._mesh_batch = batch
 
     def _try_add_ground(self) -> None:
         """Visualize ``/World/ground``: infinite grid for PhysX planes, mesh otherwise.
@@ -412,22 +522,51 @@ class IsaacViserViewer:
 
         poses = self._entity.data.body_link_pose_w
         idx = int(np.clip(self.env_idx, 0, self.env.num_envs - 1))
-        for body_i, handle in enumerate(self._mesh_handles):
-            if getattr(handle, "_impl", None) is not None and handle._impl.removed:
-                continue
-            pos = poses[:, body_i, :3].detach().cpu().numpy()
-            quat = poses[:, body_i, 3:7].detach().cpu().numpy()
-            if not self.show_all_envs:
-                # Park non-selected env instances far away (no handle rebuild).
-                parked_pos = np.full_like(pos, 1.0e4)
-                parked_quat = np.tile(
-                    np.array([1.0, 0.0, 0.0, 0.0], dtype=pos.dtype), (pos.shape[0], 1)
-                )
-                parked_pos[idx] = pos[idx]
-                parked_quat[idx] = quat[idx]
-                pos, quat = parked_pos, parked_quat
-            handle.batched_positions = pos
-            handle.batched_wxyzs = quat
+        park = np.array([1.0e4, 1.0e4, 1.0e4], dtype=np.float64)
+        ident = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+
+        for entry in self._visuals:
+            body_pos = poses[:, entry.body_id, :3]
+            body_quat = poses[:, entry.body_id, 3:7]
+            local_pos_t = torch.as_tensor(
+                entry.local_pos, device=body_pos.device, dtype=body_pos.dtype
+            )
+            local_quat_t = torch.as_tensor(
+                entry.local_quat_wxyz, device=body_quat.device, dtype=body_quat.dtype
+            )
+            # world = body ⊗ local (local already identity for baked meshes)
+            world_quat = quat_mul(
+                body_quat, local_quat_t.unsqueeze(0).expand_as(body_quat)
+            )
+            world_pos = body_pos + quat_rotate(
+                body_quat, local_pos_t.unsqueeze(0).expand_as(body_pos)
+            )
+            pos_np = world_pos.detach().cpu().numpy()
+            quat_np = world_quat.detach().cpu().numpy()
+
+            if entry.kind == "mesh":
+                handle = entry.handle
+                if getattr(handle, "_impl", None) is not None and handle._impl.removed:
+                    continue
+                if not self.show_all_envs:
+                    parked_pos = np.full_like(pos_np, 1.0e4)
+                    parked_quat = np.tile(ident.astype(pos_np.dtype), (pos_np.shape[0], 1))
+                    parked_pos[idx] = pos_np[idx]
+                    parked_quat[idx] = quat_np[idx]
+                    pos_np, quat_np = parked_pos, parked_quat
+                handle.batched_positions = pos_np.astype(np.float32)
+                handle.batched_wxyzs = quat_np.astype(np.float32)
+            else:
+                handles = entry.handle
+                for e, handle in enumerate(handles):
+                    if getattr(handle, "_impl", None) is not None and handle._impl.removed:
+                        continue
+                    if not self.show_all_envs and e != idx:
+                        handle.position = park
+                        handle.wxyz = ident
+                    else:
+                        handle.position = pos_np[e]
+                        handle.wxyz = quat_np[e]
 
         self._sync_debug_geometry()
         with self._server.atomic():

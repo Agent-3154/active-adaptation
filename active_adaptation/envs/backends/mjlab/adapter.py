@@ -336,11 +336,14 @@ class MjlabSceneAdapter(SceneAdapter):
         for sensor in self._extra_sensors.values():
             sensor.update(dt)
 
-    def get_visual_meshes(self, name: str) -> list[trimesh.Trimesh]:
-        """Body-local visual trimeshes for ``entities[name]`` (``body_names`` order).
+    def get_visual_meshes(
+        self, name: str
+    ) -> tuple[list[int], list[str], list[trimesh.Trimesh]]:
+        """Body-local visual trimeshes for ``entities[name]``.
 
         Visual = ``contype == 0`` and ``conaffinity == 0`` (mjlab convention).
-        Multiply by ``body_link_pose_w`` at runtime.
+        Returns ``(body_indices, body_names, meshes)``; index poses with
+        ``body_link_pose_w[:, body_indices]``.
         """
         from active_adaptation.envs.backends.mjlab.meshes import load_entity_body_meshes
 
@@ -349,12 +352,14 @@ class MjlabSceneAdapter(SceneAdapter):
             entity, self._sim.mj_model, role="visual", require_all=True
         )
 
-    def get_collision_meshes(self, name: str) -> list[trimesh.Trimesh]:
-        """Body-local collision trimeshes for ``entities[name]`` (``body_names`` order).
+    def get_collision_meshes(
+        self, name: str
+    ) -> tuple[list[int], list[str], list[trimesh.Trimesh]]:
+        """Body-local collision trimeshes for ``entities[name]``.
 
-        Collision = any geom with nonzero ``contype``/``conaffinity``. Bodies without
-        collision geoms get an empty trimesh so the list stays aligned with
-        ``num_bodies`` / ``body_link_pose_w``.
+        Collision = any geom with nonzero ``contype``/``conaffinity``. Bodies
+        without collision geoms are skipped. Returns
+        ``(body_indices, body_names, meshes)``.
         """
         from active_adaptation.envs.backends.mjlab.meshes import load_entity_body_meshes
 

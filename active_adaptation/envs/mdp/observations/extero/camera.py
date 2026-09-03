@@ -483,7 +483,8 @@ class raycast_camera(Observation):
             rgb = (1.0 - self._last_depth[env_idx] / max(self.sensor.far, 1e-6)).clamp(
                 0.0, 1.0
             ).unsqueeze(-1).expand(-1, -1, 3)
-        return (rgb * 255.0).byte().cpu().numpy()
+        rgb_uint8 = (rgb * 255.0).byte().cpu().numpy()
+        return rgb_uint8
 
     @override
     def compute(self) -> torch.Tensor:
@@ -496,7 +497,7 @@ class raycast_camera(Observation):
             device=self.device,
             num_envs=self.num_envs,
         )
-        rgb, depth, mask = self.sensor.render(cam_pos_w, cam_quat_w)
+        rgb, depth, mask = self.sensor.render(cam_pos_w, cam_quat_w, clone=True)
         self._last_rgb = rgb
         self._last_depth = depth
         self._last_mask = mask

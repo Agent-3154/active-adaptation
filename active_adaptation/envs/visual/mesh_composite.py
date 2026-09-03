@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
+import numpy as np
 import torch
 import trimesh
 from simple_raycaster import MeshRGBDRenderer, make_mesh_rgbd_renderer
@@ -72,8 +73,24 @@ class MeshCompositor:
                     f"mesh entity {name!r} not in scene.entities "
                     f"(have {sorted(scene.entities)})"
                 )
-            meshes = scene.get_visual_meshes(name)
-            self.register_entity(name, scene.entities[name], meshes)
+            entity = scene.entities[name]
+            body_indices, _body_names, meshes = scene.get_visual_meshes(name)
+            # Mesh RGB-D helpers still expect a dense ``num_bodies`` list and
+            # skip empties internally (body index == enumerate index).
+            dense: list[trimesh.Trimesh | None] = [None] * int(entity.num_bodies)
+            for body_i, mesh in zip(body_indices, meshes):
+                dense[int(body_i)] = mesh
+            filled = [
+                m
+                if m is not None
+                else trimesh.Trimesh(
+                    vertices=np.zeros((0, 3)),
+                    faces=np.zeros((0, 3), dtype=np.int64),
+                    process=False,
+                )
+                for m in dense
+            ]
+            self.register_entity(name, entity, filled)
 
     def render_rgbd(
         self,

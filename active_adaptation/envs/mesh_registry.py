@@ -158,15 +158,20 @@ class MeshRegistry:
         from simple_raycaster.helpers import trimesh2wp
 
         entity = scene.entities[target]
-        meshes = scene.get_visual_meshes(target)
-        if len(meshes) != entity.num_bodies:
+        body_indices, body_names, meshes = scene.get_visual_meshes(target)
+        if not meshes:
             raise ValueError(
-                f"Expected {entity.num_bodies} body meshes for {target!r}, got {len(meshes)}"
+                f"Entity {target!r} has no non-empty visual meshes for warp rendering"
             )
-        body_indices: list[int] = []
-        for body_i, mesh in enumerate(meshes):
+        if not (len(body_indices) == len(body_names) == len(meshes)):
+            raise ValueError(
+                f"get_visual_meshes({target!r}) returned mismatched lengths: "
+                f"indices={len(body_indices)}, names={len(body_names)}, "
+                f"meshes={len(meshes)}"
+            )
+        kept_indices: list[int] = []
+        for body_i, body_name, mesh in zip(body_indices, body_names, meshes):
             if mesh is None or len(mesh.vertices) == 0 or len(mesh.faces) == 0:
-                body_name = entity.body_names[body_i]
                 warnings.warn(
                     f"MeshRegistry: skipping empty visual mesh for {target!r} "
                     f"body {body_name!r}.",
@@ -174,13 +179,13 @@ class MeshRegistry:
                 )
                 continue
             self.meshes_wp.append(trimesh2wp(mesh, self.device))
-            body_indices.append(body_i)
-        if not body_indices:
+            kept_indices.append(int(body_i))
+        if not kept_indices:
             raise ValueError(
                 f"Entity {target!r} has no non-empty visual meshes for warp rendering"
             )
         self.entities.append(entity)
-        self._entity_body_indices.append(tuple(body_indices))
+        self._entity_body_indices.append(tuple(kept_indices))
 
     @staticmethod
     def _terrain_trimesh(scene: Any) -> trimesh.Trimesh:
@@ -190,7 +195,7 @@ class MeshRegistry:
                 f"terrain target requires a terrain entity "
                 f"(have {sorted(scene.entities)})"
             )
-        meshes = scene.get_collision_meshes(_TERRAIN_KEY)
+        _body_indices, _body_names, meshes = scene.get_collision_meshes(_TERRAIN_KEY)
         kept = [m for m in meshes if len(m.vertices) > 0 and len(m.faces) > 0]
         if not kept:
             raise ValueError("terrain entity has no collision meshes")

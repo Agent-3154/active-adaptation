@@ -127,20 +127,25 @@ class SceneAdapter(Protocol):
     @property
     def entities(self) -> Dict[str, Union["Articulation", "Entity"]]: ...
 
-    def get_visual_meshes(self, name: str) -> list[trimesh.Trimesh]:
-        """Body-local visual meshes for ``entities[name]`` (``body_names`` order).
+    def get_visual_meshes(
+        self, name: str
+    ) -> tuple[list[int], list[str], list[trimesh.Trimesh]]:
+        """Body-local visual meshes for ``entities[name]``.
 
-        Length matches ``num_bodies``; apply ``body_link_pose_w`` at runtime.
+        Returns ``(body_indices, body_names, meshes)`` for bodies with geometry.
+        Index poses with ``body_link_pose_w[:, body_indices]``.
         """
         raise NotImplementedError(
             f"get_visual_meshes is not implemented for {self.__class__.__name__}."
         )
 
-    def get_collision_meshes(self, name: str) -> list[trimesh.Trimesh]:
-        """Body-local collision meshes for ``entities[name]`` (``body_names`` order).
+    def get_collision_meshes(
+        self, name: str
+    ) -> tuple[list[int], list[str], list[trimesh.Trimesh]]:
+        """Body-local collision meshes for ``entities[name]``.
 
-        Length matches ``num_bodies``; bodies without collision geometry may be
-        empty trimeshes (backend-dependent).
+        Returns ``(body_indices, body_names, meshes)`` for bodies with collision
+        geometry (backend may skip empty bodies).
         """
         raise NotImplementedError(
             f"get_collision_meshes is not implemented for {self.__class__.__name__}."

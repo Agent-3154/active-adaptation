@@ -101,19 +101,26 @@ class LambertRaycastCameraSensor:
         self,
         cam_pos_w: torch.Tensor,
         cam_quat_w: torch.Tensor,
+        clone: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Render RGB-D for explicit camera poses → ``rgb, depth, mask``."""
+        """Render RGB-D for explicit camera poses → ``rgb, depth, mask``.
+
+        Note that the underlying camera reuses ouput buffers, set `clone` to `True` to get a copy of the tensors.
+        """
         camera = self._camera
         mesh_registry = self._mesh_registry
         assert camera is not None and mesh_registry is not None
         mesh_pos_w, mesh_quat_w = mesh_registry.poses_for_indices(self._mesh_indices)
-        return camera.render(
+        tensors = camera.render(
             cam_pos_w,
             cam_quat_w,
             mesh_pos_w=mesh_pos_w,
             mesh_quat_w=mesh_quat_w,
             light_dir=self.light_dir,
         )
+        if clone:
+            tensors = tuple(tensor.clone() for tensor in tensors)
+        return tensors
 
     @staticmethod
     def mount_pose(

@@ -9,20 +9,12 @@ Isaac ``get_visual_meshes`` / ``get_collision_meshes``).
 
 from __future__ import annotations
 
-from typing import Literal
+import warnings
+from typing import Literal, Tuple
 
-import numpy as np
 import trimesh
 
 GeomRole = Literal["visual", "collision"]
-
-
-def _empty_trimesh() -> trimesh.Trimesh:
-    return trimesh.Trimesh(
-        vertices=np.zeros((0, 3), dtype=np.float64),
-        faces=np.zeros((0, 3), dtype=np.int64),
-        process=False,
-    )
 
 
 def _is_visual_geom(mj_model, geom_id: int) -> bool:
@@ -56,15 +48,19 @@ def load_entity_body_meshes(
     *,
     role: GeomRole,
     require_all: bool = True,
-) -> list[trimesh.Trimesh]:
-    """Extract one body-local trimesh per ``entity.body_names`` entry.
+) -> Tuple[list[int], list[str], list[trimesh.Trimesh]]:
+    """Extract body-local trimeshes for bodies that have matching geoms.
 
     Args:
         entity: mjlab ``Entity`` (must be initialized; uses ``indexing.body_ids``).
         mj_model: compiled ``mujoco.MjModel`` from the simulation.
         role: ``\"visual\"`` or ``\"collision\"`` (contype/conaffinity).
         require_all: If True, bodies with no matching geoms raise. If False,
-            they get an empty trimesh (keeps ``num_bodies`` alignment).
+            those bodies are skipped with a warning.
+
+    Returns:
+        ``(body_indices, body_names, meshes)`` — parallel lists for bodies that
+        produced a mesh. Index poses with ``body_link_pose_w[:, body_indices]``.
     """
     from mjviser.conversions import merge_geoms
 
@@ -80,6 +76,8 @@ def load_entity_body_meshes(
             f"indexing.body_ids length {len(body_ids)} != num_bodies {entity.num_bodies}"
         )
 
+    out_indices: list[int] = []
+    out_names: list[str] = []
     meshes: list[trimesh.Trimesh] = []
     for body_i, body_id in enumerate(body_ids):
         body_name = entity.body_names[body_i]
@@ -89,13 +87,13 @@ def load_entity_body_meshes(
                 raise ValueError(
                     f"No {role} geoms for body '{body_name}' (mj body id {body_id})"
                 )
-            meshes.append(_empty_trimesh())
+            warnings.warn(
+                f"Body '{body_name}': no {role} geoms; skipping body.",
+                stacklevel=2,
+            )
             continue
         meshes.append(merge_geoms(mj_model, geom_ids))
+        out_indices.append(body_i)
+        out_names.append(body_name)
 
-    if len(meshes) != entity.num_bodies:
-        raise ValueError(
-            f"Extracted {len(meshes)} body meshes but entity has "
-            f"{entity.num_bodies} bodies."
-        )
-    return meshes
+    return out_indices, out_names, meshes
