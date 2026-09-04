@@ -593,10 +593,10 @@ collisions = env.scene.get_collision_meshes("robot") # same sparse contract; no 
 
 Low-level extraction still lives in `simple_raycaster.utils_usd` (also used by Viser):
 
-1. `find_matching_prims(regex, stage)` — stage traverse with anchored regex.
+1. Concrete `env_0` paths → `stage.GetPrimAtPath` (AA `envs/backends/isaaclab/meshes.py`). Regex `find_matching_prims` only when the path is a pattern.
 2. `get_trimesh_from_prim(prim)` — collect `Mesh`/`Cube` under the prim (follows instance prototypes), convert via `usd2trimesh`, apply **local** transform relative to the parent prim (`world * parent⁻¹`), concatenate + `merge_vertices`.
 3. Result is in **body / parent frame**; at runtime multiply by `body_link_pose_w` (or use `MeshRegistry.update_poses`).
-4. Visuals: `{body}/visuals` (required). Collisions: `{body}/collisions` then `{body}/collision`.
+4. Visuals: `{body}/visuals` then body root. Collisions: `{body}/collisions` then `{body}/collision`.
 
 Static terrain: combine under e.g. `/World/ground` and keep identity pose (geometry already world-framed).
 

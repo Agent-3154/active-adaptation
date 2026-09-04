@@ -3,6 +3,9 @@
 Mirrors ``simple_raycaster`` / Viser conventions:
 ``{body}/visuals`` or ``{body}/collisions`` under ``root_physx_view.prim_paths[0]``.
 Meshes are in the body frame for use with ``body_link_pose_w``.
+
+Paths built here are concrete ``env_0`` templates (no regex), so lookups use
+``stage.GetPrimAtPath`` rather than a full-stage ``find_matching_prims`` walk.
 """
 
 from __future__ import annotations
@@ -36,9 +39,15 @@ def entity_body_prim_paths(entity, suffix: str) -> list[str]:
     return [f"{template_path}/{body_name}{trail}" for body_name in entity.body_names]
 
 
-def _resolve_body_prims(entity, suffixes: Sequence[str], stage):
-    from simple_raycaster.utils_usd import find_matching_prims
+def _get_prim_at_path(stage, path: str):
+    """Return the USD prim at a concrete path, or ``None`` if missing."""
+    prim = stage.GetPrimAtPath(path)
+    if prim is None or not prim.IsValid():
+        return None
+    return prim
 
+
+def _resolve_body_prims(entity, suffixes: Sequence[str], stage):
     if not suffixes:
         raise ValueError("suffixes must be non-empty")
     path_lists = [entity_body_prim_paths(entity, s) for s in suffixes]
@@ -47,15 +56,10 @@ def _resolve_body_prims(entity, suffixes: Sequence[str], stage):
         for paths in path_lists:
             path = paths[body_i]
             tried.append(path)
-            prims = find_matching_prims(path, stage)
-            if len(prims) == 0:
+            prim = _get_prim_at_path(stage, path)
+            if prim is None:
                 continue
-            if len(prims) != 1:
-                raise ValueError(
-                    f"Expected exactly one prim for body '{body_name}' at "
-                    f"'{path}', found {len(prims)}."
-                )
-            yield body_i, body_name, prims[0], tried
+            yield body_i, body_name, prim, tried
             break
         else:
             yield body_i, body_name, None, tried
@@ -192,7 +196,7 @@ def load_prim_geom_parts(
     """
     try:
         from isaacsim.core.utils.stage import get_current_stage
-        from simple_raycaster.utils_usd import find_matching_prims, get_geom_parts_from_prim
+        from simple_raycaster.utils_usd import get_geom_parts_from_prim
     except ImportError as e:
         raise ImportError(
             "Isaac prim mesh extraction requires Isaac Sim and "
@@ -205,15 +209,11 @@ def load_prim_geom_parts(
     for suffix in child_suffixes:
         path = f"{prim_path}/{suffix}" if suffix else prim_path
         tried.append(path)
-        prims = find_matching_prims(path, stage)
-        if len(prims) == 0:
+        prim = _get_prim_at_path(stage, path)
+        if prim is None:
             continue
-        if len(prims) != 1:
-            raise ValueError(
-                f"Expected exactly one prim at '{path}', found {len(prims)}."
-            )
         try:
-            parts = get_geom_parts_from_prim(prims[0])
+            parts = get_geom_parts_from_prim(prim)
         except ValueError as e:
             last_err = e
             parts = []

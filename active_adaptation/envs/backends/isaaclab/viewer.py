@@ -387,7 +387,7 @@ class IsaacViserViewer:
         try:
             import isaaclab.sim as sim_utils
             from isaacsim.core.utils.stage import get_current_stage
-            from simple_raycaster.utils_usd import find_matching_prims, get_trimesh_from_prim
+            from simple_raycaster.utils_usd import get_trimesh_from_prim
         except ImportError:
             return
 
@@ -406,11 +406,11 @@ class IsaacViserViewer:
             )
             return
 
-        prims = find_matching_prims(mesh_prim_path, get_current_stage())
-        if not prims:
+        prim = get_current_stage().GetPrimAtPath(mesh_prim_path)
+        if prim is None or not prim.IsValid():
             return
         try:
-            mesh = get_trimesh_from_prim(prims[0])
+            mesh = get_trimesh_from_prim(prim)
         except ValueError:
             return
         self._ground_handle = self._server.scene.add_mesh_trimesh("/ground", mesh)
