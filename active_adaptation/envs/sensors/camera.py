@@ -40,6 +40,7 @@ class LambertRaycastCameraSensor:
         light_dir: Sequence[float] = (0.45, -0.35, 0.82),
         ambient: float = 0.30,
         diffuse: float = 0.80,
+        closest_hit: bool = True,
     ) -> None:
         self.name = name
         self.width = int(resolution[0])
@@ -51,6 +52,7 @@ class LambertRaycastCameraSensor:
         self.light_dir = tuple(float(x) for x in light_dir)
         self.ambient = float(ambient)
         self.diffuse = float(diffuse)
+        self.closest_hit = bool(closest_hit)
 
         self._camera = None
         self._mesh_registry: MeshRegistry | None = None
@@ -84,6 +86,7 @@ class LambertRaycastCameraSensor:
             diffuse=self.diffuse,
             light_dir=self.light_dir,
             outputs=("rgb", "depth"),
+            closest_hit=self.closest_hit,
         )
         self._camera.bind_meshes(mesh_registry.geometry_view(self._mesh_indices))
         self._camera.initialize()
@@ -154,6 +157,7 @@ def lambert_raycast_camera(
     light_dir: Sequence[float] = (0.45, -0.35, 0.82),
     ambient: float = 0.30,
     diffuse: float = 0.80,
+    closest_hit: bool = True,
 ) -> LambertRaycastCameraSensor:
     """Build a shared Lambert RGB-D renderer (no mount — obs terms call ``render``).
 
@@ -165,6 +169,7 @@ def lambert_raycast_camera(
             resolution: [128, 96]
             fov_y_deg: 70.0
             targets: [terrain, robot]
+            # closest_hit: false   # parallel-over-M A/B (higher memory)
 
     Pair with :class:`~active_adaptation.envs.mdp.observations.extero.camera.raycast_camera`
     observation terms that supply mount ``body_name`` / ``offset_*``.
@@ -180,6 +185,7 @@ def lambert_raycast_camera(
         light_dir=light_dir,
         ambient=ambient,
         diffuse=diffuse,
+        closest_hit=closest_hit,
     )
 
 
