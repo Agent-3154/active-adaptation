@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
-from active_adaptation.envs.mesh_registry import MeshRegistry
+from active_adaptation.envs.mesh_registry import MeshRegistry, target_entity_name
 from active_adaptation.registry import Registry
 from active_adaptation.utils.math import quat_from_euler_xyz, quat_mul, quat_rotate
 
@@ -24,7 +24,7 @@ registry = Registry.instance()
 # OpenCV / ROS optical (+Z forward, +Y down, +X right).
 _MOUNT_TO_OPENCV = (0.5, -0.5, 0.5, -0.5)
 
-# ``mesh_simplify_factor``: scalar (all targets) or per-target map.
+# ``mesh_simplify_factor``: scalar (all targets) or per-target / per-entity map.
 MeshSimplifyFactor = float | Mapping[str, float]
 
 
@@ -32,26 +32,34 @@ def _normalize_simplify_factors(
     spec: MeshSimplifyFactor | None,
     targets: Sequence[str],
 ) -> dict[str, float]:
-    """Return ``{target: factor}`` for targets with ``factor > 0``."""
+    """Return ``{full_target: factor}`` for targets with ``factor > 0``.
+
+    Map keys may be the full target string (``robot/(gripper_.*)``) or the
+    entity name (``robot``); the latter applies to every target for that entity.
+    """
     if spec is None:
         return {}
+
     if isinstance(spec, Mapping):
-        out: dict[str, float] = {}
-        unknown = []
-        target_set = set(targets)
-        for key, value in spec.items():
-            name = str(key)
-            factor = float(value)
-            if name not in target_set:
-                unknown.append(name)
-                continue
-            if factor > 0.0:
-                out[name] = factor
+        raw = {str(k): float(v) for k, v in spec.items()}
+        aliases = set(targets) | {target_entity_name(t) for t in targets}
+        unknown = [k for k in raw if k not in aliases]
         if unknown:
             raise ValueError(
                 f"mesh_simplify_factor keys {unknown} are not in sensor targets "
-                f"{list(targets)}"
+                f"{list(targets)} (or their entity names)"
             )
+        out: dict[str, float] = {}
+        for target in targets:
+            entity = target_entity_name(target)
+            if target in raw:
+                factor = raw[target]
+            elif entity in raw:
+                factor = raw[entity]
+            else:
+                continue
+            if factor > 0.0:
+                out[str(target)] = factor
         return out
 
     factor = float(spec)
@@ -232,10 +240,10 @@ def lambert_raycast_camera(
             _target_: lambert_raycast_camera
             resolution: [128, 96]
             fov_y_deg: 70.0
-            targets: [terrain, robot]
+            targets: [terrain, robot/(gripper_.*|base_link)]
             # closest_hit: false
             # mesh_simplify_factor: 0.5              # all targets
-            # mesh_simplify_factor: {robot: 0.5}     # selective (skip terrain / boxes)
+            # mesh_simplify_factor: {robot: 0.5}     # entity key covers body-filtered targets
 
     Pair with :class:`~active_adaptation.envs.mdp.observations.extero.camera.raycast_camera`
     observation terms that supply mount ``body_name`` / ``offset_*``.

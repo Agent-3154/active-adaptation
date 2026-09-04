@@ -17,6 +17,8 @@ Targets:
 * ``terrain`` — static ground (identity pose; mesh already world-framed).
 * ``scene.entities[name]`` — articulations / rigid objects; poses from
   ``body_link_pose_w`` each ``update_poses``.
+* ``name/body_regex`` — same as an entity target, but only bodies whose names
+  ``re.fullmatch`` the regex (e.g. ``robot/(gripper_.*|base_link)``).
 * ``scene.extras[name]`` — Isaac ``AssetBaseCfg`` collision-only props; mesh
   loaded once and world poses snapped once at registration (they do not move).
   **Known issue:** Isaac Lab 2.3.2 ``XformPrimView.get_world_poses()`` may
@@ -29,6 +31,7 @@ sensors, which refreshes cached mesh poses.
 
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -44,6 +47,24 @@ class _MeshBindView:
     """Minimal ``bind_meshes`` target: a ``meshes_wp`` list slice."""
 
     meshes_wp: list
+
+
+def parse_mesh_target(target: str) -> tuple[str, str | None]:
+    """Split ``entity`` or ``entity/body_regex`` into ``(entity, pattern|None)``."""
+    key = str(target)
+    if "/" not in key:
+        return key, None
+    entity, pattern = key.split("/", 1)
+    if not entity:
+        raise ValueError(f"Invalid mesh target {target!r}: empty entity name")
+    if not pattern:
+        raise ValueError(f"Invalid mesh target {target!r}: empty body regex after '/'")
+    return entity, pattern
+
+
+def target_entity_name(target: str) -> str:
+    """Entity / extra / terrain name for a target (strip optional body regex)."""
+    return parse_mesh_target(target)[0]
 
 
 class MeshRegistry:
@@ -95,7 +116,11 @@ class MeshRegistry:
         return len(self.meshes_wp)
 
     def ensure_targets(self, scene: Any, targets: Sequence[str]) -> tuple[int, ...]:
-        """Register ``targets`` if missing; return flat mesh indices for them."""
+        """Register ``targets`` if missing; return flat mesh indices for them.
+
+        Each target may be ``terrain``, an entity/extra name, or
+        ``entity/body_regex`` to keep only matching visual bodies.
+        """
         if not targets:
             raise ValueError("ensure_targets: targets must be non-empty")
         indices: list[int] = []
@@ -181,17 +206,29 @@ class MeshRegistry:
 
     def _register_target(self, scene: Any, target: str) -> tuple[int, ...]:
         start = self.n_meshes
-        if target == _TERRAIN_KEY:
+        entity_name, body_pattern = parse_mesh_target(target)
+        if entity_name == _TERRAIN_KEY:
+            if body_pattern is not None:
+                raise ValueError(
+                    f"terrain target does not support a body filter "
+                    f"(got {target!r})"
+                )
             self._register_terrain(scene)
-        elif target in scene.entities:
-            self._register_entity(scene, target)
-        elif target in (getattr(scene, "extras", None) or {}):
-            self._register_extra(scene, target)
+        elif entity_name in scene.entities:
+            self._register_entity(scene, entity_name, body_pattern=body_pattern)
+        elif entity_name in (getattr(scene, "extras", None) or {}):
+            if body_pattern is not None:
+                raise ValueError(
+                    f"extra target {entity_name!r} does not support a body filter "
+                    f"(got {target!r})"
+                )
+            self._register_extra(scene, entity_name)
         else:
             extras = getattr(scene, "extras", None) or {}
             raise KeyError(
-                f"MeshRegistry target {target!r} not found in scene.entities "
-                f"{sorted(scene.entities)} or scene.extras {sorted(extras)}"
+                f"MeshRegistry target {target!r} (entity {entity_name!r}) not found "
+                f"in scene.entities {sorted(scene.entities)} or "
+                f"scene.extras {sorted(extras)}"
             )
         end = self.n_meshes
         if end == start:
@@ -224,26 +261,36 @@ class MeshRegistry:
             self.meshes_wp.append(trimesh2wp(mesh, self.device))
         self._append_group(entity=None, body_indices=None)
 
-    def _register_entity(self, scene: Any, target: str) -> None:
+    def _register_entity(
+        self,
+        scene: Any,
+        entity_name: str,
+        *,
+        body_pattern: str | None = None,
+    ) -> None:
         from simple_raycaster.helpers import trimesh2wp
 
-        entity = scene.entities[target]
-        body_indices, body_names, meshes = scene.get_visual_meshes(target)
+        entity = scene.entities[entity_name]
+        body_indices, body_names, meshes = scene.get_visual_meshes(entity_name)
         if not meshes:
             raise ValueError(
-                f"Entity {target!r} has no non-empty visual meshes for warp rendering"
+                f"Entity {entity_name!r} has no non-empty visual meshes for warp rendering"
             )
         if not (len(body_indices) == len(body_names) == len(meshes)):
             raise ValueError(
-                f"get_visual_meshes({target!r}) returned mismatched lengths: "
+                f"get_visual_meshes({entity_name!r}) returned mismatched lengths: "
                 f"indices={len(body_indices)}, names={len(body_names)}, "
                 f"meshes={len(meshes)}"
             )
+
+        matcher = re.compile(body_pattern).fullmatch if body_pattern else None
         kept_indices: list[int] = []
         for body_i, body_name, mesh in zip(body_indices, body_names, meshes):
+            if matcher is not None and matcher(body_name) is None:
+                continue
             if mesh is None or len(mesh.vertices) == 0 or len(mesh.faces) == 0:
                 warnings.warn(
-                    f"MeshRegistry: skipping empty visual mesh for {target!r} "
+                    f"MeshRegistry: skipping empty visual mesh for {entity_name!r} "
                     f"body {body_name!r}.",
                     stacklevel=2,
                 )
@@ -252,8 +299,14 @@ class MeshRegistry:
             self.meshes_wp.append(trimesh2wp(mesh, self.device))
             kept_indices.append(int(body_i))
         if not kept_indices:
+            detail = (
+                f" matching body pattern {body_pattern!r}"
+                if body_pattern is not None
+                else ""
+            )
             raise ValueError(
-                f"Entity {target!r} has no non-empty visual meshes for warp rendering"
+                f"Entity {entity_name!r} has no non-empty visual meshes{detail} "
+                f"for warp rendering (available bodies: {body_names})"
             )
         self._append_group(entity=entity, body_indices=tuple(kept_indices))
 

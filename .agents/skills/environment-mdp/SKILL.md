@@ -578,6 +578,7 @@ mesh_pos_w, mesh_quat_w = registry.poses_for_indices(indices)
 ```
 
 - Entity meshes come from `scene.get_visual_meshes(name)` (body-local); poses from `entity.data.body_link_pose_w`.
+- Target filters: `robot/(gripper_.*|base_link)` keeps bodies whose names `re.fullmatch` the regex.
 - Isaac `scene.extras[name]` (collision-only `AssetBaseCfg`): mesh + world poses snapped once at registration (static). **Known issue (Isaac Lab 2.3.2):** `XformPrimView.get_world_poses()` may return only env_0 — `MeshRegistry._register_extra` expands via `env_origins` until a proper multi-env query exists.
 - Terrain: Isaac uses `scene.ground_mesh`; mjlab uses collision trimesh → `trimesh2wp`.
 - Batch `N` on rays must equal `entity.num_instances` (`num_envs`).
