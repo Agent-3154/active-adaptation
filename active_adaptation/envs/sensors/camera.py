@@ -10,7 +10,7 @@ Mesh geometry and poses come from the scene-owned
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import torch
 
@@ -23,6 +23,41 @@ registry = Registry.instance()
 # Body / user mount is +X forward, +Y left, +Z up. RaycastCamera + Viser use
 # OpenCV / ROS optical (+Z forward, +Y down, +X right).
 _MOUNT_TO_OPENCV = (0.5, -0.5, 0.5, -0.5)
+
+# ``mesh_simplify_factor``: scalar (all targets) or per-target map.
+MeshSimplifyFactor = float | Mapping[str, float]
+
+
+def _normalize_simplify_factors(
+    spec: MeshSimplifyFactor | None,
+    targets: Sequence[str],
+) -> dict[str, float]:
+    """Return ``{target: factor}`` for targets with ``factor > 0``."""
+    if spec is None:
+        return {}
+    if isinstance(spec, Mapping):
+        out: dict[str, float] = {}
+        unknown = []
+        target_set = set(targets)
+        for key, value in spec.items():
+            name = str(key)
+            factor = float(value)
+            if name not in target_set:
+                unknown.append(name)
+                continue
+            if factor > 0.0:
+                out[name] = factor
+        if unknown:
+            raise ValueError(
+                f"mesh_simplify_factor keys {unknown} are not in sensor targets "
+                f"{list(targets)}"
+            )
+        return out
+
+    factor = float(spec)
+    if factor <= 0.0:
+        return {}
+    return {str(t): factor for t in targets}
 
 
 class LambertRaycastCameraSensor:
@@ -41,6 +76,7 @@ class LambertRaycastCameraSensor:
         ambient: float = 0.30,
         diffuse: float = 0.80,
         closest_hit: bool = True,
+        mesh_simplify_factor: MeshSimplifyFactor = 0.0,
     ) -> None:
         self.name = name
         self.width = int(resolution[0])
@@ -53,6 +89,11 @@ class LambertRaycastCameraSensor:
         self.ambient = float(ambient)
         self.diffuse = float(diffuse)
         self.closest_hit = bool(closest_hit)
+        # Scalar or ``{target: factor}``. 0 / omitted target = no simplify.
+        # Camera-local only (does not mutate shared ``MeshRegistry`` Warp meshes).
+        self.mesh_simplify_factor = _normalize_simplify_factors(
+            mesh_simplify_factor, self.targets
+        )
 
         self._camera = None
         self._mesh_registry: MeshRegistry | None = None
@@ -72,7 +113,7 @@ class LambertRaycastCameraSensor:
         )
         self._mesh_indices = mesh_registry.ensure_targets(scene, self.targets)
         self._mesh_registry = mesh_registry
-        
+
         self.mount2opencv = torch.tensor(_MOUNT_TO_OPENCV, device=self.device)
         self._camera = RaycastCamera(
             self.width,
@@ -88,9 +129,31 @@ class LambertRaycastCameraSensor:
             outputs=("rgb", "depth"),
             closest_hit=self.closest_hit,
         )
-        self._camera.bind_meshes(mesh_registry.geometry_view(self._mesh_indices))
+        self._bind_camera_meshes(mesh_registry)
         self._camera.initialize()
         self.update(0.0)
+
+    def _bind_camera_meshes(self, mesh_registry: MeshRegistry) -> None:
+        """Bind registry meshes; optionally quadric-decimate selected targets."""
+        assert self._camera is not None
+        factors = self.mesh_simplify_factor
+        if not factors:
+            self._camera.bind_meshes(mesh_registry.geometry_view(self._mesh_indices))
+            return
+
+        # Per-target simplify → must upload camera-local trimeshes (mixed factors).
+        simplified = []
+        for target in self.targets:
+            idxs = mesh_registry.target_indices[target]
+            factor = factors.get(target, 0.0)
+            for mesh in mesh_registry.trimeshes_for_indices(idxs):
+                if factor > 0.0:
+                    m = mesh.copy()
+                    m = m.simplify_quadric_decimation(factor)
+                    simplified.append(m)
+                else:
+                    simplified.append(mesh)
+        self._camera.bind_trimeshes(simplified)
 
     def update(self, dt: float | None = None) -> None:
         """Refresh cached mesh poses from the scene (called from ``scene.update``)."""
@@ -158,6 +221,7 @@ def lambert_raycast_camera(
     ambient: float = 0.30,
     diffuse: float = 0.80,
     closest_hit: bool = True,
+    mesh_simplify_factor: MeshSimplifyFactor = 0.0,
 ) -> LambertRaycastCameraSensor:
     """Build a shared Lambert RGB-D renderer (no mount — obs terms call ``render``).
 
@@ -169,7 +233,9 @@ def lambert_raycast_camera(
             resolution: [128, 96]
             fov_y_deg: 70.0
             targets: [terrain, robot]
-            # closest_hit: false   # parallel-over-M A/B (higher memory)
+            # closest_hit: false
+            # mesh_simplify_factor: 0.5              # all targets
+            # mesh_simplify_factor: {robot: 0.5}     # selective (skip terrain / boxes)
 
     Pair with :class:`~active_adaptation.envs.mdp.observations.extero.camera.raycast_camera`
     observation terms that supply mount ``body_name`` / ``offset_*``.
@@ -186,6 +252,7 @@ def lambert_raycast_camera(
         ambient=ambient,
         diffuse=diffuse,
         closest_hit=closest_hit,
+        mesh_simplify_factor=mesh_simplify_factor,
     )
 
 

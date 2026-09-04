@@ -900,7 +900,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             for input_manager in self.input_managers.values()
         ]
 
-    @ScopedTimer("env.compute_reward", sync=PROFILE_SYNC_TIMERS)
+    @ScopedTimer("reward.compute", sync=PROFILE_SYNC_TIMERS)
     def _compute_reward(self, tensordict: TensorDictBase) -> TensorDictBase:
         if not self.reward_groups:
             tensordict.set("reward", torch.ones((self.num_envs, 1), device=self.device))
@@ -919,7 +919,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         )
         return tensordict
 
-    @ScopedTimer("env.compute_termination", sync=PROFILE_SYNC_TIMERS)
+    @ScopedTimer("termination.compute", sync=PROFILE_SYNC_TIMERS)
     def _compute_termination(self, tensordict: TensorDictBase) -> TensorDictBase:
         if (terminated := tensordict.get("terminated", None)) is None:
             terminated = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
@@ -953,7 +953,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict.set("discount", discount)
         return tensordict
 
-    @ScopedTimer("env.compute_observation", sync=PROFILE_SYNC_TIMERS)
+    @ScopedTimer("observation.compute", sync=PROFILE_SYNC_TIMERS)
     def _compute_observation(self, tensordict: TensorDictBase) -> TensorDictBase:
         [
             group.compute(tensordict, self.timestamp)

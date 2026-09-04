@@ -56,6 +56,8 @@ class MeshRegistry:
         self.torch_device = torch.device(self.device)
 
         self.meshes_wp: list[Any] = []
+        # CPU trimeshes parallel to ``meshes_wp`` (for optional camera simplify).
+        self.trimeshes: list[trimesh.Trimesh] = []
         # One entry per registered *group* (terrain / entity / extra). A group
         # may contribute multiple meshes (multi-body entities); pose tensors
         # are (N, K, …) with K = number of meshes in that group.
@@ -68,6 +70,11 @@ class MeshRegistry:
 
         self.mesh_pos_w: torch.Tensor | None = None
         self.mesh_quat_w: torch.Tensor | None = None
+
+    @property
+    def target_indices(self) -> dict[str, tuple[int, ...]]:
+        """Registered target name → flat mesh indices into ``meshes_wp`` / ``trimeshes``."""
+        return self._target_indices
 
     @classmethod
     def for_scene(
@@ -103,6 +110,15 @@ class MeshRegistry:
         """Return a bind handle for a mesh subset (for :meth:`RaycastCamera.bind_meshes`)."""
         idx = [int(i) for i in indices]
         return _MeshBindView([self.meshes_wp[i] for i in idx])
+
+    def trimeshes_for_indices(self, indices: Sequence[int]) -> list[trimesh.Trimesh]:
+        """CPU trimeshes for ``indices`` (same order as :meth:`geometry_view`)."""
+        if len(self.trimeshes) != self.n_meshes:
+            raise RuntimeError(
+                f"MeshRegistry trimeshes ({len(self.trimeshes)}) out of sync with "
+                f"meshes_wp ({self.n_meshes})"
+            )
+        return [self.trimeshes[int(i)] for i in indices]
 
     def update_poses(self, num_envs: int) -> None:
         """Refresh :attr:`mesh_pos_w` / :attr:`mesh_quat_w` from entity / fixed state."""
@@ -197,11 +213,14 @@ class MeshRegistry:
 
     def _register_terrain(self, scene: Any) -> None:
         if self.backend == "isaaclab":
+            mesh = self._isaac_terrain_trimesh(scene)
+            self.trimeshes.append(mesh)
             self.meshes_wp.append(scene.ground_mesh)
         else:
             from simple_raycaster.helpers import trimesh2wp
 
             mesh = self._terrain_trimesh(scene)
+            self.trimeshes.append(mesh)
             self.meshes_wp.append(trimesh2wp(mesh, self.device))
         self._append_group(entity=None, body_indices=None)
 
@@ -229,6 +248,7 @@ class MeshRegistry:
                     stacklevel=2,
                 )
                 continue
+            self.trimeshes.append(mesh)
             self.meshes_wp.append(trimesh2wp(mesh, self.device))
             kept_indices.append(int(body_i))
         if not kept_indices:
@@ -258,6 +278,7 @@ class MeshRegistry:
             raise ValueError(f"Extra {target!r} has no prim_paths for mesh extraction")
 
         mesh = load_prim_trimesh(prim_paths[0], require_all=True)
+        self.trimeshes.append(mesh)
         self.meshes_wp.append(trimesh2wp(mesh, self.device))
 
         # TODO(known-issue): Isaac Lab 2.3.2 XformPrimView.get_world_poses()
@@ -279,6 +300,38 @@ class MeshRegistry:
             fixed_pos=fixed_pos,
             fixed_quat=fixed_quat,
         )
+
+    @staticmethod
+    def _isaac_terrain_trimesh(scene: Any) -> trimesh.Trimesh:
+        """CPU ground trimesh matching :meth:`IsaacSceneAdapter.ground_mesh`."""
+        import numpy as np
+        from isaaclab.terrains.trimesh.utils import make_plane
+        from pxr import UsdGeom
+        import isaaclab.sim as sim_utils
+
+        mesh_prim_path = "/World/ground"
+        plane_prim = sim_utils.get_first_matching_child_prim(
+            mesh_prim_path, lambda prim: prim.GetTypeName() == "Plane"
+        )
+        if plane_prim is not None:
+            return make_plane(size=(2e6, 2e6), height=0.0, center_zero=True)
+
+        mesh_prim = sim_utils.get_first_matching_child_prim(
+            mesh_prim_path, lambda prim: prim.GetTypeName() == "Mesh"
+        )
+        if mesh_prim is None or not mesh_prim.IsValid():
+            raise RuntimeError(f"Invalid mesh prim path: {mesh_prim_path}")
+        geom = UsdGeom.Mesh(mesh_prim)
+        points = np.asarray(geom.GetPointsAttr().Get())
+        indices = np.asarray(geom.GetFaceVertexIndicesAttr().Get())
+        counts = geom.GetFaceVertexCountsAttr().Get()
+        if counts is not None and not np.all(np.asarray(counts) == 3):
+            # Fan-triangulate if needed; Isaac ground meshes are usually tris.
+            from simple_raycaster.utils_usd import get_trimesh_from_prim
+
+            return get_trimesh_from_prim(mesh_prim)
+        faces = np.asarray(indices, dtype=np.int64).reshape(-1, 3)
+        return trimesh.Trimesh(vertices=points, faces=faces, process=False)
 
     @staticmethod
     def _terrain_trimesh(scene: Any) -> trimesh.Trimesh:
