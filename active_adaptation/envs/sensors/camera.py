@@ -55,24 +55,23 @@ class LambertRaycastCameraSensor:
         self._camera = None
         self._mesh_registry: MeshRegistry | None = None
         self._mesh_indices: tuple[int, ...] = ()
-        self._num_envs = 0
 
     def initialize(self, env: Any) -> None:
         from simple_raycaster import RaycastCamera
 
         scene = env.scene
-        device = env.device
-        num_envs = env.num_envs
+        self.device = env.device
+        self.num_envs = env.num_envs
         if not self.targets:
             raise ValueError(f"Sensor {self.name!r}: targets must be non-empty")
 
         mesh_registry = MeshRegistry.for_scene(
-            scene, backend=env.backend, device=device
+            scene, backend=env.backend, device=self.device
         )
         self._mesh_indices = mesh_registry.ensure_targets(scene, self.targets)
         self._mesh_registry = mesh_registry
-        self._num_envs = num_envs
-
+        
+        self.mount2opencv = torch.tensor(_MOUNT_TO_OPENCV, device=self.device)
         self._camera = RaycastCamera(
             self.width,
             self.height,
@@ -80,7 +79,7 @@ class LambertRaycastCameraSensor:
             near=self.near,
             far=self.far,
             convention="opencv",
-            device=device,
+            device=self.device,
             ambient=self.ambient,
             diffuse=self.diffuse,
             light_dir=self.light_dir,
@@ -94,7 +93,7 @@ class LambertRaycastCameraSensor:
         """Refresh cached mesh poses from the scene (called from ``scene.update``)."""
         del dt
         if self._mesh_registry is not None:
-            self._mesh_registry.update_poses(self._num_envs)
+            self._mesh_registry.update_poses(self.num_envs)
 
     @torch.no_grad()
     def render(
@@ -122,30 +121,21 @@ class LambertRaycastCameraSensor:
             tensors = tuple(tensor.clone() for tensor in tensors)
         return tensors
 
-    @staticmethod
     def mount_pose(
+        self,
         entity: Any,
         body_id: int,
-        offset_pos: Sequence[float], # TODO: convert to tensor outside of this function
-        offset_rpy: Sequence[float],
-        *,
-        device: torch.device,
-        num_envs: int,
+        offset_pos: torch.Tensor,
+        offset_rpy: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Body mount + FLU offset → OpenCV ``(cam_pos_w, cam_quat_w)``."""
         body_pos_w = entity.data.body_link_pos_w[:, body_id]
         body_quat_w = entity.data.body_link_quat_w[:, body_id]
-        offset_pos_t = torch.as_tensor(offset_pos, device=device, dtype=torch.float32)
-        euler = torch.as_tensor(offset_rpy, device=device, dtype=torch.float32) * (
-            torch.pi / 180.0
-        )
-        mount_quat = quat_mul(
-            quat_from_euler_xyz(euler).reshape(1, 4),
-            torch.tensor(_MOUNT_TO_OPENCV, device=device),
-        )
+        offset_pos_t = offset_pos
+        mount_quat = quat_mul(quat_from_euler_xyz(offset_rpy), self.mount2opencv)
         offset_w = quat_rotate(body_quat_w, offset_pos_t.unsqueeze(0))
         cam_pos_w = body_pos_w + offset_w
-        cam_quat_w = quat_mul(body_quat_w, mount_quat.expand(num_envs, 4))
+        cam_quat_w = quat_mul(body_quat_w, mount_quat.expand(self.num_envs, 4))
         return cam_pos_w, cam_quat_w
 
     def has_debug_vis_implementation(self) -> bool:

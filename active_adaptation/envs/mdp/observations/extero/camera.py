@@ -374,7 +374,7 @@ class raycast_camera(Observation):
         pattern: str | None = None,
         entity: str = "robot",
         offset_pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        offset_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        offset_rpy_deg: tuple[float, float, float] = (0.0, 0.0, 0.0),
         data_type: str | Sequence[str] = "depth",
     ) -> None:
         super().__init__()
@@ -398,7 +398,7 @@ class raycast_camera(Observation):
         self.pattern = pattern
         self.entity_name = entity
         self.offset_pos = tuple(float(x) for x in offset_pos)
-        self.offset_rpy = tuple(float(x) for x in offset_rpy)
+        self.offset_rpy_deg = tuple(float(x) for x in offset_rpy_deg)
         self.data_types = data_types
         self._body_id: int | None = None
         self._mount_entity = None
@@ -439,6 +439,9 @@ class raycast_camera(Observation):
             )
         self._body_id = int(body_ids[0])
         self._mount_entity = mount
+
+        self.offset_pos = torch.tensor(self.offset_pos, device=self.device)
+        self.offset_rpy = torch.tensor(self.offset_rpy_deg, device=self.device) * (math.pi / 180.0)
 
         if self.env.sim.has_gui():
             aspect = self.sensor.width / max(self.sensor.height, 1)
@@ -489,13 +492,11 @@ class raycast_camera(Observation):
     @override
     def compute(self) -> torch.Tensor:
         assert self._body_id is not None and self._mount_entity is not None
-        cam_pos_w, cam_quat_w = type(self.sensor).mount_pose(
+        cam_pos_w, cam_quat_w = self.sensor.mount_pose(
             self._mount_entity,
             self._body_id,
             self.offset_pos,
             self.offset_rpy,
-            device=self.device,
-            num_envs=self.num_envs,
         )
         rgb, depth, mask = self.sensor.render(cam_pos_w, cam_quat_w, clone=True)
         self._last_rgb = rgb
