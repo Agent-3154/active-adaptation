@@ -286,9 +286,10 @@ class PPOPolicy(TensorDictModuleBase):
         if not stage in ("train", ""):
             return
         if aa.is_distributed():
+            aa.bind_local_rank_device()
             if self.cfg.use_ddp:
-                self.actor = DDP(self.actor, device_ids=[aa.get_local_rank()])
-                self.critic = DDP(self.critic, device_ids=[aa.get_local_rank()])
+                self.actor = DDP(self.actor, device_ids=[aa.get_local_cuda_index()])
+                self.critic = DDP(self.critic, device_ids=[aa.get_local_cuda_index()])
             else:
                 for param in self.actor.parameters():
                     distr.broadcast(param, src=0)

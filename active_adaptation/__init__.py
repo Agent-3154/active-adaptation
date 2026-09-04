@@ -34,6 +34,8 @@ _GLOBAL_RANK = int(os.getenv("RANK", str(_LOCAL_RANK)))
 _WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
 _MAIN_PROCESS = _GLOBAL_RANK == 0
 _ISAACLAB_EXCLUDED_EXTENSIONS = ("omni.warp.core",)
+# Set by :func:`isolate_local_cuda_device` when this process is pinned to one GPU.
+_CVD_ISOLATED = False
 
 
 def is_main_process():
@@ -50,6 +52,54 @@ def get_local_rank():
 
 def get_world_size():
     return _WORLD_SIZE
+
+
+def get_local_cuda_index() -> int:
+    """Process-local CUDA device index for Torch / Warp / DDP / NCCL.
+
+    After :func:`isolate_local_cuda_device`, each rank sees a single GPU as
+    ``cuda:0`` (required by Isaac USDRT, which only supports ``cuda:0``).
+    Without isolation, this is ``LOCAL_RANK``.
+    """
+    if _CVD_ISOLATED:
+        return 0
+    return _LOCAL_RANK
+
+
+def isolate_local_cuda_device() -> None:
+    """Pin this process to one physical GPU before CUDA / Isaac init.
+
+    ``launch_ddp`` sets ``CUDA_VISIBLE_DEVICES=0,1,…`` for the whole torchrun
+    job, so rank 1 would otherwise use ``cuda:1``. Isaac's USDRT Fabric path
+    (``UsdStage::SelectPrims``) only supports ``cuda:0`` and hangs on other
+    devices — the failure mode for Lambert / MeshRegistry sensors under DDP.
+
+    Remap visible devices so each rank's local ``cuda:0`` is a distinct GPU.
+    Must run before any ``torch.cuda`` / SimulationApp initialization.
+    """
+    global _CVD_ISOLATED
+    if _CVD_ISOLATED or not is_distributed():
+        return
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not cvd:
+        return
+    ids = [part.strip() for part in cvd.split(",") if part.strip()]
+    if len(ids) <= 1:
+        # Already a single device (or empty); treat as isolated for indexing.
+        _CVD_ISOLATED = True
+        return
+    if _LOCAL_RANK >= len(ids):
+        raise RuntimeError(
+            f"LOCAL_RANK={_LOCAL_RANK} out of range for CUDA_VISIBLE_DEVICES={cvd!r}"
+        )
+    os.environ["CUDA_VISIBLE_DEVICES"] = ids[_LOCAL_RANK]
+    _CVD_ISOLATED = True
+    _original_print(
+        f"[RANK {_LOCAL_RANK}/{_WORLD_SIZE}]: "
+        f"isolated CUDA_VISIBLE_DEVICES -> {ids[_LOCAL_RANK]} "
+        f"(process-local cuda:0)",
+        flush=True,
+    )
 
 
 def _append_kit_arg(existing: str, arg: str) -> str:
@@ -122,6 +172,51 @@ def get_backend():
     return _BACKEND if _BACKEND_SET else None
 
 
+def bind_local_rank_device() -> None:
+    """Re-bind Torch (and Warp, if loaded) to this rank's CUDA device.
+
+    Isaac Kit ``app.update`` / SimulationApp and Warp mesh init often reset
+    ``torch.cuda.current_device()`` back to 0. NCCL then sees every rank on the
+    same visible GPU and hangs at ``ncclCommInitRankConfig``. Call this after
+    AppLauncher, after sensor/Warp setup, and immediately before collectives.
+    """
+    if not is_distributed():
+        return
+    import sys
+    import torch
+    import warp as wp
+
+    if not torch.cuda.is_available():
+        return
+    wp.init()
+    idx = get_local_cuda_index()
+    torch.cuda.set_device(idx)
+    wp.set_device(f"cuda:{idx}")
+
+
+def _init_process_group() -> None:
+    """Create the NCCL process group bound to this rank's CUDA device."""
+    import torch
+    import torch.distributed as dist
+
+    if not dist.is_available() or dist.is_initialized():
+        return
+    bind_local_rank_device()
+    kwargs: dict = {
+        "backend": "nccl",
+        "init_method": "env://",
+    }
+    # PyTorch 2.2+: pin the communicator to the local device so Kit/Warp
+    # device resets cannot leave NCCL on cuda:0 for every rank.
+    if torch.cuda.is_available():
+        kwargs["device_id"] = torch.device(f"cuda:{get_local_cuda_index()}")
+    try:
+        dist.init_process_group(**kwargs)
+    except TypeError:
+        kwargs.pop("device_id", None)
+        dist.init_process_group(**kwargs)
+
+
 def init(cfg: DictConfig, auto_rank: bool):
     """Initialize the active adaptation framework.
 
@@ -138,26 +233,22 @@ def init(cfg: DictConfig, auto_rank: bool):
     elif _BACKEND == "motrix":
         pass # motrixsim env lives on CPU while policy training can be on GPU
 
-    if auto_rank and str(cfg.device).startswith("cuda"):
-        # Remap bare "cuda" / "cuda:0" etc. onto the local visible device index.
-        cfg.device = f"cuda:{get_local_rank()}"
+    # Before any CUDA / Isaac init: one visible GPU per rank so USDRT (cuda:0
+    # only) works under multi-GPU DDP with Lambert / MeshRegistry sensors.
+    if is_distributed() and auto_rank:
+        isolate_local_cuda_device()
 
-    if is_distributed():
+    if auto_rank and str(cfg.device).startswith("cuda"):
+        # Remap bare "cuda" / "cuda:0" etc. onto the process-local device index.
+        cfg.device = f"cuda:{get_local_cuda_index()}"
+
+    if is_distributed() and auto_rank:
         import torch
-        import torch.distributed as dist
 
         # NCCL uses torch.cuda.current_device(). Without set_device, every rank
         # stays on visible cuda:0 → "Duplicate GPU detected".
-        if auto_rank and torch.cuda.is_available():
-            torch.cuda.set_device(get_local_rank())
-
-        if dist.is_available() and not dist.is_initialized():
-            dist.init_process_group(
-                backend="nccl",
-                # world_size=get_world_size(),
-                # rank=get_local_rank(),
-                init_method="env://",
-            )
+        if torch.cuda.is_available():
+            torch.cuda.set_device(get_local_cuda_index())
 
     if get_backend() == "isaaclab":
         from isaaclab.app import AppLauncher
@@ -166,15 +257,29 @@ def init(cfg: DictConfig, auto_rank: bool):
 
         app_config = OmegaConf.to_container(cfg.app, resolve=True)
         app_config = _apply_default_isaaclab_kit_args(app_config)
-        AppLauncher(app_config, distributed=is_distributed(), device=cfg.device)
-        # SimulationApp can reset torch's current CUDA device to 0; re-bind so
-        # later NCCL collectives (e.g. broadcast_object_list before env create)
-        # do not all land on the same visible GPU.
-        if is_distributed() and auto_rank:
-            import torch
+        # AppLauncher(distributed=True) sets active_gpu=LOCAL_RANK. After CVD
+        # isolation the only valid local index is 0, so temporarily report
+        # LOCAL_RANK=0 for Kit while keeping our module-level rank for NCCL.
+        _saved_local_rank = os.environ.get("LOCAL_RANK")
+        if _CVD_ISOLATED:
+            os.environ["LOCAL_RANK"] = "0"
+        try:
+            AppLauncher(
+                app_config,
+                distributed=is_distributed(),
+                device=cfg.device,
+            )
+        finally:
+            if _saved_local_rank is not None:
+                os.environ["LOCAL_RANK"] = _saved_local_rank
+        # SimulationApp resets current CUDA device to 0; re-bind before NCCL.
+        bind_local_rank_device()
 
-            if torch.cuda.is_available():
-                torch.cuda.set_device(get_local_rank())
+    # Init NCCL *after* AppLauncher so the communicator is created on the
+    # correct local device (Kit would otherwise undo a pre-AppLauncher bind).
+    if is_distributed():
+        _init_process_group()
+        bind_local_rank_device()
 
     import active_adaptation.assets # register assets
     import active_adaptation.envs.sensors  # register sensors

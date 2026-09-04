@@ -1,6 +1,7 @@
 from typing import Any
 
 from typing_extensions import override
+import active_adaptation as aa
 from active_adaptation import ROBOT_MODEL_DIR
 from active_adaptation.envs.backends.isaaclab.adapter import (
     IsaacSceneAdapter,
@@ -193,8 +194,13 @@ class IsaacBackendEnv(_EnvBase):
             self.scene.viser_viewer = viser_viewer
 
         for name, sensor in extra_sensors.items():
+            print(f"[rank {aa.get_local_rank()}] initializing sensor {name!r}…", flush=True)
             sensor.initialize(self)
             self.scene._extra_sensors[name] = sensor
+            print(f"[rank {aa.get_local_rank()}] sensor {name!r} ready", flush=True)
+        # Kit warmup / Warp mesh upload often reset current_device to 0; re-bind
+        # before any later NCCL collective (barrier / broadcast / DDP).
+        aa.bind_local_rank_device()
         self.terrain_type = self.scene.terrain.cfg.terrain_type
         self.robot = self.scene.articulations["robot"]
 

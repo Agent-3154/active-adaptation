@@ -283,6 +283,20 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     )
     policy: PPOBase
 
+    # Sensor / Warp / Kit setup can reset current_device; both ranks must finish
+    # env construction on the correct GPU before any post-env NCCL collective.
+    aa.bind_local_rank_device()
+    if aa.is_distributed():
+        import torch.distributed as dist
+
+        print(
+            f"[rank {aa.get_local_rank()}] env ready, "
+            f"current_device={torch.cuda.current_device()}, waiting on barrier…",
+            flush=True,
+        )
+        dist.barrier()
+        print(f"[rank {aa.get_local_rank()}] barrier passed", flush=True)
+
     wandb_run = None
     proc_name = None  # process name for `setproctitle`
     profiling_jsonl_path = None
@@ -320,12 +334,13 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     if aa.is_distributed():
         import torch.distributed as dist
 
-        # Explicit device: Isaac AppLauncher may leave current_device at 0.
+        aa.bind_local_rank_device()
+        # Explicit device: Isaac AppLauncher / Warp may leave current_device at 0.
         name_list = [proc_name]
         dist.broadcast_object_list(
             name_list,
             src=0,
-            device=torch.device(f"cuda:{aa.get_local_rank()}"),
+            device=torch.device(f"cuda:{aa.get_local_cuda_index()}"),
         )
         proc_name = name_list[0]
 
@@ -404,7 +419,12 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     uploaded_ckpt_path = None
     carry = env.reset()
     transitions = cfg.algo.get("store_transitions", True)
-    collector = StackingCollector(
+    # collector = StackingCollector(
+    #     env,
+    #     steps=cfg.algo.train_every,
+    #     transitions=transitions,
+    # )
+    collector = BufferCollector(
         env,
         steps=cfg.algo.train_every,
         transitions=transitions,

@@ -649,7 +649,7 @@ class SAC(TensorDictModuleBase):
         # parameter tensors with the wrapped module, so optimizers built from
         # ``self.actor.parameters()`` keep pointing at the same params.
         if self._distributed:
-            self._wrap_ddp(local_rank=aa.get_local_rank())
+            self._wrap_ddp(local_rank=aa.get_local_cuda_index())
             self._broadcast_parameters()
 
         _dev = torch.device(device) if not isinstance(device, torch.device) else device

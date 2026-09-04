@@ -156,6 +156,9 @@ class MjlabBackendEnv(_EnvBase):
         for name, sensor in extra_sensors.items():
             sensor.initialize(self)
             self.scene._extra_sensors[name] = sensor
+        import active_adaptation as aa
+
+        aa.bind_local_rank_device()
         self.sim = MjlabSimAdapter(sim, viewer, viewer_cfg=viewer_cfg, scene=scene)
         self.robot = self.scene.articulations["robot"]
         if asset_spec.wrapper is not None:

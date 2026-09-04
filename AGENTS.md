@@ -39,6 +39,30 @@ When launching training remotely, follow these operational rules. For agent-orie
 - After launch, do not assume success from process existence alone. Verify that the job passes asset resolution, environment creation, W&B initialization, and reaches the tqdm/iteration loop; record early W&B run ids and any restart reason in the markdown log.
 - If a run hangs during startup, stop the tmux session and child `torchrun`/Python processes, archive the partial log, fix the root cause, and relaunch with a fresh log. Recheck that all GPUs are released before relaunching.
 
+### Multi-GPU / DDP (Isaac + sensors)
+
+`scripts/launch_ddp.sh 0,1 …` sets `CUDA_VISIBLE_DEVICES=0,1` for the whole `torchrun` job. In `aa.init(auto_rank=True)`, **`isolate_local_cuda_device()`** then remaps each rank to a **single** visible GPU **before** any CUDA / Isaac / Warp init:
+
+| Rank | After isolation | Process-local device |
+| --- | --- | --- |
+| 0 | `CUDA_VISIBLE_DEVICES=0` | `cuda:0` (physical GPU 0) |
+| 1 | `CUDA_VISIBLE_DEVICES=1` | `cuda:0` (physical GPU 1) |
+
+**Why:** Isaac USDRT Fabric (`UsdStage::SelectPrims`) only supports process-local `cuda:0`. Without isolation, rank 1 uses `cuda:1` and hangs during sensor / `MeshRegistry` setup when Fabric pose reads run (e.g. pedestal `XformPrimView.get_world_poses()`), while rank 0 waits forever on the first NCCL collective.
+
+**Agent rules for distributed code:**
+
+- Use `aa.get_local_cuda_index()` (not `aa.get_local_rank()`) for Torch / Warp / DDP `device_ids` / NCCL `device=` after `aa.init`. Under isolation this is always `0`; `get_local_rank()` remains the process rank for logging and NCCL identity.
+- Expect `cfg.device` / `env.device` to be `"cuda:0"` on **every** rank when isolated. Do not hard-code `cuda:{LOCAL_RANK}`.
+- Call `aa.bind_local_rank_device()` after Kit / Warp work that may reset the current device, and immediately before NCCL collectives if isolation is not in effect. With CVD isolation it is mostly defensive (current device `0` is already correct).
+- NCCL process group is created **after** `AppLauncher` (with `device_id` pinned to the local index). Do not assume `dist` is initialized before the Isaac app exists.
+- CVD isolation is the default for one-env-per-rank DDP. Avoid it only when a single process must see multiple GPUs (model/pipeline parallel). Isolation must run before the first CUDA init.
+
+Startup hang signatures to recognize:
+
+- `SelectPrims: GPU N requested. GPUs other than cuda:0 are not currently supported` → missing / late CVD isolation; rank 1 stuck in sensor init.
+- Rank 0 at `barrier` / `broadcast_object_list` with NCCL `Init START` and no rank-1 `sensor … ready` → same root cause (desync), not a broken NCCL install.
+
 For new features, add the smallest reproducible command in the PR description and verify both config loading and the affected training/eval path.
 
 ## Commit & Pull Request Guidelines

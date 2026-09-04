@@ -16,6 +16,35 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   - `off`: skip the guard entirely
   - default: `error`; tasks that want bad-env isolation must opt into `sanitize`
   - Override via env var `AA_NAN_GUARD`.
+- **Distributed CUDA helpers** (`active_adaptation`):
+  - `isolate_local_cuda_device()` — pin each DDP rank to one entry from
+    `CUDA_VISIBLE_DEVICES` before CUDA / Isaac / Warp init
+  - `get_local_cuda_index()` — process-local device index (`0` after isolation,
+    else `LOCAL_RANK`)
+  - `bind_local_rank_device()` — re-bind Torch (+ Warp if loaded) to that index
+    after Kit / sensor setup and before NCCL collectives
+
+### Changed
+
+- **`aa.init(auto_rank=True)` multi-GPU device model** — under
+  `launch_ddp` / `torchrun`, each rank is CVD-isolated so Isaac USDRT Fabric
+  (`SelectPrims`) always sees process-local `cuda:0`. `cfg.device` / `env.device`
+  are therefore `"cuda:0"` on every rank; use `get_local_cuda_index()` for DDP
+  `device_ids` and NCCL `device=`. NCCL `init_process_group` runs **after**
+  `AppLauncher`, with `device_id` set when supported. AppLauncher temporarily
+  sees `LOCAL_RANK=0` when isolated so Kit `active_gpu` stays on the only
+  visible device.
+- **Training scripts / PPO** — `train_ppo` barriers after env create, rebinds
+  before collectives; PPO / FPO / SAC DDP wraps use `get_local_cuda_index()`.
+
+### Fixed
+
+- **DDP hang with Isaac `sensors:` / `MeshRegistry`** — rank 1 used `cuda:1` and
+  stalled in Fabric `XformPrimView.get_world_poses()` (`SelectPrims: GPUs other
+  than cuda:0 are not currently supported`) while rank 0 waited on the first
+  NCCL collective. CVD isolation + post-sensor device rebind unblocks
+  multi-GPU training with Lambert raycast cameras and static extras (e.g.
+  pedestal).
 
 ### Deprecated
 
