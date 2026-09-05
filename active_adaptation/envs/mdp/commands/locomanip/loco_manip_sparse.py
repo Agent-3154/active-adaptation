@@ -528,7 +528,7 @@ class LocoManipSparse(LocoManipSparseBase):
         self._wp_device = wp.get_device(str(self.device))
         self._warp_seed = 0
 
-        self.update()
+        self._update()
 
     # @override
     # def pre_step(self, substep: int) -> None:
@@ -703,7 +703,7 @@ class LocoManipSparse(LocoManipSparseBase):
         self._refresh_cmd_eef_pos_b()
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         """Tracking / reach flags for rewards at THIS step (no target mutation)."""
         root_pos_w = self.asset.data.root_link_pos_w
         root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w)
@@ -984,7 +984,7 @@ class LocoManipSparseReplay(LocoManipSparseBase):
 
         self._wp_device = wp.get_device(str(self.device))
 
-        self.update()
+        self._update()
 
     def _sample_uniform(
         self, num_samples: int, value_range: Tuple[float, float]
@@ -1124,7 +1124,7 @@ class LocoManipSparseReplay(LocoManipSparseBase):
         self._refresh_cmd_eef_pos_b()
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         """Tracking / reach flags for rewards at THIS step (no target mutation)."""
         root_pos_w = self.asset.data.root_link_pos_w
         root_yaw_q = yaw_quat(self.asset.data.root_link_quat_w)

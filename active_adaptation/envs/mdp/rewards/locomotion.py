@@ -33,7 +33,7 @@ class linvel_z_l2(Reward):
         self.linvel_z = torch.zeros(self.num_envs, 1, device=self.device)
 
     @override
-    def update(self):
+    def _update(self):
         self.linvel_z = self.asset.data.root_com_lin_vel_b[:, 2].unsqueeze(1)
 
     @override
@@ -94,7 +94,7 @@ class undesired_contact(Reward):
         self.num_bodies = len(self.body_ids)
 
     @override
-    def update(self):
+    def _update(self):
         contact = self.contact_sensor.data.current_contact_time[:, self.body_ids] > 0.0
         self.undesired_contact = -contact.float().sum(1, keepdim=True)
 
@@ -104,6 +104,12 @@ class undesired_contact(Reward):
 
 
 class linvel_exp(Reward[Twist]):
+    """Reward for tracking the linear velocity of the robot.
+    This term allows dynamic weight adjustment.
+    """
+    in_keys = ["linvel_exp_weight"]
+    out_keys = None
+
     def __init__(
         self,
         weight: float,
@@ -123,22 +129,29 @@ class linvel_exp(Reward[Twist]):
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.linvel_w_sum = torch.zeros(self.num_envs, 3, device=self.device)
         self.count = torch.zeros(self.num_envs, 1, device=self.device)
+        self._weight = torch.ones(self.num_envs, 1, device=self.device)
 
+    @override
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.linvel_w_sum[env_ids] = 0.0
         self.count[env_ids] = 0.0
 
-    def update(self):
+    @override
+    def _update(self, weight: torch.Tensor | None) -> None:
         linvel_w = self.asset.data.root_com_lin_vel_w
         self.linvel_w_sum.mul_(self.gamma).add_(linvel_w)
         self.count.mul_(self.gamma).add_(1.0)
+        if weight is None:
+            self._weight = torch.ones(self.num_envs, 1, device=self.device)
+        else:
+            self._weight = weight.reshape(self.num_envs, 1)
 
     def _compute(self) -> torch.Tensor:
         linvel_w = self.linvel_w_sum / self.count.clamp_min(1.0)
         cmd_linvel_w = self.command_manager.cmd_linvel_w[:, : self.dim]
         linvel_error = (linvel_w[:, : self.dim] - cmd_linvel_w).square().sum(-1, True)
         rew = torch.exp(-linvel_error / self.sigma)
-        return rew.reshape(self.num_envs, 1)
+        return rew.reshape(self.num_envs, 1), self._weight > 0.0
 
     def debug_draw(self):
         if self.env.backend == "isaaclab":
@@ -214,6 +227,11 @@ class linvel_projection(Reward[Twist]):
 
 
 class angvel_z_exp(Reward[Twist]):
+    """Reward for tracking yaw angular velocity. Supports dynamic weight gating."""
+
+    in_keys = ["angvel_z_exp_weight"]
+    out_keys = None
+
     def __init__(
         self,
         weight: float,
@@ -231,15 +249,20 @@ class angvel_z_exp(Reward[Twist]):
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.count = torch.zeros(self.num_envs, 1, device=self.device)
         self.angvel_sum = torch.zeros(self.num_envs, 3, device=self.device)
+        self._weight = torch.ones(self.num_envs, 1, device=self.device)
 
     @override
-    def update(self):
+    def _update(self, weight: torch.Tensor | None) -> None:
         if self.world_frame:
             angvel = self.asset.data.root_com_ang_vel_w
         else:
             angvel = self.asset.data.root_com_ang_vel_b
         self.angvel_sum.mul_(self.gamma).add_(angvel)
         self.count.mul_(self.gamma).add_(1)
+        if weight is None:
+            self._weight = torch.ones(self.num_envs, 1, device=self.device)
+        else:
+            self._weight = weight.reshape(self.num_envs, 1)
 
     @override
     def _compute(self) -> torch.Tensor:
@@ -247,7 +270,7 @@ class angvel_z_exp(Reward[Twist]):
         target_angvel = self.command_manager.cmd_yawvel_b
         angvel_error = (target_angvel - angvel[:, 2:3]).square()
         rew = torch.exp(-angvel_error / 0.25)
-        return rew.reshape(self.num_envs, 1)
+        return rew.reshape(self.num_envs, 1), self._weight > 0.0
 
 
 class tracking_yaw(Reward):
@@ -429,7 +452,7 @@ class oscillator(Reward):
         grf += self.asset._external_force_b[:, self.art_feet_ids].norm(dim=-1)
         self.grf_substep[:, substep] = grf
 
-    def update(self):
+    def _update(self):
         self.grf = self.grf_substep.mean(1) / self.gravity
 
     def _compute(self):

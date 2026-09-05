@@ -297,7 +297,7 @@ class Impedance(Command):
         self.ref_yaw_vel_w.add_(self.ref_yaw_acc_w * dt)
         self.ref_yaw_w.add_(self.ref_yaw_vel_w * dt)
 
-    def update(self):
+    def _update(self):
         # compute cumulative errors
         # might be used for early termination
         yaw = self.asset.data.heading_w
@@ -711,7 +711,7 @@ class ImpedanceImpulse(Impedance):
             + self.impulse_force.get_force()
         )
     
-    def update(self):
+    def _update(self):
         super().update()
         root_pos = self.asset.data.root_pos_w - self.env.scene.env_origins
         if self.step_cnt > 0:
@@ -807,7 +807,7 @@ class ImpedanceCollision(Impedance):
         p = 3. - (self.asset.data.root_pos_w - self.origins)[:, 0]
         self.force_ext_w[:, 0] = torch.where(p < 0, 700 * p - 4 * self.asset.data.root_vel_w[:, 0], 0)
 
-    def update(self):
+    def _update(self):
         super().update()
         self.trajs.append(self.force_ext_w.clone())
         if self.step_cnt == 800:
@@ -869,7 +869,7 @@ class VelocityImpulse(Twist):
         forces_b[:, 0] += quat_rotate_inverse(self.asset.data.root_quat_w, self.constand_force.get_force())
         self.asset.has_external_wrench = True
 
-    def update(self):
+    def _update(self):
         super().update()
         self.command_linvel = quat_rotate_inverse(
             yaw_quat(self.asset.data.root_quat_w),
@@ -971,7 +971,7 @@ class VelocityCollision(Twist):
         self.use_stiffness[env_ids] = True
         self.fixed_yaw_speed[env_ids] = 0.
     
-    def update(self):
+    def _update(self):
         super().update()
         p = 3. - (self.asset.data.root_pos_w - self.origins)[:, 0]
         self.force_ext_w[:, 0] = torch.where(p < 0, 700 * p - 4 * self.asset.data.root_vel_w[:, 0], 0)

@@ -178,7 +178,7 @@ class TrajTracking(Command):
         # (``is_init``); next-step targets are written in ``update``.
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         # Rewards read next-step targets from the previous ``update``.
         self._cum_error = (self.ref_pos_w - self.asset.data.root_link_pos_w).norm(
             dim=-1, keepdim=True

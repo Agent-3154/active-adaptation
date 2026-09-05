@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import torch
 
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,30 @@ def is_method_implemented(obj, base_class, method_name: str):
     obj_func = getattr(obj_method, "__func__", obj_method)
     base_func = getattr(base_method, "__func__", base_method)
     return obj_func is not base_func
+
+
+def check_update_signature(cls: type, *, owner: str) -> None:
+    """Reject sealed ``update`` overrides and defaulted ``_update`` parameters."""
+    if "update" in cls.__dict__:
+        raise TypeError(
+            f"{cls.__qualname__} must not override {owner}.update; "
+            f"implement _update() instead (optional in_keys / out_keys)."
+        )
+    if "_update" not in cls.__dict__:
+        return
+    method = cls.__dict__["_update"]
+    if isinstance(method, (staticmethod, classmethod)):
+        method = method.__func__
+    if not callable(method):
+        return
+    for name, param in inspect.signature(method).parameters.items():
+        if name == "self":
+            continue
+        if param.default is not inspect.Parameter.empty:
+            raise TypeError(
+                f"{cls.__qualname__}._update parameter {name!r} must not have a "
+                f"default; missing in_keys values are passed as None explicitly."
+            )
 
 
 class MDPComponent:
@@ -86,4 +111,5 @@ class MDPComponent:
 __all__ = [
     "MDPComponent",
     "is_method_implemented",
+    "check_update_signature",
 ]

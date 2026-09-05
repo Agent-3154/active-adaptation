@@ -187,7 +187,7 @@ class LocoManipObject(_LocoManipObjectBase):
     def _initialize(self, env: "EnvBase") -> None:
         super()._initialize(env)
         self.grasp_height_per_env = torch.zeros(self.num_envs, device=self.device)
-        self.update()
+        self._update()
 
         if self.env.backend == "isaaclab" and self.env.sim.has_gui():
             from active_adaptation.envs.backends.isaaclab import IsaacSceneAdapter
@@ -244,7 +244,7 @@ class LocoManipObject(_LocoManipObjectBase):
         self.cmd_object_target_w[env_ids] = obj_pos_w + offset
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         """Refresh object pose and body-frame target / error terms."""
         self.object_pos_w = self.object.data.root_pos_w
         self.object_quat_w = self.object.data.root_quat_w
@@ -474,7 +474,7 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
                 scale=(0.1, 0.1, 0.1),
             )
         
-        self.update()
+        self._update()
 
     def command(self, key: str = "dense") -> torch.Tensor:
         if key == "dense":
@@ -707,7 +707,7 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         self.is_standing_env = self.command_speed < 0.1
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         self._read_robot_and_object_state()
         self._sync_command_orientation()
         self._compute_tracking_errors()
@@ -781,7 +781,7 @@ class object_distance_progress(Reward[LocoManipObject]):
         self.rew[env_ids] = 0.0
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         curr_error = self.command_manager.object_target_error_norm
         self.rew = (self.prev_error_norm - curr_error) / self.env.step_dt
         self.prev_error_norm = curr_error.clone()

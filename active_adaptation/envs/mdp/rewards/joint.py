@@ -20,7 +20,7 @@ class joint_acc_l2(Reward):
         self.joint_ids = self.asset.find_joints(self.joint_names)[0]
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
 
-    def update(self):
+    def _update(self):
         self.joint_acc = self.asset.data.joint_acc
 
     def _compute(self) -> torch.Tensor:
@@ -45,7 +45,7 @@ class energy_l1(Reward):
         elif self.env.backend == "mjlab":
             self.get_torques = lambda: self.asset.data.actuator_force[:, self.joint_ids]
 
-    def update(self):
+    def _update(self):
         self.torques = self.get_torques()
         self.joint_vel = self.asset.data.joint_vel[:, self.joint_ids]
 
@@ -67,7 +67,7 @@ class energy_l2(Reward):
         self.joint_ids, self.joint_names = self.asset.find_joints(self.joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
 
-    def update(self):
+    def _update(self):
         self.torques = self.asset.data.applied_torque[:, self.joint_ids]
         self.joint_vel = self.asset.data.joint_vel[:, self.joint_ids]
 
@@ -109,9 +109,9 @@ class joint_vel_limits(Reward):
         self.joint_ids, self.joint_names = self.asset.find_joints(self.joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
         self.limits = torch.abs(self.asset.data.joint_vel_limits[:, self.joint_ids]) * self.factor
-        self.update()
+        self._update()
 
-    def update(self):
+    def _update(self):
         self.jvel = self.asset.data.joint_vel[:, self.joint_ids]
 
     def _compute(self) -> torch.Tensor:
@@ -143,9 +143,9 @@ class joint_tau_limits(Reward):
         self.soft_limits = (
             torch.abs(self.asset.data.joint_effort_limits[:, self.joint_ids]) * self.factor
         )
-        self.update()
+        self._update()
 
-    def update(self):
+    def _update(self):
         self.applied_torque = self.asset.data.applied_torque[:, self.joint_ids]
 
     def _compute(self) -> torch.Tensor:
@@ -172,7 +172,7 @@ class joint_torque_disc(Reward):
         self.computed_torques = []
         self.projected_joint_forces = []
 
-    def update(self):
+    def _update(self):
         self.applied_torque = self.asset.data.applied_torque[:, self.joint_ids]
         self.computed_torque = self.asset.data.computed_torque[:, self.joint_ids]
         self.projected_joint_force = self.asset.root_physx_view.get_dof_projected_joint_forces()[
@@ -214,7 +214,7 @@ class joint_deviation_l1(Reward):
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
 
-    def update(self):
+    def _update(self):
         self.joint_pos = self.asset.data.joint_pos
 
     def _compute(self) -> torch.Tensor:
@@ -234,7 +234,7 @@ class joint_deviation_l2(Reward):
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
         self.default_joint_pos = self.asset.data.default_joint_pos[:, self.joint_ids].clone()
 
-    def update(self):
+    def _update(self):
         self.joint_pos = self.asset.data.joint_pos
 
     def _compute(self) -> torch.Tensor:
@@ -261,7 +261,7 @@ class joint_deviation_cum(Reward):
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.cum_deviation[env_ids] = 0.0
 
-    def update(self):
+    def _update(self):
         self.joint_pos = self.asset.data.joint_pos[:, self.joint_ids]
         deviation = torch.abs(self.joint_pos - self.default_joint_pos)
         self.cum_deviation = torch.where(
@@ -289,7 +289,7 @@ class joint_torques_l2(Reward):
         elif self.env.backend == "mjlab":
             self.get_torques = lambda: self.asset.data.actuator_force[:, self.joint_ids]
 
-    def update(self):
+    def _update(self):
         self.applied_torque = self.get_torques()
 
     def _compute(self) -> torch.Tensor:

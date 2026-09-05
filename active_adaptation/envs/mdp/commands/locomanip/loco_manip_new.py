@@ -559,7 +559,7 @@ class LocoManipNew(Command):
         )
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         # Tracking / standing for rewards at THIS step.
         self.command_speed = self.cmd_linvel_b.norm(dim=-1, keepdim=True)
         self.is_standing_env = (self.command_speed < 0.1) & (

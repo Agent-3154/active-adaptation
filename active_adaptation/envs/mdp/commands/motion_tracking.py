@@ -80,7 +80,7 @@ class MotionTrackingCommand(Command):
         self.motion_ids = torch.randint(0, self.dataset.num_motions, size=(self.num_envs,))
         self.t = torch.zeros(self.num_envs, dtype=int)
         self.future_steps = torch.tensor([0, 12, 24, 36])
-        self.update()
+        self._update()
     
     def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
         init_root_state = self.init_root_state[env_ids].clone()
@@ -158,7 +158,7 @@ class MotionTrackingCommand(Command):
             + self.env.episode_origin.reshape(self.num_envs, 1, 3)
         self.target_joint_pos = self._motion.joint_pos[:, 0, self.joint_idx_motion].to(self.device)
 
-    def update(self):
+    def _update(self):
         self._load_motion_targets()
 
     def step(self):

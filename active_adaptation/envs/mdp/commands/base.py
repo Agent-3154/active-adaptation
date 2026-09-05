@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence, final
 
 import torch
 from tensordict import TensorDict, TensorDictBase
@@ -9,7 +9,7 @@ from tensordict import TensorDict, TensorDictBase
 from active_adaptation.registry import RegistryMixin
 from active_adaptation.utils.math import quat_mul, sample_quat_yaw
 
-from ..base import MDPComponent
+from ..base import MDPComponent, check_update_signature
 
 
 if TYPE_CHECKING:
@@ -22,6 +22,10 @@ class Command(MDPComponent, RegistryMixin):
     in_keys: Optional[Sequence[str]] = None
     out_keys: Optional[Sequence[str]] = None
 
+    def __init_subclass__(cls, **kwargs) -> None:
+        check_update_signature(cls, owner="Command")
+        super().__init_subclass__(**kwargs)
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -32,8 +36,9 @@ class Command(MDPComponent, RegistryMixin):
         self.init_joint_pos = self.asset.data.default_joint_pos.clone()
         self.init_joint_vel = self.asset.data.default_joint_vel.clone()
 
+    @final
     def update(self, tensordict: TensorDictBase) -> None:
-        """Do not override this method."""
+        """Sealed dispatcher: subclasses must implement :meth:`_update` instead."""
         if self.in_keys is not None:
             tensors_in = (tensordict.get(in_key) for in_key in self.in_keys)
         else:
@@ -50,7 +55,11 @@ class Command(MDPComponent, RegistryMixin):
 
     @abstractmethod
     def _update(self) -> None:
-        """Refresh current command-dependent tensors after simulation."""
+        """Refresh current command-dependent tensors after simulation.
+
+        Parameters matching :attr:`in_keys` must not declare defaults; missing
+        keys are passed as ``None`` explicitly by :meth:`update`.
+        """
 
     def step(self) -> None:
         """Advance command time or resample future targets."""

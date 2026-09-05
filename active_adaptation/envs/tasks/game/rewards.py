@@ -15,7 +15,7 @@ class chase_distance(Reward[Game]):
         self.last_distance = torch.zeros(self.num_envs, 1, device=self.device)
         self.distance_change = torch.zeros(self.num_envs, 1, device=self.device)
 
-    def update(self):
+    def _update(self):
         self.distance_change = self.command_manager.distance - self.last_distance
         self.last_distance = self.command_manager.distance
 

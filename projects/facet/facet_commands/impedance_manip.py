@@ -427,7 +427,7 @@ class ImpedanceCommandManager(Command):
             ],
         )
     
-    def update(self):
+    def _update(self):
         self.seed = wp.rand_init(self.seed)
         mask = self.env.episode_length_buf % 100 == 0
         root_link_pos = self.asset.data.root_link_pos_w

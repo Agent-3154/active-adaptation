@@ -603,7 +603,7 @@ class PositionVelocityTracking(Command):
         self.is_standing_env[env_ids] = False
     
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         self.cmd_linvel_w = (
             (self.ref_pos_w - self.asset.data.root_link_pos_w)
             + self.ref_linvel_w

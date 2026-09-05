@@ -321,7 +321,7 @@ class RewardGroup:
 
     def update(self, tensordict: TensorDictBase) -> None:
         for func in self.funcs.values():
-            func.update()
+            func.update(tensordict)
 
     def compute(self) -> torch.Tensor:
         rewards = []

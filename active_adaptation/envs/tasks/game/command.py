@@ -27,7 +27,7 @@ class Game(Command):
                 )
             )
             self.frame_marker.set_visibility(True)
-        self.update()
+        self._update()
 
     @property
     def command(self):
@@ -74,7 +74,7 @@ class Game(Command):
         self.target_caught_time[env_ids] = 0.0
         return super().reset(env_ids, tensordict)
 
-    def update(self):
+    def _update(self):
         self.target_pos_w = torch.stack(
             [
                 self.asset.data.root_pos_w[1::2],

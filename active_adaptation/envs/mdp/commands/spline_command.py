@@ -68,7 +68,7 @@ class SplineCommand(Command):
             signs=torch.tensor([1, -1, 1, 1, -1, 1]),
         )
 
-    def update(self):
+    def _update(self):
         x, v = spline.cubic_bezier(self.spline_t, self.spline_ps)
         v = v * self.spline_time_scale.reshape(self.num_envs, 1, 1)
 

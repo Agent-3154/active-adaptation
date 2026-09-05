@@ -38,7 +38,7 @@ class max_swing_height(Reward):
         self.max_height[env_ids] = 0.0
 
     @override
-    def update(self):
+    def _update(self):
         feet_height = self.asset.data.body_link_pos_w[:, self.body_ids, 2]
         self.max_height = torch.maximum(self.max_height, feet_height).clamp_max(self.target_height)
         first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[

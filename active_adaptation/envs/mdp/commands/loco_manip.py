@@ -266,7 +266,7 @@ class SingleEEFLocoManip(Command):
             self.eef_pos_w - self.asset.data.root_link_pos_w * torch.tensor([1., 1., 0.], device=self.device)
         )
         
-        self.update()
+        self._update()
 
         self.marker = None
         self.standoff_marker = None
@@ -688,7 +688,7 @@ class SingleEEFLocoManip(Command):
         self.base_pos_error[env_ids] = 0.0
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         """Refresh tracking errors from post-physics robot state and current targets."""
         self._read_robot_state()
         self._sync_world_frames()
@@ -833,10 +833,10 @@ class eef_pos_orient_tracking(Reward[SingleEEFLocoManip]):
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
         # self._base_height_rew = self.env.reward_groups["loco"]["base_height_exp"]
-        self.update()
+        self._update()
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         self.rew_pos_exp = torch.exp(
             -self.command_manager.pos_error_norm2 / self.pos_sigma
         )
@@ -893,10 +893,10 @@ class eef_pos_forward_tracking(Reward[SingleEEFLocoManip]):
         self.asset = self.command_manager.asset
         self.eef_body_idx = self.command_manager.eef_body_idx
         self._base_height_rew = self.env.reward_groups["loco"]["base_height_exp"]
-        self.update()
+        self._update()
     
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         self.rew_pos_exp = torch.exp(-self.command_manager.pos_error_norm2 / self.pos_sigma)
         self.rew_pos_l1 = -0.2 * self.command_manager.pos_error_norm
 
@@ -950,7 +950,7 @@ class eef_pos_progress(Reward[SingleEEFLocoManip]):
         self.rew[env_ids] = 0.0
 
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
         curr_error = self.command_manager.pos_error_norm
         self.rew = (self.prev_pos_error_norm - curr_error) / self.env.step_dt
         self.prev_pos_error_norm = curr_error.clone()
