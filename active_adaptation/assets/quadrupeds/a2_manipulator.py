@@ -85,6 +85,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
         ImplicitActuatorCfg,
         sim_utils,
     )
+    from active_adaptation.envs.robots.gripper import GripperAdaptation
 
     asset_cfg = ArticulationCfg(
         spawn=sim_utils.UsdFileCfg(
@@ -153,12 +154,17 @@ def make_isaaclab_cfg(self_collisions: bool = False):
             history_length=3,
         )
     }
-    return AssetSpec(config=asset_cfg, sensors=sensors)
+    return AssetSpec(
+        config=asset_cfg,
+        sensors=sensors,
+        adaptations=(GripperAdaptation(),),
+    )
 
 
 def make_mjlab_cfg():
     import mujoco
     from active_adaptation.assets.asset_cfg import AssetSpec, EntityCfg
+    from active_adaptation.envs.robots.gripper import GripperAdaptation
     from mjlab.actuator import BuiltinPositionActuatorCfg
     from mjlab.entity import EntityArticulationInfoCfg
     from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -229,7 +235,7 @@ def make_mjlab_cfg():
             history_length=3,
         ),
     )
-    return AssetSpec(config=cfg, sensors=sensors)
+    return AssetSpec(config=cfg, sensors=sensors, adaptations=(GripperAdaptation(),))
 
 
 def make_cfg(backend: Literal["isaaclab", "mjlab"]):

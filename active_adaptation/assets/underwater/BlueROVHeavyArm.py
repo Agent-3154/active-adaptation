@@ -175,16 +175,18 @@ def make_isaaclab_cfg(self_collisions: bool = False, fixed_base: bool = False):
     return AssetSpec(
         config=asset_cfg,
         sensors={},
-        wrapper=UnderwaterRobot(
-            cfg=HydrodynamicsCfg(
-                volume=VOLUME,
-                coBM=COBM,
-                added_mass=ADDED_MASS,
-                linear_damping=LINEAR_DAMPING,
-                quadratic_damping=QUADRATIC_DAMPING,
+        adaptations=(
+            UnderwaterRobot(
+                cfg=HydrodynamicsCfg(
+                    volume=VOLUME,
+                    coBM=COBM,
+                    added_mass=ADDED_MASS,
+                    linear_damping=LINEAR_DAMPING,
+                    quadratic_damping=QUADRATIC_DAMPING,
+                ),
+                rotor_time_constants=ROTOR_TIME_CONSTANTS,
+                rotor_force_constants=ROTOR_FORCE_CONSTANTS,
             ),
-            rotor_time_constants=ROTOR_TIME_CONSTANTS,
-            rotor_force_constants=ROTOR_FORCE_CONSTANTS,
         ),
     )
 
@@ -282,16 +284,18 @@ def make_mjlab_cfg(motrix: bool = False, fixed_base: bool = False):
     return AssetSpec(
         config=cfg,
         sensors=(),
-        wrapper=UnderwaterRobot(
-            cfg=HydrodynamicsCfg(
-                volume=VOLUME,
-                coBM=COBM,
-                added_mass=ADDED_MASS,
-                linear_damping=LINEAR_DAMPING,
-                quadratic_damping=QUADRATIC_DAMPING,
+        adaptations=(
+            UnderwaterRobot(
+                cfg=HydrodynamicsCfg(
+                    volume=VOLUME,
+                    coBM=COBM,
+                    added_mass=ADDED_MASS,
+                    linear_damping=LINEAR_DAMPING,
+                    quadratic_damping=QUADRATIC_DAMPING,
+                ),
+                rotor_time_constants=ROTOR_TIME_CONSTANTS,
+                rotor_force_constants=ROTOR_FORCE_CONSTANTS,
             ),
-            rotor_time_constants=ROTOR_TIME_CONSTANTS,
-            rotor_force_constants=ROTOR_FORCE_CONSTANTS,
         ),
     )
 

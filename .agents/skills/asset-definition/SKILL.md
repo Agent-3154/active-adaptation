@@ -288,10 +288,10 @@ registry.register("asset", "unitree_a2", make_cfg)
 
 ---
 
-## Variants and wrappers
+## Variants and adaptations
 
 - **Composition:** extend base lists (see `a2_manipulator.py` appending arm joints/bodies onto A2 constants).
-- **`AssetSpec.wrapper`:** instance with config-only `__init__`; backend `_initialize(robot=..., env=...)` then registers lifecycle hooks. See underwater TEACHME.
+- **`AssetSpec.adaptations`:** list of `RobotAdaptation` instances (config-only `__init__`); backend `_bind_robot_adaptations` after the robot exists; env calls lifecycle methods explicitly. `wrapper=` is a deprecated single-adaptation alias. See `envs/robots/TEACHME.md` and `GripperAdaptation` / `UnderwaterRobot`.
 - **Isaac-only / mjlab-only:** raise `NotImplementedError` in the unsupported factory (e.g. BlueROV mjlab) rather than registering a broken cfg.
 
 ---

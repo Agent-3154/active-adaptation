@@ -10,6 +10,12 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **Robot adaptations** (`envs/robots/adaptation.py`) — composable
+  asset-attached plugins (`RobotAdaptation`) bound via
+  `AssetSpec.adaptations` / deprecated `wrapper=`. Env exposes
+  `env.adaptations`, `require_adaptation(name)`, and calls lifecycle methods
+  explicitly (not `_XXX_callbacks`). Sketches:
+  `UnderwaterRobot` / `UnderwaterAdaptation`, `GripperAdaptation`.
 - **`task.nan_guard`** — controls non-finite transition handling in `_EnvBase`:
   - `sanitize`: zero invalid rows and terminate those envs (existing behavior)
   - `error`: raise `NonFiniteTransitionError` with offending `env_ids` and tensor keys
@@ -26,6 +32,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Changed
 
+- **`AssetSpec.wrapper` → `adaptations`** — prefer
+  `AssetSpec(adaptations=(...))`; `wrapper=` still accepted as a single-item
+  alias. Backend `_bind_robot_adaptations` replaces
+  `_register_wrapper_callbacks`.
 - **Sealed `Command.update` / `Reward.update`** — subclasses must implement
   `_update` (not `update`). Optional class attrs `in_keys` / `out_keys` wire
   tensors through the step tensordict; missing `in_keys` are passed as

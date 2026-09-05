@@ -461,11 +461,25 @@ class RigidObjectCfg:
 class AssetSpec:
     config: Any
     sensors: Any = ()
+    adaptations: Sequence[Any] = ()
+    """Composable :class:`~active_adaptation.envs.robots.adaptation.RobotAdaptation` instances."""
     wrapper: Optional[Any] = None
+    """Deprecated alias for a single adaptation; prefer :attr:`adaptations`."""
 
     def with_wrapper(self, wrapper: Any) -> "AssetSpec":
+        """Deprecated: append ``wrapper`` to :attr:`adaptations`."""
         self.wrapper = wrapper
         return self
+
+    def with_adaptations(self, *adaptations: Any) -> "AssetSpec":
+        self.adaptations = tuple(self.adaptations) + tuple(adaptations)
+        return self
+
+    def iter_adaptations(self) -> list[Any]:
+        items = list(self.adaptations or ())
+        if self.wrapper is not None:
+            items.append(self.wrapper)
+        return items
 
 
 def coerce_asset_spec(asset_entry: Any, *, backend: str, **kwargs: Any) -> AssetSpec:

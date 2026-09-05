@@ -57,18 +57,26 @@ Thruster commands are converted to forces in three stages:
 Generated thrust is applied along local rotor x-axis as body-frame force for
 each rotor body.
 
-## Wrapper Lifecycle and Integration
+## Adaptation Lifecycle and Integration
 
-Current design uses **instance-based wrappers**:
+Robot behavior beyond the articulation is composed via **adaptations**
+(:class:`~active_adaptation.envs.robots.adaptation.RobotAdaptation`):
 
-- Asset declarations return `AssetSpec(config=..., sensors=..., wrapper=...)`.
-- Both Isaac and mjlab backends receive `asset_spec.wrapper`, call
-  `wrapper._initialize(robot=self.robot, env=self)`, then register optional
-  lifecycle callbacks (`startup`, `reset`, `pre_step`, `post_step`, `update`,
-  `debug_draw`).
+- Asset declarations return
+  ``AssetSpec(config=..., sensors=..., adaptations=(UnderwaterRobot(...),))``.
+  ``wrapper=`` remains a deprecated single-adaptation alias.
+- Isaac / mjlab backends stash ``asset_spec.iter_adaptations()``, build the
+  scene, then call ``env._bind_robot_adaptations(...)``.
+- Bound instances live on ``env.adaptations`` (keyed by ``adapt.name``) and are
+  driven **explicitly** from ``_EnvBase`` (``startup`` / ``reset`` / ``pre_step``
+  / ``post_step`` / ``update`` / ``debug_draw``) — not via ``_XXX_callbacks``.
+- Lookup: ``env.require_adaptation("underwater")`` /
+  ``env.require_adaptation("gripper")``.
+- ``env.robot_wrapper`` remains a compatibility alias (prefers ``"underwater"``).
 
-`UnderwaterRobot.__init__` keeps only config/state that does not depend on the
-parsed robot. Asset parsing and tensor allocation happen in `_initialize(...)`.
+``UnderwaterRobot.__init__`` / ``GripperAdaptation.__init__`` keep only
+config that does not depend on the parsed robot. Indexing and tensor allocation
+happen in ``_initialize(env, *, robot=...)``.
 
 ## Stepping Logic
 

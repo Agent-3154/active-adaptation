@@ -1,3 +1,11 @@
-from .underwater import HydrodynamicsCfg, UnderwaterRobot
+from .adaptation import RobotAdaptation
+from .gripper import GripperAdaptation
+from .underwater import HydrodynamicsCfg, UnderwaterRobot, UnderwaterAdaptation
 
-__all__ = ["HydrodynamicsCfg", "UnderwaterRobot"]
+__all__ = [
+    "RobotAdaptation",
+    "GripperAdaptation",
+    "HydrodynamicsCfg",
+    "UnderwaterRobot",
+    "UnderwaterAdaptation",
+]

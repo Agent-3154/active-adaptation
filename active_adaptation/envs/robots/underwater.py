@@ -1,5 +1,5 @@
 """
-Backend-agnostic underwater robot wrapper around IsaacLab's Articulation or Mjlab's Entity.
+Backend-agnostic underwater robot adaptation around IsaacLab's Articulation or Mjlab's Entity.
 """
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ from functools import cached_property
 
 import torch
 from tensordict import TensorDictBase
+from typing_extensions import override
 
+from active_adaptation.envs.robots.adaptation import RobotAdaptation
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
 from active_adaptation.utils.profiling import ScopedTimer
 import active_adaptation.utils.string as string_utils
@@ -191,7 +193,11 @@ class UnderwaterRobotData:
     hydro_torques_b: torch.Tensor
 
 
-class UnderwaterRobot:
+class UnderwaterRobot(RobotAdaptation):
+    """Hydrodynamics + thruster adaptation (``env.adaptations["underwater"]``)."""
+
+    name = "underwater"
+
     def __init__(
         self,
         cfg: HydrodynamicsCfg,
@@ -200,11 +206,10 @@ class UnderwaterRobot:
         robot: "Articulation | None" = None,
         env: "_EnvBase | None" = None,
     ):
+        super().__init__()
         self.cfg = cfg
         self._rotor_time_constants = dict(rotor_time_constants)
         self._rotor_force_constants = dict(rotor_force_constants)
-        self.robot = None
-        self.env = None
         self.dt = None
         self.rotor_names = []
         self.body_names = []
@@ -217,7 +222,7 @@ class UnderwaterRobot:
         # Base body is assumed to be the root body in IsaacLab articulations.
         self._base_body_id = 0
         if robot is not None and env is not None:
-            self._initialize(robot=robot, env=env)
+            self._initialize(env, robot=robot)
         elif robot is not None or env is not None:
             raise ValueError("Both 'robot' and 'env' must be provided together.")
 
@@ -349,9 +354,9 @@ class UnderwaterRobot:
             )
         return out
 
-    def _initialize(self, robot: "Articulation", env: "_EnvBase"):
-        self.robot = robot
-        self.env = env
+    @override
+    def _initialize(self, env: "_EnvBase", *, robot: "Articulation"):
+        super()._initialize(env, robot=robot)
         self.dt = self.env.sim.get_physics_dt()
 
         self.body_names = list(self.robot.body_names)
@@ -657,3 +662,7 @@ class UnderwaterRobot:
                 thrust_w.reshape(-1, 3),
                 color=(0.2, 0.8, 1.0, 1.0),
             )
+
+
+# Prefer this name in new code; ``UnderwaterRobot`` kept for asset/compat imports.
+UnderwaterAdaptation = UnderwaterRobot

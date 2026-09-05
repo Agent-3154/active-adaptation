@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import warnings
 from collections import OrderedDict
-from typing import Callable, Dict, Literal, Mapping, Any, Optional, cast
+from typing import Callable, Dict, Literal, Mapping, Any, Optional, Sequence, cast
 from dataclasses import dataclass
 
 import numpy as np
@@ -229,6 +229,14 @@ class ObsGroup:
         for func in self.funcs.values():
             func.update()
 
+    def startup(self) -> None:
+        for func in self.funcs.values():
+            func.startup()
+
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
+        for func in self.funcs.values():
+            func.reset(env_ids, tensordict)
+
     def compute(self, tensordict: TensorDictBase, timestamp: int) -> TensorDictBase:
         if self._is_functional:
             compact = OrderedDict()
@@ -322,6 +330,14 @@ class RewardGroup:
     def update(self, tensordict: TensorDictBase) -> None:
         for func in self.funcs.values():
             func.update(tensordict)
+
+    def startup(self) -> None:
+        for func in self.funcs.values():
+            func.startup()
+
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
+        for func in self.funcs.values():
+            func.reset(env_ids, tensordict)
 
     def compute(self) -> torch.Tensor:
         rewards = []
@@ -446,6 +462,13 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.input_tensordict = None
         self.extra = {}
         self._nonfinite_rows_total = 0
+        self.command_manager.startup()
+        for adapt in self.adaptations.values():
+            adapt.startup()
+        for group in self.observation_groups.values():
+            group.startup()
+        for group in self.reward_groups.values():
+            group.startup()
         [callback() for callback in self._startup_callbacks]
         self._startup_done = True
 
@@ -509,6 +532,9 @@ class _EnvBase(EnvBase, RegistryMixin):
     def _create_mdp_terms(self):
         self._scene_components: list[mdp.MDPComponent] = []
         self._callback_component_ids: set[int] = set()
+        self.adaptations: OrderedDict[str, Any] = OrderedDict()
+        self._pending_adaptations: Sequence[Any] = ()
+        self.robot_wrapper = None  # deprecated alias; prefer env.adaptations
         self.randomizations: Mapping[str, mdp.Randomization] = OrderedDict()
         self.observation_groups: Mapping[str, ObsGroup] = OrderedDict()
         self.reward_groups: Mapping[str, RewardGroup] = OrderedDict()
@@ -522,6 +548,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         self._pre_step_callbacks = []
         self._post_step_callbacks = []
         self._update_callbacks = []
+        self._post_group_update_callbacks = []
         self._debug_draw_callbacks = []
 
         # MDP: command manager
@@ -599,9 +626,58 @@ class _EnvBase(EnvBase, RegistryMixin):
             if isinstance(term, mdp.MDPComponent):
                 self._add_mdp_component(term)
 
+    def _bind_robot_adaptations(self, adaptations: Sequence[Any]) -> None:
+        """Initialize asset adaptations and register them on ``env.adaptations``.
+
+        Called from backend ``setup_scene`` after the robot articulation exists.
+        Lifecycle methods are invoked explicitly from ``_EnvBase`` (not via
+        ``_XXX_callbacks``).
+        """
+        from active_adaptation.envs.robots.adaptation import RobotAdaptation
+
+        self.adaptations = OrderedDict()
+        for adapt in adaptations:
+            if adapt is None:
+                continue
+            if not isinstance(adapt, RobotAdaptation):
+                # Transitional: treat duck-typed wrappers as adaptations.
+                warnings.warn(
+                    f"Robot adaptation {type(adapt).__name__} does not subclass "
+                    f"RobotAdaptation; prefer migrating it.",
+                    stacklevel=2,
+                )
+            name = getattr(adapt, "name", None) or type(adapt).__name__
+            if name in self.adaptations:
+                raise ValueError(f"Duplicate robot adaptation name {name!r}")
+            adapt._initialize(self, robot=self.robot)
+            self.adaptations[name] = adapt
+        # Backward-compat handle used by older code / TEACHME docs.
+        self.robot_wrapper = (
+            self.adaptations.get("underwater")
+            or next(iter(self.adaptations.values()), None)
+        )
+
+    def get_adaptation(self, name: str) -> Any | None:
+        return self.adaptations.get(name)
+
+    def require_adaptation(self, name: str) -> Any:
+        adapt = self.adaptations.get(name)
+        if adapt is None:
+            raise KeyError(
+                f"Robot adaptation {name!r} is not bound. "
+                f"Available: {list(self.adaptations)}"
+            )
+        return adapt
+
     def _edit_scene_spec(self, scene_cfg: Any) -> None:
         for component in self._scene_components:
             component.edit_spec(scene_cfg)
+        # Adaptations are bound after the robot exists; call edit_spec on
+        # pending (pre-bind) instances when backends stash them.
+        for adapt in getattr(self, "_pending_adaptations", ()) or ():
+            edit = getattr(adapt, "edit_spec", None)
+            if callable(edit):
+                edit(scene_cfg)
 
     def _initialize_mdp_terms(self):
         self.command_manager._initialize(self)
@@ -643,10 +719,6 @@ class _EnvBase(EnvBase, RegistryMixin):
         return instance_cls(**kwargs)
 
     def _register_command_component(self, command: mdp.Command) -> None:
-        if mdp.is_method_implemented(command, mdp.MDPComponent, "startup"):
-            self._startup_callbacks.append(command.startup)
-        if mdp.is_method_implemented(command, mdp.MDPComponent, "reset"):
-            self._reset_callbacks.append(command.reset)
         if mdp.is_method_implemented(command, mdp.MDPComponent, "pre_step"):
             self._pre_step_callbacks.append(command.pre_step)
         if mdp.is_method_implemented(command, mdp.MDPComponent, "post_step"):
@@ -714,9 +786,11 @@ class _EnvBase(EnvBase, RegistryMixin):
         self._callback_component_ids.add(component_id)
 
         if mdp.is_method_implemented(component, mdp.MDPComponent, "startup"):
-            self._startup_callbacks.append(component.startup)
+            if not isinstance(component, (mdp.Observation, mdp.Reward)):
+                self._startup_callbacks.append(component.startup)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "reset"):
-            self._reset_callbacks.append(component.reset)
+            if not isinstance(component, (mdp.Observation, mdp.Reward)):
+                self._reset_callbacks.append(component.reset)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "pre_step"):
             self._pre_step_callbacks.append(component.pre_step)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "post_step"):
@@ -780,7 +854,15 @@ class _EnvBase(EnvBase, RegistryMixin):
 
             self._reset_idx(env_ids, tensordict)
             self.scene.reset(env_ids)
-            # MDP terms: reset(env_ids, tensordict) — may read/write tensordict
+            # Explicit: command + obs/reward groups (same pattern as update).
+            self.command_manager.reset(env_ids, tensordict)
+            for adapt in self.adaptations.values():
+                adapt.reset(env_ids, tensordict)
+            for group in self.observation_groups.values():
+                group.reset(env_ids, tensordict)
+            for group in self.reward_groups.values():
+                group.reset(env_ids, tensordict)
+            # Remaining MDP terms (actions, randomizations, terminations)
             [callback(env_ids, tensordict) for callback in self._reset_callbacks]
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
@@ -833,6 +915,8 @@ class _EnvBase(EnvBase, RegistryMixin):
                 with ScopedTimer("pre_step_callbacks", sync=PROFILE_SYNC_TIMERS):
                     self.scene.zero_external_wrenches()
                     self._apply_action(substep)
+                    for adapt in self.adaptations.values():
+                        adapt.pre_step(substep)
                     [callback(substep) for callback in self._pre_step_callbacks]
                     self.scene.write_data_to_sim()
                 with ScopedTimer("sim.step", sync=PROFILE_SYNC_TIMERS):
@@ -845,6 +929,8 @@ class _EnvBase(EnvBase, RegistryMixin):
                 with ScopedTimer("scene.update", sync=PROFILE_SYNC_TIMERS):
                     self.scene.update(self.physics_dt)
                 with ScopedTimer("post_step_callbacks", sync=PROFILE_SYNC_TIMERS):
+                    for adapt in self.adaptations.values():
+                        adapt.post_step(substep)
                     [callback(substep) for callback in self._post_step_callbacks]
 
         self.episode_length_buf.add_(1)
@@ -854,6 +940,10 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         with ScopedTimer("command.update", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.update(tensordict)
+
+        with ScopedTimer("adaptation.update", sync=PROFILE_SYNC_TIMERS):
+            for adapt in self.adaptations.values():
+                adapt.update(tensordict)
         
         # for input_manager in self.input_managers.values():
         #     input_manager.update(tensordict)
@@ -861,6 +951,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         with ScopedTimer("reward.update", sync=PROFILE_SYNC_TIMERS):
             for group in self.reward_groups.values():
                 group.update(tensordict)
+            [callback() for callback in self._post_group_update_callbacks]
         tensordict = self._compute_reward(tensordict)
         
         with ScopedTimer("termination.update", sync=PROFILE_SYNC_TIMERS):
@@ -890,6 +981,8 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.extra["env/nonfinite_rows_total"] = self._nonfinite_rows_total
 
         if self._should_debug_draw():
+            for adapt in self.adaptations.values():
+                adapt.debug_draw()
             [callback() for callback in self._debug_draw_callbacks]
 
         return tensordict
