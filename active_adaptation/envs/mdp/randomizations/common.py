@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Union, Dict, Tuple, Optional
 from typing_extensions import override
 
 import active_adaptation
-from active_adaptation.utils.math import quat_rotate_inverse
+from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
 from active_adaptation.utils.profiling import PROFILE_SYNC_TIMERS, ScopedTimer
 
 import active_adaptation.utils.string as string_utils
@@ -93,14 +93,19 @@ def _set_external_wrench(
     is_global: bool = False,
     env_ids=None,
 ):
-    """Apply permanent external wrenches (Isaac composer / mjlab xfrc).
+    """Apply permanent external wrenches with an explicit backend branch.
 
-    Isaac: body-local by default via ``permanent_wrench_composer``.
-    mjlab: ``write_external_wrench_to_sim`` (world-frame; callers must convert).
+    ``forces`` / ``torques`` shape ``(N, num_bodies, 3)``.
+
+    - **isaaclab:** ``permanent_wrench_composer.set_forces_and_torques``;
+      ``is_global`` selects world vs body-local (default local).
+    - **mjlab:** ``write_external_wrench_to_sim`` (always world-frame). When
+      ``is_global=False``, body-local inputs are rotated with
+      ``body_link_quat_w`` before writing.
     """
-    composer = getattr(asset, "permanent_wrench_composer", None)
-    if composer is not None:
-        composer.set_forces_and_torques(
+    backend = active_adaptation.get_backend()
+    if backend == "isaaclab":
+        asset.permanent_wrench_composer.set_forces_and_torques(
             forces=forces,
             torques=torques,
             body_ids=body_ids,
@@ -108,7 +113,17 @@ def _set_external_wrench(
             is_global=is_global,
         )
         return
-    if hasattr(asset, "write_external_wrench_to_sim"):
+
+    if backend == "mjlab":
+        if not is_global:
+            if body_ids is None:
+                quat_w = asset.data.body_link_quat_w
+            else:
+                quat_w = asset.data.body_link_quat_w[:, body_ids]
+            n, b, _ = forces.shape
+            quat_flat = quat_w.reshape(n * b, 4)
+            forces = quat_rotate(quat_flat, forces.reshape(n * b, 3)).reshape(n, b, 3)
+            torques = quat_rotate(quat_flat, torques.reshape(n * b, 3)).reshape(n, b, 3)
         kwargs = {}
         if body_ids is not None:
             kwargs["body_ids"] = body_ids
@@ -116,10 +131,8 @@ def _set_external_wrench(
             kwargs["env_ids"] = env_ids
         asset.write_external_wrench_to_sim(forces, torques, **kwargs)
         return
-    raise TypeError(
-        f"{type(asset).__name__} has neither permanent_wrench_composer nor "
-        f"write_external_wrench_to_sim"
-    )
+
+    raise ValueError(f"Unsupported backend for external wrench: {backend!r}")
 
 
 class motor_params(Randomization):
