@@ -26,6 +26,15 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Changed
 
+- **Sealed `Command.update` / `Reward.update`** — subclasses must implement
+  `_update` (not `update`). Optional class attrs `in_keys` / `out_keys` wire
+  tensors through the step tensordict; missing `in_keys` are passed as
+  explicit `None`. `__init_subclass__` rejects overriding `update` and any
+  `_update` parameter with a default (`check_update_signature` in
+  `envs/mdp/base.py`).
+- **Explicit reward-group updates** — `RewardGroup.update(tensordict)` is
+  called from `_step` instead of registering per-term `update` callbacks for
+  rewards. Observation groups are likewise updated explicitly.
 - **`aa.init(auto_rank=True)` multi-GPU device model** — under
   `launch_ddp` / `torchrun`, each rank is CVD-isolated so Isaac USDRT Fabric
   (`SelectPrims`) always sees process-local `cuda:0`. `cfg.device` / `env.device`

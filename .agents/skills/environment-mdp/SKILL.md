@@ -1,11 +1,11 @@
 ---
 name: environment-mdp
-description: Implement and wire MDP terms in active-adaptation (observations, rewards, terminations, actions, commands, randomizations) using the V2 deferred-init API. Use when adding or modifying classes under envs/mdp/, editing cfg/task/ observation/reward/termination/input/command/randomization/sensors blocks, implementing command `prescribe` for split policy/command control (e.g. command-driven IK via `arm_control`), registering scene sensors (envs/sensors/, contact_sensor), debugging env_base step/reset callbacks, cross-backend contact sensor data (Isaac net_forces_w / force_matrix_w vs mjlab force), debug viz (scene.draw_*, camera frustums), Warp/simple-raycaster raycasting, USD mesh extraction, or Isaac/mjlab Viser viewers.
+description: Implement and wire MDP terms in active-adaptation (observations, rewards, terminations, actions, commands, randomizations) using deferred-init bases. Use when adding or modifying classes under envs/mdp/, editing cfg/task/ observation/reward/termination/input/command/randomization/sensors blocks, implementing sealed Command/Reward update→_update with in_keys/out_keys, command prescribe/step for split policy/command control, registering scene sensors (envs/sensors/, contact_sensor), debugging env_base step/reset callbacks, cross-backend contact sensor data (Isaac net_forces_w / force_matrix_w vs mjlab force), debug viz (scene.draw_*, camera frustums), Warp/simple-raycaster raycasting, USD mesh extraction, or Isaac/mjlab Viser viewers.
 ---
 
 # Environment / MDP terms (active-adaptation)
 
-Implement MDP terms as **V2** classes: construct from Hydra kwargs **without** an env, then bind in `_initialize(env)` after the scene exists. Register via `RegistryMixin`; task YAML selects them by class name.
+Implement MDP terms with **deferred init**: construct from Hydra kwargs **without** an env, then bind in `_initialize(env)` after the scene exists. Register via `RegistryMixin`; task YAML selects them by class name. `Command` / `Reward` use a sealed `update` → `_update` dispatcher with optional `in_keys` / `out_keys`.
 
 **Primary references**
 - Env wiring + step/reset: `active_adaptation/envs/env_base.py`
@@ -26,7 +26,7 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 ## When to use
 
 - Adding a new observation / reward / termination / action / command / randomization
-- Porting a legacy `Reward`/`Observation`/… term to V2
+- Porting a term to deferred init / sealed `_update`
 - Wiring or renaming terms in `cfg/task/`
 - Splitting policy vs command actuation (`input.action` + `command.prescribe` → `input.arm_control`, etc.)
 - Declaring task-level scene sensors (`sensors:` — object contact, filtered ground contact, …)
@@ -38,11 +38,11 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 
 ## Hard rules
 
-1. **Use V2 only** — `ObservationV2`, `RewardV2`, `TerminationV2`, `ActionV2`, `CommandV2`, `RandomizationV2`. Legacy bases that take `env` in `__init__` are deprecated (`Reward` raises).
+1. **Use deferred bases only** — `Observation`, `Reward`, `Termination`, `Action`, `Command`, `Randomization`. Construct from Hydra kwargs without `env`; bind in `_initialize(env)`.
 2. **Two-phase init** — `__init__(**cfg_kwargs)` stores config only; `_initialize(env)` binds `self.env`, caches assets/sensors, allocates buffers. Always call `super()._initialize(env)` first when overriding.
-3. **Register by subclassing** — subclassing a V2 base auto-registers under the class name (or `namespace.ClassName`). Import the module so registration runs (see package `__init__.py` auto-import patterns).
+3. **Register by subclassing** — subclassing a base auto-registers under the class name (or `namespace.ClassName`). Import the module so registration runs (see package `__init__.py` auto-import patterns).
 4. **Shape convention** — tensors are batched `(num_envs, …)`. Rewards/terminations usually return `(num_envs, 1)`.
-5. **Override only what you need** — `_add_mdp_component` registers `startup` / `reset` / `update` / `pre_step` / `post_step` / `debug_draw` only when the subclass **overrides** the base method (`is_method_implemented`). Empty overrides still register.
+5. **Sealed `Command.update` / `Reward.update`** — do **not** override `update`. Implement `_update(*tensors_in)` instead. Optional `in_keys` / `out_keys` class attrs; missing keys are passed as `None`. `_update` parameters **must not** have defaults (enforced by `check_update_signature`). Other MDP types: `_add_mdp_component` still registers overridden `startup` / `reset` / `update` / `pre_step` / `post_step` / `debug_draw` via `is_method_implemented`.
 6. **Simulation name order** — Isaac and MuJoCo/mjlab typically use different joint/body orders. Resolve names via `asset.cfg.joint_names_simulation` / `asset.cfg.body_names_simulation` (helpers `find_joints` / `find_bodies` in `envs/utils/api.py`), **not** `asset.find_joints` / `asset.find_bodies`. Critical for action and observation terms so trained policies transfer across backends.
 7. **Contact sensor indices** — mjlab’s contact sensor has no `find_bodies`. Use `find_sensor_bodies(asset, contact_sensor, pattern)` so articulation and sensor indices stay aligned in simulation order.
 8. **Contact sensor data fields differ by backend** — do **not** assume a shared `sensor.data.*` API. Isaac uses `ContactSensorData` (`net_forces_w`, `force_matrix_w`, …); mjlab uses `ContactData` (`force`, `found`, …) and only populates fields listed in `ContactSensorCfg.fields`. Branch on `env.backend` or use a thin helper when reading forces / air time.
@@ -56,15 +56,16 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 
 ```
 Task Progress:
-- [ ] Choose term type and V2 base class
+- [ ] Choose term type and base class (Observation / Reward / …)
 - [ ] Implement class in the matching envs/mdp/<family>/ module
 - [ ] __init__: config kwargs only (no env / asset access)
 - [ ] _initialize: super()._initialize(env); then asset/sensor/buffer setup
 - [ ] Joint/body indices: `find_joints` / `find_bodies` (simulation order), not `asset.find_*`
 - [ ] Contact indices: `find_sensor_bodies` (not `contact_sensor.find_bodies`)
 - [ ] Bind sensors by name: `env.scene.sensors[sensor_name]`, entities via `env.scene.entities[entity_name]`
-- [ ] Implement the type-specific compute / apply / sync API
-- [ ] Optional lifecycle: update, reset(env_ids, tensordict), pre_step, post_step, startup, debug_draw, **prescribe(tensordict)** (command only)
+- [ ] Implement the type-specific compute / apply / `_update` API
+- [ ] Optional lifecycle: `_update` (Command/Reward; sealed `update`), reset(env_ids, tensordict), pre_step, post_step, startup, debug_draw, **prescribe(tensordict)** / **step()** (command), `in_keys`/`out_keys` when needed
+- [ ] If Command/Reward `_update`: **no default args**; missing `in_keys` arrive as `None`
 - [ ] If `debug_draw`: use `env.scene.draw_*` / `create_camera_frustum` (not `env.debug_draw`)
 - [ ] Optional: symmetry_transform (obs/action) for symaug
 - [ ] If overriding `sample_init`: write `env.episode_origin[env_ids] = origins` used for spawn
@@ -202,21 +203,21 @@ def _initialize(self, env):
 
 ## Term APIs (what to implement)
 
-| Type | Config block | Factory | Must implement | Notes |
-|------|--------------|---------|----------------|-------|
-| Observation | `observation.<group>.<name>` | `ObservationV2.make` | `compute() -> Tensor` | Groups concat along last dim in YAML order |
-| Reward | `reward.<group>.<name>` | `RewardV2.make` | `_compute() -> Tensor` or `(rew, is_active)` | `compute()` applies `weight` + modifier + EMA |
-| Termination | `termination.<name>` | `TerminationV2.make` | `compute(terminated) -> bool Tensor` or `(term, discount)` | `is_timeout=True` → truncated |
-| Action | `input.<name>` | `ActionV2.make` | `process_action`, `apply_action` | Set `action_dim`; often `symmetry_transform` |
-| Command | `command` | `CommandV2.make` | `sync_state`, `update`; optional `prescribe` | Also `sample_init` (must set `env.episode_origin`); see [Command timing](#command-timing) and [`prescribe`](#prescribe-command-driven-inputs) |
-| Randomization | `randomization.<name>` | `RandomizationV2.make` | lifecycle hooks as needed | mjlab: declare `mj_fields` if expanding model |
+| Type | Config block | Must implement | Notes |
+|------|--------------|----------------|-------|
+| Observation | `observation.<group>.<name>` | `compute() -> Tensor` | Groups concat along last dim in YAML order; optional `update()` |
+| Reward | `reward.<group>.<name>` | `_compute() -> Tensor` or `(rew, is_active)` | Sealed `update` → `_update`; optional `in_keys`/`out_keys`. `compute()` applies `weight` + modifier + EMA |
+| Termination | `termination.<name>` | `compute(terminated) -> bool Tensor` or `(term, discount)` | `is_timeout=True` → truncated |
+| Action | `input.<name>` | `process_action`, `apply_action` | Set `action_dim`; often `symmetry_transform` |
+| Command | `command` | `_update`; optional `prescribe`, `step` | Sealed `update` → `_update`; also `sample_init` (must set `env.episode_origin`); see [Command timing](#command-timing) and [`prescribe`](#prescribe-command-driven-inputs) |
+| Randomization | `randomization.<name>` | lifecycle hooks as needed | mjlab: declare `mj_fields` if expanding model |
 
 ### Minimal examples
 
 **Reward** (`envs/mdp/rewards/…`):
 
 ```python
-class my_term(RewardV2):
+class my_term(Reward):
     def __init__(self, weight: float, scale: float = 1.0, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.scale = scale
@@ -229,10 +230,26 @@ class my_term(RewardV2):
         return -self.asset.data.root_com_lin_vel_b[:, 2:3].square() * self.scale
 ```
 
+**Reward with dynamic gating via `in_keys`** (e.g. `linvel_exp`):
+
+```python
+class linvel_exp(Reward):
+    in_keys = ["linvel_exp_weight"]  # written by command.update into step TD
+    out_keys = None
+
+    def _update(self, weight: torch.Tensor | None) -> None:  # no defaults!
+        # cache buffers; missing key → weight is None
+        ...
+
+    def _compute(self):
+        rew = ...
+        return rew, self._weight > 0.0  # is_active from last _update
+```
+
 **Observation**:
 
 ```python
-class my_obs(ObservationV2):
+class my_obs(Observation):
     def _initialize(self, env):
         super()._initialize(env)
         self.asset = self.env.scene.articulations["robot"]
@@ -260,56 +277,61 @@ observation:
 
 ## Lifecycle and step order
 
-Env construction: `_create_mdp_terms()` (instantiate from cfg) → `_setup_simulation()` → `_initialize_mdp_terms()` → `_build_tensor_specs()`.
+Env construction: `_create_mdp_terms()` (instantiate from cfg) → scene setup → `_initialize_mdp_terms()` → `_build_tensor_specs()`.
 
-Per `_step`:
+Per `_step` (after physics substeps):
 
-**Before physics** (once per env step):
+1. `command_manager.update(tensordict)` — sealed dispatcher → `_update(*in_keys)`; may write `out_keys`; refresh command state for this step’s rewards
+2. `RewardGroup.update(tensordict)` for each group → each reward’s sealed `update` → `_update`
+3. `_compute_reward`
+4. termination `update` hooks → `_compute_termination`
+5. `command_manager.step()` — advance / resample for the **next** step
+6. `ObsGroup.update(tensordict)` → `_compute_observation`
+7. randomization `update` hooks
 
-1. `command_manager.prescribe(tensordict)` — fill missing `task.input` keys (see [`prescribe`](#prescribe-command-driven-inputs))
-2. each `input_manager.process_action(tensordict.get(key))` — includes prescribed + policy values
-3. physics substeps: `apply_action` → `pre_step` → sim → `post_step`
-
-**After physics**:
-
-4. `command_manager.sync_state()` — refresh intermediates; **do not** change next-step targets
-5. `update` callbacks
-6. rewards → terminations (read last step’s next-step command as this step’s target)
-7. `command_manager.update()` — may resample; write **next-step** targets
-8. observations
+**Before physics** (once per env step): `command_manager.prescribe(tensordict)` then each `input_manager.process_action`.
 
 First `_reset`: run `startup` callbacks once, then for reset envs: `_reset_idx` → `scene.reset` → `reset` callbacks.
 
+### Sealed `update` / `_update` (Command & Reward)
+
+| | Role |
+|--|------|
+| `update(tensordict)` | **Sealed** (`@final`). Pulls `in_keys` from the step TD (missing → `None`), calls `_update`, writes `out_keys`. Do not override. |
+| `_update(*tensors_in)` | Override to refresh caches. Params must match `in_keys` order and **must not have defaults**. |
+| `in_keys` / `out_keys` | Optional class attrs (`None` = no TD I/O). |
+
+Enforced at class definition by `check_update_signature` in `envs/mdp/base.py`.
+
 ### Command timing
 
-`sync_state` and `update` are intentionally asymmetric:
+`_update` and `step` are intentionally asymmetric:
 
 | Hook | Role |
 |------|------|
-| `sync_state` | Refresh **intermediates** derived from the **already active** command (errors, caches) for rewards/terminations. **Do not** change the command or write next-step targets. |
-| `update` | May resample / advance the command. Write **next-step** targets that observations will see. |
+| `_update` | Refresh command-dependent tensors from the **current** sim state (and optional `in_keys`) for rewards/terminations this step. |
+| `step` | May resample / advance the command for the **upcoming** observation / next reward step. |
 
-**Next-step targets:** Command buffers used by observations (and by the *following* step's rewards) are written in `update` only. Rewards in the current step read whatever `update` produced on the **previous** step — that previous "next-step" command is now the target for the state just simulated. Do **not** recompute those targets in `sync_state` or `reset` just to make the post-reset observation look valid.
+**First observation is discarded:** Training treats the first transition after reset as invalid via `is_init` (PPO/off-policy mask with `~is_init`). Do not recompute next-step targets in `reset` solely to validate the post-reset obs.
 
-**First observation is discarded:** Training treats the first transition after reset as invalid via `is_init` (PPO/off-policy mask with `~is_init`). That avoids paying for a second command/obs evaluation on reset: leave next-step targets to the first `update` after the episode starts.
-
-Pattern for look-ahead / trajectory commands:
+Pattern:
 
 ```python
-def sync_state(self):
-    # optional: error stats from last update's targets vs current state
-    ...
+class MyCommand(Command):
+    def _update(self) -> None:
+        # errors / caches from active command vs current state
+        ...
 
-def update(self):
-    # write targets for the upcoming obs / next reward step
-    ...
+    def step(self) -> None:
+        # advance clip / write targets for upcoming obs
+        ...
 ```
 
 ---
 
 ## `prescribe`: command-driven inputs
 
-Use **`prescribe(tensordict)`** on `CommandV2` when the command should drive one or more **`task.input`** slots that the policy does **not** learn (reference trajectories, hand-crafted IK targets, scripted gripper phase, etc.).
+Use **`prescribe(tensordict)`** on `Command` when the command should drive one or more **`task.input`** slots that the policy does **not** learn (reference trajectories, hand-crafted IK targets, scripted gripper phase, etc.).
 
 ### When to use
 
@@ -330,13 +352,13 @@ for input_key, input_manager in self.input_managers.items():
     input_manager.process_action(tensordict.get(input_key, None))
 ```
 
-So prescribed values must come from command state already updated on the **previous** step’s `update()` (same timing as reward targets). Do **not** write next-step references in `prescribe`; use `update()` for that.
+So prescribed values must come from command state already updated on the **previous** step’s `step()` / prior `_update` (same timing as reward targets). Do **not** write next-step references in `prescribe`; use `step()` for that.
 
 | Hook | Writes next-step refs? | Runs `process_action`? |
 |------|------------------------|-------------------------|
-| `update` | yes (obs / next reward) | no |
-| `prescribe` | no — uses refs from last `update` | fills tensordict only |
-| `sync_state` | no | no |
+| `_update` | refreshes current-step caches | no |
+| `step` | yes (obs / next reward) | no |
+| `prescribe` | no — uses refs from last `step` | fills tensordict only |
 
 ### Contract
 
@@ -367,9 +389,14 @@ Policy / algo specs use **`action_manager`** (typically `input.action` only). Pr
 ### Implementation sketch
 
 ```python
-class MyTracking(CommandV2):
+class MyTracking(Command):
     @override
-    def update(self) -> None:
+    def _update(self) -> None:
+        # optional: error stats from active refs vs current state
+        ...
+
+    @override
+    def step(self) -> None:
         # advance clip index; write cmd_eef_pos_b / cmd_eef_quat_b for next step
         self._write_tracking_refs(None, self._raw_time_steps)
         self._refresh_body_frame_commands()
@@ -383,13 +410,13 @@ class MyTracking(CommandV2):
             )
 ```
 
-Reference: `CommandV2.prescribe` docstring in `envs/mdp/commands/base.py`; example `uw_manip.commands.manip_tracking.ManipTracking`.
+Reference: `Command.prescribe` docstring in `envs/mdp/commands/base.py`; example `uw_manip.commands.manip_tracking.ManipTracking`.
 
 ### Anti-patterns (`prescribe`)
 
-- Writing next-step trajectory targets in `prescribe` instead of `update`
+- Writing next-step trajectory targets in `prescribe` instead of `step`
 - Always overwriting input keys (breaks teleop / ablations that pass `arm_control` from outside)
-- Putting prescribe logic in `sync_state` or `reset` (wrong phase; `process_action` never sees it)
+- Putting prescribe logic in `_update` or `reset` (wrong phase; `process_action` never sees it)
 - Using a single flat `action` tensor in the command when YAML defines separate `input.*` managers
 - Expecting `prescribe` to run inside physics substeps (it runs once per env step, before substeps)
 
@@ -418,7 +445,7 @@ def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
 
 - `scene.sample_spawn_origin_candidates(env_ids)` — unstamped candidates. Default: `env_origins[env_ids]`. Isaac may random-sample a terrain patch when procedural terrain is active.
 - For episode-local math (shared 3DGS, motion refs in env frame, etc.) subtract / add **`env.episode_origin`**, not `scene.env_origins`.
-- Base `Command` / `CommandV2.sample_init` already follows this pattern; overrides that skip `super()` must set `episode_origin` themselves.
+- Base `Command.sample_init` already follows this pattern; overrides that skip `super()` must set `episode_origin` themselves.
 
 `gs_camera` with `origin: env` renders at `mount_pos_w - env.episode_origin` so all envs share one PLY around the episode frame.
 
@@ -627,16 +654,15 @@ Isaac/mjlab **Viser** robot meshes (viewer internals, not MDP terms): same body-
 ## Anti-patterns
 
 - Accessing `env.scene` / assets in `__init__` (scene does not exist yet)
-- Subclassing legacy `Reward` / `Observation` / …
-- Putting command resampling or next-step target writes in `sync_state` (use `update`)
-- Writing reference inputs in `sync_state` / `reset` instead of `prescribe` + `update` (see [`prescribe`](#prescribe-command-driven-inputs))
+- Overriding sealed `Command.update` / `Reward.update` (implement `_update`; no default args)
+- Putting command resampling / next-step target writes in `_update` (use `step`)
+- Writing reference inputs in `_update` / `reset` instead of `prescribe` + `step` (see [`prescribe`](#prescribe-command-driven-inputs))
 - Overwriting prescribed `task.input` keys in `prescribe` when the key is already set (breaks policy override / teleop)
 - Re-evaluating next-step command/obs targets in `reset` “to fix” the first obs (that obs is discarded via `is_init`)
 - Overriding `sample_init` without writing `env.episode_origin[env_ids]` (shared 3DGS / episode-local consumers break)
 - Subtracting `scene.env_origins` for episode-local frames when spawn was randomized — use `env.episode_origin`
 - Forgetting to import the module (class never enters the registry)
 - Returning unbatched reward/obs tensors
-- Registering empty `update`/`reset` overrides unintentionally (they still run every step/reset)
 - Using `env.debug_draw` instead of `env.scene.draw_*` / `create_camera_frustum`
 - Using `asset.find_joints` / `asset.find_bodies` for MDP feature layout (backend-native order; breaks Isaac↔mjlab transfer) — use `find_joints` / `find_bodies` / `*_names_simulation`
 - Calling `contact_sensor.find_bodies` directly (missing on mjlab; may disagree with articulation order even on Isaac) — use `find_sensor_bodies`

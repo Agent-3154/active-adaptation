@@ -22,20 +22,20 @@ active_adaptation/envs/
 │       ├── viewer.py        # MjLabViewer
 │       └── env.py           # AssetSpec.sensors + task sensors: → SceneCfg.sensors
 └── mdp/
-    ├── base.py              # MDPComponent, is_method_implemented
-    ├── __init__.py          # re-exports V1+V2 bases + subpackages
+    ├── base.py              # MDPComponent, is_method_implemented, check_update_signature
+    ├── __init__.py          # re-exports bases + subpackages
     ├── actions/
-    │   ├── base.py          # Action, ActionV2
+    │   ├── base.py          # Action
     │   └── *.py             # e.g. JointPosition
     ├── commands/
-    │   ├── base.py          # Command, CommandV2 (sync_state vs update)
+    │   ├── base.py          # Command (sealed update → _update; step; prescribe)
     │   └── *.py             # e.g. Twist
     ├── observations/
-    │   ├── base.py          # Observation, ObservationV2
+    │   ├── base.py          # Observation
     │   ├── common.py, joint.py, contact.py, underwater.py, …
     │   └── __init__.py      # explicit submodule imports
     ├── rewards/
-    │   ├── base.py          # Reward (deprecated), RewardV2
+    │   ├── base.py          # Reward (sealed update → _update; in_keys/out_keys)
     │   ├── locomotion.py, …
     │   └── __init__.py      # auto-imports all *.py except base/common
     ├── terminations/
@@ -53,7 +53,7 @@ Task YAML: `cfg/task/<Robot>/<Task>.yaml` — blocks `input`, `command`, `observ
 
 ```
 _EnvBase.__init__
-  ├─ _create_mdp_terms()     # ActionV2/CommandV2/… .make from cfg; no scene yet
+  ├─ _create_mdp_terms()     # instantiate Action/Command/… from cfg; no scene yet
   ├─ _setup_simulation()     # setup_scene → entities + AssetSpec.sensors + task sensors: → sim/scene ready
   ├─ _initialize_mdp_terms() # term._initialize(self) for all terms
   └─ _build_tensor_specs()   # action/obs/reward/done specs from initialized terms
@@ -90,12 +90,15 @@ _step(tensordict)
   │     write_data_to_sim → sim.step → scene.update
   │     post_step(substep)
   ├─ episode_length_buf += 1
-  ├─ command.sync_state()   # intermediates for rewards; do not change next-step targets
-  ├─ update callbacks
+  ├─ command.update(tensordict)      # sealed → _update(*in_keys); may write out_keys
+  ├─ for each RewardGroup: group.update(tensordict)  # sealed Reward.update → _update
   ├─ _compute_reward
+  ├─ termination update hooks
   ├─ _compute_termination
-  ├─ command.update()       # may resample; write next-step targets for obs
+  ├─ command.step()                  # advance / resample for next obs
+  ├─ for each ObsGroup: group.update(tensordict)
   ├─ _compute_observation
+  ├─ randomization update hooks
   └─ if sim.has_gui(): debug_draw callbacks
        (backends insert scene.clear_debug as first callback)
 ```
@@ -108,13 +111,12 @@ _step(tensordict)
 
 | Source | How registered |
 |--------|----------------|
-| `command_manager` | Always: `pre_step`, `reset`, `debug_draw` |
-| each `input_manager` | Always: `reset`, `debug_draw` |
-| obs / reward / term / randomization | Via `_add_mdp_component`: only **overridden** methods among `startup`, `reset`, `pre_step`, `post_step`, `update`, `debug_draw` |
+| `command_manager` | `startup` / `reset` / `pre_step` / `post_step` / `debug_draw` when overridden; **`update` is explicit** (sealed dispatcher) |
+| each `input_manager` | Via `_add_mdp_component` when overridden |
+| Observation / Reward | **Not** registered as generic `update` callbacks; `ObsGroup` / `RewardGroup.update(tensordict)` called explicitly |
+| term / randomization | Via `_add_mdp_component`: overridden `startup`, `reset`, `pre_step`, `post_step`, `update`, `debug_draw` |
 
-`update` callbacks are wrapped in `ScopedTimer(class_name)`.
-
-Command `sync_state` / `update` are **not** in the generic callback lists; they are called explicitly in `_step`.
+Command / Reward `update` are sealed; subclasses implement `_update`. See `check_update_signature`.
 
 ---
 
@@ -153,16 +155,20 @@ Optional: `namespace = "foo"` on the class → registry key `foo.ClassName`; YAM
 
 ---
 
-## RewardV2 details
+## Reward details
 
 - `_compute` may return `Tensor` or `(rew, is_active)` (inactive envs zeroed for EMA count).
 - `compute` applies `weight * rew * modifier`, then resets `modifier` to ones.
+- **Sealed `update(tensordict)`** → `_update(*in_keys)`. Do not override `update`.
+- Optional class attrs `in_keys` / `out_keys`. Missing `in_keys` → `None` via `tensordict.get(key, None)`.
+- `_update` parameters **must not** have defaults (`check_update_signature`).
 - Other terms can write into `reward.modifier` before compute for coupling.
 - `relabel(tensordict)` exists for offline reward recomputation (see base).
+- Examples with `in_keys`: `linvel_exp` / `angvel_z_exp` (`linvel_exp_weight`, `angvel_z_exp_weight`).
 
 ---
 
-## TerminationV2 details
+## Termination details
 
 - `compute(terminated)` receives the running terminated mask.
 - Return bool tensor `(num_envs, 1)`, or `(term, discount)`.
@@ -171,7 +177,7 @@ Optional: `namespace = "foo"` on the class → registry key `foo.ClassName`; YAM
 
 ---
 
-## ActionV2 details
+## Action details
 
 - `_initialize` sets `self.asset = scene.articulations["robot"]`.
 - Must define `action_dim` before specs are built.
@@ -255,23 +261,22 @@ Ensure the mjlab sensor’s `ContactSensorCfg.fields` includes every quantity th
 
 ---
 
-## CommandV2 details
+## Command details
 
-- Abstract `sync_state` and `update` (must override both, even if `pass`).
-- `sample_init(env_ids)` provides root (and optionally joint) state for `_reset_idx`.
-- No teleop on V2 (legacy `Command` had `teleop`).
-- **`sync_state`:** refresh intermediates for rewards from the *current* command; do not change commands / next-step targets.
-- **`update`:** may change commands; write next-step targets for observations (rewards on the *next* step read these).
-- **`prescribe(tensordict)`:** optional; called once at the start of `_step` **before** `input_manager.process_action`. Fill **missing** keys on the step tensordict that match `task.input` entries (e.g. command-driven `arm_control` while the policy only outputs `action`). Uses reference state from the **previous** step’s `update`, not new targets. Default no-op in `envs/mdp/commands/base.py`.
+- **Sealed `update(tensordict)`** → `_update(*in_keys)`; optional `out_keys`. Do not override `update`.
+- `_update` params must not have defaults; missing keys arrive as `None`.
+- `step()` — advance / resample for the upcoming observation (after rewards/terminations).
+- `sample_init(env_ids, reset_td)` provides root (and optionally joint) state; must write `env.episode_origin`.
+- **`prescribe(tensordict)`:** optional; called once at the start of `_step` **before** `input_manager.process_action`. Fill **missing** keys on the step tensordict that match `task.input` entries. Uses reference state from the **previous** `step()`, not new targets. Default no-op in `envs/mdp/commands/base.py`.
 - **First obs discarded:** post-reset observation is invalid (`is_init`); do not recompute next-step targets in `reset` solely to validate it. See SKILL.md “Command timing” and “`prescribe`”.
 
-### `prescribe` vs `update` vs policy action
+### `prescribe` vs `_update` / `step` vs policy action
 
-| | `update` | `prescribe` | policy → `action` |
-|--|----------|-------------|-------------------|
-| When | after sim, before obs | start of `_step`, before substeps | env step input |
-| Purpose | next-step command refs | inject non-learned `input.*` | learned control |
-| Tensordict | no | yes (in-place) | yes (`action` key) |
+| | `_update` | `step` | `prescribe` | policy → `action` |
+|--|-----------|--------|-------------|-------------------|
+| When | after sim, before rewards | after terminations, before obs | start of `_step`, before substeps | env step input |
+| Purpose | current-step caches / out_keys | next-step command refs | inject non-learned `input.*` | learned control |
+| Tensordict | yes (`in_keys`/`out_keys`) | no | yes (in-place) | yes (`action` key) |
 
 Split-control tasks: declare separate `input.arm_control` + `input.action` in YAML; implement `prescribe` on the command; keep learned dim on `action` only (`env.action_manager`). Example: `aa-projects/uw_manip/…/manip_tracking.py` + `BlueROVHeavyManipTracking.yaml`.
 
