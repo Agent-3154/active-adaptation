@@ -42,7 +42,7 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 2. **Two-phase init** — `__init__(**cfg_kwargs)` stores config only; `_initialize(env)` binds `self.env`, caches assets/sensors, allocates buffers. Always call `super()._initialize(env)` first when overriding.
 3. **Register by subclassing** — subclassing a base auto-registers under the class name (or `namespace.ClassName`). Import the module so registration runs (see package `__init__.py` auto-import patterns).
 4. **Shape convention** — tensors are batched `(num_envs, …)`. Rewards/terminations usually return `(num_envs, 1)`.
-5. **Sealed `Command.update` / `Reward.update`** — do **not** override `update`. Implement `_update(*tensors_in)` instead. Optional `in_keys` / `out_keys` class attrs; missing keys are passed as `None`. `_update` parameters **must not** have defaults (enforced by `check_update_signature`). Other MDP types: `_add_mdp_component` still registers overridden `startup` / `reset` / `update` / `pre_step` / `post_step` / `debug_draw` via `is_method_implemented`.
+5. **Sealed `Command.update` / `Reward.update`** — do **not** override `update`. Implement `_update(*tensors_in)` instead. Optional `in_keys` / `out_keys` class attrs; missing keys are passed as `None`. `_update` parameters **must not** have defaults (enforced by `check_update_signature`). `startup` / `reset` are called explicitly from `_EnvBase` on command, adaptations, obs/reward groups, randomizations, terminations, and input managers. `_add_mdp_component` still registers overridden `pre_step` / `post_step` / `debug_draw` via `is_method_implemented`.
 6. **Simulation name order** — Isaac and MuJoCo/mjlab typically use different joint/body orders. Resolve names via `asset.cfg.joint_names_simulation` / `asset.cfg.body_names_simulation` (helpers `find_joints` / `find_bodies` in `envs/utils/api.py`), **not** `asset.find_joints` / `asset.find_bodies`. Critical for action and observation terms so trained policies transfer across backends.
 7. **Contact sensor indices** — mjlab’s contact sensor has no `find_bodies`. Use `find_sensor_bodies(asset, contact_sensor, pattern)` so articulation and sensor indices stay aligned in simulation order.
 8. **Contact sensor data fields differ by backend** — do **not** assume a shared `sensor.data.*` API. Isaac uses `ContactSensorData` (`net_forces_w`, `force_matrix_w`, …); mjlab uses `ContactData` (`force`, `found`, …) and only populates fields listed in `ContactSensorCfg.fields`. Branch on `env.backend` or use a thin helper when reading forces / air time.
@@ -291,7 +291,7 @@ Per `_step` (after physics substeps):
 
 **Before physics** (once per env step): `command_manager.prescribe(tensordict)` then each `input_manager.process_action`.
 
-First `_reset`: run `startup` callbacks once, then for reset envs: `_reset_idx` → `scene.reset` → `reset` callbacks.
+First env init: explicit `startup` once (command → adaptations → obs/reward groups → randomizations → terminations → input managers). Each `_reset`: `_reset_idx` → `scene.reset` → explicit `reset` in the same family order.
 
 ### Sealed `update` / `_update` (Command & Reward)
 
@@ -463,7 +463,7 @@ def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
 - Both arguments are required. Most terms leave `tensordict` unused.
 - Terms **may read and write** `tensordict` (controlled / curriculum resets, inter-term handoff during the same reset).
 - Env always passes a real `TensorDictBase` (allocates an empty one on full reset when the caller passed `None`).
-- Order today: `_reset_idx` (`command_manager.sample_init`) → `scene.reset` → term `reset` callbacks.
+- Order today: `_reset_idx` (`command_manager.sample_init`) → `scene.reset` → explicit `reset` on command, adaptations, obs/reward groups, randomizations, terminations, input managers.
 - **Future:** `sample_init` will be removed; `reset` will own initial-state decisions. Do not reintroduce `reset(env_ids)`-only overrides.
 
 ---

@@ -1,7 +1,7 @@
-"""Gripper semantic adaptation: joint/body indices + closedness helper.
+"""Gripper semantic adaptation: EEF + finger indices and closedness.
 
 Commands / rewards should use ``env.require_adaptation("gripper")`` instead of
-re-resolving ``arm_joint[7,8]`` / ``gripper_(left|right)`` in every term.
+re-resolving grasp / finger names in every term.
 """
 from __future__ import annotations
 
@@ -19,22 +19,29 @@ if TYPE_CHECKING:
 
 
 class GripperAdaptation(RobotAdaptation):
-    """Expose gripper joint/body indices and a normalized closedness signal.
+    """Expose EEF body, finger joints/bodies, and a normalized closedness signal.
 
-    ``closedness()`` returns ``[num_envs, 1]`` in ``[0, 1]`` with ``0`` = fully
-    open and ``1`` = fully closed (max |joint pos| / soft limit).
+    Closedness assumes finger soft-limit rest (joint pos ≈ 0) is **closed** and
+    ``|q|`` toward the soft limit is **open** (A2 Piper / similar). Then:
+
+    - ``closedness()`` → ``[N, 1]`` in ``[0, 1]`` with ``0`` = open, ``1`` = closed
+    - ``openness()`` → ``1 - closedness()``
     """
 
     name = "gripper"
 
     def __init__(
         self,
+        eef_body_name: str = "grasp_point",
         joint_names: str | Sequence[str] = "arm_joint[7,8]",
         body_names: str | Sequence[str] | None = "gripper_(left|right)",
     ) -> None:
         super().__init__()
+        self.eef_body_name_cfg = eef_body_name
         self.joint_names_cfg = joint_names
         self.body_names_cfg = body_names
+        self.eef_body_id: int = -1
+        self.eef_body_name: str = ""
         self.joint_ids: torch.Tensor | None = None
         self.joint_names: list[str] = []
         self.body_ids: torch.Tensor | None = None
@@ -44,6 +51,15 @@ class GripperAdaptation(RobotAdaptation):
     @override
     def _initialize(self, env: "_EnvBase", *, robot: "Articulation") -> None:
         super()._initialize(env, robot=robot)
+
+        eef_ids, eef_names = find_bodies(robot, self.eef_body_name_cfg)
+        if len(eef_ids) != 1:
+            raise ValueError(
+                f"GripperAdaptation: expected one EEF body for "
+                f"{self.eef_body_name_cfg!r}, got {eef_names}"
+            )
+        self.eef_body_id = int(eef_ids[0])
+        self.eef_body_name = eef_names[0]
 
         joint_ids, joint_names = find_joints(robot, self.joint_names_cfg)
         if not joint_ids:
@@ -71,15 +87,26 @@ class GripperAdaptation(RobotAdaptation):
         self.body_ids = torch.as_tensor(body_ids, device=self.device, dtype=torch.long)
         self.body_names = list(body_names)
 
-    def closedness(self) -> torch.Tensor:
-        """Return gripper closedness in ``[0, 1]`` (0=open, 1=closed), shape ``[N, 1]``."""
-        gripper_pos = self.robot.data.joint_pos[:, self.joint_ids]
-        return (
-            gripper_pos.abs().amax(dim=-1, keepdim=True) / self.max_open
-        ).clamp(0.0, 1.0)
+    @property
+    def eef_pos_w(self) -> torch.Tensor:
+        return self.robot.data.body_pos_w[:, self.eef_body_id]
+
+    @property
+    def eef_quat_w(self) -> torch.Tensor:
+        return self.robot.data.body_quat_w[:, self.eef_body_id]
 
     def joint_pos(self) -> torch.Tensor:
         return self.robot.data.joint_pos[:, self.joint_ids]
+
+    def openness(self) -> torch.Tensor:
+        """Finger opening in ``[0, 1]`` (0=closed rest, 1=at soft limit), ``[N, 1]``."""
+        return (
+            self.joint_pos().abs().amax(dim=-1, keepdim=True) / self.max_open
+        ).clamp(0.0, 1.0)
+
+    def closedness(self) -> torch.Tensor:
+        """Gripper closedness in ``[0, 1]`` (0=open, 1=closed), shape ``[N, 1]``."""
+        return 1.0 - self.openness()
 
 
 __all__ = ["GripperAdaptation"]

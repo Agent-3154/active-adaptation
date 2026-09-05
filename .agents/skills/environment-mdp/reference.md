@@ -111,10 +111,11 @@ _step(tensordict)
 
 | Source | How registered |
 |--------|----------------|
-| `command_manager` | `startup` / `reset` / `pre_step` / `post_step` / `debug_draw` when overridden; **`update` is explicit** (sealed dispatcher) |
-| each `input_manager` | Via `_add_mdp_component` when overridden |
-| Observation / Reward | **Not** registered as generic `update` callbacks; `ObsGroup` / `RewardGroup.update(tensordict)` called explicitly |
-| term / randomization | Via `_add_mdp_component`: overridden `startup`, `reset`, `pre_step`, `post_step`, `update`, `debug_draw` |
+| `command_manager` | Explicit `startup` / `reset` / `update`; `pre_step` / `post_step` / `debug_draw` via `_register_command_component` when overridden |
+| each `input_manager` | Explicit `startup` / `reset`; `pre_step` / `post_step` / `debug_draw` via `_add_mdp_component` when overridden |
+| Observation / Reward | Explicit via `ObsGroup` / `RewardGroup` (`startup` / `reset` / `update`) |
+| term / randomization | Explicit `startup` / `reset`; overridden `pre_step` / `post_step` / `debug_draw` via `_add_mdp_component` |
+| robot adaptations | Explicit lifecycle from `_EnvBase` |
 
 Command / Reward `update` are sealed; subclasses implement `_update`. See `check_update_signature`.
 
@@ -289,14 +290,25 @@ Split-control tasks: declare separate `input.arm_control` + `input.action` in YA
 def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
     ...
 
-# env_base._reset
-# always passes a TensorDictBase (empty TD if caller passed None)
-[callback(env_ids, tensordict) for callback in self._reset_callbacks]
+# env_base._reset (after _reset_idx + scene.reset)
+self.command_manager.reset(env_ids, tensordict)
+for adapt in self.adaptations.values():
+    adapt.reset(env_ids, tensordict)
+for group in self.observation_groups.values():
+    group.reset(env_ids, tensordict)
+for group in self.reward_groups.values():
+    group.reset(env_ids, tensordict)
+for rand in self.randomizations.values():
+    rand.reset(env_ids, tensordict)
+for term in self.termination_funcs.values():
+    term.reset(env_ids, tensordict)
+for input_manager in self.input_managers.values():
+    input_manager.reset(env_ids, tensordict)
 ```
 
 Terms may read/write `tensordict`. Most leave it unused.
 
-**Order:** `_reset_idx` (`sample_init`) → `scene.reset` → `reset` callbacks.
+**Order:** `_reset_idx` (`sample_init`) → `scene.reset` → explicit `reset` calls above.
 
 **Future:** drop `sample_init`; `reset` decides initial state.
 

@@ -32,6 +32,9 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Changed
 
+- **Explicit `startup` / `reset`** — `_EnvBase` calls `startup`/`reset` on
+  command, adaptations, obs/reward groups, randomizations, terminations, and
+  input managers. `_startup_callbacks` / `_reset_callbacks` removed.
 - **`AssetSpec.wrapper` → `adaptations`** — prefer
   `AssetSpec(adaptations=(...))`; `wrapper=` still accepted as a single-item
   alias. Backend `_bind_robot_adaptations` replaces

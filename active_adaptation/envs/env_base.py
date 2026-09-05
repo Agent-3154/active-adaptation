@@ -469,7 +469,12 @@ class _EnvBase(EnvBase, RegistryMixin):
             group.startup()
         for group in self.reward_groups.values():
             group.startup()
-        [callback() for callback in self._startup_callbacks]
+        for rand in self.randomizations.values():
+            rand.startup()
+        for term in self.termination_funcs.values():
+            term.startup()
+        for input_manager in self.input_managers.values():
+            input_manager.startup()
         self._startup_done = True
 
     @property
@@ -543,12 +548,11 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         self._enabled_reward_groups = 0
 
-        self._startup_callbacks = []
-        self._reset_callbacks = []
+        # Remaining callback bags: pre|post_step|debug_draw for MDP terms /
+        # command, plus backend clear_debug. startup / reset / update and
+        # robot adaptations are explicit.
         self._pre_step_callbacks = []
         self._post_step_callbacks = []
-        self._update_callbacks = []
-        self._post_group_update_callbacks = []
         self._debug_draw_callbacks = []
 
         # MDP: command manager
@@ -785,12 +789,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             return
         self._callback_component_ids.add(component_id)
 
-        if mdp.is_method_implemented(component, mdp.MDPComponent, "startup"):
-            if not isinstance(component, (mdp.Observation, mdp.Reward)):
-                self._startup_callbacks.append(component.startup)
-        if mdp.is_method_implemented(component, mdp.MDPComponent, "reset"):
-            if not isinstance(component, (mdp.Observation, mdp.Reward)):
-                self._reset_callbacks.append(component.reset)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "pre_step"):
             self._pre_step_callbacks.append(component.pre_step)
         if mdp.is_method_implemented(component, mdp.MDPComponent, "post_step"):
@@ -854,7 +852,6 @@ class _EnvBase(EnvBase, RegistryMixin):
 
             self._reset_idx(env_ids, tensordict)
             self.scene.reset(env_ids)
-            # Explicit: command + obs/reward groups (same pattern as update).
             self.command_manager.reset(env_ids, tensordict)
             for adapt in self.adaptations.values():
                 adapt.reset(env_ids, tensordict)
@@ -862,8 +859,12 @@ class _EnvBase(EnvBase, RegistryMixin):
                 group.reset(env_ids, tensordict)
             for group in self.reward_groups.values():
                 group.reset(env_ids, tensordict)
-            # Remaining MDP terms (actions, randomizations, terminations)
-            [callback(env_ids, tensordict) for callback in self._reset_callbacks]
+            for rand in self.randomizations.values():
+                rand.reset(env_ids, tensordict)
+            for term in self.termination_funcs.values():
+                term.reset(env_ids, tensordict)
+            for input_manager in self.input_managers.values():
+                input_manager.reset(env_ids, tensordict)
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
         tensordict.update(self.observation_spec.zero())
@@ -912,23 +913,23 @@ class _EnvBase(EnvBase, RegistryMixin):
         
         with ScopedTimer("simulation", sync=PROFILE_SYNC_TIMERS):
             for substep in range(self.decimation):
-                with ScopedTimer("pre_step_callbacks", sync=PROFILE_SYNC_TIMERS):
+                with ScopedTimer("simulation.pre_step", sync=PROFILE_SYNC_TIMERS):
                     self.scene.zero_external_wrenches()
-                    self._apply_action(substep)
+                    for input_manager in self.input_managers.values():
+                        input_manager.apply_action(tensordict)
                     for adapt in self.adaptations.values():
                         adapt.pre_step(substep)
                     [callback(substep) for callback in self._pre_step_callbacks]
                     self.scene.write_data_to_sim()
-                with ScopedTimer("sim.step", sync=PROFILE_SYNC_TIMERS):
+                with ScopedTimer("simulation.step", sync=PROFILE_SYNC_TIMERS):
                     self.sim.step()
                     if substep == self.decimation - 1:
                         if self._should_render_sensors():
                             self.sim.render_sensors()
                         if self._should_render_gui():
                             self.sim.render_gui()
-                with ScopedTimer("scene.update", sync=PROFILE_SYNC_TIMERS):
+                with ScopedTimer("simulation.post_step", sync=PROFILE_SYNC_TIMERS):
                     self.scene.update(self.physics_dt)
-                with ScopedTimer("post_step_callbacks", sync=PROFILE_SYNC_TIMERS):
                     for adapt in self.adaptations.values():
                         adapt.post_step(substep)
                     [callback(substep) for callback in self._post_step_callbacks]
@@ -951,7 +952,6 @@ class _EnvBase(EnvBase, RegistryMixin):
         with ScopedTimer("reward.update", sync=PROFILE_SYNC_TIMERS):
             for group in self.reward_groups.values():
                 group.update(tensordict)
-            [callback() for callback in self._post_group_update_callbacks]
         tensordict = self._compute_reward(tensordict)
         
         with ScopedTimer("termination.update", sync=PROFILE_SYNC_TIMERS):
@@ -986,12 +986,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             [callback() for callback in self._debug_draw_callbacks]
 
         return tensordict
-
-    def _apply_action(self, substep: int):
-        [
-            input_manager.apply_action(substep)
-            for input_manager in self.input_managers.values()
-        ]
 
     @ScopedTimer("reward.compute", sync=PROFILE_SYNC_TIMERS)
     def _compute_reward(self, tensordict: TensorDictBase) -> TensorDictBase:
