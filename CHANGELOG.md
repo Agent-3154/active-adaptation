@@ -32,6 +32,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Changed
 
+- **Isaac external wrenches** — use
+  `asset.permanent_wrench_composer.set_forces_and_torques` /
+  `add_forces_and_torques` only (no `set_external_force_and_torque` /
+  `_external_force_b`). Shared helper: `mdp.randomizations.common._set_external_wrench`.
 - **Explicit `startup` / `reset`** — `_EnvBase` calls `startup`/`reset` on
   command, adaptations, obs/reward groups, randomizations, terminations, and
   input managers. `_startup_callbacks` / `_reset_callbacks` removed.

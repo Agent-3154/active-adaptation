@@ -120,14 +120,13 @@ class IsaacSceneAdapter(SceneAdapter):
     @override
     def zero_external_wrenches(self) -> None:
         for asset in self._scene.articulations.values():
+            asset.instantaneous_wrench_composer.reset()
+            asset.permanent_wrench_composer.reset()
+        for asset in self._scene.rigid_objects.values():
             if hasattr(asset, "instantaneous_wrench_composer"):
                 asset.instantaneous_wrench_composer.reset()
             if hasattr(asset, "permanent_wrench_composer"):
                 asset.permanent_wrench_composer.reset()
-            if hasattr(asset, "_external_force_b") and hasattr(asset, "_external_torque_b"):
-                asset._external_force_b.zero_()
-                asset._external_torque_b.zero_()
-                asset.has_external_wrench = False
 
     @override
     def create_camera_frustum(

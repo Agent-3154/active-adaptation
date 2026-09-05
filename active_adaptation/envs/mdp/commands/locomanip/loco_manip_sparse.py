@@ -532,11 +532,13 @@ class LocoManipSparse(LocoManipSparseBase):
 
     # @override
     # def pre_step(self, substep: int) -> None:
-    #     self.asset._external_force_b[:, self.eef_body_idx] = quat_rotate_inverse(
-    #         self.asset.data.body_link_quat_w[:, self.eef_body_idx],
-    #         self.payload_force_w,
+    #     self.asset.permanent_wrench_composer.set_forces_and_torques(
+    #         forces=quat_rotate_inverse(
+    #             self.asset.data.body_link_quat_w[:, self.eef_body_idx],
+    #             self.payload_force_w,
+    #         ).reshape(self.num_envs, 1, 3),
+    #         body_ids=[self.eef_body_idx],
     #     )
-    #     self.asset.has_external_wrench = True
 
     def _sample_uniform(
         self, num_samples: int, value_range: Tuple[float, float]

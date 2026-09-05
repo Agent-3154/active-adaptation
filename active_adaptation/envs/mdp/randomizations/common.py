@@ -89,23 +89,37 @@ def _set_external_wrench(
     forces: torch.Tensor,
     torques: torch.Tensor,
     body_ids=None,
+    *,
+    is_global: bool = False,
+    env_ids=None,
 ):
-    """Set external wrench across old/new simulator APIs."""
-    if hasattr(asset, "set_external_force_and_torque"):
+    """Apply permanent external wrenches (Isaac composer / mjlab xfrc).
+
+    Isaac: body-local by default via ``permanent_wrench_composer``.
+    mjlab: ``write_external_wrench_to_sim`` (world-frame; callers must convert).
+    """
+    composer = getattr(asset, "permanent_wrench_composer", None)
+    if composer is not None:
+        composer.set_forces_and_torques(
+            forces=forces,
+            torques=torques,
+            body_ids=body_ids,
+            env_ids=env_ids,
+            is_global=is_global,
+        )
+        return
+    if hasattr(asset, "write_external_wrench_to_sim"):
         kwargs = {}
         if body_ids is not None:
             kwargs["body_ids"] = body_ids
-        asset.set_external_force_and_torque(forces, torques, **kwargs)
+        if env_ids is not None:
+            kwargs["env_ids"] = env_ids
+        asset.write_external_wrench_to_sim(forces, torques, **kwargs)
         return
-
-    if body_ids is None:
-        asset._external_force_b[:] = forces
-        asset._external_torque_b[:] = torques
-    else:
-        asset._external_force_b[:, body_ids] = forces
-        asset._external_torque_b[:, body_ids] = torques
-    if hasattr(asset, "has_external_wrench"):
-        asset.has_external_wrench = True
+    raise TypeError(
+        f"{type(asset).__name__} has neither permanent_wrench_composer nor "
+        f"write_external_wrench_to_sim"
+    )
 
 
 class motor_params(Randomization):
@@ -1016,11 +1030,13 @@ class drag(Randomization):
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.forces[env_ids] = 0.
 
-    def step(self, substep):
+    def pre_step(self, substep):
         lin_vel = self.asset.data.body_lin_vel_w[:, self.body_indices]
         drag_forces = - lin_vel * self.drag_coeffs
         self.forces = drag_forces * self.default_mass_total
-        self.asset.set_external_force_and_torque(self.forces, self.torques, body_ids=self.body_indices)
+        _set_external_wrench(
+            self.asset, self.forces, self.torques, body_ids=self.body_indices
+        )
 
     def debug_draw(self):
         self.env.scene.draw_vector(
@@ -1058,7 +1074,7 @@ class stumble(Randomization):
         friction.uniform_(*self.friction_range)
         self.friction_coef[env_ids] = friction
 
-    def step(self, substep):
+    def pre_step(self, substep):
         # feet_height = self.asset.data.feet_height_map.mean(-1).reshape(-1)
         feet_lin_vel_w = self.asset.data.body_lin_vel_w[:, self.body_ids]
         feet_quat_w = self.asset.data.body_quat_w[:, self.body_ids]
@@ -1119,12 +1135,15 @@ class pull(Randomization):
         self.drag_magnitude[env_ids] = drag_magnitude * self.default_mass_total
         self.apply_drag[env_ids] = (torch.rand(len(env_ids), 1, device=self.device) < self.drag_prob)
     
-    def step(self, substep):
+    def pre_step(self, substep):
         force =  self.axis * self.drag_magnitude
         self.forces[:] = torch.where(self.apply_drag, force, torch.zeros_like(self.forces))
-        self.asset.set_external_force_and_torque(
-            quat_rotate_inverse(self.asset.data.root_link_quat_w, self.forces).unsqueeze(1), 
-            torch.zeros_like(force).unsqueeze(1), [0])
+        _set_external_wrench(
+            self.asset,
+            quat_rotate_inverse(self.asset.data.root_link_quat_w, self.forces).unsqueeze(1),
+            torch.zeros_like(force).unsqueeze(1),
+            body_ids=[0],
+        )
 
     def debug_draw(self):
         self.env.scene.draw_vector(
@@ -1188,7 +1207,7 @@ class spring_grf(Randomization):
         axis = axis / axis.norm(dim=-1, keepdim=True)
         self.axis = torch.where(resample.unsqueeze(-1), axis, self.axis)
 
-    def step(self, substep):
+    def pre_step(self, substep):
         feet_height = self.asset.data.feet_height
         feet_quat = self.asset.data.body_quat_w[:, self.feet_ids]
         feet_lin_vel = self.asset.data.body_lin_vel_w[:, self.feet_ids]
@@ -1240,7 +1259,7 @@ class random_impulse(Randomization):
             self.body_id = 0 # apply to the root link
         self.impulse_force = ImpulseForce.zeros(self.num_envs, device=self.device)
         
-    def step(self, substep):
+    def pre_step(self, substep):
         impulse_force = self.impulse_force.get_force(None, None)
         forces_b = quat_rotate_inverse(self.asset.data.root_link_quat_w, impulse_force)
         torques_b = torch.zeros_like(forces_b)
@@ -1290,7 +1309,7 @@ class constant_force(Randomization):
         self.force_range = torch.tensor(self.force_range_cfg, device=self.device)
         self.offset_range = torch.tensor(self.offset_range_cfg, device=self.device)
         
-    def step(self, substep):
+    def pre_step(self, substep):
         arange = torch.arange(self.num_envs, device=self.device)
         quat = self.asset.data.body_quat_w[arange, self.body_id]
         forces_b = quat_rotate_inverse(

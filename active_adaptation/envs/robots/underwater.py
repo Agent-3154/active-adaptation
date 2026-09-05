@@ -631,17 +631,16 @@ class UnderwaterRobot(RobotAdaptation):
             self.data.hydro_forces_b.copy_(forces_b[:, self._base_body_id])
             self.data.hydro_torques_b.copy_(torques_b[:, self._base_body_id])
 
-        # Isaac: body-local wrenches via permanent_wrench_composer.
+        # Isaac: body-local via permanent_wrench_composer.
         # mjlab: xfrc_applied is world-frame; rotate body wrenches here.
         with ScopedTimer("underwater.submit_wrench"):
-            composer = getattr(self.robot, "permanent_wrench_composer", None)
-            if composer is not None:
-                composer.set_forces_and_torques(
+            if self.env.backend == "isaaclab":
+                self.robot.permanent_wrench_composer.set_forces_and_torques(
                     forces_b,
                     torques_b,
                     is_global=False,
                 )
-            else:
+            elif self.env.backend == "mjlab":
                 quat_flat = body_quat_w.reshape(-1, 4)
                 forces_w = quat_rotate(
                     quat_flat, forces_b.reshape(-1, 3)
@@ -650,6 +649,8 @@ class UnderwaterRobot(RobotAdaptation):
                     quat_flat, torques_b.reshape(-1, 3)
                 ).reshape_as(torques_b)
                 self.robot.write_external_wrench_to_sim(forces_w, torques_w)
+            else:
+                raise ValueError(f"Unsupported backend for underwater wrench: {self.env.backend}")
 
     def debug_draw(self):
         if self.env.backend == "isaaclab":

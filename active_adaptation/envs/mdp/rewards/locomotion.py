@@ -449,7 +449,9 @@ class oscillator(Reward):
 
     def post_step(self, substep):
         grf = self.contact_sensor.data.net_forces_w[:, self.feet_ids].norm(dim=-1)
-        grf += self.asset._external_force_b[:, self.art_feet_ids].norm(dim=-1)
+        grf += self.asset.permanent_wrench_composer.composed_force_as_torch[
+            :, self.art_feet_ids
+        ].norm(dim=-1)
         self.grf_substep[:, substep] = grf
 
     def _update(self):

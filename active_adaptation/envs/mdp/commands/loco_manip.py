@@ -410,7 +410,6 @@ class SingleEEFLocoManip(Command):
                 body_ids=[self.eef_body_idx],
                 is_global=True,
             )
-            self.asset.has_external_wrench = True
         elif self.env.backend == "mjlab":
             entity: Entity = self.asset
             entity.write_external_wrench_to_sim(

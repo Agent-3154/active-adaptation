@@ -240,13 +240,19 @@ class Impedance(Command):
         self.constant_force.duration[env_ids] = 0.
         self.impulse_force.duration[env_ids] = 0.
 
-    def step(self, substep: int):
-        forces_b = self.asset._external_force_b
-        forces_b[:, 0] += quat_rotate_inverse(self.asset.data.root_quat_w, self.force_ext_w)
-        torques_b = self.asset._external_torque_b
-        constant_force_b = quat_rotate_inverse(self.asset.data.root_quat_w, self.constant_force.get_force())
-        torques_b[:, 0] += self.constant_force.offset.cross(constant_force_b, dim=-1)
-        self.asset.has_external_wrench = True
+    def pre_step(self, substep: int):
+        force_b = quat_rotate_inverse(
+            self.asset.data.root_quat_w, self.force_ext_w
+        ).unsqueeze(1)
+        constant_force_b = quat_rotate_inverse(
+            self.asset.data.root_quat_w, self.constant_force.get_force()
+        )
+        torque_b = self.constant_force.offset.cross(constant_force_b, dim=-1).unsqueeze(1)
+        self.asset.permanent_wrench_composer.add_forces_and_torques(
+            forces=force_b,
+            torques=torque_b,
+            body_ids=[0],
+        )
 
     def _integrate(self, dt: float):
         setpos_w = torch.where(
@@ -861,13 +867,15 @@ class VelocityImpulse(Twist):
         self.use_stiffness[env_ids] = True
         self.fixed_yaw_speed[env_ids] = 0.
 
-    def step(self, substep):
-        super().step(substep)
-        forces_b = self.asset._external_force_b
-        impulse_force = self.impulse_force.get_force()
-        # forces_b[:, 0] += quat_rotate_inverse(self.asset.data.root_quat_w, impulse_force)
-        forces_b[:, 0] += quat_rotate_inverse(self.asset.data.root_quat_w, self.constand_force.get_force())
-        self.asset.has_external_wrench = True
+    def pre_step(self, substep):
+        super().pre_step(substep)
+        force_b = quat_rotate_inverse(
+            self.asset.data.root_quat_w, self.constand_force.get_force()
+        ).unsqueeze(1)
+        self.asset.permanent_wrench_composer.add_forces_and_torques(
+            forces=force_b,
+            body_ids=[0],
+        )
 
     def _update(self):
         super().update()
@@ -982,9 +990,12 @@ class VelocityCollision(Twist):
             exit(0)
         self.step_cnt += 1
 
-    def step(self, substep):
-        self.asset._external_force_b[:, 0] += quat_rotate_inverse(
+    def pre_step(self, substep):
+        force_b = quat_rotate_inverse(
             self.asset.data.root_quat_w,
-            self.force_ext_w
+            self.force_ext_w,
+        ).unsqueeze(1)
+        self.asset.permanent_wrench_composer.add_forces_and_torques(
+            forces=force_b,
+            body_ids=[0],
         )
-        self.asset.has_external_wrench = True
