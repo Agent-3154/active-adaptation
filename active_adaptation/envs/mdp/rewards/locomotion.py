@@ -165,22 +165,47 @@ class linvel_exp(Reward[Twist]):
 
 
 class root_pos_exp(Reward):
-    def __init__(self, weight: float, dim: int = 2, track_var: bool = False):
+    """Reward for tracking the root position. Supports dynamic weight gating."""
+
+    in_keys = ["root_pos_exp_weight"]
+    out_keys = None
+
+    def __init__(
+        self,
+        weight: float,
+        dim: int = 2,
+        track_var: bool = False,
+        sigma: float = 0.25,
+        square: bool = False,
+    ):
         super().__init__(weight, track_var=track_var)
         self.dim = dim
+        self.sigma = sigma
+        self.square = square
 
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
+    
+    @override
+    def _update(self, weight: torch.Tensor | None) -> None:
+        if weight is None:
+            self._weight = torch.ones(self.num_envs, 1, device=self.device)
+        else:
+            self._weight = weight.reshape(self.num_envs, 1)
 
     def _compute(self) -> torch.Tensor:
-        target_pos = self.command_manager.cmd_pos_w[:, : self.dim]
-        pos_error = (
+        target_pos = self.command_manager.cmd_root_pos_w[:, : self.dim]
+        root_pos_w = self.asset.data.root_link_pos_w[:, : self.dim]
+        error_squared = (
             self.asset.data.root_link_pos_w[:, : self.dim] - target_pos
         ).square().sum(-1, True)
-        rew = torch.exp(-pos_error / 0.25)
-        return rew.reshape(self.num_envs, 1)
+        if self.square:
+            rew = torch.exp(-error_squared / self.sigma)
+        else:
+            rew = torch.exp(-error_squared.sqrt() / self.sigma)
+        return rew.reshape(self.num_envs, 1), self._weight > 0.0
 
 
 class root_pos_l2(Reward):
