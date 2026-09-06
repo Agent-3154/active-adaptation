@@ -15,6 +15,7 @@ from active_adaptation.utils.math import (
     root_pose_from_view_z_up,
 )
 from active_adaptation.utils.symmetry import SymmetryTransform
+from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     import numpy as np
@@ -375,6 +376,7 @@ class raycast_camera(Observation):
         entity: str = "robot",
         offset_pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
         offset_rpy_deg: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        frequency: float = 50.0,
         data_type: str | Sequence[str] = "depth",
     ) -> None:
         super().__init__()
@@ -400,13 +402,10 @@ class raycast_camera(Observation):
         self.offset_pos = tuple(float(x) for x in offset_pos)
         self.offset_rpy_deg = tuple(float(x) for x in offset_rpy_deg)
         self.data_types = data_types
+        self.frequency = frequency
         self._body_id: int | None = None
         self._mount_entity = None
-        self._last_rgb: torch.Tensor | None = None
-        self._last_depth: torch.Tensor | None = None
-        self._last_mask: torch.Tensor | None = None
-        self._cam_pos_w: torch.Tensor | None = None
-        self._cam_quat_w: torch.Tensor | None = None
+        self._interval: float = 1.0 / self.frequency
         self.camera_handle = None
 
     @override
@@ -442,6 +441,16 @@ class raycast_camera(Observation):
 
         self.offset_pos = torch.tensor(self.offset_pos, device=self.device)
         self.offset_rpy = torch.tensor(self.offset_rpy_deg, device=self.device) * (math.pi / 180.0)
+        self._last_rgb: torch.Tensor | None = None
+        self._last_depth: torch.Tensor | None = None
+        self._last_mask: torch.Tensor | None = None
+        
+        self._cam_pos_w = torch.zeros(self.env.num_envs, 3, device=self.device)
+        self._cam_quat_w = torch.zeros(self.env.num_envs, 4, device=self.device)
+        self._cam_quat_w[:] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+
+        self._time_until_next_render = torch.zeros(self.env.num_envs, 1, device=self.device)
+        self._should_render = torch.ones(self.env.num_envs, 1, device=self.device, dtype=torch.bool)
 
         if self.env.sim.has_gui():
             aspect = self.sensor.width / max(self.sensor.height, 1)
@@ -488,22 +497,42 @@ class raycast_camera(Observation):
             ).unsqueeze(-1).expand(-1, -1, 3)
         rgb_uint8 = (rgb * 255.0).byte().cpu().numpy()
         return rgb_uint8
-
+    
     @override
-    def compute(self) -> torch.Tensor:
-        assert self._body_id is not None and self._mount_entity is not None
-        cam_pos_w, cam_quat_w = self.sensor.mount_pose(
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase | None = None) -> None:
+        self._time_until_next_render[env_ids] = 0.0
+        self._should_render[env_ids] = True
+    
+    @override
+    def post_step(self, substep: int) -> None:
+        del substep
+        self._should_render = self._time_until_next_render <= 0.0
+        came_pos_w, came_quat_w = self.sensor.mount_pose(
             self._mount_entity,
             self._body_id,
             self.offset_pos,
             self.offset_rpy,
         )
-        rgb, depth, mask = self.sensor.render(cam_pos_w, cam_quat_w, clone=True)
+        self._cam_pos_w = torch.where(self._should_render, came_pos_w, self._cam_pos_w)
+        self._cam_quat_w = torch.where(self._should_render, came_quat_w, self._cam_quat_w)
+        self._time_until_next_render = torch.where(
+            self._should_render,
+            self._interval,
+            self._time_until_next_render - self.env.physics_dt
+        )
+
+    @override
+    def compute(self) -> torch.Tensor:
+        assert self._body_id is not None and self._mount_entity is not None
+        rgb, depth, mask = self.sensor.render(
+            self._cam_pos_w,
+            self._cam_quat_w,
+            enabled=self._should_render,
+            clone=True,
+        )
         self._last_rgb = rgb
         self._last_depth = depth
         self._last_mask = mask
-        self._cam_pos_w = cam_pos_w
-        self._cam_quat_w = cam_quat_w
         return self._format_output()
 
     @override
