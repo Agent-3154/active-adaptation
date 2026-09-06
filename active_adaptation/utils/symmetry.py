@@ -71,6 +71,35 @@ class SymmetryTransform(nn.Module):
         """
         return SymmetryTransform(self.perm.clone(), torch.ones_like(self.signs))
     
+    def __getitem__(self, idx_or_slice: int | slice) -> "SymmetryTransform":
+        """Select a subset of dimensions and return a local transform.
+
+        Indices are remapped to ``0 .. k-1`` so the result can be safely
+        ``cat``'d with other blocks. Integer indexing yields a 1-d transform
+        (not a 0-d buffer). The selected subspace must be closed under
+        ``perm`` (every ``perm[i]`` for ``i`` in the selection is also in the
+        selection).
+        """
+        n = int(self.perm.shape[0])
+        if isinstance(idx_or_slice, int):
+            sel = torch.tensor([idx_or_slice], dtype=torch.long)
+        elif isinstance(idx_or_slice, slice):
+            sel = torch.arange(n, dtype=torch.long)[idx_or_slice]
+        else:
+            sel = torch.as_tensor(idx_or_slice, dtype=torch.long).reshape(-1)
+        if sel.numel() == 0:
+            raise ValueError("SymmetryTransform slice must select at least one dim.")
+        # Map original dim -> local index within the selection.
+        inv = torch.full((n,), -1, dtype=torch.long)
+        inv[sel] = torch.arange(sel.numel(), dtype=torch.long)
+        src = self.perm[sel]
+        if (inv[src] < 0).any():
+            raise ValueError(
+                f"SymmetryTransform slice {idx_or_slice!r} is not closed under "
+                f"perm={self.perm.tolist()} (needs dims {src.tolist()})."
+            )
+        return SymmetryTransform(inv[src], self.signs[sel])
+    
     @classmethod
     def rot6d(cls):
         """
@@ -78,6 +107,29 @@ class SymmetryTransform(nn.Module):
         left-right symmetric counterpart.
         """
         return cls(perm=[0, 1, 2, 3, 4, 5], signs=[1, -1, 1, -1, 1, -1])
+    
+    @classmethod
+    def xyz(cls):
+        """
+        Return a SymmetryTransform that transforms a 3D position into its 
+        left-right symmetric counterpart.
+        """
+        return cls(perm=[0, 1, 2], signs=[1, -1, 1])
+    
+    @classmethod
+    def rpy(cls):
+        """
+        Return a SymmetryTransform that transforms a 3D rotation into its 
+        left-right symmetric counterpart.
+        """
+        return cls(perm=[0, 1, 2], signs=[1, 1, -1])
+    
+    @classmethod
+    def identity(cls, dim: int):
+        """
+        Return a SymmetryTransform that is the identity transform.
+        """
+        return cls(perm=torch.arange(dim), signs=torch.ones(dim))
 
 
 def mirrored(symmetry_mapping: dict):
