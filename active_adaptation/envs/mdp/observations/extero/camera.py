@@ -441,9 +441,19 @@ class raycast_camera(Observation):
 
         self.offset_pos = torch.tensor(self.offset_pos, device=self.device)
         self.offset_rpy = torch.tensor(self.offset_rpy_deg, device=self.device) * (math.pi / 180.0)
-        self._last_rgb: torch.Tensor | None = None
-        self._last_depth: torch.Tensor | None = None
-        self._last_mask: torch.Tensor | None = None
+        self._last_rgb: torch.Tensor = torch.zeros(
+            self.env.num_envs, self.sensor.height, self.sensor.width, 3, device=self.device
+        )
+        self._last_depth: torch.Tensor = torch.zeros(
+            self.env.num_envs, self.sensor.height, self.sensor.width, device=self.device
+        )
+        self._last_mask: torch.Tensor = torch.zeros(
+            self.env.num_envs,
+            self.sensor.height,
+            self.sensor.width,
+            device=self.device,
+            dtype=torch.bool,
+        )
         
         self._cam_pos_w = torch.zeros(self.env.num_envs, 3, device=self.device)
         self._cam_quat_w = torch.zeros(self.env.num_envs, 4, device=self.device)
@@ -505,8 +515,10 @@ class raycast_camera(Observation):
     
     @override
     def post_step(self, substep: int) -> None:
+        if substep == 0:
+            self._should_render.zero_()
         del substep
-        self._should_render = self._time_until_next_render <= 0.0
+        self._should_render |= self._time_until_next_render <= 0.0
         came_pos_w, came_quat_w = self.sensor.mount_pose(
             self._mount_entity,
             self._body_id,
@@ -524,15 +536,17 @@ class raycast_camera(Observation):
     @override
     def compute(self) -> torch.Tensor:
         assert self._body_id is not None and self._mount_entity is not None
+        due = self._should_render.reshape(self.num_envs)
         rgb, depth, mask = self.sensor.render(
             self._cam_pos_w,
             self._cam_quat_w,
-            enabled=self._should_render,
-            clone=True,
+            enabled=due,
+            clone=False,
         )
-        self._last_rgb = rgb
-        self._last_depth = depth
-        self._last_mask = mask
+        if due.any():
+            self._last_rgb[due] = rgb[due]
+            self._last_depth[due] = depth[due]
+            self._last_mask[due] = mask[due]
         return self._format_output()
 
     @override

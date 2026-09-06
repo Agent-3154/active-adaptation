@@ -174,7 +174,7 @@ class LambertRaycastCameraSensor:
         self,
         cam_pos_w: torch.Tensor,
         cam_quat_w: torch.Tensor,
-        enabled: torch.Tensor,
+        enabled: torch.Tensor | None = None,
         clone: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Render RGB-D for explicit camera poses → ``rgb, depth, mask``.
