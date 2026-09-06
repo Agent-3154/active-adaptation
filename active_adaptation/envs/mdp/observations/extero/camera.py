@@ -351,6 +351,10 @@ class raycast_camera(Observation):
     :meth:`~active_adaptation.envs.sensors.camera.LambertRaycastCameraSensor.render`
     each step. Multiple obs terms may share one sensor/renderer.
 
+    ``dtype`` controls hold-buffer / returned image precision (``float32`` or
+    ``float16``). Render kernels stay fp32; values are cast on store. Useful to
+    cut rollout VRAM; compatible with PPO AMP (update-time autocast is separate).
+
         sensors:
           shared_camera:
             _target_: lambert_raycast_camera
@@ -363,10 +367,18 @@ class raycast_camera(Observation):
               sensor_name: shared_camera
               body_name: gripper_base
               data_type: depth
+              dtype: float16
     """
 
     supported_backends = ("isaaclab", "mjlab")
     _DATA_TYPES = frozenset({"depth", "rgb", "rgbd", "mask", "normal"})
+    _DTYPE_ALIASES = {
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "half": torch.float16,
+    }
 
     def __init__(
         self,
@@ -378,6 +390,7 @@ class raycast_camera(Observation):
         offset_rpy_deg: tuple[float, float, float] = (0.0, 0.0, 0.0),
         frequency: float = 50.0,
         data_type: str | Sequence[str] = "depth",
+        dtype: str = "float32",
     ) -> None:
         super().__init__()
         if body_name is None and pattern is None:
@@ -395,6 +408,12 @@ class raycast_camera(Observation):
             )
         if not data_types:
             raise ValueError("data_type must be non-empty")
+        dtype_key = str(dtype).lower()
+        if dtype_key not in self._DTYPE_ALIASES:
+            raise ValueError(
+                f"raycast_camera dtype must be one of {sorted(self._DTYPE_ALIASES)}, "
+                f"got {dtype!r}"
+            )
         self.sensor_name = sensor_name
         self.body_name = body_name
         self.pattern = pattern
@@ -403,6 +422,8 @@ class raycast_camera(Observation):
         self.offset_rpy_deg = tuple(float(x) for x in offset_rpy_deg)
         self.data_types = data_types
         self.frequency = frequency
+        self._image_dtype = self._DTYPE_ALIASES[dtype_key]
+        self._needs_rgb = any(k in data_types for k in ("rgb", "rgbd"))
         self._body_id: int | None = None
         self._mount_entity = None
         self._interval: float = 1.0 / self.frequency
@@ -441,18 +462,20 @@ class raycast_camera(Observation):
 
         self.offset_pos = torch.tensor(self.offset_pos, device=self.device)
         self.offset_rpy = torch.tensor(self.offset_rpy_deg, device=self.device) * (math.pi / 180.0)
-        self._last_rgb: torch.Tensor = torch.zeros(
-            self.env.num_envs, self.sensor.height, self.sensor.width, 3, device=self.device
+        h, w = self.sensor.height, self.sensor.width
+        n = self.env.num_envs
+        img_dtype = self._image_dtype
+        # Always keep depth for debug viz when only mask is requested.
+        self._last_rgb: torch.Tensor | None = (
+            torch.zeros(n, h, w, 3, device=self.device, dtype=img_dtype)
+            if self._needs_rgb
+            else None
         )
         self._last_depth: torch.Tensor = torch.zeros(
-            self.env.num_envs, self.sensor.height, self.sensor.width, device=self.device
+            n, h, w, device=self.device, dtype=img_dtype
         )
         self._last_mask: torch.Tensor = torch.zeros(
-            self.env.num_envs,
-            self.sensor.height,
-            self.sensor.width,
-            device=self.device,
-            dtype=torch.bool,
+            n, h, w, device=self.device, dtype=torch.bool
         )
         
         self._cam_pos_w = torch.zeros(self.env.num_envs, 3, device=self.device)
@@ -476,7 +499,6 @@ class raycast_camera(Observation):
                 self.camera_handle = None
 
     def _format_output(self) -> torch.Tensor:
-        assert self._last_depth is not None
         parts: list[torch.Tensor] = []
         for key in self.data_types:
             if key == "depth":
@@ -485,8 +507,7 @@ class raycast_camera(Observation):
                 assert self._last_rgb is not None
                 parts.append(self._last_rgb.permute(0, 3, 1, 2).contiguous())
             elif key == "mask":
-                assert self._last_mask is not None
-                parts.append(self._last_mask.float().unsqueeze(1))
+                parts.append(self._last_mask.to(dtype=self._image_dtype).unsqueeze(1))
             elif key == "rgbd":
                 assert self._last_rgb is not None
                 rgb = self._last_rgb.permute(0, 3, 1, 2)
@@ -494,15 +515,13 @@ class raycast_camera(Observation):
         return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
 
     def _debug_image_hwc_uint8(self, env_idx: int) -> "np.ndarray":
-        assert self._last_depth is not None
         if "rgb" in self.data_types or "rgbd" in self.data_types:
             assert self._last_rgb is not None
             rgb = self._last_rgb[env_idx].float().clamp(0.0, 1.0)
         elif "mask" in self.data_types:
-            assert self._last_mask is not None
             rgb = self._last_mask[env_idx].float().unsqueeze(-1).expand(-1, -1, 3)
         else:
-            rgb = (1.0 - self._last_depth[env_idx] / max(self.sensor.far, 1e-6)).clamp(
+            rgb = (1.0 - self._last_depth[env_idx].float() / max(self.sensor.far, 1e-6)).clamp(
                 0.0, 1.0
             ).unsqueeze(-1).expand(-1, -1, 3)
         rgb_uint8 = (rgb * 255.0).byte().cpu().numpy()
@@ -544,8 +563,9 @@ class raycast_camera(Observation):
             clone=False,
         )
         if due.any():
-            self._last_rgb[due] = rgb[due]
-            self._last_depth[due] = depth[due]
+            if self._last_rgb is not None:
+                self._last_rgb[due] = rgb[due].to(dtype=self._image_dtype)
+            self._last_depth[due] = depth[due].to(dtype=self._image_dtype)
             self._last_mask[due] = mask[due]
         return self._format_output()
 
