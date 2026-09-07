@@ -267,7 +267,7 @@ Ensure the mjlab sensor’s `ContactSensorCfg.fields` includes every quantity th
 - **Sealed `update(tensordict)`** → `_update(*in_keys)`; optional `out_keys`. Do not override `update`.
 - `_update` params must not have defaults; missing keys arrive as `None`.
 - `step()` — advance / resample for the upcoming observation (after rewards/terminations).
-- `sample_init(env_ids, reset_td)` provides root (and optionally joint) state; must write `env.episode_origin`.
+- `reset(env_ids, tensordict) -> origins` writes root (and optionally joint/object) state and returns episode origins `(len(env_ids), 3)`.
 - **`prescribe(tensordict)`:** optional; called once at the start of `_step` **before** `input_manager.process_action`. Fill **missing** keys on the step tensordict that match `task.input` entries. Uses reference state from the **previous** `step()`, not new targets. Default no-op in `envs/mdp/commands/base.py`.
 - **First obs discarded:** post-reset observation is invalid (`is_init`); do not recompute next-step targets in `reset` solely to validate it. See SKILL.md “Command timing” and “`prescribe`”.
 
@@ -286,12 +286,12 @@ Split-control tasks: declare separate `input.arm_control` + `input.action` in YA
 ## Reset API
 
 ```python
-# mdp/base.py
+# mdp/base.py (non-command terms)
 def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
     ...
 
-# env_base._reset (after _reset_idx + scene.reset)
-self.command_manager.reset(env_ids, tensordict)
+# env_base._reset (after scene.reset)
+self.episode_origin[env_ids] = self.command_manager.reset(env_ids, tensordict)
 for adapt in self.adaptations.values():
     adapt.reset(env_ids, tensordict)
 for group in self.observation_groups.values():
@@ -308,9 +308,7 @@ for input_manager in self.input_managers.values():
 
 Terms may read/write `tensordict`. Most leave it unused.
 
-**Order:** `_reset_idx` (`sample_init`) → `scene.reset` → explicit `reset` calls above.
-
-**Future:** drop `sample_init`; `reset` decides initial state.
+**Order:** `scene.reset` → `command_manager.reset` (writes state, returns origins) → explicit `reset` calls above.
 
 ---
 
@@ -385,14 +383,14 @@ handle.wxyz = quat_wxyz
 handle.image = hwc_uint8
 ```
 
-Env backends register `scene.clear_debug` as the **first** `debug_draw` callback so each frame starts empty, then term callbacks append primitives; viewers sync on `sim.render_gui()` / `viewer.update()` (throttled ~30 Hz). Native MDP cameras request `env.sensor_render_enabled` → `sim.render_sensors()` each control step (Isaac Kit render / mjlab `sense()`). 3DGS uses `env.visual` + `gs_camera` → `visual.render` (option A); with `origin: env`, poses are relative to `env.episode_origin` (set in `sample_init`). `FvdbGaussianWorld.render` may depth-composite `mesh_entities` via `simple_raycaster` mesh RGB-D (`diffrast`/`raycast`) when meshes were attached in `_setup_visual`. Isaac Viser also uploads InteriorGS `*_collision.usd` as `/visual/collision` (visible; splat stays hidden). Physics collision from that mesh is not wired yet.
+Env backends register `scene.clear_debug` as the **first** `debug_draw` callback so each frame starts empty, then term callbacks append primitives; viewers sync on `sim.render_gui()` / `viewer.update()` (throttled ~30 Hz). Native MDP cameras request `env.sensor_render_enabled` → `sim.render_sensors()` each control step (Isaac Kit render / mjlab `sense()`). 3DGS uses `env.visual` + `gs_camera` → `visual.render` (option A); with `origin: env`, poses are relative to `env.episode_origin` (from `Command.reset`). `FvdbGaussianWorld.render` may depth-composite `mesh_entities` via `simple_raycaster` mesh RGB-D (`diffrast`/`raycast`) when meshes were attached in `_setup_visual`. Isaac Viser also uploads InteriorGS `*_collision.usd` as `/visual/collision` (visible; splat stays hidden). Physics collision from that mesh is not wired yet.
 
 ### Episode origins (`env.episode_origin`)
 
 | Buffer | Meaning |
 |--------|---------|
 | `scene.env_origins` | Layout / curriculum slots |
-| `env.episode_origin` | Origin used this episode (`sample_init` must write it) |
+| `env.episode_origin` | Origin used this episode (`Command.reset` must return it) |
 
 Candidates: `scene.sample_spawn_origin_candidates(env_ids)`. Shared appearance / episode-local math uses `episode_origin`, not `env_origins`.
 

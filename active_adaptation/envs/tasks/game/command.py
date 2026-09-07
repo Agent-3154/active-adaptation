@@ -54,11 +54,10 @@ class Game(Command):
             signs=torch.tensor([1, -1, 1, 1, -1, 1, 1, 1]),
         )
 
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         chase = env_ids % 2 == 0
         init_root_state = self.init_root_state[env_ids]
         origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
-        self.env.episode_origin[env_ids] = origins
         init_pos_even = origins[chase]
         offset = torch.zeros_like(init_pos_even)
         offset[:, 0].uniform_(3.0, 4.0).mul_(
@@ -69,10 +68,8 @@ class Game(Command):
         init_root_state[~chase, :3] += init_pos_odd
         init_root_state[:, 3:7] = sample_quat_yaw(len(env_ids), device=self.device)
         self._write_initial_states(init_root_state, env_ids)
-
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.target_caught_time[env_ids] = 0.0
-        return super().reset(env_ids, tensordict)
+        return origins
 
     def _update(self):
         self.target_pos_w = torch.stack(

@@ -48,7 +48,7 @@ Read [reference.md](reference.md) for the step-loop diagram, callback registrati
 8. **Contact sensor data fields differ by backend** — do **not** assume a shared `sensor.data.*` API. Isaac uses `ContactSensorData` (`net_forces_w`, `force_matrix_w`, …); mjlab uses `ContactData` (`force`, `found`, …) and only populates fields listed in `ContactSensorCfg.fields`. Branch on `env.backend` or use a thin helper when reading forces / air time.
 9. **Scene owns sensors; assets suggest defaults** — prefer task YAML `sensors:` + `envs/sensors/` factories. `AssetSpec.sensors` still seeds robot defaults (e.g. `contact_forces`); task entries with the same name **replace** them. Do not assume every contact sensor is on the robot.
 10. **Never smoke-test with the shared root venv** — it is by design incomplete. Use `uv run --project venv/isaac51` (or `isaac60` / `mjlab`). See [.agents/skills/README.md](../README.md#smoke-tests--running-code).
-11. **Write ``env.episode_origin`` in ``sample_init``** — after choosing origins (e.g. via `scene.sample_spawn_origin_candidates`), set `env.episode_origin[env_ids] = origins`. Use `episode_origin` (not `scene.env_origins`) for shared 3DGS / episode-local frames. See [Episode origins](#episode-origins).
+11. **Return episode origins from ``Command.reset``** — after choosing origins (e.g. via `scene.sample_spawn_origin_candidates`), write robot/object state and **return** origins `(len(env_ids), 3)`. The env assigns `env.episode_origin[env_ids]`. Use `episode_origin` (not `scene.env_origins`) for shared 3DGS / episode-local frames. See [Episode origins](#episode-origins).
 
 ---
 
@@ -68,7 +68,7 @@ Task Progress:
 - [ ] If Command/Reward `_update`: **no default args**; missing `in_keys` arrive as `None`
 - [ ] If `debug_draw`: use `env.scene.draw_*` / `create_camera_frustum` (not `env.debug_draw`)
 - [ ] Optional: symmetry_transform (obs/action) for symaug
-- [ ] If overriding `sample_init`: write `env.episode_origin[env_ids] = origins` used for spawn
+- [ ] If Command: `reset` writes sim state and **returns** episode origins `(len(env_ids), 3)`
 - [ ] Ensure module is imported (auto-import or explicit in package __init__)
 - [ ] Wire into cfg/task/ YAML (and `sensors:` if a new scene sensor is required)
 - [ ] Smoke via backend venv (`uv run --project venv/isaac51|mjlab`): instantiate env and step once
@@ -209,7 +209,7 @@ def _initialize(self, env):
 | Reward | `reward.<group>.<name>` | `_compute() -> Tensor` or `(rew, is_active)` | Sealed `update` → `_update`; optional `in_keys`/`out_keys`. `compute()` applies `weight` + modifier + EMA |
 | Termination | `termination.<name>` | `compute(terminated) -> bool Tensor` or `(term, discount)` | `is_timeout=True` → truncated |
 | Action | `input.<name>` | `process_action`, `apply_action` | Set `action_dim`; often `symmetry_transform` |
-| Command | `command` | `_update`; optional `prescribe`, `step` | Sealed `update` → `_update`; also `sample_init` (must set `env.episode_origin`); see [Command timing](#command-timing) and [`prescribe`](#prescribe-command-driven-inputs) |
+| Command | `command` | `_update`; optional `prescribe`, `step` | Sealed `update` → `_update`; `reset` writes sim state and returns episode origins; see [Command timing](#command-timing) and [`prescribe`](#prescribe-command-driven-inputs) |
 | Randomization | `randomization.<name>` | lifecycle hooks as needed | mjlab: declare `mj_fields` if expanding model |
 
 ### Minimal examples
@@ -291,7 +291,7 @@ Per `_step` (after physics substeps):
 
 **Before physics** (once per env step): `command_manager.prescribe(tensordict)` then each `input_manager.process_action`.
 
-First env init: explicit `startup` once (command → adaptations → obs/reward groups → randomizations → terminations → input managers). Each `_reset`: `_reset_idx` → `scene.reset` → explicit `reset` in the same family order.
+First env init: explicit `startup` once (command → adaptations → obs/reward groups → randomizations → terminations → input managers). Each `_reset`: `scene.reset` → `command_manager.reset` (writes state, returns origins) → explicit `reset` in the same family order.
 
 ### Sealed `update` / `_update` (Command & Reward)
 
@@ -429,23 +429,23 @@ Multi-env layouts and shared appearance (one 3DGS / local frame for all envs) ne
 | Buffer | Owner | Meaning |
 |--------|--------|---------|
 | `scene.env_origins` | Scene / terrain | Persistent **layout / curriculum** slots (grid or terrain levels) |
-| `env.episode_origin` | Env (`(N, 3)`) | Origin used for the **current episode** (what was added in `sample_init`) |
+| `env.episode_origin` | Env (`(N, 3)`) | Origin used for the **current episode** (from `Command.reset` return) |
 
-**Contract:** every `sample_init` (including overrides) must write the origins it actually uses:
+**Contract:** every `Command.reset` (including overrides) must write initial sim state and return the origins it actually used:
 
 ```python
-def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
+def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
     origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
-    self.env.episode_origin[env_ids] = origins
-    init_root_state = self.init_root_state[env_ids]
+    init_root_state = self.init_root_state[env_ids].clone()
     init_root_state[:, :3] += origins
+    self._write_initial_states({"robot": init_root_state}, env_ids)
     ...
-    return init_root_state
+    return origins  # env assigns episode_origin[env_ids]
 ```
 
 - `scene.sample_spawn_origin_candidates(env_ids)` — unstamped candidates. Default: `env_origins[env_ids]`. Isaac may random-sample a terrain patch when procedural terrain is active.
 - For episode-local math (shared 3DGS, motion refs in env frame, etc.) subtract / add **`env.episode_origin`**, not `scene.env_origins`.
-- Base `Command.sample_init` already follows this pattern; overrides that skip `super()` must set `episode_origin` themselves.
+- Base `Command.reset` already follows this pattern; overrides that skip `super()` must still return origins.
 
 `gs_camera` with `origin: env` renders at `mount_pos_w - env.episode_origin` so all envs share one PLY around the episode frame.
 
@@ -453,18 +453,26 @@ def sample_init(self, env_ids: torch.Tensor) -> torch.Tensor:
 
 ## Reset API
 
-**Required signature** (all MDP terms):
+**Required signature** (non-command MDP terms):
 
 ```python
 def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
     ...
 ```
 
-- Both arguments are required. Most terms leave `tensordict` unused.
+**Command signature:**
+
+```python
+def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
+    """Write initial sim state; return episode origins (len(env_ids), 3)."""
+    ...
+```
+
+- Both arguments are required. Most non-command terms leave `tensordict` unused.
 - Terms **may read and write** `tensordict` (controlled / curriculum resets, inter-term handoff during the same reset).
 - Env always passes a real `TensorDictBase` (allocates an empty one on full reset when the caller passed `None`).
-- Order today: `_reset_idx` (`command_manager.sample_init`) → `scene.reset` → explicit `reset` on command, adaptations, obs/reward groups, randomizations, terminations, input managers.
-- **Future:** `sample_init` will be removed; `reset` will own initial-state decisions. Do not reintroduce `reset(env_ids)`-only overrides.
+- Order: `scene.reset` → `episode_origin[env_ids] = command_manager.reset(...)` → adaptations → obs/reward groups → randomizations → terminations → input managers.
+- Do not reintroduce `sample_init` or `reset(env_ids)`-only overrides.
 
 ---
 
@@ -517,7 +525,7 @@ Use **`env.scene`** (`SceneAdapter`) for all MDP debug drawing. Do **not** use `
 
 Native camera obs terms set `env.sensor_render_enabled = True` in `_initialize`.
 
-**3DGS / visual world (option A):** appearance is **not** on `sim`. Load via `task.visual` → `env.visual` (`VisualWorld`, e.g. `FvdbGaussianWorld`). Observation `gs_camera` calls `env.visual.render` in `update`/`compute` — no `sensor_render_enabled`. With `origin: env` (default for shared scenes), camera poses are expressed relative to `env.episode_origin` (must be set in `sample_init`; see [Episode origins](#episode-origins)).
+**3DGS / visual world (option A):** appearance is **not** on `sim`. Load via `task.visual` → `env.visual` (`VisualWorld`, e.g. `FvdbGaussianWorld`). Observation `gs_camera` calls `env.visual.render` in `update`/`compute` — no `sensor_render_enabled`. With `origin: env` (default for shared scenes), camera poses are expressed relative to `env.episode_origin` (from `Command.reset`; see [Episode origins](#episode-origins)).
 
 **Robot + GS composite:** `_setup_visual` calls `visual.attach_scene_meshes(scene)` for `task.visual.mesh_entities` (default `[robot]`). Isaac pulls body-local visuals via `scene.get_visual_meshes`; mesh RGB-D is rendered by **`simple_raycaster`** (`mesh_renderer: diffrast|raycast`, optional quadric `face_keep`). AA only depth-composites over GS (`envs/visual/mesh_composite.py`). Pass `origin_w=episode_origin` for episode-local cameras.
 
@@ -659,7 +667,7 @@ Isaac/mjlab **Viser** robot meshes (viewer internals, not MDP terms): same body-
 - Writing reference inputs in `_update` / `reset` instead of `prescribe` + `step` (see [`prescribe`](#prescribe-command-driven-inputs))
 - Overwriting prescribed `task.input` keys in `prescribe` when the key is already set (breaks policy override / teleop)
 - Re-evaluating next-step command/obs targets in `reset` “to fix” the first obs (that obs is discarded via `is_init`)
-- Overriding `sample_init` without writing `env.episode_origin[env_ids]` (shared 3DGS / episode-local consumers break)
+- Command `reset` that skips returning episode origins (shared 3DGS / episode-local consumers break)
 - Subtracting `scene.env_origins` for episode-local frames when spawn was randomized — use `env.episode_origin`
 - Forgetting to import the module (class never enters the registry)
 - Returning unbatched reward/obs tensors

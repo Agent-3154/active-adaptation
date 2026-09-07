@@ -223,7 +223,7 @@ class Twist(Command):
         ], dim=-1)
 
     @override
-    def sample_init(self, env_ids, reset_td=None) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         if self.curriculum and self.env.episode_count > 1: # and self.env.training:
             distance_traveled = self.distance_traveled[env_ids]
             distance_commanded = self.distance_commanded[env_ids].clamp_min(1.0)
@@ -237,10 +237,14 @@ class Twist(Command):
         self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
         self.distance_commanded[env_ids] = 0.0
         self.distance_traveled[env_ids] = 0.0
-        super().sample_init(env_ids, reset_td)
+        origins = super().reset(env_ids, tensordict)
+        self._reset_command_buffers(env_ids, tensordict)
+        return origins
 
-    @override
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+    def _reset_command_buffers(
+        self, env_ids: torch.Tensor, tensordict: TensorDictBase
+    ) -> None:
+        """Clear per-episode command buffers after spawn (no sim writes)."""
         self.next_command_linvel[env_ids] = 0.0
         self.cmd_linvel_b[env_ids] = 0.0
         self.target_yaw[env_ids] = self.asset.data.heading_w[env_ids, None]
@@ -578,7 +582,7 @@ class PositionVelocityTracking(Command):
         return transform
     
     @override
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         if self.curriculum and self.env.episode_count > 1: # and self.env.training:
             distance_traveled = self.distance_traveled[env_ids]
             distance_commanded = self.distance_commanded[env_ids].clamp_min(1.0)
@@ -592,15 +596,14 @@ class PositionVelocityTracking(Command):
         self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
         self.distance_commanded[env_ids] = 0.0
         self.distance_traveled[env_ids] = 0.0
-        super().sample_init(env_ids, reset_td)
+        origins = super().reset(env_ids, tensordict)
 
-    @override
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.ref_pos_w[env_ids] = self.asset.data.root_link_pos_w[env_ids]
         self.ref_yaw_w[env_ids] = self.asset.data.heading_w[env_ids, None]
         self.ref_linvel_b[env_ids] = 0.0
         self.ref_yawvel_w[env_ids] = 0.0
         self.is_standing_env[env_ids] = False
+        return origins
     
     @override
     def _update(self) -> None:

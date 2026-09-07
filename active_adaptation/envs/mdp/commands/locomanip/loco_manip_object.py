@@ -109,9 +109,10 @@ class _LocoManipObjectBase(Command):
         lo, hi = value_range
         return torch.rand(num_samples, device=device) * (hi - lo) + lo
 
-    def _sample_initial_states(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _sample_initial_states(
+        self, env_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
-        self.env.episode_origin[env_ids] = origins
         n = len(env_ids)
 
         object_init = self.object_init_root_state[env_ids].clone()
@@ -127,11 +128,15 @@ class _LocoManipObjectBase(Command):
         robot_init[:, 2] = (
             self.env.get_ground_height_at(robot_init[:, :3]) + default_robot_z
         )
-        return {"robot": robot_init, self.object_name: object_init}
+        return origins, {"robot": robot_init, self.object_name: object_init}
 
     @override
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
-        self._write_initial_states(self._sample_initial_states(env_ids), env_ids)
+    def reset(
+        self, env_ids: torch.Tensor, tensordict: TensorDictBase
+    ) -> torch.Tensor:
+        origins, states = self._sample_initial_states(env_ids)
+        self._write_initial_states(states, env_ids)
+        return origins
 
     def get_gripper_status(self) -> torch.Tensor:
         """Return gripper closedness in ``[0, 1]`` (0=open, 1=closed)."""
@@ -233,9 +238,13 @@ class LocoManipObject(_LocoManipObjectBase):
         raise ValueError(f"Invalid key: {key!r}; expected 'object'")
 
     @override
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
+    def reset(
+        self, env_ids: torch.Tensor, tensordict: TensorDictBase
+    ) -> torch.Tensor:
+        origins = super().reset(env_ids, tensordict)
         self._sample_target(env_ids)
         self.grasp_height_per_env[env_ids] = self._sample_uniform(len(env_ids), self.grasp_height_range, self.device)
+        return origins
     
     def _sample_target(self, env_ids: torch.Tensor) -> None:
         obj_pos_w = self.object.data.root_link_pos_w[env_ids]
@@ -532,11 +541,34 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
         raise ValueError(f"Invalid key: {key}")
 
     @override
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
-        super().sample_init(env_ids, reset_td)
+    def reset(
+        self, env_ids: torch.Tensor, tensordict: TensorDictBase
+    ) -> torch.Tensor:
+        origins = super().reset(env_ids, tensordict)
         self.grasp_height_per_env[env_ids] = self._sample_uniform(
             len(env_ids), self.grasp_height_range, self.device
         )
+        self.sample_commands(env_ids)
+        # compute standoff position # do not extract as method
+        robot_w = self.asset.data.root_link_pos_w[env_ids]
+        object_w = self.object.data.root_pos_w[env_ids]
+        diff = robot_w - object_w
+        direction = diff / diff.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        standoff = object_w + direction * self.standoff_distance
+        standoff[:, 2] = self.env.get_ground_height_at(standoff)
+        self.approach_standoff_w[env_ids] = standoff
+
+        move_offset = torch.zeros(len(env_ids), 3, device=self.device)
+        move_offset[:, 0].uniform_(-2.0, 2.0)
+        move_offset[:, 1].uniform_(-2.0, 2.0)
+        move_yaw = torch.zeros(len(env_ids), 1, device=self.device)
+        move_yaw.uniform_(-torch.pi / 2, torch.pi / 2)
+        self.move_offset_w[env_ids] = move_offset
+        self.move_yaw[env_ids] = move_yaw
+
+        self.phase_ids[env_ids] = 0 # reset to approach phase
+        self.should_grasp[env_ids] = False
+        return origins
 
     def sample_commands(self, env_ids: torch.Tensor) -> None:
         self.grasp_height_per_env[env_ids] = self._sample_uniform(
@@ -628,29 +660,6 @@ class LocoManipObjectScripted(_LocoManipObjectBase):
             self.move_yaw[env_ids],
         )
         self.cmd_eef_status[env_ids, 0] = 1
-
-    @override
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
-        self.sample_commands(env_ids)
-        # compute standoff position # do not extract as method
-        robot_w = self.asset.data.root_link_pos_w[env_ids]
-        object_w = self.object.data.root_pos_w[env_ids]
-        diff = robot_w - object_w
-        direction = diff / diff.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        standoff = object_w + direction * self.standoff_distance
-        standoff[:, 2] = self.env.get_ground_height_at(standoff)
-        self.approach_standoff_w[env_ids] = standoff
-
-        move_offset = torch.zeros(len(env_ids), 3, device=self.device)
-        move_offset[:, 0].uniform_(-2.0, 2.0)
-        move_offset[:, 1].uniform_(-2.0, 2.0)
-        move_yaw = torch.zeros(len(env_ids), 1, device=self.device)
-        move_yaw.uniform_(-torch.pi / 2, torch.pi / 2)
-        self.move_offset_w[env_ids] = move_offset
-        self.move_yaw[env_ids] = move_yaw
-
-        self.phase_ids[env_ids] = 0 # reset to approach phase
-        self.should_grasp[env_ids] = False
 
     def _read_robot_and_object_state(self) -> None:
         self.root_pos_w = self.asset.data.root_link_pos_w

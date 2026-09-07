@@ -221,7 +221,8 @@ class Impedance(Command):
         # currently only used for smoothing the rewards
         return self.asset.data.body_lin_vel_w[:, self.body_ids].mean(1)
 
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
+        origins = super().reset(env_ids, tensordict)
         self.sample_command_world(env_ids)
         # self.sample_command_compliant(env_ids)
         self._cum_error[env_ids] = 0.0
@@ -239,6 +240,7 @@ class Impedance(Command):
         self.spring_force.duration[env_ids] = 0.
         self.constant_force.duration[env_ids] = 0.
         self.impulse_force.duration[env_ids] = 0.
+        return origins
 
     def pre_step(self, substep: int):
         force_b = quat_rotate_inverse(
@@ -642,14 +644,19 @@ class ImpedanceImpulse(Impedance):
         self.ep_id = torch.zeros(self.num_envs, 1, device=self.device, dtype=int)
         self.step_cnt = 0
 
-    def sample_init(self, env_ids, reset_td=None):
-        init_root_state = self.init_root_state[env_ids]
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
+        init_root_state = self.init_root_state[env_ids].clone()
         origins = self.env.scene.env_origins[env_ids]
         init_root_state[:, :3] += origins
+        self._write_initial_states({"robot": init_root_state}, env_ids)
+        entity = self.env.scene["robot"]
+        entity.write_joint_state_to_sim(
+            self.init_joint_pos[env_ids],
+            self.init_joint_vel[env_ids],
+            env_ids=env_ids,
+        )
         self.ep_id[env_ids] = self.ep_id[env_ids] + 1
-        return init_root_state
 
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.sample_command_setvel(env_ids)
         self.set_linvel[env_ids, 0] = self.X_VEL
         self.lin_kp[env_ids] = 12.
@@ -671,6 +678,7 @@ class ImpedanceImpulse(Impedance):
         self.spring_force.duration[env_ids] = 0.
         self.constant_force.duration[env_ids] = 0.
         self.impulse_force.duration[env_ids] = 0.
+        return origins
 
     def update_command(self):
         self.command_setpos_w[:] = torch.where(
@@ -758,17 +766,40 @@ class ImpedanceCollision(Impedance):
         self.trajs = []
         self.step_cnt = 0
 
-    def sample_init(self, env_ids, reset_td=None):
-        init_root_state = self.init_root_state[env_ids]
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
+        init_root_state = self.init_root_state[env_ids].clone()
         if self.env.scene.terrain.cfg.terrain_type == "plane":
             origins = self.env.scene.env_origins[env_ids]
         else:
             idx = torch.randint(0, self.env.num_envs, (len(env_ids),), device=self.device)
-            origins = self._origins[idx % len(self._origins)]
+            origins = self.origins[idx % len(self.origins)]
         init_root_state[:, :3] += origins
-        # self.ep_id[env_ids] = self.ep_id[env_ids] + 1
-        return init_root_state
-    
+        self._write_initial_states({"robot": init_root_state}, env_ids)
+        entity = self.env.scene["robot"]
+        entity.write_joint_state_to_sim(
+            self.init_joint_pos[env_ids],
+            self.init_joint_vel[env_ids],
+            env_ids=env_ids,
+        )
+
+        self.sample_command_world(env_ids)
+        self._cum_error[env_ids] = 0.0
+        self.env.extra["stats/distance_commanded"] = self.distance_commanded.mean().item()
+        self.env.extra["stats/distance_covered"] = self.distance_covered.mean().item()
+        self.env.extra["stats/force_schedule"] = self.force_schedule()
+        self.distance_covered[env_ids] = 0.0
+        self.distance_commanded[env_ids] = 0.0
+
+        self.ref_pos_w[env_ids] = self.asset.data.root_pos_w[env_ids].unsqueeze(1)
+        self.ref_lin_vel_w[env_ids] = 0.0
+        self.ref_yaw_w[env_ids] = self.asset.data.heading_w[env_ids, None, None]
+        self.ref_yaw_vel_w[env_ids] = 0.0
+
+        self.spring_force.duration[env_ids] = 0.
+        self.constant_force.duration[env_ids] = 0.
+        self.impulse_force.duration[env_ids] = 0.
+        return origins
+
     def _sample_command(self, env_ids, command_mode):
         scalar = torch.empty(len(env_ids), 1, device=self.device)
         lin_kp = scalar.uniform_(32., 32.).clone()
@@ -837,22 +868,29 @@ class VelocityImpulse(Twist):
         self.ep_id = torch.zeros(self.num_envs, 1, device=self.device, dtype=int)
         self.step_cnt = 0
 
-    def sample_init(self, env_ids, reset_td=None):
-        init_root_state = self.init_root_state[env_ids]
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
+        init_root_state = self.init_root_state[env_ids].clone()
         if self.env.scene.terrain.cfg.terrain_type == "plane":
             origins = self.env.scene.env_origins[env_ids]
         else:
             idx = torch.randint(0, self.env.num_envs, (len(env_ids),), device=self.device)
-            origins = self._origins[idx % len(self._origins)]
+            origins = self.origins[idx % len(self.origins)]
         init_root_state[:, :3] += origins
+        self._write_initial_states({"robot": init_root_state}, env_ids)
+        entity = self.env.scene["robot"]
+        entity.write_joint_state_to_sim(
+            self.init_joint_pos[env_ids],
+            self.init_joint_vel[env_ids],
+            env_ids=env_ids,
+        )
         self.ep_id[env_ids] = self.ep_id[env_ids] + 1
-        return init_root_state
-    
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
-        super().reset(env_ids, tensordict)
+
+        # Avoid Twist.reset (would re-spawn with default origins).
+        self._reset_command_buffers(env_ids, tensordict)
         self.constand_force.duration.data[env_ids] = 0.
         self.sample_vel_command(env_ids)
         self.sample_yaw_command(env_ids)
+        return origins
     
     def sample_vel_command(self, env_ids):
         next_command_linvel = torch.zeros(len(env_ids), 3, device=self.device)
@@ -950,21 +988,27 @@ class VelocityCollision(Twist):
         self.trajs = []
         self.step_cnt = 0
 
-    def sample_init(self, env_ids, reset_td=None):
-        init_root_state = self.init_root_state[env_ids]
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
+        init_root_state = self.init_root_state[env_ids].clone()
         if self.env.scene.terrain.cfg.terrain_type == "plane":
             origins = self.env.scene.env_origins[env_ids]
         else:
             idx = torch.randint(0, self.env.num_envs, (len(env_ids),), device=self.device)
-            origins = self._origins[idx % len(self._origins)]
+            origins = self.origins[idx % len(self.origins)]
         init_root_state[:, :3] += origins
-        # self.ep_id[env_ids] = self.ep_id[env_ids] + 1
-        return init_root_state
-    
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
-        super().reset(env_ids, tensordict)
+        self._write_initial_states({"robot": init_root_state}, env_ids)
+        entity = self.env.scene["robot"]
+        entity.write_joint_state_to_sim(
+            self.init_joint_pos[env_ids],
+            self.init_joint_vel[env_ids],
+            env_ids=env_ids,
+        )
+
+        # Avoid Twist.reset (would re-spawn with default origins).
+        self._reset_command_buffers(env_ids, tensordict)
         self.sample_vel_command(env_ids)
         self.sample_yaw_command(env_ids)
+        return origins
     
     def sample_vel_command(self, env_ids):
         next_command_linvel = torch.zeros(len(env_ids), 3, device=self.device)

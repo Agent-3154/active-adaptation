@@ -341,7 +341,8 @@ class LocoManipNew(Command):
         raise ValueError(f"Invalid key: {key}")
 
     @override
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        origins = super().reset(env_ids, tensordict)
         resample = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         resample[env_ids] = True
         # always start in nominal mode
@@ -362,6 +363,7 @@ class LocoManipNew(Command):
         self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
         self.distance_commanded[env_ids] = 0.0
         self.distance_traveled[env_ids] = 0.0
+        return origins
 
     @override
     def _initialize(self, env: _EnvBase) -> None:

@@ -82,7 +82,7 @@ class MDPComponent:
     def startup(self) -> None:
         pass
 
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
         """Reset per-env state for ``env_ids``.
 
         Both arguments are required. Terms may read from and write into
@@ -90,9 +90,8 @@ class MDPComponent:
         it unused.
 
         Note:
-            Initial root/joint state is still set via ``command_manager.sample_init``
-            in ``_reset_idx`` before these callbacks run. A future change will move
-            that responsibility into ``reset``.
+            Initial root/joint state is set by ``command_manager.reset``, which
+            also returns the episode origins written to ``env.episode_origin``.
         """
         pass
 

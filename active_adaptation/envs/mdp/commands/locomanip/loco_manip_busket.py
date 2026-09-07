@@ -78,37 +78,57 @@ class LocoManipBusketScripted(LocoManipObjectScripted):
         self._sample_lift_offsets(all_env_ids)
 
     @override
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
-        init_state = self._sample_initial_states(env_ids)
-        if self.platform_name is None:
-            self._write_initial_states(init_state, env_ids)
-            return
-
-        object_init = init_state[self.object_name]
-        platform_init = self.platform_init_root_state[env_ids].clone()
-        platform_init[:, :2] = object_init[:, :2]
-        platform_init[:, 2] = (
-            self.env.get_ground_height_at(platform_init[:, :3])
-            + 0.5 * self.platform_height
-        )
-        platform_init[:, 3:7] = torch.tensor(
-            [1.0, 0.0, 0.0, 0.0],
-            device=self.device,
-            dtype=platform_init.dtype,
-        )
-        platform_init[:, 7:] = 0.0
-        object_init[:, 2] += self.platform_height
-        init_state[self.platform_name] = platform_init
+    def reset(
+        self, env_ids: torch.Tensor, tensordict: TensorDictBase
+    ) -> torch.Tensor:
+        origins, init_state = self._sample_initial_states(env_ids)
+        if self.platform_name is not None:
+            object_init = init_state[self.object_name]
+            platform_init = self.platform_init_root_state[env_ids].clone()
+            platform_init[:, :2] = object_init[:, :2]
+            platform_init[:, 2] = (
+                self.env.get_ground_height_at(platform_init[:, :3])
+                + 0.5 * self.platform_height
+            )
+            platform_init[:, 3:7] = torch.tensor(
+                [1.0, 0.0, 0.0, 0.0],
+                device=self.device,
+                dtype=platform_init.dtype,
+            )
+            platform_init[:, 7:] = 0.0
+            object_init[:, 2] += self.platform_height
+            init_state[self.platform_name] = platform_init
         self._write_initial_states(init_state, env_ids)
+
+        # Scripted buffer reset (skip parent spawn — already written above).
+        self.grasp_height_per_env[env_ids] = self._sample_uniform(
+            len(env_ids), self.grasp_height_range, self.device
+        )
+        self.sample_commands(env_ids)
+        robot_w = self.asset.data.root_link_pos_w[env_ids]
+        object_w = self.object.data.root_pos_w[env_ids]
+        diff = robot_w - object_w
+        direction = diff / diff.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        standoff = object_w + direction * self.standoff_distance
+        standoff[:, 2] = self.env.get_ground_height_at(standoff)
+        self.approach_standoff_w[env_ids] = standoff
+
+        move_offset = torch.zeros(len(env_ids), 3, device=self.device)
+        move_offset[:, 0].uniform_(-2.0, 2.0)
+        move_offset[:, 1].uniform_(-2.0, 2.0)
+        move_yaw = torch.zeros(len(env_ids), 1, device=self.device)
+        move_yaw.uniform_(-torch.pi / 2, torch.pi / 2)
+        self.move_offset_w[env_ids] = move_offset
+        self.move_yaw[env_ids] = move_yaw
+
+        self.phase_ids[env_ids] = 0
+        self.should_grasp[env_ids] = False
+        self._sample_lift_offsets(env_ids)
+        return origins
 
     @override
     def sample_commands(self, env_ids: torch.Tensor) -> None:
         self.grasp_height_per_env[env_ids] = self.grasp_offset_obj[2]
-
-    @override
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
-        super().reset(env_ids, tensordict)
-        self._sample_lift_offsets(env_ids)
 
     def _sample_lift_offsets(self, env_ids: torch.Tensor) -> None:
         self._lift_offset[env_ids].zero_()

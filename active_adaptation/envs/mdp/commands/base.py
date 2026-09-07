@@ -64,14 +64,19 @@ class Command(MDPComponent, RegistryMixin):
     def step(self) -> None:
         """Advance command time or resample future targets."""
 
-    def sample_init(
+    def reset(
         self,
         env_ids: torch.Tensor,
-        reset_td: TensorDictBase | None = None,
-    ) -> None:
+        tensordict: TensorDictBase,
+    ) -> torch.Tensor:
+        """Write initial sim state for ``env_ids`` and return episode origins.
+
+        Origins have shape ``(len(env_ids), 3)``. The env assigns
+        ``env.episode_origin[env_ids]`` from the returned tensor. Subclasses
+        that customize spawn must still return the origins they used.
+        """
         init_root_state = self.init_root_state[env_ids].clone()
         origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
-        self.env.episode_origin[env_ids] = origins
         init_root_state[:, :3] += origins
         init_root_state[:, 3:7] = quat_mul(
             init_root_state[:, 3:7],
@@ -84,6 +89,7 @@ class Command(MDPComponent, RegistryMixin):
             self.init_joint_vel[env_ids],
             env_ids=env_ids,
         )
+        return origins
 
     def _write_initial_states(
         self,

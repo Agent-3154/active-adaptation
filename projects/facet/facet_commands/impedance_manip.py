@@ -390,7 +390,8 @@ class ImpedanceCommandManager(Command):
             body_ids=[0],
         )
 
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
+        origins = super().reset(env_ids, tensordict)
         root_link_pos = self.asset.data.root_link_pos_w[env_ids]
         root_link_rpy = euler_from_quat(self.asset.data.root_link_quat_w[env_ids])
         self.pos_base.pos_w[env_ids] = root_link_pos.unsqueeze(1)
@@ -425,6 +426,7 @@ class ImpedanceCommandManager(Command):
                 wp.from_torch(self.cmd.virtual_mass_base, dtype=wp.float32, return_ctype=True),
             ],
         )
+        return origins
     
     def _update(self):
         self.seed = wp.rand_init(self.seed)

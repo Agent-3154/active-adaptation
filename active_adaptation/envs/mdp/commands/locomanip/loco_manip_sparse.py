@@ -550,10 +550,11 @@ class LocoManipSparse(LocoManipSparseBase):
         )
 
     @override
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
+    def reset(
+        self, env_ids: torch.Tensor, tensordict: TensorDictBase
+    ) -> torch.Tensor:
         """Spawn near env origin (goal) or on a tighter ring (traj)."""
         origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
-        self.env.episode_origin[env_ids] = origins
         robot_init = self.init_root_state[env_ids].clone()
         default_z_offset = robot_init[:, 2].clone()
 
@@ -581,6 +582,14 @@ class LocoManipSparse(LocoManipSparseBase):
             sample_quat_yaw(len(env_ids), device=self.device),
         )
         self._write_initial_states(robot_init, env_ids)
+        # Mid-reset read in sample_commands (traj centers); env assigns after return.
+        self.env.episode_origin[env_ids] = origins
+
+        self.eef_pos_reached[env_ids] = False
+        self.sample_commands(env_ids)
+        # Heading-frame EEF for newly sampled world goals (obs/reward before first update).
+        self._refresh_cmd_eef_pos_b()
+        return origins
 
     def sample_commands(self, env_ids: torch.Tensor) -> None:
         """Sample world goals (Warp) and/or trajectory curves for ``env_ids``."""
@@ -696,13 +705,6 @@ class LocoManipSparse(LocoManipSparseBase):
         )
         self.world_eef_pos_w[env_ids] = target
         self.cmd_eef_pos_w[env_ids] = target
-
-    @override
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
-        self.eef_pos_reached[env_ids] = False
-        self.sample_commands(env_ids)
-        # Heading-frame EEF for newly sampled world goals (obs/reward before first update).
-        self._refresh_cmd_eef_pos_b()
 
     @override
     def _update(self) -> None:
@@ -998,10 +1000,11 @@ class LocoManipSparseReplay(LocoManipSparseBase):
         )
 
     @override
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
+    def reset(
+        self, env_ids: torch.Tensor, tensordict: TensorDictBase
+    ) -> torch.Tensor:
         """Spawn near env origins (small polar jitter)."""
         origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
-        self.env.episode_origin[env_ids] = origins
         robot_init = self.init_root_state[env_ids].clone()
         default_z_offset = robot_init[:, 2].clone()
         n = len(env_ids)
@@ -1018,6 +1021,11 @@ class LocoManipSparseReplay(LocoManipSparseBase):
         )
         self.sparse_mode[env_ids] = MODE_GOAL_REACHING
         self._write_initial_states(robot_init, env_ids)
+
+        self.eef_pos_reached[env_ids] = False
+        self.sample_commands(env_ids)
+        self._refresh_cmd_eef_pos_b()
+        return origins
 
     def sample_commands(self, env_ids: torch.Tensor) -> None:
         """Apply a catalog relative transform to the current robot pose."""
@@ -1117,13 +1125,6 @@ class LocoManipSparseReplay(LocoManipSparseBase):
             ],
             device=self._wp_device,
         )
-
-    @override
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
-        self.eef_pos_reached[env_ids] = False
-        self.sparse_mode[env_ids] = MODE_GOAL_REACHING
-        self.sample_commands(env_ids)
-        self._refresh_cmd_eef_pos_b()
 
     @override
     def _update(self) -> None:

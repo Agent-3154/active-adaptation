@@ -681,10 +681,12 @@ class SingleEEFLocoManip(Command):
         )        
 
     @override
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        origins = super().reset(env_ids, tensordict)
         self.sample_commands(env_ids)
         # self._sync_world_frames()
         self.base_pos_error[env_ids] = 0.0
+        return origins
 
     @override
     def _update(self) -> None:

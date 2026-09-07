@@ -89,7 +89,7 @@ Unknown attributes fall through via `__getattr__` to the wrapped native sim obje
 | `ground_mesh` | Warp mesh for height-field raycasts |
 | `create_sphere_marker` / `create_arrow_marker` | debug visualization |
 
-Episode-local frame for shared worlds (e.g. 3DGS): ``env.episode_origin``, written in ``sample_init``.
+Episode-local frame for shared worlds (e.g. 3DGS): ``env.episode_origin``, assigned from ``Command.reset``'s return value.
 
 ---
 

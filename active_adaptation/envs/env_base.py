@@ -561,7 +561,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         command = self._make_component(mdp.Command, class_name, command_cfg)
         if not command:
             raise ValueError(f"Command class '{class_name}' not found")
-        self.command_manager = command
+        self.command_manager: mdp.Command = command
         if isinstance(command, mdp.MDPComponent):
             self._scene_components.append(command)
 
@@ -850,9 +850,11 @@ class _EnvBase(EnvBase, RegistryMixin):
             )
             self.episode_count += num_envs
 
-            self._reset_idx(env_ids, tensordict)
+            self.stats[env_ids] = 0.0
             self.scene.reset(env_ids)
-            self.command_manager.reset(env_ids, tensordict)
+            self.episode_origin[env_ids] = self.command_manager.reset(
+                env_ids, tensordict
+            )
             for adapt in self.adaptations.values():
                 adapt.reset(env_ids, tensordict)
             for group in self.observation_groups.values():
@@ -871,23 +873,6 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict.set("episode_id", self.episode_id.clone())
         self._last_gui_render_time = time.perf_counter()
         return tensordict
-
-    def _reset_idx(self, env_ids: torch.Tensor, reset_td: TensorDictBase):
-        init_state = self.command_manager.sample_init(env_ids, reset_td)
-        # ponytail: keep legacy sample_init return support until remaining AA
-        # commands are migrated to write simulator state in-place.
-        if init_state is None:
-            self.stats[env_ids] = 0.0
-            return
-        if not isinstance(init_state, dict):
-            init_state = {"robot": init_state}
-        for key, value in init_state.items():
-            entity = self.scene[key]
-            if self.backend == "mjlab" and entity.is_fixed_base:
-                entity.write_mocap_pose_to_sim(value[:, :7], env_ids=env_ids)
-            else:
-                entity.write_root_state_to_sim(value, env_ids=env_ids)
-        self.stats[env_ids] = 0.0
 
     # TODO: add explanation for the difference
     def _should_render_sensors(self) -> bool:
@@ -999,11 +984,11 @@ class _EnvBase(EnvBase, RegistryMixin):
             if reward_group.enabled:
                 tensordict["reward", group] = reward
 
+        success = tensordict.get("success", None)
+        if success is None:
+            success = (self.episode_length_buf.reshape(self.num_envs, 1) >= self.max_episode_length * 0.9)
         self.stats["episode_len"][:] = self.episode_length_buf.reshape(self.num_envs, 1)
-        self.stats["success"][:] = (
-            (self.episode_length_buf.reshape(self.num_envs, 1) >= self.max_episode_length * 0.9)
-            .float()
-        )
+        self.stats["success"] = success.float().clone()
         return tensordict
 
     @ScopedTimer("termination.compute", sync=PROFILE_SYNC_TIMERS)

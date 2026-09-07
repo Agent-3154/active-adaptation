@@ -44,6 +44,7 @@ class SplineCommand(Command):
             self.control_points_marker.set_visibility(True)
     
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        origins = super().reset(env_ids, tensordict)
         self.spline_t[env_ids] = 0.0
         self.spline_ps[env_ids] = spline.create_from(
             self.asset.data.root_pos_w[env_ids, :2],
@@ -53,6 +54,7 @@ class SplineCommand(Command):
             t = torch.linspace(0, 1, 25, device=self.device)
             x, v = spline.cubic_bezier(t.unsqueeze(0), self.spline_ps[0:1])
             self.traj_vis = x[0].cpu()
+        return origins
 
     @property
     def command(self):

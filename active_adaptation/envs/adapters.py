@@ -165,7 +165,8 @@ class SceneAdapter(Protocol):
 
         For shared appearance (e.g. one 3DGS for all envs) and for converting
         world poses into the episode-local frame, use ``env.episode_origin``
-        (written in ``sample_init``), not this property.
+        (assigned from ``command_manager.reset``'s return value), not this
+        property.
         """
         return self._scene.env_origins
 
@@ -176,7 +177,8 @@ class SceneAdapter(Protocol):
 
         Default: ``env_origins[env_ids]``. Isaac overrides this to sample a
         random terrain patch when procedural terrain is active. Callers must
-        still write the values they use to ``env.episode_origin[env_ids]``.
+        return the values they use from ``Command.reset`` so the env can assign
+        ``env.episode_origin[env_ids]``.
         """
         return self.env_origins[env_ids]
 

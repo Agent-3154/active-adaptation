@@ -82,10 +82,9 @@ class MotionTrackingCommand(Command):
         self.future_steps = torch.tensor([0, 12, 24, 36])
         self._update()
     
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         init_root_state = self.init_root_state[env_ids].clone()
         origins = self.env.scene.sample_spawn_origin_candidates(env_ids)
-        self.env.episode_origin[env_ids] = origins
         motion = self.dataset.get_slice(self.motion_ids[env_ids.cpu()], 0, 1)
         init_root_state[:, :3] = origins + motion.root_pos_w[:, 0].to(self.device)
         init_root_state[:, 3:7] = motion.root_link_quat_w[:, 0].to(self.device)
@@ -95,9 +94,8 @@ class MotionTrackingCommand(Command):
             torch.zeros_like(motion.joint_pos[:, 0], device=self.device),
             env_ids=env_ids,
         )
-    
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         self.t[env_ids] = 0
+        return origins
 
     @property
     def command(self):

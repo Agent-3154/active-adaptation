@@ -147,11 +147,6 @@ class TrajTracking(Command):
             dim=-1,
         )
 
-    @override
-    def sample_init(self, env_ids: torch.Tensor, reset_td=None) -> None:
-        """Spawn at default root pose; ``reset`` fits the trajectory from here."""
-        super().sample_init(env_ids, reset_td)
-    
     def _resample_target(self, env_ids: torch.Tensor) -> None:
         x0 = self.asset.data.root_link_pos_w[env_ids]
         v0 = self.asset.data.root_link_lin_vel_w[env_ids]
@@ -168,7 +163,8 @@ class TrajTracking(Command):
         ).long()
 
     @override
-    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
+        origins = super().reset(env_ids, tensordict)
         self._resample_target(env_ids)
         Kp = torch.empty(len(env_ids), 1, device=self.device)
         Kp.uniform_(0.5, 1.0)
@@ -176,6 +172,7 @@ class TrajTracking(Command):
         self._cum_error[env_ids] = 0.0
         # Do not evaluate targets here: the first post-reset obs is discarded
         # (``is_init``); next-step targets are written in ``update``.
+        return origins
 
     @override
     def _update(self) -> None:
