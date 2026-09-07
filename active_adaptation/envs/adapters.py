@@ -73,25 +73,16 @@ class SimAdapter(Protocol):
 
     def has_gui(self) -> bool: ...
 
-    def step(self) -> None:
-        """Advance physics only (no GUI, no camera/sensor products)."""
-        ...
-
-    def render_gui(self) -> None:
-        """Update interactive viewers (Omniverse / Viser / MjLabViewer)."""
-        ...
-
-    def render_sensors(self) -> None:
-        """Refresh camera / sensor products consumed by MDP observations.
-
-        Isaac: Kit render (camera annotators). mjlab: ``Simulation.sense()``.
-        Decoupled 3DGS uses ``env.visual.render`` from obs ``compute`` (option A),
-        not this hook.
+    def step(self,
+        render_sensors: bool = False,
+        render_gui: bool = False,
+    ) -> None:
+        """Advance physics only (no GUI, no camera/sensor products).
+        
+        Args:
+            render_sensors: Whether to render sensors.
+            render_gui: Whether to render the GUI.
         """
-        ...
-
-    def render(self) -> None:
-        """Gym ``human`` mode / full viewport refresh (typically :meth:`render_gui`)."""
         ...
 
     def set_camera_view(self, eye=None, target=None, **kwargs) -> None: ...

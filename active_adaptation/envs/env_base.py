@@ -875,10 +875,14 @@ class _EnvBase(EnvBase, RegistryMixin):
         return tensordict
 
     # TODO: add explanation for the difference
-    def _should_render_sensors(self) -> bool:
+    def _should_render_sensors(self, substep: int) -> bool:
+        if substep != self.decimation - 1:
+            return False
         return self.sensor_render_enabled
 
-    def _should_render_gui(self) -> bool:
+    def _should_render_gui(self, substep: int) -> bool:
+        if substep != self.decimation - 1:
+            return False
         if not self.sim.has_gui():
             return False
         if time.perf_counter() - self._last_gui_render_time > 1.0 / 30.0:
@@ -907,12 +911,10 @@ class _EnvBase(EnvBase, RegistryMixin):
                     [callback(substep) for callback in self._pre_step_callbacks]
                     self.scene.write_data_to_sim()
                 with ScopedTimer("simulation.step", sync=PROFILE_SYNC_TIMERS):
-                    self.sim.step()
-                    if substep == self.decimation - 1:
-                        if self._should_render_sensors():
-                            self.sim.render_sensors()
-                        if self._should_render_gui():
-                            self.sim.render_gui()
+                    self.sim.step(
+                        render_sensors=self._should_render_sensors(substep),
+                        render_gui=self._should_render_gui(substep),
+                    )
                 with ScopedTimer("simulation.post_step", sync=PROFILE_SYNC_TIMERS):
                     self.scene.update(self.physics_dt)
                     for adapt in self.adaptations.values():

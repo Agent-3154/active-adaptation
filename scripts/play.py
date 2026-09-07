@@ -22,6 +22,7 @@ from torchrl.envs.utils import set_exploration_type, ExplorationType
 import active_adaptation as aa
 from active_adaptation.utils.export import export_onnx
 from active_adaptation.utils.timerfd import Timer
+from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.helpers import EpisodeStats
 from active_adaptation.learning.modules.vecnorm import VecNorm
 
@@ -84,6 +85,8 @@ class PlayConfig:
     task: PlayTaskOverride = field(default_factory=PlayTaskOverride)
     """Task overrides applied on top of the selected task config."""
     exploration_type: ExplorationType = ExplorationType.MODE
+    max_steps: Optional[int] = None
+    """Stop after this many env steps (None = run until interrupted)."""
 
 
 cs = ConfigStore.instance()
@@ -170,8 +173,10 @@ def main(cfg: PlayConfig):
         torch.inference_mode(), set_exploration_type(exploration_type):
         try:
             for i in itertools.count():
-                carry = rollout_policy(carry)
-                td, carry = env.step_and_maybe_reset(carry)
+                with ScopedTimer("policy_inference"):
+                    carry = rollout_policy(carry)
+                with ScopedTimer("step_and_maybe_reset"):
+                    td, carry = env.step_and_maybe_reset(carry)
                 episode_stats.add(td)
 
                 if record_enabled:
@@ -187,14 +192,28 @@ def main(cfg: PlayConfig):
                 if elapsed >= print_interval_s:
                     n_steps = i - last_print_step
                     sps = n_steps / elapsed
+                    ScopedTimer.print_summary(clear=True, depth=3)
                     print(f"step {i} | {sps:.1f}x{env.num_envs}={sps*env.num_envs:.1f} env steps/s")
                     last_print_time = now
                     last_print_step = i
 
+                max_steps = cfg.get("max_steps", None)
+                if max_steps is not None and (i + 1) >= int(max_steps):
+                    print(f"Reached max_steps={max_steps}, stopping.")
+                    break
+
                 timer.sleep()
         except KeyboardInterrupt:
             print(f"Interrupted by user, video saved to: {video_path}" if record_enabled else "Interrupted by user.")
-    
+
+    # Flush agent FSM event log if present.
+    cmd = getattr(env.base_env, "command_manager", None)
+    logger = getattr(cmd, "_event_logger", None) if cmd is not None else None
+    if logger is not None:
+        phase = getattr(cmd, "phase", None)
+        logger.close(phase=phase)
+        print(f"[LocoManip2] event_log closed: {logger.path}")
+
     env.close()
 
 

@@ -70,26 +70,20 @@ class IsaacSimAdapter(SimAdapter):
         # True for Omniverse Kit GUI *or* browser Viser (debug callbacks / mesh sync).
         return self._sim.has_gui() or self._viser_viewer is not None
 
-    def step(self) -> None:
+    def step(
+        self,
+        render_sensors: bool = False,
+        render_gui: bool = False,
+    ) -> None:
         self._kit_rendered_this_step = False
-        self._sim.step(render=False)
-
-    def render_sensors(self) -> None:
-        # Isaac Lab camera products require a Kit render pass.
-        self._sim.render()
-        self._kit_rendered_this_step = True
-
-    def render_gui(self) -> None:
-        # Kit couples viewport and sensor render; skip a second Kit pass if
-        # render_sensors() already ran this physics step.
-        if not self._kit_rendered_this_step and self._sim.has_gui():
-            self._sim.render()
-            self._kit_rendered_this_step = True
-        if self._viser_viewer is not None:
+        # path 1: use the render flag to render the GUI and sensors
+        self._sim.step(render=render_gui or render_sensors)
+        # path 2: render the GUI and sensors separately
+        # self._sim.step(render=False)
+        # if render_sensors or render_gui:
+        #     self._sim.render()
+        if render_gui and self._viser_viewer is not None:
             self._viser_viewer.update()
-
-    def render(self) -> None:
-        self.render_gui()
 
     def set_camera_view(self, eye=None, target=None, **kwargs) -> None:
         if eye is not None and target is not None:

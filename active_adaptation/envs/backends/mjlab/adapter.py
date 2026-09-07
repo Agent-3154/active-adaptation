@@ -243,18 +243,16 @@ class MjlabSimAdapter(SimAdapter):
     def has_gui(self) -> bool:
         return self.viewer is not None
 
-    def step(self) -> None:
+    def step(
+        self,
+        render_sensors: bool = False,
+        render_gui: bool = False,
+    ) -> None:
         self._sim.step()
-
-    def render_sensors(self) -> None:
-        self._sim.sense()
-
-    def render_gui(self) -> None:
-        if self.viewer is not None:
+        if render_sensors:
+            self._sim.sense()
+        if render_gui and self.viewer is not None:
             self.viewer.update()
-
-    def render(self) -> None:
-        self.render_gui()
 
     def render_rgb_array(self) -> np.ndarray:
         renderer = self._get_offscreen_renderer()
