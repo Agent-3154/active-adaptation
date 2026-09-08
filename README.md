@@ -2,7 +2,7 @@
 
 `active-adaptation` is a fast-moving, research-oriented RL codebase for various robotic tasks and algorithms. It emphasizes environment flexibility and ease of use for research.
 
-Projects using this codebase:
+Projects using or based on this codebase:
 
 * [FACET: Force-Adaptive Control via Impedance Reference Tracking for Legged Robots](https://arxiv.org/abs/2505.06883)
 
@@ -13,6 +13,8 @@ Projects using this codebase:
 * [Gallant: Voxel Grid-based Humanoid Locomotion and Local-navigation across 3D Constrained Terrains](https://arxiv.org/abs/2511.14625)
 
 * [MimicLite](https://github.com/EGalahad/mimic-lite) at branch `dev/hdmi`.
+  
+* [HEFT: Heavy-Payload Full-size Humanoid Teleoperation with Privileged Motion Guidance and Windowed Payload Curriculum](https://arxiv.org/abs/2607.02332)
 
 and more to come...
 
