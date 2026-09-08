@@ -66,7 +66,9 @@ class IsaacBackendEnv(_EnvBase):
         asset_spec: AssetSpec = coerce_asset_spec(
             asset_entry, backend="isaaclab", **robot_cfg
         )
-        self._pending_adaptations = asset_spec.iter_adaptations()
+        pending: list[tuple[str | None, Any]] = [
+            (None, adapt) for adapt in asset_spec.iter_adaptations()
+        ]
         scene_cfg.robot = asset_spec.config
         sensors = asset_spec.sensors
         for name, sensor_cfg in sensors.items():
@@ -91,6 +93,10 @@ class IsaacBackendEnv(_EnvBase):
             )
             cfg.prim_path = "{ENV_REGEX_NS}/" + obj_name
             setattr(scene_cfg, obj_name, cfg)
+            for adapt in object_spec.iter_adaptations():
+                pending.append((obj_name, adapt))
+
+        self._pending_adaptations = pending
 
         import active_adaptation.envs.sensors  # noqa: F401  # register sensor factories
 
@@ -188,8 +194,7 @@ class IsaacBackendEnv(_EnvBase):
 
         self._debug_draw_callbacks.insert(0, self.scene.clear_debug)
 
-        self._bind_robot_adaptations(self._pending_adaptations)
-        self._pending_adaptations = ()
+        self._bind_pending_adaptations()
     
     @override
     def _setup_visual(self) -> None:

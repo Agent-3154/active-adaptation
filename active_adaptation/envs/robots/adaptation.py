@@ -1,10 +1,16 @@
-"""Robot adaptations: composable asset-attached behavior (not articulation subclasses).
+"""Asset adaptations: composable entity-attached behavior (not Articulation subclasses).
 
 An adaptation owns semantic indices / caches and optional physics hooks. Assets
-declare a list on :class:`~active_adaptation.assets.asset_cfg.AssetSpec`; the
-env binds them after the robot exists and calls lifecycle methods explicitly.
+(robots **or** scene objects) declare a list on
+:class:`~active_adaptation.assets.asset_cfg.AssetSpec`; the env binds them after
+the entity exists and calls lifecycle methods explicitly.
 
-Examples: underwater hydrodynamics, gripper closedness helpers.
+Examples: underwater hydrodynamics, gripper closedness, object grasp sampling.
+
+Lookup keys on ``env.adaptations``:
+
+- Robot adaptations: ``adapt.name`` (e.g. ``"gripper"``).
+- Object adaptations: ``{scene_object_name}.{adapt.name}`` (e.g. ``"object.grasp"``).
 """
 from __future__ import annotations
 
@@ -14,16 +20,17 @@ import torch
 from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation
     from active_adaptation.envs.env_base import _EnvBase
 
 
 class RobotAdaptation:
-    """Asset-attached robot behavior (composition, not inheritance of Articulation).
+    """Asset-attached behavior (composition over inheritance).
 
-    Subclasses must set :attr:`name` (unique key on ``env.adaptations``).
-    Construct with config only; bind via :meth:`_initialize` after the scene
-    robot exists.
+    Subclasses must set :attr:`name`. Construct with config only; bind via
+    :meth:`_initialize` after the scene entity exists.
+
+    The bound handle is :attr:`asset` (robot articulation or object entity).
+    :attr:`robot` is a compatibility alias for the same reference.
     """
 
     name: str = ""
@@ -32,13 +39,36 @@ class RobotAdaptation:
         if not self.name:
             raise TypeError(f"{type(self).__name__} must define a non-empty class attr `name`")
         self.env: _EnvBase | None = None
-        self.robot: Articulation | None = None
+        self.asset: Any | None = None
         self._initialized = False
 
-    def _initialize(self, env: "_EnvBase", *, robot: "Articulation") -> None:
+    def _initialize(
+        self,
+        env: "_EnvBase",
+        *,
+        asset: Any | None = None,
+        robot: Any | None = None,
+    ) -> None:
+        """Bind to a scene entity.
+
+        Prefer ``asset=``. ``robot=`` remains accepted as a deprecated alias.
+        """
+        if asset is None:
+            asset = robot
+        if asset is None:
+            raise TypeError(f"{type(self).__name__}._initialize requires asset=")
         self.env = env
-        self.robot = robot
+        self.asset = asset
         self._initialized = True
+
+    @property
+    def robot(self) -> Any | None:
+        """Compatibility alias for :attr:`asset` (robot adaptations)."""
+        return self.asset
+
+    @robot.setter
+    def robot(self, value: Any) -> None:
+        self.asset = value
 
     @property
     def initialized(self) -> bool:
@@ -55,9 +85,9 @@ class RobotAdaptation:
         if not self._initialized:
             raise RuntimeError(f"{type(self).__name__} is not initialized")
         try:
-            return self.robot.device
+            return self.asset.device
         except AttributeError:
-            return self.robot.data.root_link_pos_w.device
+            return self.asset.data.root_link_pos_w.device
 
     # --- lifecycle (env calls these explicitly; base methods are no-ops) ---
 
@@ -84,4 +114,7 @@ class RobotAdaptation:
         pass
 
 
-__all__ = ["RobotAdaptation"]
+# Forward-looking alias; keep ``RobotAdaptation`` as the public name for now.
+Adaptation = RobotAdaptation
+
+__all__ = ["RobotAdaptation", "Adaptation"]

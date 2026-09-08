@@ -355,8 +355,8 @@ class UnderwaterRobot(RobotAdaptation):
         return out
 
     @override
-    def _initialize(self, env: "_EnvBase", *, robot: "Articulation"):
-        super()._initialize(env, robot=robot)
+    def _initialize(self, env: "_EnvBase", *, asset: "Articulation", robot: "Articulation | None" = None):
+        super()._initialize(env, asset=asset, robot=robot)
         self.dt = self.env.sim.get_physics_dt()
 
         self.body_names = list(self.robot.body_names)

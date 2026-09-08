@@ -462,7 +462,7 @@ class AssetSpec:
     config: Any
     sensors: Any = ()
     adaptations: Sequence[Any] = ()
-    """Composable :class:`~active_adaptation.envs.robots.adaptation.RobotAdaptation` instances."""
+    """Composable asset adaptations (robot or scene object), see ``RobotAdaptation``."""
     wrapper: Optional[Any] = None
     """Deprecated alias for a single adaptation; prefer :attr:`adaptations`."""
 

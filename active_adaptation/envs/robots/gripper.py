@@ -49,10 +49,10 @@ class GripperAdaptation(RobotAdaptation):
         self.max_open: torch.Tensor | None = None
 
     @override
-    def _initialize(self, env: "_EnvBase", *, robot: "Articulation") -> None:
-        super()._initialize(env, robot=robot)
+    def _initialize(self, env: "_EnvBase", *, asset: "Articulation", robot: "Articulation | None" = None) -> None:
+        super()._initialize(env, asset=asset, robot=robot)
 
-        eef_ids, eef_names = find_bodies(robot, self.eef_body_name_cfg)
+        eef_ids, eef_names = find_bodies(self.asset, self.eef_body_name_cfg)
         if len(eef_ids) != 1:
             raise ValueError(
                 f"GripperAdaptation: expected one EEF body for "
@@ -61,7 +61,7 @@ class GripperAdaptation(RobotAdaptation):
         self.eef_body_id = int(eef_ids[0])
         self.eef_body_name = eef_names[0]
 
-        joint_ids, joint_names = find_joints(robot, self.joint_names_cfg)
+        joint_ids, joint_names = find_joints(self.asset, self.joint_names_cfg)
         if not joint_ids:
             raise ValueError(
                 f"GripperAdaptation: no joints matched {self.joint_names_cfg!r}"
@@ -71,7 +71,7 @@ class GripperAdaptation(RobotAdaptation):
         )
         self.joint_names = list(joint_names)
 
-        limits = robot.data.soft_joint_pos_limits[0, self.joint_ids]
+        limits = self.asset.data.soft_joint_pos_limits[0, self.joint_ids]
         self.max_open = limits.abs().amax(dim=-1).max().clamp_min(1e-6)
 
         if self.body_names_cfg is None:
@@ -79,7 +79,7 @@ class GripperAdaptation(RobotAdaptation):
             self.body_names = []
             return
 
-        body_ids, body_names = find_bodies(robot, self.body_names_cfg)
+        body_ids, body_names = find_bodies(self.asset, self.body_names_cfg)
         if not body_ids:
             raise ValueError(
                 f"GripperAdaptation: no bodies matched {self.body_names_cfg!r}"
