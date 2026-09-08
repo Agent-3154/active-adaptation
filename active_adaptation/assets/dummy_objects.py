@@ -17,13 +17,14 @@ YAML example::
         _target_: dummy_chair
         leg_length: 0.45
 
-Factories return ``AssetSpec`` with a ``GraspPose`` adaptation over the four
-capsule legs (``env.require_adaptation("table.grasp")``).
+Factories return ``AssetSpec`` with a ``GraspPose`` adaptation of prescribed
+poses at each leg midpoint looking at the center axis
+(``env.require_adaptation("table.grasp")``).
 """
 
 from __future__ import annotations
 
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
 
 from active_adaptation import ROBOT_MODEL_DIR
 from active_adaptation.registry import Registry
@@ -35,7 +36,7 @@ Backend = Literal["isaaclab", "mjlab"]
 _DEFAULT_RGBA = (0.55, 0.42, 0.28, 1.0)
 _DEFAULT_POS = (0.0, 0.0, 0.0)
 _DEFAULT_ROT = (1.0, 0.0, 0.0, 0.0)
-_DEFAULT_MASS = 15.0
+_DEFAULT_MASS = 5.0
 
 
 def _as_float_tuple(value: Sequence[float] | float, expected: int | None = None) -> tuple[float, ...]:
@@ -346,20 +347,35 @@ def _get_furniture_spawner_cls():
 
         root = _usd_from_mjspec_rigid(stage, prim_path, spec)
 
+        from isaaclab.sim.utils import bind_physics_material
+        from pxr import Gf, UsdPhysics
+
         # Apply spawn-time pose (RigidObject init_state also sets this; keep consistent).
         if translation is not None:
-            from pxr import Gf
-
             root.GetAttribute("xformOp:translate").Set(Gf.Vec3f(*translation))
         if orientation is not None:
-            from pxr import Gf
-
             root.GetAttribute("xformOp:orient").Set(Gf.Quatf(*orientation))
-
         if cfg.collision_props is not None:
             geom_root = stage.GetPrimAtPath(f"{prim_path}/geometry")
             for child in geom_root.GetChildren():
+                if not child.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
                 schemas.define_collision_properties(str(child.GetPath()), cfg.collision_props, stage=stage)
+        if cfg.physics_material is not None:
+            geom_root_path = f"{prim_path}/geometry"
+            # Keep the material beside geometry (not under it) so iterating
+            # collision children never includes the material prim itself.
+            # ``bind_physics_material`` is nested and would warn on the material.
+            if not cfg.physics_material_path.startswith("/"):
+                material_path = f"{prim_path}/{cfg.physics_material_path}"
+            else:
+                material_path = cfg.physics_material_path
+            cfg.physics_material.func(material_path, cfg.physics_material)
+            geom_root = stage.GetPrimAtPath(geom_root_path)
+            for child in geom_root.GetChildren():
+                if not child.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                bind_physics_material(str(child.GetPath()), material_path, stage=stage)
         if cfg.mass_props is not None:
             schemas.define_mass_properties(prim_path, cfg.mass_props, stage=stage)
         if cfg.rigid_props is not None:
@@ -381,6 +397,8 @@ def _get_furniture_spawner_cls():
         back_height: float = 0.42
         back_thickness: float = 0.04
         rgba: tuple[float, float, float, float] = _DEFAULT_RGBA
+        physics_material_path: str = "material"
+        physics_material: Any = None
         copy_from_source: bool = True
 
     _FURNITURE_SPAWNER_CLS = ProceduralFurnitureCfg
@@ -394,6 +412,11 @@ def _isaac_spawn_kwargs(*, mass: float, collision_only: bool, activate_contact_s
         collision_props=sim_utils.CollisionPropertiesCfg(
             contact_offset=0.02,
             rest_offset=0.0,
+        ),
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            static_friction=0.8,
+            dynamic_friction=0.8,
+            restitution=0.0,
         ),
         activate_contact_sensors=activate_contact_sensors and not collision_only,
     )
@@ -415,7 +438,6 @@ def _isaac_spawn_kwargs(*, mass: float, collision_only: bool, activate_contact_s
         mass_props=sim_utils.MassPropertiesCfg(mass=mass),
     )
     return kw
-
 
 def _make_furniture_isaaclab(
     kind: str,
@@ -612,7 +634,7 @@ def make_table(
 ):
     """Procedural table (box top + capsule legs). Non-articulated rigid body.
 
-    Returns ``AssetSpec`` with a ``GraspPose`` adaptation over the four legs
+    Returns ``AssetSpec`` with prescribed leg-midpoint ``GraspPose`` adaptations
     (disable with ``attach_grasp=False``).
     """
     return _make_furniture(
@@ -655,7 +677,7 @@ def make_chair(
 ):
     """Procedural chair (box seat/back + capsule legs). Non-articulated rigid body.
 
-    Returns ``AssetSpec`` with a ``GraspPose`` adaptation over the four legs
+    Returns ``AssetSpec`` with prescribed leg-midpoint ``GraspPose`` adaptations
     (disable with ``attach_grasp=False``).
     """
     return _make_furniture(

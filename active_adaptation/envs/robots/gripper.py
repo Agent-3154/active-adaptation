@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 class GripperAdaptation(RobotAdaptation):
     """Expose EEF body, finger joints/bodies, and a normalized closedness signal.
 
+    **Frame:** unless an asset documents otherwise, the EEF body ``+X`` is
+    **forward / approach** (see ``grasp_pose.EEF_FORWARD_B`` / ``eef_forward_w``).
+
     Closedness assumes finger soft-limit rest (joint pos ≈ 0) is **closed** and
     ``|q|`` toward the soft limit is **open** (A2 Piper / similar). Then:
 

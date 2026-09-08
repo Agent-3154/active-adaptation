@@ -29,6 +29,7 @@ class randomize_materials_isaac(Randomization):
         dynamic_friction_range: Optional[NestedRangeType] = None,
         restitution_range: Optional[NestedRangeType] = None,
         homogeneous: bool = True,
+        entity_name: str = "robot",
     ):
         super().__init__()
         self.body_names = body_names
@@ -36,11 +37,12 @@ class randomize_materials_isaac(Randomization):
         self.dynamic_friction_range = dynamic_friction_range
         self.restitution_range = restitution_range
         self.homogeneous = homogeneous
+        self.entity_name = entity_name
 
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
-        self.asset = self.env.scene.articulations["robot"]
+        self.asset = self.env.scene.entities[self.entity_name]
         self.body_ids, self.body_names = self.asset.find_bodies(self.body_names)
 
         num_shapes_per_body = [0,]

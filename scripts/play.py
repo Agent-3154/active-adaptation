@@ -212,7 +212,7 @@ def main(cfg: PlayConfig):
     if logger is not None:
         phase = getattr(cmd, "phase", None)
         logger.close(phase=phase)
-        print(f"[LocoManip2] event_log closed: {logger.path}")
+        print(f"[event_log] closed: {logger.path}")
 
     env.close()
 

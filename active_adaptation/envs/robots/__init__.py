@@ -1,13 +1,14 @@
 from .adaptation import RobotAdaptation, Adaptation
 from .gripper import GripperAdaptation
-from .grasp_pose import CapsuleGrasp, GraspPose
+from .grasp_pose import EEF_FORWARD_B, eef_forward_w, GraspPose
 from .underwater import HydrodynamicsCfg, UnderwaterRobot, UnderwaterAdaptation
 
 __all__ = [
     "RobotAdaptation",
     "Adaptation",
     "GripperAdaptation",
-    "CapsuleGrasp",
+    "EEF_FORWARD_B",
+    "eef_forward_w",
     "GraspPose",
     "HydrodynamicsCfg",
     "UnderwaterRobot",
