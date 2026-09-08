@@ -124,6 +124,32 @@ class GraspPose(RobotAdaptation):
             rows.append([*pos.tolist(), *quat.tolist()])
         return cls(poses=rows)
 
+    @classmethod
+    def for_door_handles(
+        cls,
+        door_thickness: float,
+        handle_radius: float,
+    ) -> "GraspPose":
+        """One prescribed pose per handle face (**handle body frame**).
+
+        Grasp points sit on the handle axis so ±Y jaws can straddle the
+        capsule. Approach is along ±Y toward the handle origin; EEF **+X** =
+        approach, **+Z** = handle up. Callers should transform with the
+        ``handle`` body pose (not the articulation root) when the door moves.
+        """
+        y_off = 0.5 * float(door_thickness) + float(handle_radius)
+        up = torch.tensor([0.0, 0.0, 1.0])
+        rows: list[list[float]] = []
+        for y_sign, approach_y in ((+1.0, -1.0), (-1.0, +1.0)):
+            pos = torch.tensor([0.0, y_sign * y_off, 0.0])
+            approach = torch.tensor([0.0, approach_y, 0.0])
+            rot = _frame_x_approach_z_up(
+                approach.unsqueeze(0), up.unsqueeze(0)
+            )[0]
+            quat = quat_from_matrix(rot.unsqueeze(0))[0]
+            rows.append([*pos.tolist(), *quat.tolist()])
+        return cls(poses=rows)
+
     @property
     def num_poses(self) -> int:
         if self.poses is not None:

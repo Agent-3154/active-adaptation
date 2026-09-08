@@ -34,6 +34,8 @@ registry = Registry.instance()
 Backend = Literal["isaaclab", "mjlab"]
 
 _DEFAULT_RGBA = (0.55, 0.42, 0.28, 1.0)
+# Cooler slate for door jambs / lintel vs warm panel wood.
+_DEFAULT_DOOR_FRAME_RGBA = (0.28, 0.30, 0.34, 1.0)
 _DEFAULT_POS = (0.0, 0.0, 0.0)
 _DEFAULT_ROT = (1.0, 0.0, 0.0, 0.0)
 _DEFAULT_MASS = 5.0
@@ -180,6 +182,134 @@ def build_chair_spec(
     return spec
 
 
+def build_door_spec(
+    *,
+    door_dimensions: Sequence[float] = (0.9, 0.04, 2.0),
+    handle_position: Sequence[float] = (0.35, 1.0),
+    frame_thickness: float = 0.08,
+    handle_radius: float = 0.02,
+    handle_length: float = 0.12,
+    door_joint_range: tuple[float, float] = (-1.8, 1.8),
+    handle_joint_range: tuple[float, float] = (-1.2, 1.2),
+    rgba: Sequence[float] = _DEFAULT_RGBA,
+    frame_rgba: Sequence[float] = _DEFAULT_DOOR_FRAME_RGBA,
+    body_name: str = "door",
+):
+    """Articulated door: fixed ``frame`` → hinged ``panel`` → hinged ``handle``.
+
+    Joints
+    ------
+    - ``door_joint``: revolute about **+Z** at the left (-X) edge of the panel.
+    - ``handle_joint``: revolute about **+Y** (through the door) at the handle.
+
+    Object / frame frame: origin at floor under the opening center; **+Z** up,
+    **+Y** through the door, **+X** along the width. ``door_dimensions`` is full
+    ``(width, thickness, height)``. ``handle_position`` is ``(x, z)`` in the
+    **frame** frame (same as the closed panel face). No freejoint — fixed-base
+    fixture (mjlab auto-mocap / Isaac fixed root).
+
+    ``rgba`` colors the panel (and handle); ``frame_rgba`` colors the jambs /
+    lintel. ``body_name`` is unused for link names (always ``frame`` / ``panel`` /
+    ``handle``) but kept for API symmetry with other builders.
+    """
+    import mujoco
+
+    del body_name
+    width, thickness, height = _as_float_tuple(door_dimensions, 3)
+    hx, hz = _as_float_tuple(handle_position, 2)
+    ft = float(frame_thickness)
+    hr = float(handle_radius)
+    hl = float(handle_length)
+    rgba_t = _rgba(rgba)
+    frame_rgba_t = _rgba(frame_rgba)
+
+    if width <= 0 or thickness <= 0 or height <= 0:
+        raise ValueError(f"door_dimensions must be positive, got {door_dimensions}")
+    if ft <= 0:
+        raise ValueError(f"frame_thickness must be positive, got {frame_thickness}")
+    if abs(hx) > 0.5 * width:
+        raise ValueError(
+            f"handle_position x={hx} is outside door half-width {0.5 * width}"
+        )
+    if not (0.0 < hz < height):
+        raise ValueError(f"handle_position z={hz} must be in (0, height={height})")
+
+    half_w, half_d, half_h = width * 0.5, thickness * 0.5, height * 0.5
+    half_ft = ft * 0.5
+    hinge_x = -half_w
+
+    spec = mujoco.MjSpec()
+    frame = spec.worldbody.add_body(name="frame")
+    frame.mass = 20.0
+    frame.inertia = [1.0, 1.0, 1.0]
+
+    # U-frame (left/right jambs + top lintel), same depth as the panel.
+    jamb_x = half_w + half_ft
+    for side, x in (("left", -jamb_x), ("right", jamb_x)):
+        frame.add_geom(
+            name=f"frame_{side}_collision",
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=(half_ft, half_d, half_h),
+            pos=(x, 0.0, half_h),
+            rgba=frame_rgba_t,
+        )
+    frame.add_geom(
+        name="frame_top_collision",
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=(half_w + ft, half_d, half_ft),
+        pos=(0.0, 0.0, height + half_ft),
+        rgba=frame_rgba_t,
+    )
+
+    # Panel hinged at the left edge; geom centered to fill the opening when q=0.
+    panel = frame.add_body(name="panel", pos=(hinge_x, 0.0, 0.0))
+    panel.mass = 15.0
+    panel.inertia = [1.0, 1.0, 1.0]
+    door_joint = panel.add_joint(
+        name="door_joint",
+        type=mujoco.mjtJoint.mjJNT_HINGE,
+        axis=[0.0, 0.0, 1.0],
+    )
+    door_joint.range = list(door_joint_range)
+    panel.add_geom(
+        name="panel_collision",
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=(half_w, half_d, half_h),
+        pos=(half_w, 0.0, half_h),
+        rgba=rgba_t,
+    )
+
+    # Handle body at the latch; joint about +Y (through the door).
+    # Panel-frame handle position: frame (hx, 0, hz) → panel (hx - hinge_x, 0, hz).
+    handle_pos_panel = (hx - hinge_x, 0.0, hz)
+    handle = panel.add_body(name="handle", pos=handle_pos_panel)
+    handle.mass = 0.4
+    handle.inertia = [0.01, 0.01, 0.01]
+    handle_joint = handle.add_joint(
+        name="handle_joint",
+        type=mujoco.mjtJoint.mjJNT_HINGE,
+        axis=[0.0, 1.0, 0.0],
+    )
+    handle_joint.range = list(handle_joint_range)
+
+    half_hl = hl * 0.5
+    for side, y_sign in (("front", +1.0), ("back", -1.0)):
+        y = y_sign * (half_d + hr)
+        _add_capsule_leg(
+            handle,
+            name=f"handle_{side}_collision",
+            radius=hr,
+            fromto=[-half_hl, y, 0.0, half_hl, y, 0.0],
+            rgba=rgba_t,
+        )
+    return spec
+
+
+DOOR_JOINT_NAMES_SIMULATION = ["door_joint", "handle_joint"]
+DOOR_BODY_NAMES_SIMULATION = ["frame", "panel", "handle"]
+DOOR_INIT_JOINT_POS = {"door_joint": 0.0, "handle_joint": 0.0}
+
+
 # ---------------------------------------------------------------------------
 # Isaac: MjSpec → single rigid USD (metamorphosis-style, no articulation)
 # ---------------------------------------------------------------------------
@@ -193,6 +323,32 @@ def _usd_add_default_transform_(prim) -> None:
     prim.CreateAttribute("xformOp:orient", Sdf.ValueTypeNames.Quatf, False).Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
     prim.CreateAttribute("xformOp:translate", Sdf.ValueTypeNames.Float3, False).Set(Gf.Vec3f(0.0, 0.0, 0.0))
     prim.CreateAttribute("xformOpOrder", Sdf.ValueTypeNames.TokenArray, False).Set(order)
+
+
+def _usd_apply_geom_rgba(stage, geom_path: str, rgba) -> None:
+    """Color a USD gprim from MuJoCo ``geom.rgba`` (Isaac needs a visual material).
+
+    Sets ``displayColor`` / ``displayOpacity`` and binds a per-geom
+    ``PreviewSurface`` so RTX / interactive viewports pick up the color.
+    MjSpec ``rgba`` alone is ignored by the USD path.
+    """
+    from pxr import UsdGeom, Gf
+    import isaaclab.sim as sim_utils
+    from isaaclab.sim.utils import bind_visual_material
+
+    r, g, b, a = (float(rgba[0]), float(rgba[1]), float(rgba[2]), float(rgba[3]))
+    prim = stage.GetPrimAtPath(geom_path)
+    if not prim.IsValid():
+        raise ValueError(f"Cannot color missing prim: {geom_path}")
+    gprim = UsdGeom.Gprim(prim)
+    gprim.CreateDisplayColorAttr([(r, g, b)])
+    gprim.CreateDisplayOpacityAttr([a])
+
+    mat_path = f"{geom_path}/Looks/material"
+    if not stage.GetPrimAtPath(mat_path).IsValid():
+        mat_cfg = sim_utils.PreviewSurfaceCfg(diffuse_color=(r, g, b), opacity=a)
+        mat_cfg.func(mat_path, mat_cfg)
+    bind_visual_material(geom_path, mat_path, stage=stage)
 
 
 def _usd_create_capsule(stage, path: str, radius: float, fromto):
@@ -282,11 +438,150 @@ def _usd_from_mjspec_rigid(stage, prim_path: str, spec) -> object:
             case _:
                 raise ValueError(f"Unsupported furniture geom type: {geom.type}")
         UsdPhysics.CollisionAPI.Apply(stage.GetPrimAtPath(geom_path))
+        _usd_apply_geom_rgba(stage, geom_path, geom.rgba)
 
     # Root pose matches compiled body pose (usually identity at origin).
     _usd_add_default_transform_(root)
     root.GetAttribute("xformOp:translate").Set(Gf.Vec3f(*mjdata.xpos[mjbody.id]))
     root.GetAttribute("xformOp:orient").Set(Gf.Quatf(*mjdata.xquat[mjbody.id]))
+    return root
+
+
+def _usd_create_fixed_joint(stage, path: str, body_0, body_1):
+    from pxr import UsdGeom, UsdPhysics, Gf
+
+    joint = UsdPhysics.FixedJoint.Define(stage, path)
+    joint.CreateBody0Rel().SetTargets([body_0.GetPath()])
+    joint.CreateBody1Rel().SetTargets([body_1.GetPath()])
+    xf_cache = UsdGeom.XformCache()
+    body_0_pose = xf_cache.GetLocalToWorldTransform(body_0)
+    body_1_pose = xf_cache.GetLocalToWorldTransform(body_1)
+    rel_pose = body_1_pose * body_0_pose.GetInverse()
+    rel_pose = rel_pose.RemoveScaleShear()
+    joint.CreateLocalPos0Attr().Set(Gf.Vec3f(rel_pose.ExtractTranslation()))
+    joint.CreateLocalRot0Attr().Set(Gf.Quatf(rel_pose.ExtractRotationQuat()))
+    return joint
+
+
+def _usd_create_revolute_joint(stage, path: str, body_0, body_1, axis: str = "Z"):
+    from pxr import UsdGeom, UsdPhysics, Gf
+
+    try:
+        from pxr import PhysxSchema
+    except ImportError:
+        PhysxSchema = None
+
+    assert axis in ("X", "Y", "Z"), f"Invalid axis: {axis}"
+    joint = UsdPhysics.RevoluteJoint.Define(stage, path)
+    joint.CreateBody0Rel().SetTargets([body_0.GetPath()])
+    joint.CreateBody1Rel().SetTargets([body_1.GetPath()])
+    joint.CreateAxisAttr(axis)
+    xf_cache = UsdGeom.XformCache()
+    body_0_pose = xf_cache.GetLocalToWorldTransform(body_0)
+    body_1_pose = xf_cache.GetLocalToWorldTransform(body_1)
+    rel_pose = body_1_pose * body_0_pose.GetInverse()
+    rel_pose = rel_pose.RemoveScaleShear()
+    joint.CreateLocalPos0Attr().Set(Gf.Vec3f(rel_pose.ExtractTranslation()))
+    joint.CreateLocalRot0Attr().Set(Gf.Quatf(rel_pose.ExtractRotationQuat()))
+    prim = joint.GetPrim()
+    if not UsdPhysics.DriveAPI(prim, "angular"):
+        UsdPhysics.DriveAPI.Apply(prim, "angular")
+    if PhysxSchema is not None and not PhysxSchema.PhysxJointAPI(prim):
+        PhysxSchema.PhysxJointAPI.Apply(prim)
+    return joint
+
+
+def _usd_add_body_geoms(stage, xform, mjbody) -> None:
+    """Attach box/capsule collision geoms under a body xform (named from MJCF)."""
+    import mujoco
+    import numpy as np
+    from pxr import UsdGeom, Gf, UsdPhysics
+
+    for i, geom in enumerate(mjbody.geoms):
+        name = geom.name or f"collision_{i}"
+        geom_path = f"{xform.GetPath()}/{name}"
+        match geom.type:
+            case mujoco.mjtGeom.mjGEOM_BOX:
+                cube = UsdGeom.Cube.Define(stage, geom_path)
+                cube.CreateSizeAttr(2.0)
+                _usd_add_default_transform_(cube.GetPrim())
+                cube.GetPrim().GetAttribute("xformOp:scale").Set(
+                    Gf.Vec3f(float(geom.size[0]), float(geom.size[1]), float(geom.size[2]))
+                )
+                cube.GetPrim().GetAttribute("xformOp:translate").Set(
+                    Gf.Vec3f(float(geom.pos[0]), float(geom.pos[1]), float(geom.pos[2]))
+                )
+            case mujoco.mjtGeom.mjGEOM_CAPSULE:
+                fromto = np.array(geom.fromto, dtype=float)
+                if np.allclose(fromto, 0.0):
+                    half = float(geom.size[1])
+                    pos = np.array(geom.pos, dtype=float)
+                    fromto = np.array(
+                        [pos[0], pos[1], pos[2] - half, pos[0], pos[1], pos[2] + half],
+                        dtype=float,
+                    )
+                _usd_create_capsule(stage, geom_path, float(geom.size[0]), fromto)
+            case _:
+                raise ValueError(f"Unsupported door geom type: {geom.type}")
+        UsdPhysics.CollisionAPI.Apply(stage.GetPrimAtPath(geom_path))
+        _usd_apply_geom_rgba(stage, geom_path, geom.rgba)
+
+
+def _usd_from_mjspec_articulated(stage, prim_path: str, spec) -> object:
+    """Build an articulated USD prim from an MjSpec (metamorphosis-style).
+
+    Applies ``ArticulationRootAPI`` on the root and revolute / fixed joints
+    between bodies. Collision geoms are children of each body xform.
+    """
+    import mujoco
+    import numpy as np
+    from pxr import UsdGeom, Gf, UsdPhysics
+
+    mjmodel = spec.compile()
+    mjdata = mujoco.MjData(mjmodel)
+    mujoco.mj_forward(mjmodel, mjdata)
+
+    root = UsdGeom.Xform.Define(stage, prim_path).GetPrim()
+    UsdPhysics.ArticulationRootAPI.Apply(root)
+    _usd_add_default_transform_(root)
+
+    prim_dict: dict[int, object] = {}
+    for mjbody in spec.worldbody.find_all("body"):
+        xform = UsdGeom.Xform.Define(stage, f"{prim_path}/{mjbody.name}")
+        xform_prim = xform.GetPrim()
+        _usd_add_body_geoms(stage, xform, mjbody)
+        _usd_add_default_transform_(xform_prim)
+        xform_prim.GetAttribute("xformOp:translate").Set(
+            Gf.Vec3f(*mjdata.xpos[mjbody.id])
+        )
+        xform_prim.GetAttribute("xformOp:orient").Set(
+            Gf.Quatf(*mjdata.xquat[mjbody.id])
+        )
+        UsdPhysics.CollisionAPI.Apply(xform_prim)
+        UsdPhysics.RigidBodyAPI.Apply(xform_prim)
+        prim_dict[mjbody.id] = xform_prim
+
+        if mjbody.parent.id <= 0:
+            continue
+        parent_prim = prim_dict[mjbody.parent.id]
+        joints = mjbody.joints
+        if len(joints):
+            if len(joints) != 1:
+                raise ValueError("Only one joint per body is supported for door USD")
+            joint = joints[0]
+            joint_path = f"{parent_prim.GetPath()}/{joint.name}"
+            joint_range_deg = np.asarray(joint.range) / np.pi * 180.0
+            if joint.type != mujoco.mjtJoint.mjJNT_HINGE:
+                raise ValueError(f"Unsupported joint type: {joint.type}")
+            axis = ["X", "Y", "Z"][int(np.argmax(np.abs(joint.axis)))]
+            usd_joint = _usd_create_revolute_joint(
+                stage, joint_path, parent_prim, xform_prim, axis
+            )
+            usd_joint.CreateLowerLimitAttr(float(joint_range_deg[0]))
+            usd_joint.CreateUpperLimitAttr(float(joint_range_deg[1]))
+        else:
+            joint_path = f"{parent_prim.GetPath()}/{mjbody.name}_fixed"
+            _usd_create_fixed_joint(stage, joint_path, parent_prim, xform_prim)
     return root
 
 
@@ -701,6 +996,304 @@ def make_chair(
     )
 
 
+_DOOR_SPAWNER_CLS = None
+
+
+def _get_door_spawner_cls():
+    """Lazy Isaac spawner for the articulated procedural door."""
+    global _DOOR_SPAWNER_CLS
+    if _DOOR_SPAWNER_CLS is not None:
+        return _DOOR_SPAWNER_CLS
+
+    from collections.abc import Callable
+
+    from isaaclab.sim import schemas
+    from isaaclab.sim.spawners.spawner_cfg import SpawnerCfg
+    from isaaclab.sim.utils import clone, get_current_stage
+    from isaaclab.utils import configclass
+    from pxr import Usd
+
+    @clone
+    def spawn_door(
+        prim_path: str,
+        cfg: "ProceduralDoorCfg",
+        translation: tuple[float, float, float] | None = None,
+        orientation: tuple[float, float, float, float] | None = None,
+        **kwargs,
+    ) -> Usd.Prim:
+        del kwargs
+        stage = get_current_stage()
+        if stage.GetPrimAtPath(prim_path).IsValid():
+            raise ValueError(f"A prim already exists at path: '{prim_path}'.")
+
+        spec = build_door_spec(
+            door_dimensions=cfg.door_dimensions,
+            handle_position=cfg.handle_position,
+            frame_thickness=cfg.frame_thickness,
+            handle_radius=cfg.handle_radius,
+            handle_length=cfg.handle_length,
+            door_joint_range=cfg.door_joint_range,
+            handle_joint_range=cfg.handle_joint_range,
+            rgba=cfg.rgba,
+            frame_rgba=cfg.frame_rgba,
+        )
+        root = _usd_from_mjspec_articulated(stage, prim_path, spec)
+
+        from pxr import Gf, UsdPhysics
+        from isaaclab.sim.utils import bind_physics_material
+
+        if translation is not None:
+            root.GetAttribute("xformOp:translate").Set(Gf.Vec3f(*translation))
+        if orientation is not None:
+            root.GetAttribute("xformOp:orient").Set(Gf.Quatf(*orientation))
+
+        # Collision / material on every collision geom under each link.
+        for body_name in DOOR_BODY_NAMES_SIMULATION:
+            body_prim = stage.GetPrimAtPath(f"{prim_path}/{body_name}")
+            if not body_prim.IsValid():
+                continue
+            for child in body_prim.GetChildren():
+                if not child.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                if cfg.collision_props is not None:
+                    schemas.define_collision_properties(
+                        str(child.GetPath()), cfg.collision_props, stage=stage
+                    )
+
+        if cfg.physics_material is not None:
+            if not cfg.physics_material_path.startswith("/"):
+                material_path = f"{prim_path}/{cfg.physics_material_path}"
+            else:
+                material_path = cfg.physics_material_path
+            cfg.physics_material.func(material_path, cfg.physics_material)
+            for body_name in DOOR_BODY_NAMES_SIMULATION:
+                body_prim = stage.GetPrimAtPath(f"{prim_path}/{body_name}")
+                if not body_prim.IsValid():
+                    continue
+                for child in body_prim.GetChildren():
+                    if not child.HasAPI(UsdPhysics.CollisionAPI):
+                        continue
+                    bind_physics_material(str(child.GetPath()), material_path, stage=stage)
+
+        if cfg.articulation_props is not None:
+            schemas.modify_articulation_root_properties(prim_path, cfg.articulation_props)
+        if cfg.activate_contact_sensors:
+            schemas.activate_contact_sensors(prim_path, stage=stage)
+        return root
+
+    @configclass
+    class ProceduralDoorCfg(SpawnerCfg):
+        func: Callable = spawn_door
+        door_dimensions: tuple[float, float, float] = (0.9, 0.04, 2.0)
+        handle_position: tuple[float, float] = (0.35, 1.0)
+        frame_thickness: float = 0.08
+        handle_radius: float = 0.02
+        handle_length: float = 0.12
+        door_joint_range: tuple[float, float] = (-1.8, 1.8)
+        handle_joint_range: tuple[float, float] = (-1.2, 1.2)
+        rgba: tuple[float, float, float, float] = _DEFAULT_RGBA
+        frame_rgba: tuple[float, float, float, float] = _DEFAULT_DOOR_FRAME_RGBA
+        collision_props: Any = None
+        physics_material_path: str = "material"
+        physics_material: Any = None
+        articulation_props: Any = None
+        activate_contact_sensors: bool = True
+        copy_from_source: bool = False
+
+    _DOOR_SPAWNER_CLS = ProceduralDoorCfg
+    return _DOOR_SPAWNER_CLS
+
+
+def make_door(
+    backend: Backend,
+    door_dimensions: Sequence[float] = (0.9, 0.04, 2.0),
+    handle_position: Sequence[float] = (0.35, 1.0),
+    frame_thickness: float = 0.1,
+    handle_radius: float = 0.02,
+    handle_length: float = 0.12,
+    door_joint_range: Sequence[float] = (-1.8, 1.8),
+    handle_joint_range: Sequence[float] = (-1.2, 1.2),
+    rgba: Sequence[float] = _DEFAULT_RGBA,
+    frame_rgba: Sequence[float] = _DEFAULT_DOOR_FRAME_RGBA,
+    pos: Sequence[float] = _DEFAULT_POS,
+    rot: Sequence[float] = _DEFAULT_ROT,
+    activate_contact_sensors: bool = True,
+    attach_grasp: bool = True,
+    attach_door: bool = True,
+    open_direction: str = "pull",
+    handle_unlock_threshold_deg: float = 30.0,
+    initially_locked: bool = True,
+    name: str = "door",
+):
+    """Articulated door: ``frame`` —``door_joint``→ ``panel`` —``handle_joint``→ ``handle``.
+
+    Fixed-base fixture (no freejoint). ``door_dimensions`` is full
+    ``(width, thickness, height)``. ``handle_position`` is ``(x, z)`` in the
+    frame frame. ``rgba`` is panel/handle; ``frame_rgba`` is jambs/lintel.
+    ``door_joint`` defaults to **zero stiffness** (free hinge + light damping).
+
+    Adaptations (disable with flags):
+    - ``DoorAdaptation`` (``door.door``): lock / push-pull / handle unlock
+    - ``GraspPose`` (``door.grasp``): prescribed handle-face grasps
+    """
+    from active_adaptation.assets.asset_cfg import AssetSpec
+    from active_adaptation.envs.robots.door import DoorAdaptation
+    from active_adaptation.envs.robots.grasp_pose import GraspPose
+
+    door_dimensions_t = _as_float_tuple(door_dimensions, 3)
+    handle_position_t = _as_float_tuple(handle_position, 2)
+    door_range_t = _as_float_tuple(door_joint_range, 2)
+    handle_range_t = _as_float_tuple(handle_joint_range, 2)
+    pos_t = _as_float_tuple(pos, 3)
+    rot_t = _as_float_tuple(rot, 4)
+    rgba_t = _rgba(rgba)
+    frame_rgba_t = _rgba(frame_rgba)
+    del name  # link names are fixed: frame / panel / handle
+
+    if backend == "isaaclab":
+        import isaaclab.sim as sim_utils
+        from active_adaptation.assets.asset_cfg import ArticulationCfg, ImplicitActuatorCfg
+
+        ProceduralDoorCfg = _get_door_spawner_cls()
+        spawn = ProceduralDoorCfg(
+            door_dimensions=door_dimensions_t,
+            handle_position=handle_position_t,
+            frame_thickness=float(frame_thickness),
+            handle_radius=float(handle_radius),
+            handle_length=float(handle_length),
+            door_joint_range=door_range_t,
+            handle_joint_range=handle_range_t,
+            rgba=rgba_t,
+            frame_rgba=frame_rgba_t,
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.02,
+                rest_offset=0.0,
+            ),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.8,
+                dynamic_friction=0.8,
+                restitution=0.0,
+            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=False,
+                solver_position_iteration_count=4,
+                solver_velocity_iteration_count=0,
+            ),
+            activate_contact_sensors=activate_contact_sensors,
+            copy_from_source=False,
+        )
+        cfg = ArticulationCfg(
+            spawn=spawn,
+            init_state=ArticulationCfg.InitialStateCfg(
+                pos=pos_t,
+                rot=rot_t,
+                joint_pos=dict(DOOR_INIT_JOINT_POS),
+                joint_vel={".*": 0.0},
+            ),
+            actuators={
+                "door": ImplicitActuatorCfg(
+                    joint_names_expr=["door_joint"],
+                    effort_limit_sim=80.0,
+                    stiffness=0.0,
+                    damping=4.0,
+                    armature=0.01,
+                    friction=0.01,
+                ),
+                "handle": ImplicitActuatorCfg(
+                    joint_names_expr=["handle_joint"],
+                    effort_limit_sim=20.0,
+                    stiffness=20.0,
+                    damping=2.0,
+                    armature=0.005,
+                    friction=0.01,
+                ),
+            },
+            joint_names_simulation=list(DOOR_JOINT_NAMES_SIMULATION),
+            body_names_simulation=list(DOOR_BODY_NAMES_SIMULATION),
+        )
+    elif backend == "mjlab":
+        from active_adaptation.assets.asset_cfg import EntityCfg
+        from mjlab.actuator import BuiltinPdActuatorCfg
+        from mjlab.entity import EntityArticulationInfoCfg
+        from mjlab.utils.spec_config import CollisionCfg
+
+        def spec_fn():
+            return build_door_spec(
+                door_dimensions=door_dimensions_t,
+                handle_position=handle_position_t,
+                frame_thickness=frame_thickness,
+                handle_radius=handle_radius,
+                handle_length=handle_length,
+                door_joint_range=door_range_t,
+                handle_joint_range=handle_range_t,
+                rgba=rgba_t,
+                frame_rgba=frame_rgba_t,
+            )
+
+        cfg = EntityCfg(
+            init_state=EntityCfg.InitialStateCfg(
+                pos=pos_t,
+                rot=rot_t,
+                joint_pos=dict(DOOR_INIT_JOINT_POS),
+                joint_vel={".*": 0.0},
+            ),
+            spec_fn=spec_fn,
+            articulation=EntityArticulationInfoCfg(
+                actuators=(
+                    BuiltinPdActuatorCfg(
+                        target_names_expr=("door_joint",),
+                        effort_limit=80.0,
+                        stiffness=0.0,
+                        damping=4.0,
+                        armature=0.01,
+                        frictionloss=0.01,
+                    ),
+                    BuiltinPdActuatorCfg(
+                        target_names_expr=("handle_joint",),
+                        effort_limit=20.0,
+                        stiffness=20.0,
+                        damping=2.0,
+                        armature=0.005,
+                        frictionloss=0.01,
+                    ),
+                ),
+            ),
+            collisions=(
+                CollisionCfg(
+                    geom_names_expr=(".*_collision",),
+                    contype=1,
+                    conaffinity=1,
+                    condim=3,
+                    priority=0,
+                    solref=(0.02, 1),
+                    friction=(1.0, 5e-3, 5e-4),
+                ),
+            ),
+            joint_names_simulation=list(DOOR_JOINT_NAMES_SIMULATION),
+            body_names_simulation=list(DOOR_BODY_NAMES_SIMULATION),
+        )
+    else:
+        raise ValueError(f"Invalid backend: {backend}")
+
+    adaptations: list = []
+    if attach_door:
+        adaptations.append(
+            DoorAdaptation(
+                open_direction=open_direction,  # type: ignore[arg-type]
+                handle_unlock_threshold_deg=handle_unlock_threshold_deg,
+                initially_locked=initially_locked,
+            )
+        )
+    if attach_grasp:
+        adaptations.append(
+            GraspPose.for_door_handles(
+                door_thickness=door_dimensions_t[1],
+                handle_radius=float(handle_radius),
+            )
+        )
+    return AssetSpec(config=cfg, adaptations=tuple(adaptations))
+
+
 # ---------------------------------------------------------------------------
 # Legacy USD-file dummy props (Isaac-only for now)
 # ---------------------------------------------------------------------------
@@ -783,6 +1376,7 @@ def make_dummy_basket_platform(backend: Backend):
 
 registry.register("asset", "dummy_table", make_table)
 registry.register("asset", "dummy_chair", make_chair)
+registry.register("asset", "dummy_door", make_door)
 registry.register("asset", "dummy_stand", make_dummy_stand)
 registry.register("asset", "dummy_basket", make_dummy_basket)
 registry.register("asset", "dummy_basket_platform", make_dummy_basket_platform)
