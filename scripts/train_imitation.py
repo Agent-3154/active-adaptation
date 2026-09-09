@@ -191,10 +191,14 @@ def make_env_teacher_student(
     from active_adaptation.utils.checkpoint_cfg import (
         is_from_checkpoint_algo,
         load_algo_cfg_from_local_pt,
+        resolve_policy_class,
+        validate_algo_cfg_target,
     )
     if is_from_checkpoint_algo(teacher_cfg):
         teacher_checkpoint.update()
         teacher_cfg = load_algo_cfg_from_local_pt(teacher_checkpoint.get_path())
+    validate_algo_cfg_target(teacher_cfg)
+    validate_algo_cfg_target(student_cfg)
     teacher_cfg = hydra.utils.instantiate(teacher_cfg)
     student_cfg = hydra.utils.instantiate(student_cfg)
 
@@ -238,7 +242,7 @@ def make_env_teacher_student(
     env = TransformedEnv(base_env, transform)
     env.set_seed(seed)
 
-    teacher_cls = teacher_cfg.get_class()
+    teacher_cls = resolve_policy_class(teacher_cfg)
     print(f"Creating teacher {teacher_cls} on device {device}")
     teacher = teacher_cls.from_env(teacher_cfg, env, device=device)
     if "policy" in teacher_state:
@@ -247,7 +251,7 @@ def make_env_teacher_student(
     teacher.eval()
 
     # --- Student ---
-    student_cls = student_cfg.get_class()
+    student_cls = resolve_policy_class(student_cfg)
     print(f"Creating student {student_cls} on device {device}")
     student = student_cls.from_env(student_cfg, env, device=device)
     if "policy" in student_state:

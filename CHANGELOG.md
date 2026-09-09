@@ -62,6 +62,17 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   visible device.
 - **Training scripts / PPO** — `train_ppo` barriers after env create, rebinds
   before collectives; PPO / FPO / SAC DDP wraps use `get_local_cuda_index()`.
+- **Reward scaling in algorithms** — the env no longer multiplies per-step
+  rewards by `step_dt` (`reward._mult_dt_` / `env.mult_dt` removed). On-policy
+  learners must scale rewards in `compute_advantage`; the canonical pattern is
+  `rewards * (1 - gamma)` before GAE (see
+  `learning/ppo/ppo_symaug.py` `compute_advantage`).
+- **Algo Hydra `_target_`** — the `_target_` field on an algo config dataclass
+  points to the **config class** (e.g. `ppo_symaug.PPOConfig`), not the policy
+  class. `get_class()` returns the policy; `make_env_policy` instantiates the
+  config via `hydra.utils.instantiate`, then calls `policy_cls.from_env(cfg, …)`.
+  Legacy checkpoint auto-rewrite (`…Policy` → `…Config`) is removed;
+  `validate_algo_cfg_target` rejects policy-class targets.
 
 ### Fixed
 
@@ -74,7 +85,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Deprecated
 
-- **`reward._mult_dt_` / `env.mult_dt`** — multiplying per-step rewards by `step_dt` in `_compute_reward` is deprecated and will be removed. Set `reward._mult_dt_: false` in task config and scale rewards in the policy / algorithm instead.
+- **`reward._mult_dt_` / `env.mult_dt`** — removed. Per-step env rewards are no
+  longer multiplied by `step_dt`. Tune reward weights in task YAML and apply
+  algorithm-side scaling (typically `rewards * (1 - gamma)` in PPO
+  `compute_advantage`; see `ppo_symaug.py`).
 
 ---
 
@@ -145,6 +159,8 @@ First consolidated **v0.8** release line. This branch merges months of HDMI / Mi
 | Robot models | In-repo / hand-edited MJCF | `ROBOT_MODEL_DIR` + assetx for composed variants |
 | Contact forces | Assumed shared sensor API | Branch on backend or use task `sensors:` factories |
 | CLI | `aa-create-project`, `aa-pull`, … | `aa-project …` |
+| Per-step reward scale | `reward._mult_dt_` in env (`× step_dt`) | Algo scales in `compute_advantage` (e.g. `× (1 - γ)`) |
+| Algo Hydra `_target_` | Policy class (legacy) | Config dataclass; `get_class()` → policy |
 
 The first observation after reset is intentionally discarded in training (`is_init` mask); do not recompute command targets in `reset` to “fix” it.
 
@@ -152,7 +168,9 @@ The first observation after reset is intentionally discarded in training (`is_in
 
 - **`venv/isaac60`** (Isaac Lab 3 / Sim 6) is tracked on branch **`v0.9`**, not validated on `v0.8`.
 - **`main`** is not kept in sync with `v0.8`; new work should branch from **`v0.8`** (or later release branches).
-- Some legacy config paths (policy class as Hydra `_target_`) still work via fallbacks but should migrate to algo cfg objects.
+- Checkpoints saved with legacy `algo._target_` pointing at a policy class must be
+  re-saved with a config-dataclass target (see `ppo_symaug.PPOConfig`) or edited
+  in the sidecar `cfg.yaml` before `algo=from_checkpoint` will load.
 - **`MeshRegistry` static extras (Isaac Lab 2.3.2):** `XformPrimView.get_world_poses()` may only return env_0; `_register_extra` expands poses with `env_origins`. Replace with a full multi-env pose query when available (`mesh_registry.py`).
 
 ---

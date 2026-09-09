@@ -43,7 +43,18 @@ PPO is often stage 1 in RLPD recipes (`cfg/recipe/*_rlpd.yaml`) before `rollout.
 
 ## Hydra config pattern
 
-`_target_` is the **config dataclass**; `get_class()` returns the policy. `helpers.make_env_policy` instantiates the config (runs `__post_init__`) then calls `from_env`. See `TEACHME.md` (Hydra config). Example: `ppo_symaug.PPOConfig`, `ppo_teacher_student.PPOTSCfg`.
+`_target_` on the algo dataclass points to the **config class itself**, not the policy class. `get_class()` returns the policy; `helpers.make_env_policy` runs `hydra.utils.instantiate(algo_cfg)` (config + `__post_init__`), then `policy_cls.from_env(cfg, env, device)`.
+
+```python
+@dataclass
+class PPOConfig:
+    _target_: str = "active_adaptation.learning.ppo.ppo_symaug.PPOConfig"  # ← Config, not PPOPolicy
+
+    def get_class(self):
+        return PPOPolicy
+```
+
+See `TEACHME.md` (Hydra config). Examples: `ppo_symaug.PPOConfig`, `ppo_teacher_student.PPOTSCfg`.
 
 ---
 
@@ -83,7 +94,7 @@ No replay buffer. All training tensors come from the collected rollout batch.
 ### 1. File + Hydra
 
 - Add `learning/ppo/<name>.py`
-- Dataclass: `_target_` = **config class path**, `get_class()` → policy class, `name`, `cs.store(..., group="algo")`
+- Dataclass: `_target_` = **this config class** (e.g. `…ppo_symaug.PPOConfig`), **not** the policy class; `get_class()` → policy class; `name`; `cs.store(..., group="algo")`
 - No `Literal[...]` in Hydra fields — validate at runtime
 - Derived fields (e.g. union `in_keys`) in `__post_init__` as **tuple/list**, never `set`
 - `ppo/__init__.py` auto-imports `*.py`
@@ -124,9 +135,23 @@ Pattern in `ppo_symaug._update`:
 
 ### 5. GAE (`compute_advantage`)
 
-- Aggregate reward dict → scalar `reward_aggregated`
-- Optional `clamp_reward` (min 0) before GAE
-- Scale rewards by `(1 - gamma)` for effective-horizon normalization
+The **algorithm** is responsible for reward scaling. The env returns per-step reward sums with **no** `step_dt` / `reward._mult_dt_` multiplier (removed in 0.8+). Scale in `compute_advantage` before GAE — canonical pattern in `ppo_symaug`:
+
+```python
+rewards = tensordict[REWARD_KEY]
+if isinstance(rewards, TensorDict):
+    rewards = torch.concat(list(rewards.values()), dim=-1)
+rewards = rewards.sum(-1, keepdim=True)
+if clamp_reward:
+    rewards = rewards.clamp_min(0.0)
+# scale according to the effective horizon
+rewards = rewards * (1.0 - self.gae.gamma)
+adv, ret = self.gae(rewards, terms, dones, values, next_values, discount)
+```
+
+- Aggregate reward dict → scalar `reward_aggregated` (log / debug)
+- Optional `clamp_reward` (min 0) before scaling
+- `(1 - gamma)` keeps advantage magnitudes stable as `gamma` or task reward weights change
 - Use `GAE(0.99, 0.95)` from `common.py` with `values`, `next_values`, `discount`, `terminated`, `done`
 - Write `adv` and `ret` into tensordict
 
@@ -255,6 +280,8 @@ algo.compile=false           # avoid with debug or DDP
 - Building twin actors with `copy.deepcopy` when the graph still has `Lazy*` params (e.g. `Actor`) — use a `make_actor()` factory twice; see TEACHME “Cloning modules”
 - Freezing teacher modules with `requires_grad_(False)` during distill and forgetting to re-enable them before the next PPO update
 - Letting `VecNorm` keep updating in a student/adapt stage while the actor is frozen (freeze norms after the teacher checkpoint)
+- Setting algo `_target_` to the policy class — Hydra must instantiate the config dataclass first
+- Relying on env-side `reward._mult_dt_` or omitting `(1 - gamma)` scaling in `compute_advantage`
 
 ---
 

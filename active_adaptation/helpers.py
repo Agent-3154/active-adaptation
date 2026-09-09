@@ -72,19 +72,18 @@ def make_env_policy(
     backend = active_adaptation.get_backend()
 
     from active_adaptation.utils.checkpoint_cfg import (
-        FromCheckpointAlgoConfig,
         is_from_checkpoint_algo,
         load_algo_cfg_from_local_pt,
+        resolve_policy_class,
+        validate_algo_cfg_target,
     )
 
     # Parse checkpoint in parallel with environment creation.
     with ThreadPoolExecutor(max_workers=1) as executor:
         checkpoint_future = executor.submit(parse_checkpoint, checkpoint_path)
 
-        # setup policy
-        # New pattern: ``_target_`` is the *config* dataclass (so ``__post_init__`` runs
-        # via ``hydra.utils.instantiate``); ``cfg.get_class()`` returns the policy class.
-        # Legacy: ``_target_`` was the policy class — keep a fallback during migration.
+        # ``_target_`` is the config dataclass; ``hydra.utils.instantiate`` builds it;
+        # ``cfg.get_class()`` returns the policy class for ``from_env``.
         if is_from_checkpoint_algo(algo_cfg):
             if not checkpoint_path:
                 raise ValueError(
@@ -104,9 +103,10 @@ def make_env_policy(
                 )
             algo_cfg = load_algo_cfg_from_local_pt(local_pt)
 
+        validate_algo_cfg_target(algo_cfg)
         _algo_cfg = algo_cfg
         algo_cfg = hydra.utils.instantiate(algo_cfg)
-        policy_cls = algo_cfg.get_class()
+        policy_cls = resolve_policy_class(algo_cfg)
         
         _ensure_backend_env_imported(backend)
         if backend == "isaaclab":

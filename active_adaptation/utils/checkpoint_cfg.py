@@ -51,6 +51,45 @@ def is_from_checkpoint_algo(algo_cfg) -> bool:
     return name == FROM_CHECKPOINT_ALGO_NAME
 
 
+def _algo_target_str(algo_cfg) -> str | None:
+    if hasattr(algo_cfg, "_target_"):
+        target = algo_cfg._target_
+    else:
+        target = OmegaConf.select(algo_cfg, "_target_", default=None)
+    return target if isinstance(target, str) else None
+
+
+def validate_algo_cfg_target(algo_cfg) -> None:
+    """Require ``_target_`` to name a Hydra config dataclass, not a policy class."""
+    if is_from_checkpoint_algo(algo_cfg):
+        return
+    target = _algo_target_str(algo_cfg)
+    if target is None:
+        raise ValueError(
+            "algo config must set `_target_` to a config dataclass "
+            "(e.g. active_adaptation.learning.ppo.ppo_symaug.PPOConfig)."
+        )
+    class_name = target.rsplit(".", 1)[-1]
+    if class_name.endswith("Config") or class_name.endswith("Cfg"):
+        return
+    raise ValueError(
+        f"algo._target_ must point to a config dataclass (*Config / *Cfg), not a "
+        f"policy class (got {target!r}). Instantiate via hydra.utils.instantiate "
+        f"on the config, then policy_cls = cfg.get_class(); policy_cls.from_env(cfg, …)."
+    )
+
+
+def resolve_policy_class(algo_cfg):
+    """Instantiated algo config → policy class via ``get_class()``."""
+    if not hasattr(algo_cfg, "get_class"):
+        target = _algo_target_str(algo_cfg)
+        raise TypeError(
+            f"Algo config {type(algo_cfg).__name__} has no get_class() "
+            f"(_target_={target!r}). Use a config dataclass, not a policy class."
+        )
+    return algo_cfg.get_class()
+
+
 def find_run_cfg_yaml(checkpoint_file: Path) -> Path | None:
     """Locate training ``cfg.yaml`` next to a local checkpoint ``.pt`` file."""
     parent = checkpoint_file.parent
@@ -78,10 +117,7 @@ def load_algo_cfg_from_local_pt(checkpoint_file: Path | str) -> DictConfig:
     if "algo" not in saved:
         raise KeyError(f"{cfg_yaml} has no 'algo' section")
     algo_cfg = saved.algo
-    target = OmegaConf.select(algo_cfg, "_target_")
-    if isinstance(target, str) and target.endswith("Policy"):
-        module, policy_name = target.rsplit(".", 1)
-        algo_cfg._target_ = f"{module}.{policy_name.removesuffix('Policy')}Config"
+    validate_algo_cfg_target(algo_cfg)
     total_iters = OmegaConf.select(saved, "total_iters")
     if total_iters:
         for key in ("entropy_decay_start", "entropy_decay_end"):
