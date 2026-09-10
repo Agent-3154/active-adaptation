@@ -12,6 +12,11 @@ from active_adaptation.utils.math import quat_rotate_inverse, wrap_to_pi, yaw_qu
 from active_adaptation.envs.mdp.commands.base import Command
 from active_adaptation.envs.mdp.rewards.base import Reward
 from active_adaptation.envs.mdp.terminations.base import Termination
+from active_adaptation.envs.mdp.actions.underwater import (
+    UnderwaterPositionVelocity,
+    UnderwaterThrottle,
+    UnderwaterVelocity,
+)
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -46,13 +51,16 @@ class TrajTracking(Command):
 
     On reset, samples an endpoint ``(xT, vT)`` and duration and fits a
     :class:`~active_adaptation.planning.QuinticPolynomial` from the current
-    root state. Next-step references are written only in :meth:`update`
-    (not ``sync_state`` / ``reset``): the post-reset observation is discarded
-    via ``is_init``, and rewards read the previous step's next-step targets.
+    root state. Next-step references are written in :meth:`step` (and once at
+    reset so :meth:`prescribe` is valid on the first env step). Rewards in
+    ``_update`` read the previous step's next-step targets.
 
     Orientation is yaw-only, derived from ``orientation_mode``:
     - ``0``: face the reference horizontal velocity
     - ``1``: face the trajectory endpoint (goal)
+
+    :meth:`prescribe` fills ``action`` for underwater velocity / pose-velocity
+    baselines. Direct throttle control is left unchanged.
     """
 
     def __init__(
@@ -64,6 +72,7 @@ class TrajTracking(Command):
         look_at_goal_prob: float = 0.5,
         resample_interval: int = 100,
         resample_prob: float = 0.2,
+        overwrite_action: bool = False,
     ) -> None:
         super().__init__()
         self.target_range = _as_range3(target_range)
@@ -73,6 +82,9 @@ class TrajTracking(Command):
         self.look_at_goal_prob = float(look_at_goal_prob)
         self.resample_interval = int(resample_interval)
         self.resample_prob = float(resample_prob)
+        # When True, always write ``action`` (scripted baseline / play). When
+        # False, fill only if the tensordict has no ``action`` (RL / teleop).
+        self.overwrite_action = bool(overwrite_action)
 
     @override
     def _initialize(self, env: "_EnvBase") -> None:
@@ -82,6 +94,7 @@ class TrajTracking(Command):
             self.future_steps_t = torch.tensor(self.future_steps, dtype=torch.long)
             self.ref_pos_w = torch.zeros(self.num_envs, 3)
             self.ref_lin_vel_w = torch.zeros(self.num_envs, 3)
+            self.ref_lin_vel_traj_w = torch.zeros(self.num_envs, 3)
             self.ref_yaw_w = torch.zeros(self.num_envs, 1)
             self.goal_pos_w = torch.zeros(self.num_envs, 3)
             self.target_pos_w = torch.zeros(self.num_envs, len(self.future_steps), 3)
@@ -119,17 +132,20 @@ class TrajTracking(Command):
         pos_w: torch.Tensor,
         vel_w: torch.Tensor,
         fallback_yaw: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Resolve yaw command for shape ``(N, 3)`` or ``(N, K, 3)`` → ``(..., 1)``.
 
         Mode 0: horizontal velocity heading. Mode 1: look from ``pos_w`` toward ``goal_pos_w``.
         """
+        goal = self.goal_pos_w if env_ids is None else self.goal_pos_w[env_ids]
+        mode = self.orientation_mode if env_ids is None else self.orientation_mode[env_ids]
         if pos_w.ndim == 2:
-            goal_delta = self.goal_pos_w - pos_w
-            mode = self.orientation_mode.squeeze(-1)  # (N,)
+            goal_delta = goal - pos_w
+            mode = mode.squeeze(-1)  # (N,)
         else:
-            goal_delta = self.goal_pos_w.unsqueeze(1) - pos_w
-            mode = self.orientation_mode  # (N, 1) broadcasts over K
+            goal_delta = goal.unsqueeze(1) - pos_w
+            # mode (N, 1) broadcasts over K
 
         yaw_vel = _yaw_from_xy(vel_w[..., 0], vel_w[..., 1], fallback_yaw)
         yaw_goal = _yaw_from_xy(goal_delta[..., 0], goal_delta[..., 1], fallback_yaw)
@@ -162,6 +178,92 @@ class TrajTracking(Command):
             torch.rand(len(env_ids), 1, device=self.device) < self.look_at_goal_prob
         ).long()
 
+    def _write_tracking_refs(self, env_ids: torch.Tensor | None = None) -> None:
+        """Evaluate the quintic at the next env step into command buffers."""
+        if env_ids is None:
+            idx: torch.Tensor | slice = slice(None)
+            n = self.num_envs
+            traj = self.traj
+            ep = self.env.episode_length_buf
+            heading = self.asset.data.heading_w
+            root_pos = self.asset.data.root_link_pos_w
+            quat_yaw = yaw_quat(self.asset.data.root_link_quat_w)
+            kp = self.Kp
+        else:
+            idx = env_ids
+            n = int(env_ids.numel())
+            traj = self.traj[env_ids]
+            ep = self.env.episode_length_buf[env_ids]
+            heading = self.asset.data.heading_w[env_ids]
+            root_pos = self.asset.data.root_link_pos_w[env_ids]
+            quat_yaw = yaw_quat(self.asset.data.root_link_quat_w[env_ids])
+            kp = self.Kp[env_ids]
+
+        t_next = (ep.unsqueeze(1) + 1) * self.env.step_dt
+        t_next = torch.minimum(t_next, traj.duration)
+        ref_pos, ref_vel = traj.eval(t_next)  # [n, 1, 3]
+        self.ref_pos_w[idx] = ref_pos.squeeze(1)
+        self.ref_lin_vel_traj_w[idx] = ref_vel.squeeze(1)
+        pos_error = self.ref_pos_w[idx] - root_pos
+        self.ref_lin_vel_w[idx] = self.ref_lin_vel_traj_w[idx] + kp * pos_error
+        self.ref_yaw_w[idx] = self._yaw_command(
+            self.ref_pos_w[idx],
+            self.ref_lin_vel_w[idx],
+            heading,
+            env_ids=env_ids,
+        )
+
+        t_query = (ep.unsqueeze(1) + self.future_steps_t) * self.env.step_dt
+        t_query = torch.minimum(t_query, traj.duration)
+        pos_w, vel_w = traj.eval(t_query)
+        self.target_pos_w[idx] = pos_w
+        self.target_lin_vel_w[idx] = vel_w
+        root_pos_h = root_pos.unsqueeze(1)
+        quat_h = quat_yaw.unsqueeze(1)
+        self.target_pos_b[idx] = quat_rotate_inverse(quat_h, pos_w - root_pos_h)
+        self.target_lin_vel_b[idx] = quat_rotate_inverse(quat_h, vel_w)
+        self.target_yaw_w[idx] = self._yaw_command(
+            pos_w,
+            vel_w,
+            heading.unsqueeze(1),
+            env_ids=env_ids,
+        )
+        self.target_yaw_err[idx] = wrap_to_pi(
+            self.target_yaw_w[idx] - heading.view(n, 1, 1)
+        )
+
+    def _prescribed_twist_b(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Body-frame pos error, commanded vel, traj vel, and yaw-rate ``(N, 3)``."""
+        quat = self.asset.data.root_link_quat_w
+        pos_b = quat_rotate_inverse(
+            quat, self.ref_pos_w - self.asset.data.root_link_pos_w
+        )
+        vel_b = quat_rotate_inverse(quat, self.ref_lin_vel_w)
+        vel_traj_b = quat_rotate_inverse(quat, self.ref_lin_vel_traj_w)
+        yaw_err = wrap_to_pi(
+            self.ref_yaw_w.squeeze(-1) - self.asset.data.heading_w
+        )
+        omega_b = torch.zeros(self.num_envs, 3, device=self.device, dtype=quat.dtype)
+        omega_b[:, 2] = yaw_err
+        return pos_b, vel_b, vel_traj_b, omega_b
+
+    @override
+    def prescribe(self, tensordict: TensorDictBase) -> None:
+        action = self.env.input_managers.get("action")
+        if action is None:
+            return
+        if tensordict.get("action") is not None and not self.overwrite_action:
+            return
+
+        if isinstance(action, UnderwaterThrottle):
+            return
+        pos_b, vel_b, vel_traj_b, omega_b = self._prescribed_twist_b()
+        if isinstance(action, UnderwaterPositionVelocity):
+            # Outer pose loop lives on the action; feed traj velocity (no extra Kp).
+            tensordict.set("action", torch.cat([pos_b, vel_traj_b, omega_b], dim=-1))
+        elif isinstance(action, UnderwaterVelocity):
+            tensordict.set("action", torch.cat([vel_b, omega_b], dim=-1))
+
     @override
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
         origins = super().reset(env_ids, tensordict)
@@ -170,8 +272,8 @@ class TrajTracking(Command):
         Kp.uniform_(0.5, 1.0)
         self.Kp[env_ids] = Kp
         self._cum_error[env_ids] = 0.0
-        # Do not evaluate targets here: the first post-reset obs is discarded
-        # (``is_init``); next-step targets are written in ``update``.
+        # First env step's prescribe / rewards need refs before ``step``.
+        self._write_tracking_refs(env_ids)
         return origins
 
     @override
@@ -189,41 +291,9 @@ class TrajTracking(Command):
         )
         if resample.any():
             resample_ids = resample.nonzero().squeeze(-1)
-            self._resample_target(resample_ids) 
+            self._resample_target(resample_ids)
 
-        # Next-step references for the upcoming observation / following reward.
-        t_next = (self.env.episode_length_buf + 1).unsqueeze(1) * self.env.step_dt
-        t_next = torch.minimum(t_next, self.traj.duration)
-        ref_pos, ref_vel = self.traj.eval(t_next) # [N, 1, 3]
-        
-        self.ref_pos_w = ref_pos.squeeze(1) # [N, 3]
-        pos_error = self.ref_pos_w - self.asset.data.root_link_pos_w
-        self.ref_lin_vel_w = ref_vel.squeeze(1) + self.Kp * pos_error # [N, 3]
-
-        heading = self.asset.data.heading_w  # (N,)
-        self.ref_yaw_w = self._yaw_command(
-            self.ref_pos_w,
-            self.ref_lin_vel_w,
-            heading,
-        )
-
-        t_query = (self.env.episode_length_buf.unsqueeze(1) + self.future_steps_t) * self.env.step_dt
-        t_query = torch.minimum(t_query, self.traj.duration)
-        pos_w, vel_w = self.traj.eval(t_query)
-        self.target_pos_w = pos_w
-        self.target_lin_vel_w = vel_w
-
-        root_pos = self.asset.data.root_link_pos_w.unsqueeze(1)
-        quat = yaw_quat(self.asset.data.root_link_quat_w).unsqueeze(1)
-        self.target_pos_b = quat_rotate_inverse(quat, pos_w - root_pos)
-        self.target_lin_vel_b = quat_rotate_inverse(quat, vel_w)
-
-        self.target_yaw_w = self._yaw_command(
-            pos_w,
-            vel_w,
-            heading.unsqueeze(1),
-        )
-        self.target_yaw_err = wrap_to_pi(self.target_yaw_w - heading.view(-1, 1, 1))
+        self._write_tracking_refs()
 
     @override
     def debug_draw(self) -> None:

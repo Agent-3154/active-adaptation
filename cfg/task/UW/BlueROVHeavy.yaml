@@ -21,18 +21,26 @@ sim:
   mujoco_physics_dt: 0.002
 
 input:
+  # action:
+  #   _target_: UnderwaterThrottle
   action:
-    _target_: UnderwaterThrottle
+    _target_: UnderwaterVelocity
+    kp: 20.0 # TODO: replace with better per-axis gains
+    kd: 2.0
+    alpha_range: [0.9, 0.95]
 
 command:
   _target_: TrajTracking
-  target_range: [[-4.0, 4.0], [-4.0, 4.0], [-1.0, 1.0]]
+  target_range: [[-3.0, 3.0], [-3.0, 3.0], [-1.0, 1.0]]
   future_steps: [1, 4]
   vel_range: [[-1.0, 1.0], [-1.0, 1.0], [0.0, 0.0]]
-  duration_range: [10.0, 20.0]
+  duration_range: [20.0, 20.0]
   look_at_goal_prob: 0.5
   resample_interval: 200
   resample_prob: 0.2
+  # Scripted UnderwaterVelocity / PositionVelocity: command writes ``action``.
+  # Leave false (default) when an RL policy owns the twist/throttle action.
+  overwrite_action: true
 
 observation:
   command:
@@ -59,4 +67,4 @@ reward:
 
 termination:
   max_episode_length: {}
-  position_error_exceeding: {threshold: 1.0}
+  # position_error_exceeding: {threshold: 1.0}

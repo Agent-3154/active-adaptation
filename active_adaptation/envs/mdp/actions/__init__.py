@@ -14,7 +14,7 @@ from .joint import (
 )
 from .marker import Marker
 from .task_space import EndEffectorPose, EndEffectorPoseDelta, EndEffectorPoseWithGripper
-from .underwater import UnderwaterThrottle
+from .underwater import UnderwaterPositionVelocity, UnderwaterThrottle, UnderwaterVelocity
 from .write import WriteJointPosition, WriteRootState
 
 __all__ = [
@@ -31,6 +31,8 @@ __all__ = [
     "EndEffectorPoseDelta",
     "EndEffectorPoseWithGripper",
     "UnderwaterThrottle",
+    "UnderwaterVelocity",
+    "UnderwaterPositionVelocity",
     "Marker",
     "WriteRootState",
     "WriteJointPosition",

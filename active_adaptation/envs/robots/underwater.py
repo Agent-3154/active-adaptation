@@ -152,45 +152,45 @@ class UnderwaterRobotData:
     Naming convention:
     - `*_b`: vector expressed in robot base/body frame.
     - 6D wrench vectors follow `[Fx, Fy, Fz, Mx, My, Mz]`.
-    - Shapes are batched over environments (`num_envs`, ...).
+    - Shapes use ``N`` = num_envs, ``B`` = num_bodies, ``n`` = num_rotors.
     """
     # Constant (or slowly changing) hydrodynamics parameters/matrices.
-    added_mass_matrix: torch.Tensor
-    linear_damping: torch.Tensor  # (num_envs, num_bodies, 6)
-    quadratic_damping: torch.Tensor  # (num_envs, num_bodies, 6)
-    volume: torch.Tensor  # (num_envs, num_bodies)
-    coBM: torch.Tensor
+    added_mass_matrix: torch.Tensor  # (N, 6, 6)
+    linear_damping: torch.Tensor  # (N, B, 6)
+    quadratic_damping: torch.Tensor  # (N, B, 6)
+    volume: torch.Tensor  # (N, B)
+    coBM: torch.Tensor  # (N,)
 
     # Temporal state for filtered body acceleration estimate.
-    prev_body_vels: torch.Tensor
-    prev_body_acc: torch.Tensor
+    prev_body_vels: torch.Tensor  # (N, 6) hydro-signed base twist
+    prev_body_acc: torch.Tensor  # (N, 6)
 
     # Flow/current disturbance configuration and sampled flow state.
-    flow_vels: torch.Tensor
-    max_flow_vel: torch.Tensor
-    flow_noise_scale: torch.Tensor
+    flow_vels: torch.Tensor  # (N, 6)
+    max_flow_vel: torch.Tensor  # (N, 6)
+    flow_noise_scale: torch.Tensor  # (N, 6)
 
     # Rotor command/state used for throttle-to-thrust conversion.
     # `throttle_cmd` is action input (normalized [-1, 1]);
     # `throttle` is filtered actuator state.
-    throttle_cmd: torch.Tensor
-    throttle: torch.Tensor
-    time_constants: torch.Tensor
-    force_constants: torch.Tensor
-    rpm: torch.Tensor
-    thrusts_b: torch.Tensor
+    throttle_cmd: torch.Tensor  # (N, n)
+    throttle: torch.Tensor  # (N, n)
+    time_constants: torch.Tensor  # (N, n)
+    force_constants: torch.Tensor  # (N, n)
+    rpm: torch.Tensor  # (N, n)
+    thrusts_b: torch.Tensor  # (N, n, 3) rotor-local; thrust along +X
 
     # Per-step decomposed hydrodynamics terms.
-    body_acc: torch.Tensor
-    damping: torch.Tensor  # (num_envs, num_bodies, 6) body-frame wrenches
-    added_mass: torch.Tensor
-    coriolis: torch.Tensor
-    buoyancy: torch.Tensor
-    hydro: torch.Tensor
+    body_acc: torch.Tensor  # (N, 6)
+    damping: torch.Tensor  # (N, B, 6) body-frame wrenches
+    added_mass: torch.Tensor  # (N, 6)
+    coriolis: torch.Tensor  # (N, 6)
+    buoyancy: torch.Tensor  # (N, 6) base-body buoyancy wrench
+    hydro: torch.Tensor  # (N, 6) added-mass + Coriolis at base
 
     # Final hydro wrench contribution applied to base link in body frame.
-    hydro_forces_b: torch.Tensor
-    hydro_torques_b: torch.Tensor
+    hydro_forces_b: torch.Tensor  # (N, 3)
+    hydro_torques_b: torch.Tensor  # (N, 3)
 
 
 class UnderwaterRobot(RobotAdaptation):
@@ -441,9 +441,70 @@ class UnderwaterRobot(RobotAdaptation):
         # IsaacLab's default articulation data fields.
         self.robot.data_underwater = self.data
 
+        # Optional mixer for scripted velocity/pose baselines. RL writes
+        # ``throttle_cmd`` directly and does not use this path.
+        self.allocation_matrix: torch.Tensor | None = None  # (6, n)
+        self.allocation_pinv: torch.Tensor | None = None  # (n, 6)
+        if self.num_rotors > 0:
+            self._build_allocation_matrix()
+
     @property
     def num_rotors(self) -> int:
         return len(self.rotor_names)
+
+    def _build_allocation_matrix(self) -> None:
+        """Map unit rotor +X thrust to a base-body wrench, scaled to throttle ≈ 1.
+
+        Column ``i`` is the wrench at the base from rotor ``i`` at throttle 1,
+        using the T200 force curve already used in :meth:`write_data_to_sim`.
+        Geometry is taken from env 0 (cloned assets share the same layout).
+        """
+        data = self.robot.data
+        n = self.num_rotors
+        base_id = self._base_body_id
+        rotor_ids = self.rotor_indices
+        base_pos = data.body_link_pos_w[0, base_id]
+        base_quat = data.body_link_quat_w[0, base_id]
+        rotor_pos = data.body_link_pos_w[0, rotor_ids]
+        rotor_quat = data.body_link_quat_w[0, rotor_ids]
+        r_b = quat_rotate_inverse(
+            base_quat.expand_as(rotor_quat),
+            rotor_pos - base_pos,
+        )
+        axis_w = quat_rotate(
+            rotor_quat,
+            torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(n, 3),
+        )
+        axis_b = quat_rotate_inverse(base_quat.expand_as(rotor_quat), axis_w)
+        torque_b = torch.cross(r_b, axis_b, dim=-1)
+        alloc = torch.cat([axis_b.T, torque_b.T], dim=0)
+        rpm_at_one = min(3.6599e3 * 1.0 + 3.4521e2, 3900.0)
+        force_at_one = (
+            self.data.force_constants[0]
+            / 4.4e-7
+            * 9.81
+            * (
+                4.7368e-7 * rpm_at_one**2
+                - 1.9275e-4 * rpm_at_one
+                + 8.4452e-2
+            )
+        )
+        alloc = alloc * force_at_one.unsqueeze(0)
+        self.allocation_matrix = alloc
+        self.allocation_pinv = torch.linalg.pinv(alloc)
+
+    def allocate_wrench(self, wrench_b: torch.Tensor) -> torch.Tensor:
+        """Map a base-body wrench ``(N, 6)`` to clipped throttle ``(N, n)``.
+
+        Linearized around throttle 1; the T200 curve is still applied when
+        the command is written to sim. Not used by :class:`UnderwaterThrottle`.
+        """
+        if self.allocation_pinv is None:
+            raise RuntimeError(
+                "Wrench allocation requires rotors; RL should write throttle_cmd "
+                "via UnderwaterThrottle instead."
+            )
+        return (wrench_b @ self.allocation_pinv.T).clamp(-1.0, 1.0)
 
     def set_flow_velocities(
         self,
@@ -555,13 +616,13 @@ class UnderwaterRobot(RobotAdaptation):
 
             with ScopedTimer("underwater.body_damping_math"):
                 body_lin_vel_b = quat_rotate_inverse(
-                    body_quat_w.reshape(-1, 4),
-                    (body_lin_vel_w - flow_lin_w.unsqueeze(1)).reshape(-1, 3),
-                ).reshape(self.num_envs, self.num_bodies, 3)
+                    body_quat_w,
+                    body_lin_vel_w - flow_lin_w.unsqueeze(1),
+                )
                 body_ang_vel_b = quat_rotate_inverse(
-                    body_quat_w.reshape(-1, 4),
-                    (body_ang_vel_w - flow_ang_w.unsqueeze(1)).reshape(-1, 3),
-                ).reshape(self.num_envs, self.num_bodies, 3)
+                    body_quat_w,
+                    body_ang_vel_w - flow_ang_w.unsqueeze(1),
+                )
                 body_hydro_twist_b = torch.cat(
                     [body_lin_vel_b, body_ang_vel_b], dim=-1
                 )
@@ -641,13 +702,8 @@ class UnderwaterRobot(RobotAdaptation):
                     is_global=False,
                 )
             elif self.env.backend == "mjlab":
-                quat_flat = body_quat_w.reshape(-1, 4)
-                forces_w = quat_rotate(
-                    quat_flat, forces_b.reshape(-1, 3)
-                ).reshape_as(forces_b)
-                torques_w = quat_rotate(
-                    quat_flat, torques_b.reshape(-1, 3)
-                ).reshape_as(torques_b)
+                forces_w = quat_rotate(body_quat_w, forces_b)
+                torques_w = quat_rotate(body_quat_w, torques_b)
                 self.robot.write_external_wrench_to_sim(forces_w, torques_w)
             else:
                 raise ValueError(f"Unsupported backend for underwater wrench: {self.env.backend}")
