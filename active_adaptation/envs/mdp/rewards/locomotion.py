@@ -2,7 +2,11 @@ import torch
 from typing import TYPE_CHECKING, Optional, List, Union
 from typing_extensions import override
 
-from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse, yaw_quat
+from active_adaptation.utils.math import (
+    euler_from_quat,
+    quat_rotate_inverse,
+    wrap_to_pi,
+)
 from .base import Reward
 from active_adaptation.envs.mdp.commands.locomotion import Twist
 from active_adaptation.envs.utils import find_sensor_bodies
@@ -14,6 +18,47 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import EnvBase
 
 Names = Union[str, List[str]]
+
+_POS_AXIS_IDS: dict[str, tuple[int, ...]] = {
+    "x": (0,),
+    "y": (1,),
+    "z": (2,),
+    "xy": (0, 1),
+    "yx": (0, 1),
+    "xz": (0, 2),
+    "zx": (0, 2),
+    "yz": (1, 2),
+    "zy": (1, 2),
+    "xyz": (0, 1, 2),
+}
+
+_ROT_AXIS_IDS: dict[str, tuple[int, ...]] = {
+    "roll": (0,),
+    "pitch": (1,),
+    "yaw": (2,),
+    "rp": (0, 1),
+    "ry": (0, 2),
+    "py": (1, 2),
+    "rpy": (0, 1, 2),
+}
+
+
+def _parse_pos_axes(axis: str) -> tuple[int, ...]:
+    key = axis.lower().replace(",", "").replace(" ", "")
+    if key not in _POS_AXIS_IDS:
+        raise ValueError(
+            f"root_pos_exp axis must be one of {sorted(_POS_AXIS_IDS)}, got {axis!r}"
+        )
+    return _POS_AXIS_IDS[key]
+
+
+def _parse_rot_axes(axis: str) -> tuple[int, ...]:
+    key = axis.lower().replace(",", "").replace(" ", "")
+    if key not in _ROT_AXIS_IDS:
+        raise ValueError(
+            f"root_rot_exp axis must be one of {sorted(_ROT_AXIS_IDS)}, got {axis!r}"
+        )
+    return _ROT_AXIS_IDS[key]
 
 
 class survival(Reward):
@@ -165,7 +210,11 @@ class linvel_exp(Reward[Twist]):
 
 
 class root_pos_exp(Reward):
-    """Reward for tracking the root position. Supports dynamic weight gating."""
+    """Tracking-style root position reward (exp of positional error).
+
+    Soft-gated by ``root_pos_exp_weight`` (e.g. approach schedule). Pair with a
+    reaching-style term such as ``quadmanip.root_vel_direction``.
+    """
 
     in_keys = ["root_pos_exp_weight"]
     out_keys = None
@@ -173,13 +222,13 @@ class root_pos_exp(Reward):
     def __init__(
         self,
         weight: float,
-        dim: int = 2,
+        axis: str = "xy",
         track_var: bool = False,
         sigma: float = 0.25,
         square: bool = False,
     ):
         super().__init__(weight, track_var=track_var)
-        self.dim = dim
+        self.axis_ids = _parse_pos_axes(axis)
         self.sigma = sigma
         self.square = square
 
@@ -187,7 +236,8 @@ class root_pos_exp(Reward):
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
-    
+        self._weight = torch.ones(self.num_envs, 1, device=self.device)
+
     @override
     def _update(self, weight: torch.Tensor | None) -> None:
         if weight is None:
@@ -196,16 +246,73 @@ class root_pos_exp(Reward):
             self._weight = weight.reshape(self.num_envs, 1)
 
     def _compute(self) -> torch.Tensor:
-        target_pos = self.command_manager.cmd_root_pos_w[:, : self.dim]
-        root_pos_w = self.asset.data.root_link_pos_w[:, : self.dim]
-        error_squared = (
-            self.asset.data.root_link_pos_w[:, : self.dim] - target_pos
-        ).square().sum(-1, True)
+        ids = list(self.axis_ids)
+        delta = (
+            self.asset.data.root_link_pos_w[:, ids]
+            - self.command_manager.cmd_root_pos_w[:, ids]
+        )
+        error = delta.norm(dim=-1, keepdim=True)
         if self.square:
-            rew = torch.exp(-error_squared / self.sigma)
+            rew = torch.exp(-error.square() / self.sigma)
         else:
-            rew = torch.exp(-error_squared.sqrt() / self.sigma)
-        return rew.reshape(self.num_envs, 1), self._weight > 0.0
+            rew = torch.exp(-error / self.sigma)
+        return rew.reshape(self.num_envs, 1) * self._weight, self._weight > 0.0
+
+
+class root_rot_exp(Reward):
+    """Tracking-style root orientation reward (exp of wrapped RPY error).
+
+    Soft-gated by ``root_rot_exp_weight``. Pair with ``root_angvel_direction``
+    for reaching-style yaw.
+    """
+
+    in_keys = ["root_rot_exp_weight"]
+    out_keys = None
+
+    def __init__(
+        self,
+        weight: float,
+        axis: str = "yaw",
+        sigma: float = 0.25,
+        square: bool = False,
+        track_var: bool = False,
+    ):
+        super().__init__(weight, track_var=track_var)
+        self.axis_ids = _parse_rot_axes(axis)
+        self.sigma = sigma
+        self.square = square
+
+    @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
+        self.asset: Articulation = self.env.scene.articulations["robot"]
+        self._weight = torch.ones(self.num_envs, 1, device=self.device)
+
+    @override
+    def _update(self, weight: torch.Tensor | None) -> None:
+        if weight is None:
+            self._weight = torch.ones(self.num_envs, 1, device=self.device)
+        else:
+            self._weight = weight.reshape(self.num_envs, 1)
+
+    def _root_rpy_error(self) -> torch.Tensor:
+        """Wrapped RPY error ``cmd - root``, shape ``[N, 3]``."""
+        cmd_rpy = euler_from_quat(self.command_manager.cmd_root_quat_w)
+        # Prefer heading_w for yaw (matches loco command / angvel shaping).
+        root_rpy = euler_from_quat(self.asset.data.root_link_quat_w)
+        root_rpy = root_rpy.clone()
+        root_rpy[:, 2] = self.asset.data.heading_w
+        return wrap_to_pi(cmd_rpy - root_rpy)
+
+    def _compute(self) -> torch.Tensor:
+        ids = list(self.axis_ids)
+        err = self._root_rpy_error()[:, ids]
+        error = err.norm(dim=-1, keepdim=True)
+        if self.square:
+            rew = torch.exp(-error.square() / self.sigma)
+        else:
+            rew = torch.exp(-error / self.sigma)
+        return rew.reshape(self.num_envs, 1) * self._weight, self._weight > 0.0
 
 
 class root_pos_l2(Reward):

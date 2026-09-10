@@ -150,6 +150,35 @@ class GraspPose(RobotAdaptation):
             rows.append([*pos.tolist(), *quat.tolist()])
         return cls(poses=rows)
 
+    @classmethod
+    def for_side_axis(
+        cls,
+        *,
+        axis: Sequence[float] = (1.0, 0.0, 0.0),
+        approach_dirs: Sequence[Sequence[float]] = (
+            (0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+        ),
+        pos: Sequence[float] = (0.0, 0.0, 0.0),
+    ) -> "GraspPose":
+        """Side grasps for a slender body (e.g. horizontal capsule).
+
+        ``axis`` is the long body axis (used as the EEF up-hint so ±Y fingers
+        close across the thin cross-section). ``approach_dirs`` are object-frame
+        approach directions (normalized). Grasp ``pos`` defaults to the origin.
+        """
+        axis_t = torch.tensor(list(axis), dtype=torch.float32)
+        pos_t = torch.tensor(list(pos), dtype=torch.float32)
+        rows: list[list[float]] = []
+        for d in approach_dirs:
+            approach = torch.tensor(list(d), dtype=torch.float32)
+            rot = _frame_x_approach_z_up(
+                approach.unsqueeze(0), axis_t.unsqueeze(0)
+            )[0]
+            quat = quat_from_matrix(rot.unsqueeze(0))[0]
+            rows.append([*pos_t.tolist(), *quat.tolist()])
+        return cls(poses=rows)
+
     @property
     def num_poses(self) -> int:
         if self.poses is not None:
