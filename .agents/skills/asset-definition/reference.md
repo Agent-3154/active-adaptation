@@ -15,7 +15,7 @@ Companion to [SKILL.md](SKILL.md). File map, backend wiring, templates, and clea
 | `active_adaptation/assets/__init__.py` | Imports family packages (registration side effects) |
 | `active_adaptation/assets/quadrupeds/*.py` | Unitree A2/B2/Go2 (+ manipulators) |
 | `active_adaptation/assets/humanoids/g1.py` | G1 waist-unlocked |
-| `active_adaptation/assets/underwater/*.py` | BlueROV (+ Heavy); Isaac + `AssetSpec.wrapper` |
+| `active_adaptation/assets/underwater/*.py` | BlueROV (+ Heavy); Isaac + `AssetSpec.behaviors` |
 | `active_adaptation/assets/dummy_objects.py` | Isaac-only rigid objects (returns bare cfg) |
 | `active_adaptation/assets/spawn.py` | Legacy Isaac cloner decorator — **not** used by AssetSpec robots |
 | `active_adaptation/assets/Go2/`, `G1/` | In-repo MJCF/URDF leftovers — prefer `ROBOT_MODEL_DIR` |
@@ -44,7 +44,7 @@ Extra fields on both Isaac/mjlab cfgs:
 - `joint_names_simulation`
 - `body_names_simulation`
 
-`AssetSpec.with_wrapper(wrapper)` mutates and returns `self` for chaining.
+
 
 ---
 
@@ -58,7 +58,7 @@ scene_cfg.robot = asset_spec.config
 for name, sensor_cfg in asset_spec.sensors.items():
     setattr(scene_cfg, name, sensor_cfg)
 scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
-# if asset_spec.wrapper: wrapper._initialize(robot=..., env=...); register hooks
+
 ```
 
 Objects (optional):
@@ -450,11 +450,11 @@ Use this when refactoring; do not expand these patterns.
 ## Wrapper lifecycle (underwater)
 
 1. Factory builds `UnderwaterRobot(...)` with hydro/rotor **config only**.
-2. Isaac `setup_scene` takes `asset_spec.wrapper`, calls `_initialize(robot=self.robot, env=self)`.
+2. Backends stash `asset_spec.iter_behaviors()`, then `_bind_pending_behaviors()` after entities exist.
 3. Registers optional `startup` / `reset` / `pre_step` / `post_step` / `update` / `debug_draw`.
 4. Wrapper applies external wrenches in `pre_step` / `write_data_to_sim`.
 
-Details: `active_adaptation/envs/robots/TEACHME.md`.
+Details: `active_adaptation/envs/behaviors/TEACHME.md`.
 
 ---
 

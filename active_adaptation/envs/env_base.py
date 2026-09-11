@@ -463,7 +463,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.extra = {}
         self._nonfinite_rows_total = 0
         self.command_manager.startup()
-        for adapt in self.adaptations.values():
+        for adapt in self.behaviors.values():
             adapt.startup()
         for group in self.observation_groups.values():
             group.startup()
@@ -537,11 +537,10 @@ class _EnvBase(EnvBase, RegistryMixin):
     def _create_mdp_terms(self):
         self._scene_components: list[mdp.MDPComponent] = []
         self._callback_component_ids: set[int] = set()
-        self.adaptations: OrderedDict[str, Any] = OrderedDict()
-        # Pending (scene_key, adapt): scene_key None → robot (key = adapt.name);
-        # otherwise key = f"{scene_key}.{adapt.name}".
-        self._pending_adaptations: list[tuple[str | None, Any]] = []
-        self.robot_wrapper = None  # deprecated alias; prefer env.adaptations
+        self.behaviors: OrderedDict[str, Any] = OrderedDict()
+        # Pending (scene_key, behavior): scene_key None → robot (key = behavior.name);
+        # otherwise key = f"{scene_key}.{behavior.name}".
+        self._pending_behaviors: list[tuple[str | None, Any]] = []
         self.randomizations: Mapping[str, mdp.Randomization] = OrderedDict()
         self.observation_groups: Mapping[str, ObsGroup] = OrderedDict()
         self.reward_groups: Mapping[str, RewardGroup] = OrderedDict()
@@ -552,7 +551,7 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         # Remaining callback bags: pre|post_step|debug_draw for MDP terms /
         # command, plus backend clear_debug. startup / reset / update and
-        # robot adaptations are explicit.
+        # entity behaviors are explicit.
         self._pre_step_callbacks = []
         self._post_step_callbacks = []
         self._debug_draw_callbacks = []
@@ -632,39 +631,39 @@ class _EnvBase(EnvBase, RegistryMixin):
             if isinstance(term, mdp.MDPComponent):
                 self._add_mdp_component(term)
 
-    def _bind_adaptations(
+    def _bind_behaviors(
         self,
-        adaptations: Sequence[Any] | Sequence[tuple[str | None, Any]],
+        behaviors: Sequence[Any] | Sequence[tuple[str | None, Any]],
         *,
         asset: Any | None = None,
         key_prefix: str | None = None,
     ) -> None:
-        """Initialize asset adaptations and register them on ``env.adaptations``.
+        """Initialize entity behaviors and register them on ``env.behaviors``.
 
         Called from backend ``setup_scene`` after the bound entity exists.
         Lifecycle methods are invoked explicitly from ``_EnvBase`` (not via
         ``_XXX_callbacks``).
 
         Args:
-            adaptations: Either a sequence of adaptation instances, or a
-                sequence of ``(scene_key, adapt)`` pairs. ``scene_key is None``
-                (or omitted) means robot: registry key is ``adapt.name``.
-                Otherwise key is ``f"{scene_key}.{adapt.name}"``.
+            behaviors: Either a sequence of behavior instances, or a
+                sequence of ``(scene_key, behavior)`` pairs. ``scene_key is None``
+                (or omitted) means robot: registry key is ``behavior.name``.
+                Otherwise key is ``f"{scene_key}.{behavior.name}"``.
             asset: Entity to bind. Defaults to ``self.robot`` when
                 ``key_prefix`` is None.
-            key_prefix: If given, forces keys ``f"{key_prefix}.{adapt.name}"``
-                for a flat adaptation sequence (used when binding one object).
+            key_prefix: If given, forces keys ``f"{key_prefix}.{behavior.name}"``
+                for a flat behavior sequence (used when binding one object).
         """
-        from active_adaptation.envs.robots.adaptation import RobotAdaptation
+        from active_adaptation.envs.behaviors.behavior import EntityBehavior
 
-        if not hasattr(self, "adaptations") or self.adaptations is None:
-            self.adaptations = OrderedDict()
+        if not hasattr(self, "behaviors") or self.behaviors is None:
+            self.behaviors = OrderedDict()
 
         bound_asset = asset if asset is not None else self.robot
         if bound_asset is None:
-            raise RuntimeError("Cannot bind adaptations: no asset/robot available")
+            raise RuntimeError("Cannot bind behaviors: no asset/robot available")
 
-        for item in adaptations:
+        for item in behaviors:
             if item is None:
                 continue
             if isinstance(item, tuple) and len(item) == 2:
@@ -673,40 +672,30 @@ class _EnvBase(EnvBase, RegistryMixin):
                 scene_key, adapt = key_prefix, item
             if adapt is None:
                 continue
-            if not isinstance(adapt, RobotAdaptation):
+            if not isinstance(adapt, EntityBehavior):
                 warnings.warn(
-                    f"Asset adaptation {type(adapt).__name__} does not subclass "
-                    f"RobotAdaptation; prefer migrating it.",
+                    f"Entity behavior {type(adapt).__name__} does not subclass "
+                    f"EntityBehavior; prefer migrating it.",
                     stacklevel=2,
                 )
             adapt_name = getattr(adapt, "name", None) or type(adapt).__name__
             name = f"{scene_key}.{adapt_name}" if scene_key else adapt_name
-            if name in self.adaptations:
-                raise ValueError(f"Duplicate asset adaptation name {name!r}")
+            if name in self.behaviors:
+                raise ValueError(f"Duplicate entity behavior name {name!r}")
             adapt._initialize(self, asset=bound_asset)
-            self.adaptations[name] = adapt
+            self.behaviors[name] = adapt
 
-        # Backward-compat handle used by older code / TEACHME docs.
-        self.robot_wrapper = (
-            self.adaptations.get("underwater")
-            or next(
-                (a for k, a in self.adaptations.items() if "." not in k),
-                None,
-            )
-        )
-
-    def _bind_pending_adaptations(self) -> None:
-        """Bind all ``_pending_adaptations`` using ``scene.entities`` by key.
+    def _bind_pending_behaviors(self) -> None:
+        """Bind all ``_pending_behaviors`` using ``scene.entities`` by key.
 
         Robot entries use ``scene_key=None`` → ``self.robot`` and bare
-        ``adapt.name``. Object entries use the YAML ``objects:`` key as
-        ``scene_key`` → ``f"{scene_key}.{adapt.name}"``.
+        ``behavior.name``. Object entries use the YAML ``objects:`` key as
+        ``scene_key`` → ``f"{scene_key}.{behavior.name}"``.
         """
-        pending = list(getattr(self, "_pending_adaptations", ()) or ())
-        self.adaptations = OrderedDict()
+        pending = list(getattr(self, "_pending_behaviors", ()) or ())
+        self.behaviors = OrderedDict()
         if not pending:
-            self.robot_wrapper = None
-            self._pending_adaptations = []
+            self._pending_behaviors = []
             return
 
         by_key: OrderedDict[str | None, list[Any]] = OrderedDict()
@@ -727,43 +716,38 @@ class _EnvBase(EnvBase, RegistryMixin):
                 entities = getattr(self.scene, "entities", None)
                 if entities is None:
                     raise RuntimeError(
-                        f"Cannot bind object adaptation for {scene_key!r}: "
+                        f"Cannot bind object behavior for {scene_key!r}: "
                         "scene has no entities"
                     )
                 if scene_key not in entities:
                     raise KeyError(
-                        f"Cannot bind object adaptation for {scene_key!r}: "
+                        f"Cannot bind object behavior for {scene_key!r}: "
                         f"not in scene.entities (have {list(entities)})"
                     )
                 asset = entities[scene_key]
                 prefix = scene_key
-            self._bind_adaptations(adapts, asset=asset, key_prefix=prefix)
+            self._bind_behaviors(adapts, asset=asset, key_prefix=prefix)
 
-        self._pending_adaptations = []
+        self._pending_behaviors = []
 
-    def _bind_robot_adaptations(self, adaptations: Sequence[Any]) -> None:
-        """Deprecated alias for :meth:`_bind_adaptations` (robot / no prefix)."""
-        self.adaptations = OrderedDict()
-        self._bind_adaptations(adaptations, asset=self.robot, key_prefix=None)
+    def get_behavior(self, name: str) -> Any | None:
+        return self.behaviors.get(name)
 
-    def get_adaptation(self, name: str) -> Any | None:
-        return self.adaptations.get(name)
-
-    def require_adaptation(self, name: str) -> Any:
-        adapt = self.adaptations.get(name)
-        if adapt is None:
+    def require_behavior(self, name: str) -> Any:
+        behavior = self.behaviors.get(name)
+        if behavior is None:
             raise KeyError(
-                f"Asset adaptation {name!r} is not bound. "
-                f"Available: {list(self.adaptations)}"
+                f"Entity behavior {name!r} is not bound. "
+                f"Available: {list(self.behaviors)}"
             )
-        return adapt
+        return behavior
 
     def _edit_scene_spec(self, scene_cfg: Any) -> None:
         for component in self._scene_components:
             component.edit_spec(scene_cfg)
-        # Adaptations are bound after entities exist; call edit_spec on
+        # Behaviors are bound after entities exist; call edit_spec on
         # pending (pre-bind) instances when backends stash them.
-        for item in getattr(self, "_pending_adaptations", ()) or ():
+        for item in getattr(self, "_pending_behaviors", ()) or ():
             adapt = item[1] if isinstance(item, tuple) else item
             edit = getattr(adapt, "edit_spec", None)
             if callable(edit):
@@ -941,7 +925,7 @@ class _EnvBase(EnvBase, RegistryMixin):
             self.episode_origin[env_ids] = self.command_manager.reset(
                 env_ids, tensordict
             )
-            for adapt in self.adaptations.values():
+            for adapt in self.behaviors.values():
                 adapt.reset(env_ids, tensordict)
             for group in self.observation_groups.values():
                 group.reset(env_ids, tensordict)
@@ -992,7 +976,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                     self.scene.zero_external_wrenches()
                     for input_manager in self.input_managers.values():
                         input_manager.apply_action(tensordict)
-                    for adapt in self.adaptations.values():
+                    for adapt in self.behaviors.values():
                         adapt.pre_step(substep)
                     [callback(substep) for callback in self._pre_step_callbacks]
                     self.scene.write_data_to_sim()
@@ -1003,7 +987,7 @@ class _EnvBase(EnvBase, RegistryMixin):
                     )
                 with ScopedTimer("simulation.post_step", sync=PROFILE_SYNC_TIMERS):
                     self.scene.update(self.physics_dt)
-                    for adapt in self.adaptations.values():
+                    for adapt in self.behaviors.values():
                         adapt.post_step(substep)
                     [callback(substep) for callback in self._post_step_callbacks]
 
@@ -1015,8 +999,8 @@ class _EnvBase(EnvBase, RegistryMixin):
         with ScopedTimer("command.update", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.update(tensordict)
 
-        with ScopedTimer("adaptation.update", sync=PROFILE_SYNC_TIMERS):
-            for adapt in self.adaptations.values():
+        with ScopedTimer("behavior.update", sync=PROFILE_SYNC_TIMERS):
+            for adapt in self.behaviors.values():
                 adapt.update(tensordict)
         
         # for input_manager in self.input_managers.values():
@@ -1054,7 +1038,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         self.extra["env/nonfinite_rows_total"] = self._nonfinite_rows_total
 
         if self._should_debug_draw():
-            for adapt in self.adaptations.values():
+            for adapt in self.behaviors.values():
                 adapt.debug_draw()
             [callback() for callback in self._debug_draw_callbacks]
 

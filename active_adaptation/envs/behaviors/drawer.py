@@ -1,7 +1,7 @@
-"""Drawer articulation adaptation: slide joint accessors (no locks).
+"""Drawer articulation behavior: slide joint accessors (no locks).
 
-Attach via ``AssetSpec(adaptations=(DrawerAdaptation(), ...))``. Lookup with
-``env.require_adaptation("drawer.drawer")`` when the YAML object key is ``drawer``.
+Attach via ``AssetSpec(behaviors=(DrawerBehavior(), ...))``. Lookup with
+``env.require_behavior("drawer.drawer")`` when the YAML object key is ``drawer``.
 
 Supports **multi-drawer** cabinets (``drawer_{i}_joint``). Handles are welded
 bars — there is no handle joint and no lock/unlock logic.
@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from typing_extensions import override
 
-from active_adaptation.envs.robots.adaptation import RobotAdaptation
+from active_adaptation.envs.behaviors.behavior import EntityBehavior
 from active_adaptation.envs.utils import find_joints
 
 if TYPE_CHECKING:
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 _DRAWER_JOINT_RE = re.compile(r"^drawer_(\d+)_joint$")
 
 
-class DrawerAdaptation(RobotAdaptation):
+class DrawerBehavior(EntityBehavior):
     """Expose multi-drawer slide joints (unlocked / free-sliding)."""
 
     name = "drawer"
@@ -51,7 +51,7 @@ class DrawerAdaptation(RobotAdaptation):
         drawer_ids, drawer_names = find_joints(self.asset, self.drawer_joint_name_cfg)
         if len(drawer_ids) == 0:
             raise ValueError(
-                f"DrawerAdaptation: no drawer joints matching "
+                f"DrawerBehavior: no drawer joints matching "
                 f"{self.drawer_joint_name_cfg!r}"
             )
 
@@ -74,4 +74,4 @@ class DrawerAdaptation(RobotAdaptation):
         return self.asset.data.joint_pos[:, self.drawer_joint_ids]
 
 
-__all__ = ["DrawerAdaptation"]
+__all__ = ["DrawerBehavior"]

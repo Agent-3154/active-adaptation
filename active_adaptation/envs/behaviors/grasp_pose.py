@@ -1,11 +1,11 @@
-"""Object grasp-candidate adaptation.
+"""Object grasp-candidate behavior.
 
-Attach via ``AssetSpec(adaptations=(GraspPose(...),))``. Lookup with
-``env.require_adaptation("chair.grasp")`` when the YAML object key is ``chair``.
+Attach via ``AssetSpec(behaviors=(GraspPose(...),))``. Lookup with
+``env.require_behavior("chair.grasp")`` when the YAML object key is ``chair``.
 
 Holds a fixed list of **prescribed** object-frame poses ``(pos[3], quat_wxyz[4])``.
-No procedural part sampling — callers (or :meth:`for_legs`) decide feasible
-poses for the whole object.
+No procedural part sampling — callers (or :meth:`for_legs` /
+:meth:`for_grasp_board`) decide feasible poses for the whole object.
 
 **Approach convention:** unless an asset or call site says otherwise, the EEF
 approaches along its body **+X** (forward). Prescribed grasp quats must align
@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 import torch
 from typing_extensions import override
 
-from active_adaptation.envs.robots.adaptation import RobotAdaptation
+from active_adaptation.envs.behaviors.behavior import EntityBehavior
 from active_adaptation.utils.math import normalize, quat_from_matrix, quat_rotate
 
 if TYPE_CHECKING:
@@ -27,6 +27,48 @@ if TYPE_CHECKING:
 
 # EEF body-frame forward / approach axis (default unless otherwise specified).
 EEF_FORWARD_B: tuple[float, float, float] = (1.0, 0.0, 0.0)
+
+# ``dummy_grasp_board``: 3 heights × 4 orientations per face.
+GRASP_BOARD_BARS_PER_FACE: int = 12
+_DEFAULT_GRASP_BOARD_PANEL: tuple[float, float, float] = (1.1, 0.04, 1.0)
+
+
+def grasp_board_bar_specs(
+    panel_size: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL,
+) -> list[tuple[str, float, float, tuple[float, float, float]]]:
+    """Shared board layout: ``(tag, x, z, axis_xyz)`` per bar (one face).
+
+    Height-major order at bottom / mid / top: horizontal, vertical, −45°, +45°.
+    Four X columns keep bars from overlapping. Keep in sync with
+    ``build_grasp_board_spec`` / :meth:`GraspPose.for_grasp_board`.
+    """
+    import math
+
+    width, _thickness, height = (float(x) for x in panel_size)
+    inv_sqrt2 = 1.0 / math.sqrt(2.0)
+    z_levels = (
+        ("bot", 0.20 * height),
+        ("mid", 0.50 * height),
+        ("top", 0.80 * height),
+    )
+    # Columns: h, v, m45 (−45°), p45 (+45°)
+    x_cols = (
+        -0.34 * width,
+        -0.12 * width,
+        0.12 * width,
+        0.34 * width,
+    )
+    orients: tuple[tuple[str, tuple[float, float, float]], ...] = (
+        ("h", (1.0, 0.0, 0.0)),
+        ("v", (0.0, 0.0, 1.0)),
+        ("m45", (inv_sqrt2, 0.0, -inv_sqrt2)),
+        ("p45", (inv_sqrt2, 0.0, inv_sqrt2)),
+    )
+    bars: list[tuple[str, float, float, tuple[float, float, float]]] = []
+    for level, z in z_levels:
+        for (tag_o, axis), x in zip(orients, x_cols, strict=True):
+            bars.append((f"{level}_{tag_o}", float(x), float(z), axis))
+    return bars
 
 
 def eef_forward_w(quat_w: torch.Tensor) -> torch.Tensor:
@@ -66,7 +108,7 @@ def _frame_x_approach_z_up(
     return torch.stack((x, y, z), dim=-1)
 
 
-class GraspPose(RobotAdaptation):
+class GraspPose(EntityBehavior):
     """Prescribed object-frame grasp poses.
 
     Args:
@@ -218,6 +260,53 @@ class GraspPose(RobotAdaptation):
             rows.append([*pos_t.tolist(), *quat.tolist()])
         return cls(poses=rows)
 
+    @classmethod
+    def for_grasp_board(
+        cls,
+        panel_size: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL,
+        handle_length: float = 0.16,
+        handle_radius: float = 0.022,
+        handle_box_size: Sequence[float] | None = (0.04, 0.03),
+        standoff: float = 0.01,
+    ) -> "GraspPose":
+        """Prescribed mid-bar grasps for ``dummy_grasp_board`` (object frame).
+
+        Layout matches ``build_grasp_board_spec`` via :func:`grasp_board_bar_specs`
+        (3 heights × hori / vert / −45° / +45° = 12 bars per face). Pose order:
+
+        - indices ``0..11``: **+Y** box face (approach −Y)
+        - indices ``12..23``: **−Y** capsule face (approach +Y)
+
+        Grasp points sit on each bar axis so ±Y jaws can straddle; EEF **+X**
+        = face approach, long bar axis is the up-hint (fingers close across
+        the thin cross-section).
+        """
+        thickness = float(panel_size[1])
+        hr = float(handle_radius)
+        so = float(standoff)
+        half_t = 0.5 * thickness
+        del handle_length  # axis grasp at bar centers
+
+        if handle_box_size is None:
+            hy = max(hr, 0.018)
+        else:
+            hy = 0.5 * float(handle_box_size[0])
+
+        bars = grasp_board_bar_specs(panel_size)
+        rows: list[list[float]] = []
+        for y_sign, y_half in ((+1.0, hy), (-1.0, hr)):
+            y = y_sign * (half_t + so + y_half)
+            approach = torch.tensor([0.0, -y_sign, 0.0], dtype=torch.float32)
+            for _tag, px, pz, axis in bars:
+                pos = torch.tensor([px, y, pz], dtype=torch.float32)
+                axis_t = torch.tensor(list(axis), dtype=torch.float32)
+                rot = _frame_x_approach_z_up(
+                    approach.unsqueeze(0), axis_t.unsqueeze(0)
+                )[0]
+                quat = quat_from_matrix(rot.unsqueeze(0))[0]
+                rows.append([*pos.tolist(), *quat.tolist()])
+        return cls(poses=rows)
+
     @property
     def num_poses(self) -> int:
         if self.poses is not None:
@@ -275,4 +364,10 @@ class GraspPose(RobotAdaptation):
         ]
 
 
-__all__ = ["EEF_FORWARD_B", "eef_forward_w", "GraspPose"]
+__all__ = [
+    "EEF_FORWARD_B",
+    "GRASP_BOARD_BARS_PER_FACE",
+    "eef_forward_w",
+    "grasp_board_bar_specs",
+    "GraspPose",
+]

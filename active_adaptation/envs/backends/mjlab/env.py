@@ -63,7 +63,7 @@ class MjlabBackendEnv(_EnvBase):
             asset_entry, backend="mjlab", **robot_cfg
         )
         pending: list[tuple[str | None, Any]] = [
-            (None, adapt) for adapt in asset_spec.iter_adaptations()
+            (None, adapt) for adapt in asset_spec.iter_behaviors()
         ]
         asset_cfg = asset_spec.config
         sensors = {sensor.name: sensor for sensor in asset_spec.sensors}
@@ -86,10 +86,10 @@ class MjlabBackendEnv(_EnvBase):
                 asset_entry, backend="mjlab", **obj_spec
             )
             entities[obj_name] = object_spec.config
-            for adapt in object_spec.iter_adaptations():
+            for adapt in object_spec.iter_behaviors():
                 pending.append((obj_name, adapt))
 
-        self._pending_adaptations = pending
+        self._pending_behaviors = pending
 
         import active_adaptation.envs.sensors  # noqa: F401  # register sensor factories
 
@@ -149,7 +149,7 @@ class MjlabBackendEnv(_EnvBase):
         aa.bind_local_rank_device()
         self.sim = MjlabSimAdapter(sim, viewer, viewer_cfg=viewer_cfg, scene=scene)
         self.robot = self.scene.articulations["robot"]
-        self._bind_pending_adaptations()
+        self._bind_pending_behaviors()
 
     def _make_viewer_cfg(self, viewer_config_cls):
         lookat = tuple(float(v) for v in self.cfg.viewer.lookat)

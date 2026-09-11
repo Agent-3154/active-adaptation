@@ -1,6 +1,6 @@
-"""Gripper semantic adaptation: EEF + finger indices and closedness.
+"""Gripper semantic behavior: EEF + finger indices and closedness.
 
-Commands / rewards should use ``env.require_adaptation("gripper")`` instead of
+Commands / rewards should use ``env.require_behavior("gripper")`` instead of
 re-resolving grasp / finger names in every term.
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Sequence
 import torch
 from typing_extensions import override
 
-from active_adaptation.envs.robots.adaptation import RobotAdaptation
+from active_adaptation.envs.behaviors.behavior import EntityBehavior
 from active_adaptation.envs.utils import find_bodies, find_joints
 
 if TYPE_CHECKING:
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class GripperAdaptation(RobotAdaptation):
+class GripperBehavior(EntityBehavior):
     """Expose EEF body, finger joints/bodies, and a normalized closedness signal.
 
     **Frame:** unless an asset documents otherwise, the EEF body ``+X`` is
@@ -58,7 +58,7 @@ class GripperAdaptation(RobotAdaptation):
         eef_ids, eef_names = find_bodies(self.asset, self.eef_body_name_cfg)
         if len(eef_ids) != 1:
             raise ValueError(
-                f"GripperAdaptation: expected one EEF body for "
+                f"GripperBehavior: expected one EEF body for "
                 f"{self.eef_body_name_cfg!r}, got {eef_names}"
             )
         self.eef_body_id = int(eef_ids[0])
@@ -67,7 +67,7 @@ class GripperAdaptation(RobotAdaptation):
         joint_ids, joint_names = find_joints(self.asset, self.joint_names_cfg)
         if not joint_ids:
             raise ValueError(
-                f"GripperAdaptation: no joints matched {self.joint_names_cfg!r}"
+                f"GripperBehavior: no joints matched {self.joint_names_cfg!r}"
             )
         self.joint_ids = torch.as_tensor(
             joint_ids, device=self.device, dtype=torch.long
@@ -85,7 +85,7 @@ class GripperAdaptation(RobotAdaptation):
         body_ids, body_names = find_bodies(self.asset, self.body_names_cfg)
         if not body_ids:
             raise ValueError(
-                f"GripperAdaptation: no bodies matched {self.body_names_cfg!r}"
+                f"GripperBehavior: no bodies matched {self.body_names_cfg!r}"
             )
         self.body_ids = torch.as_tensor(body_ids, device=self.device, dtype=torch.long)
         self.body_names = list(body_names)
@@ -112,4 +112,4 @@ class GripperAdaptation(RobotAdaptation):
         return 1.0 - self.openness()
 
 
-__all__ = ["GripperAdaptation"]
+__all__ = ["GripperBehavior"]

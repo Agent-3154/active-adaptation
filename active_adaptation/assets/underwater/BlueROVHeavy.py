@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from typing import Literal
 
-from active_adaptation.envs.robots.underwater import HydrodynamicsCfg, UnderwaterRobot
+from active_adaptation.envs.behaviors.underwater import HydrodynamicsCfg, UnderwaterRobot
 from active_adaptation.registry import Registry
 from active_adaptation import ROBOT_MODEL_DIR
 
@@ -102,7 +102,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
     return AssetSpec(
         config=asset_cfg,
         sensors={},
-        adaptations=(
+        behaviors=(
             UnderwaterRobot(
                 cfg=HydrodynamicsCfg(
                     volume=VOLUME,

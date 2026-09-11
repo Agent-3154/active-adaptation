@@ -13,7 +13,7 @@ from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
-    from active_adaptation.envs.robots.underwater import UnderwaterRobot, UnderwaterRobotData
+    from active_adaptation.envs.behaviors.underwater import UnderwaterRobot, UnderwaterRobotData
 
 
 def _gain(value: float | Sequence[float], dim: int, device: torch.device) -> torch.Tensor:
@@ -127,7 +127,7 @@ class _AllocatedTwistAction(Action):
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
-        self.underwater = env.require_adaptation("underwater")
+        self.underwater = env.require_behavior("underwater")
         self.uw = cast("UnderwaterRobotData", self.asset.data_underwater)
         self.action_dim = self._action_dim
         self.action_buf = torch.zeros(self.num_envs, 4, self.action_dim, device=self.device)

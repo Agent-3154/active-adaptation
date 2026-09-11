@@ -11,7 +11,7 @@ from active_adaptation.assets.underwater.BlueROVHeavy import (
     ROTOR_MAX_ROTATION_VEL_RAD_S,
     ROTOR_TIME_CONSTANTS,
 )
-from active_adaptation.envs.robots.underwater import HydrodynamicsCfg, UnderwaterRobot
+from active_adaptation.envs.behaviors.underwater import HydrodynamicsCfg, UnderwaterRobot
 from active_adaptation.registry import Registry
 from active_adaptation import ROBOT_MODEL_DIR
 
@@ -175,7 +175,7 @@ def make_isaaclab_cfg(self_collisions: bool = False, fixed_base: bool = False):
     return AssetSpec(
         config=asset_cfg,
         sensors={},
-        adaptations=(
+        behaviors=(
             UnderwaterRobot(
                 cfg=HydrodynamicsCfg(
                     volume=VOLUME,
@@ -284,7 +284,7 @@ def make_mjlab_cfg(motrix: bool = False, fixed_base: bool = False):
     return AssetSpec(
         config=cfg,
         sensors=(),
-        adaptations=(
+        behaviors=(
             UnderwaterRobot(
                 cfg=HydrodynamicsCfg(
                     volume=VOLUME,

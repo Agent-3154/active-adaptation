@@ -6,6 +6,10 @@ multiple collision geoms (box top / seat / back + capsule legs).
 Articulated fixtures (``door``, ``drawer``): fixed-base multi-body MJCF built
 procedurally, Isaac via articulated USD spawn, mjlab via ``EntityCfg.spec_fn``.
 
+Grasp practice (``grasp_board``): static panel with **box** bars on **+Y** and
+**capsule** bars on **−Y** (no joints; always kinematic / fixed-base). Factories
+attach ``GraspPose.for_grasp_board`` (``board.grasp``) with mid-bar candidates.
+
 YAML example::
 
     objects:
@@ -22,10 +26,14 @@ YAML example::
       drawer:
         _target_: dummy_drawer
         cabinet_dimensions: [0.5, 0.4, 0.55]
+      board:
+        _target_: dummy_grasp_board
+        panel_size: [0.5, 0.04, 0.6]
+        collision_only: true
 
-Factories return ``AssetSpec`` with a ``GraspPose`` adaptation of prescribed
+Factories return ``AssetSpec`` with a ``GraspPose`` behavior of prescribed
 poses at each leg midpoint looking at the center axis
-(``env.require_adaptation("table.grasp")``).
+(``env.require_behavior("table.grasp")``).
 """
 
 from __future__ import annotations
@@ -265,6 +273,188 @@ def build_chair_spec(
             fromto=[x, y, 0.0, x, y, float(leg_length)],
             rgba=rgba_t,
         )
+    return spec
+
+
+_DEFAULT_GRASP_BOARD_PANEL_RGBA = (0.28, 0.30, 0.34, 1.0)
+_DEFAULT_GRASP_BOARD_BOX_RGBA = (0.55, 0.42, 0.28, 1.0)
+_DEFAULT_GRASP_BOARD_CAPSULE_RGBA = (0.42, 0.55, 0.48, 1.0)
+
+
+def build_grasp_board_spec(
+    *,
+    panel_size: Sequence[float] = (1.1, 0.04, 1.0),
+    handle_length: float = 0.16,
+    handle_radius: float = 0.022,
+    handle_box_size: Sequence[float] | None = (0.04, 0.03),
+    standoff: float = 0.01,
+    panel_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA,
+    box_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_BOX_RGBA,
+    capsule_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_CAPSULE_RGBA,
+    mass: float | None = None,
+    body_name: str = "board",
+):
+    """Static grasp practice board: panel + box bars (+Y) + capsule bars (−Y).
+
+    Single body, no joints. Object frame: origin at floor under panel center;
+    **+Z** up, **+X** along width, **+Y** through the panel (box face).
+    ``panel_size`` is full ``(width, thickness, height)``.
+
+    Each face gets a 3×4 grid (``grasp_board_bar_specs``): bottom / mid / top
+    × horizontal, vertical, −45°, +45° (columns spaced in **X**).
+    """
+    import math
+    import mujoco
+
+    from active_adaptation.envs.behaviors.grasp_pose import grasp_board_bar_specs
+
+    width, thickness, height = _as_float_tuple(panel_size, 3)
+    hl = float(handle_length)
+    hr = float(handle_radius)
+    so = float(standoff)
+    if width <= 0 or thickness <= 0 or height <= 0:
+        raise ValueError(f"panel_size must be positive, got {panel_size}")
+    if hl <= 0 or hr <= 0:
+        raise ValueError("handle_length and handle_radius must be positive")
+    if so < 0:
+        raise ValueError(f"standoff must be >= 0, got {standoff}")
+
+    half_w, half_t, half_h = width * 0.5, thickness * 0.5, height * 0.5
+    hx, hy, hz = _handle_box_half_extents(
+        handle_length=hl, handle_radius=hr, handle_box_size=handle_box_size
+    )
+    # Vertical box: thin cross-section in X, protrusion in Y, length in Z.
+    v_half_x = hz
+    v_half_y = hy
+    v_half_z = 0.5 * hl
+
+    panel_rgba_t = _rgba(panel_rgba)
+    box_rgba_t = _rgba(box_rgba)
+    cap_rgba_t = _rgba(capsule_rgba)
+
+    half_a = 0.25 * math.pi  # 45°
+    qw = math.cos(0.5 * half_a)
+    qy = math.sin(0.5 * half_a)
+    quat_p45 = (qw, 0.0, qy, 0.0)   # +45° about Y → axis (+X,+Z)
+    quat_m45 = (qw, 0.0, -qy, 0.0)  # −45° about Y → axis (+X,−Z)
+    half_hl = 0.5 * hl
+    diag = half_hl / math.sqrt(2.0)
+
+    bars = grasp_board_bar_specs((width, thickness, height))
+
+    spec = mujoco.MjSpec()
+    body = spec.worldbody.add_body(name=body_name)
+    if mass is not None:
+        body.mass = float(mass)
+
+    body.add_geom(
+        name=f"{body_name}_panel_collision",
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=(half_w, half_t, half_h),
+        pos=(0.0, 0.0, half_h),
+        rgba=panel_rgba_t,
+    )
+
+    def _add_box_bar(*, name: str, size, pos, quat=None, rgba=None) -> None:
+        geom = body.add_geom(
+            name=name,
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=list(size),
+            pos=list(pos),
+            rgba=rgba,
+        )
+        if quat is not None:
+            geom.quat = list(quat)
+
+    def _add_face(*, y_sign: float, shape: HandleShape, rgba) -> None:
+        side = "box" if shape == "box" else "capsule"
+        y_center = y_sign * (half_t + so + (hy if shape == "box" else hr))
+
+        for tag, x0, z0, _axis in bars:
+            name = f"{body_name}_{side}_{tag}_collision"
+            if tag.endswith("_h"):
+                if shape == "box":
+                    _add_box_bar(
+                        name=name,
+                        size=(hx, hy, hz),
+                        pos=(x0, y_center, z0),
+                        rgba=rgba,
+                    )
+                else:
+                    _add_capsule_leg(
+                        body,
+                        name=name,
+                        radius=hr,
+                        fromto=[
+                            x0 - half_hl, y_center, z0,
+                            x0 + half_hl, y_center, z0,
+                        ],
+                        rgba=rgba,
+                    )
+            elif tag.endswith("_v"):
+                if shape == "box":
+                    _add_box_bar(
+                        name=name,
+                        size=(v_half_x, v_half_y, v_half_z),
+                        pos=(x0, y_center, z0),
+                        rgba=rgba,
+                    )
+                else:
+                    _add_capsule_leg(
+                        body,
+                        name=name,
+                        radius=hr,
+                        fromto=[
+                            x0, y_center, z0 - half_hl,
+                            x0, y_center, z0 + half_hl,
+                        ],
+                        rgba=rgba,
+                    )
+            elif tag.endswith("_m45"):
+                if shape == "box":
+                    _add_box_bar(
+                        name=name,
+                        size=(hx, hy, hz),
+                        pos=(x0, y_center, z0),
+                        quat=quat_m45,
+                        rgba=rgba,
+                    )
+                else:
+                    _add_capsule_leg(
+                        body,
+                        name=name,
+                        radius=hr,
+                        fromto=[
+                            x0 - diag, y_center, z0 + diag,  # (−X,+Z) → (+X,−Z)
+                            x0 + diag, y_center, z0 - diag,
+                        ],
+                        rgba=rgba,
+                    )
+            elif tag.endswith("_p45"):
+                if shape == "box":
+                    _add_box_bar(
+                        name=name,
+                        size=(hx, hy, hz),
+                        pos=(x0, y_center, z0),
+                        quat=quat_p45,
+                        rgba=rgba,
+                    )
+                else:
+                    _add_capsule_leg(
+                        body,
+                        name=name,
+                        radius=hr,
+                        fromto=[
+                            x0 - diag, y_center, z0 - diag,
+                            x0 + diag, y_center, z0 + diag,
+                        ],
+                        rgba=rgba,
+                    )
+            else:
+                raise ValueError(f"Unknown grasp-board bar tag: {tag!r}")
+
+    _add_face(y_sign=+1.0, shape="box", rgba=box_rgba_t)
+    _add_face(y_sign=-1.0, shape="capsule", rgba=cap_rgba_t)
     return spec
 
 
@@ -762,6 +952,11 @@ def _usd_from_mjspec_rigid(stage, prim_path: str, spec) -> object:
                 cube.GetPrim().GetAttribute("xformOp:translate").Set(
                     Gf.Vec3f(float(geom.pos[0]), float(geom.pos[1]), float(geom.pos[2]))
                 )
+                # MuJoCo geom quat is wxyz (identity = 1,0,0,0).
+                qw, qx, qy, qz = (float(v) for v in geom.quat)
+                cube.GetPrim().GetAttribute("xformOp:orient").Set(
+                    Gf.Quatf(qw, qx, qy, qz)
+                )
             case mujoco.mjtGeom.mjGEOM_CAPSULE:
                 fromto = np.array(geom.fromto, dtype=float)
                 if np.allclose(fromto, 0.0):
@@ -877,6 +1072,10 @@ def _usd_add_body_geoms(stage, xform, mjbody) -> None:
                 )
                 cube.GetPrim().GetAttribute("xformOp:translate").Set(
                     Gf.Vec3f(float(geom.pos[0]), float(geom.pos[1]), float(geom.pos[2]))
+                )
+                qw, qx, qy, qz = (float(v) for v in geom.quat)
+                cube.GetPrim().GetAttribute("xformOp:orient").Set(
+                    Gf.Quatf(qw, qx, qy, qz)
                 )
             case mujoco.mjtGeom.mjGEOM_CAPSULE:
                 fromto = np.array(geom.fromto, dtype=float)
@@ -1015,6 +1214,19 @@ def _get_furniture_spawner_cls():
                 mass=None,
                 body_name=cfg.body_name,
             )
+        elif cfg.kind == "grasp_board":
+            spec = build_grasp_board_spec(
+                panel_size=cfg.panel_size,
+                handle_length=cfg.handle_length,
+                handle_radius=cfg.handle_radius,
+                handle_box_size=cfg.handle_box_size,
+                standoff=cfg.standoff,
+                panel_rgba=cfg.panel_rgba,
+                box_rgba=cfg.box_rgba,
+                capsule_rgba=cfg.capsule_rgba,
+                mass=None,
+                body_name=cfg.body_name,
+            )
         else:
             raise ValueError(f"Unknown furniture kind: {cfg.kind}")
 
@@ -1069,6 +1281,15 @@ def _get_furniture_spawner_cls():
         seat_size: tuple[float, float, float] = (0.42, 0.42, 0.04)
         back_height: float = 0.42
         back_thickness: float = 0.04
+        # grasp_board fields
+        panel_size: tuple[float, float, float] = (1.1, 0.04, 1.0)
+        handle_length: float = 0.16
+        handle_radius: float = 0.022
+        handle_box_size: tuple[float, float] | None = (0.04, 0.03)
+        standoff: float = 0.01
+        panel_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA
+        box_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_BOX_RGBA
+        capsule_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_CAPSULE_RGBA
         rgba: tuple[float, float, float, float] = _DEFAULT_RGBA
         physics_material_path: str = "material"
         physics_material: Any = None
@@ -1237,7 +1458,7 @@ def _make_furniture_mjlab(
 
 def _make_furniture(backend: Backend, kind: str, **kwargs):
     from active_adaptation.assets.asset_cfg import AssetSpec
-    from active_adaptation.envs.robots.grasp_pose import GraspPose
+    from active_adaptation.envs.behaviors.grasp_pose import GraspPose
 
     pos = _as_float_tuple(kwargs.pop("pos", _DEFAULT_POS), 3)
     rot = _as_float_tuple(kwargs.pop("rot", _DEFAULT_ROT), 4)
@@ -1277,12 +1498,12 @@ def _make_furniture(backend: Backend, kind: str, **kwargs):
     else:
         raise ValueError(f"Invalid backend: {backend}")
 
-    adaptations = ()
+    behaviors = ()
     if attach_grasp:
-        adaptations = (
+        behaviors = (
             GraspPose.for_legs(corners, leg_length=leg_length, leg_radius=leg_radius),
         )
-    return AssetSpec(config=cfg, adaptations=adaptations)
+    return AssetSpec(config=cfg, behaviors=behaviors)
 
 
 # ---------------------------------------------------------------------------
@@ -1307,7 +1528,7 @@ def make_table(
 ):
     """Procedural table (box top + capsule legs). Non-articulated rigid body.
 
-    Returns ``AssetSpec`` with prescribed leg-midpoint ``GraspPose`` adaptations
+    Returns ``AssetSpec`` with prescribed leg-midpoint ``GraspPose`` behaviors
     (disable with ``attach_grasp=False``).
     """
     return _make_furniture(
@@ -1350,7 +1571,7 @@ def make_chair(
 ):
     """Procedural chair (box seat/back + capsule legs). Non-articulated rigid body.
 
-    Returns ``AssetSpec`` with prescribed leg-midpoint ``GraspPose`` adaptations
+    Returns ``AssetSpec`` with prescribed leg-midpoint ``GraspPose`` behaviors
     (disable with ``attach_grasp=False``).
     """
     return _make_furniture(
@@ -1372,6 +1593,158 @@ def make_chair(
         activate_contact_sensors=activate_contact_sensors,
         attach_grasp=attach_grasp,
     )
+
+
+def make_grasp_board(
+    backend: Backend,
+    panel_size: Sequence[float] = (1.1, 0.04, 1.0),
+    handle_length: float = 0.16,
+    handle_radius: float = 0.022,
+    handle_box_size: Sequence[float] | None = (0.04, 0.03),
+    standoff: float = 0.01,
+    panel_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA,
+    box_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_BOX_RGBA,
+    capsule_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_CAPSULE_RGBA,
+    mass: float = 10.0,
+    pos: Sequence[float] = _DEFAULT_POS,
+    rot: Sequence[float] = _DEFAULT_ROT,
+    collision_only: bool = True,
+    activate_contact_sensors: bool = True,
+    attach_grasp: bool = True,
+    name: str = "board",
+):
+    """Static / kinematic grasp practice board (never a falling free body).
+
+    Panel + box bars on **+Y**, capsules on **−Y**. No joints. Each face is a
+    3×4 grid (bottom/mid/top × hori/vert/−45°/+45°).
+
+    - ``collision_only=True`` (default): Isaac ``AssetBaseCfg`` / mjlab fixed body
+      (pedestal-style static collider).
+    - ``collision_only=False``: still **kinematic** (Isaac ``kinematic_enabled``;
+      mjlab fixed-base, no freejoint) so the board cannot tip or fall. Use this
+      when you want a RigidObject view / contact sensors without dynamics.
+
+    Returns ``AssetSpec`` with ``GraspPose`` (``board.grasp``) of mid-bar
+    candidates (disable with ``attach_grasp=False``).
+    """
+    from active_adaptation.assets.asset_cfg import AssetSpec
+    from active_adaptation.envs.behaviors.grasp_pose import GraspPose
+
+    panel_t = _as_float_tuple(panel_size, 3)
+    box_size_t = (
+        None if handle_box_size is None else _as_float_tuple(handle_box_size, 2)
+    )
+    pos_t = _as_float_tuple(pos, 3)
+    rot_t = _as_float_tuple(rot, 4)
+    panel_rgba_t = _rgba(panel_rgba)
+    box_rgba_t = _rgba(box_rgba)
+    cap_rgba_t = _rgba(capsule_rgba)
+
+    if backend == "isaaclab":
+        import isaaclab.sim as sim_utils
+        from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
+
+        ProceduralFurnitureCfg = _get_furniture_spawner_cls()
+        if collision_only:
+            spawn_kw = _isaac_spawn_kwargs(
+                mass=mass,
+                collision_only=True,
+                activate_contact_sensors=activate_contact_sensors,
+            )
+        else:
+            # Kinematic rigid body: contacts ok, gravity / free motion off.
+            spawn_kw = dict(
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    contact_offset=0.02,
+                    rest_offset=0.0,
+                ),
+                physics_material=sim_utils.RigidBodyMaterialCfg(
+                    static_friction=0.8,
+                    dynamic_friction=0.8,
+                    restitution=0.0,
+                ),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    rigid_body_enabled=True,
+                    kinematic_enabled=True,
+                    disable_gravity=True,
+                    max_depenetration_velocity=1.0,
+                ),
+                mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+                activate_contact_sensors=activate_contact_sensors,
+            )
+        spawn = ProceduralFurnitureCfg(
+            kind="grasp_board",
+            body_name=name,
+            panel_size=panel_t,
+            handle_length=float(handle_length),
+            handle_radius=float(handle_radius),
+            handle_box_size=box_size_t,
+            standoff=float(standoff),
+            panel_rgba=panel_rgba_t,
+            box_rgba=box_rgba_t,
+            capsule_rgba=cap_rgba_t,
+            **spawn_kw,
+        )
+        if collision_only:
+            cfg = AssetBaseCfg(
+                spawn=spawn,
+                init_state=AssetBaseCfg.InitialStateCfg(pos=pos_t, rot=rot_t),
+            )
+        else:
+            cfg = RigidObjectCfg(
+                spawn=spawn,
+                init_state=RigidObjectCfg.InitialStateCfg(pos=pos_t, rot=rot_t),
+            )
+    elif backend == "mjlab":
+        from active_adaptation.assets.asset_cfg import EntityCfg
+        from mjlab.utils.spec_config import CollisionCfg
+
+        def spec_fn():
+            # Always fixed-base (no freejoint): kinematic / static fixture.
+            return build_grasp_board_spec(
+                panel_size=panel_t,
+                handle_length=handle_length,
+                handle_radius=handle_radius,
+                handle_box_size=box_size_t,
+                standoff=standoff,
+                panel_rgba=panel_rgba_t,
+                box_rgba=box_rgba_t,
+                capsule_rgba=cap_rgba_t,
+                mass=None if collision_only else mass,
+                body_name=name,
+            )
+
+        cfg = EntityCfg(
+            init_state=EntityCfg.InitialStateCfg(pos=pos_t, rot=rot_t),
+            spec_fn=spec_fn,
+            articulation=None,
+            collisions=(
+                CollisionCfg(
+                    geom_names_expr=(".*_collision",),
+                    contype=1,
+                    conaffinity=1,
+                    condim=3,
+                    priority=0,
+                    solref=(0.02, 1),
+                    friction=(1.0, 5e-3, 5e-4),
+                ),
+            ),
+        )
+    else:
+        raise ValueError(f"Invalid backend: {backend}")
+
+    behaviors: list = []
+    if attach_grasp:
+        behaviors.append(
+            GraspPose.for_grasp_board(
+                panel_size=panel_t,
+                handle_length=float(handle_length),
+                handle_radius=float(handle_radius),
+                handle_box_size=box_size_t,
+                standoff=float(standoff),
+            )
+        )
+    return AssetSpec(config=cfg, behaviors=tuple(behaviors))
 
 
 _DOOR_SPAWNER_CLS = None
@@ -1516,13 +1889,13 @@ def make_door(
     frame frame. ``rgba`` is panel/handle; ``frame_rgba`` is jambs/lintel.
     ``door_joint`` defaults to **zero stiffness** (free hinge + light damping).
 
-    Adaptations (disable with flags):
-    - ``DoorAdaptation`` (``door.door``): lock / push-pull / handle unlock
+    Behaviors (disable with flags):
+    - ``DoorBehavior`` (``door.door``): lock / push-pull / handle unlock
     - ``GraspPose`` (``door.grasp``): prescribed handle-face grasps
     """
     from active_adaptation.assets.asset_cfg import AssetSpec
-    from active_adaptation.envs.robots.door import DoorAdaptation
-    from active_adaptation.envs.robots.grasp_pose import GraspPose
+    from active_adaptation.envs.behaviors.door import DoorBehavior
+    from active_adaptation.envs.behaviors.grasp_pose import GraspPose
 
     door_dimensions_t = _as_float_tuple(door_dimensions, 3)
     handle_position_t = _as_float_tuple(handle_position, 2)
@@ -1667,17 +2040,17 @@ def make_door(
     else:
         raise ValueError(f"Invalid backend: {backend}")
 
-    adaptations: list = []
+    behaviors: list = []
     if attach_door:
-        adaptations.append(
-            DoorAdaptation(
+        behaviors.append(
+            DoorBehavior(
                 open_direction=open_direction,  # type: ignore[arg-type]
                 handle_unlock_threshold_deg=handle_unlock_threshold_deg,
                 initially_locked=initially_locked,
             )
         )
     if attach_grasp:
-        adaptations.append(
+        behaviors.append(
             GraspPose.for_door_handles(
                 door_thickness=door_dimensions_t[1],
                 handle_radius=float(handle_radius),
@@ -1685,7 +2058,7 @@ def make_door(
                 handle_box_size=box_size_t,
             )
         )
-    return AssetSpec(config=cfg, adaptations=tuple(adaptations))
+    return AssetSpec(config=cfg, behaviors=tuple(behaviors))
 
 
 _DRAWER_SPAWNER_CLS = None
@@ -1836,13 +2209,13 @@ def make_drawer(
     ``handle_shape``: ``"capsule"`` or ``"box"``; optional ``handle_box_size``
     as full ``(depth_y, height_z)``.
 
-    Adaptations (disable with flags):
-    - ``DrawerAdaptation`` (``drawer.drawer``): slide joint accessors
+    Behaviors (disable with flags):
+    - ``DrawerBehavior`` (``drawer.drawer``): slide joint accessors
     - ``GraspPose`` (``drawer.grasp``): prescribed front-handle grasp (local)
     """
     from active_adaptation.assets.asset_cfg import AssetSpec
-    from active_adaptation.envs.robots.drawer import DrawerAdaptation
-    from active_adaptation.envs.robots.grasp_pose import GraspPose
+    from active_adaptation.envs.behaviors.drawer import DrawerBehavior
+    from active_adaptation.envs.behaviors.grasp_pose import GraspPose
 
     n_drawers = int(num_drawers)
     if n_drawers < 1:
@@ -1986,18 +2359,18 @@ def make_drawer(
     else:
         raise ValueError(f"Invalid backend: {backend}")
 
-    adaptations: list = []
+    behaviors: list = []
     if attach_drawer:
-        adaptations.append(DrawerAdaptation())
+        behaviors.append(DrawerBehavior())
     if attach_grasp:
-        adaptations.append(
+        behaviors.append(
             GraspPose.for_drawer_handle(
                 handle_radius=float(handle_radius),
                 handle_shape=shape,
                 handle_box_size=box_size_t,
             )
         )
-    return AssetSpec(config=cfg, adaptations=tuple(adaptations))
+    return AssetSpec(config=cfg, behaviors=tuple(behaviors))
 
 
 # ---------------------------------------------------------------------------
@@ -2082,6 +2455,7 @@ def make_dummy_basket_platform(backend: Backend):
 
 registry.register("asset", "dummy_table", make_table)
 registry.register("asset", "dummy_chair", make_chair)
+registry.register("asset", "dummy_grasp_board", make_grasp_board)
 registry.register("asset", "dummy_door", make_door)
 registry.register("asset", "dummy_drawer", make_drawer)
 registry.register("asset", "dummy_stand", make_dummy_stand)

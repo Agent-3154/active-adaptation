@@ -8,6 +8,14 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Changed
+
+- **Entity behaviors** — renamed `RobotAdaptation` → `EntityBehavior`;
+  package `envs/robots/` → `envs/behaviors/`. API: `AssetSpec.behaviors`,
+  `env.behaviors`, `require_behavior`. Subclasses: `GripperBehavior`,
+  `DoorBehavior`, `DrawerBehavior` (`UnderwaterRobot` kept). No compat
+  aliases for the old Adaptation names.
+
 ### Added
 
 - **Robot adaptations** (`envs/robots/adaptation.py`) — composable

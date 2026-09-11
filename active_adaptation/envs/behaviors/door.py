@@ -1,7 +1,7 @@
-"""Door articulation adaptation: lock, open direction, handle unlock.
+"""Door articulation behavior: lock, open direction, handle unlock.
 
-Attach via ``AssetSpec(adaptations=(DoorAdaptation(), ...))``. Lookup with
-``env.require_adaptation("door.door")`` when the YAML object key is ``door``.
+Attach via ``AssetSpec(behaviors=(DoorBehavior(), ...))``. Lookup with
+``env.require_behavior("door.door")`` when the YAML object key is ``door``.
 
 **Locking:** while locked, the hinge (``door_joint``) is held at ``0`` with high
 stiffness (Isaac) and/or near-zero joint limits. Unlock when
@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal, Sequence
 import torch
 from typing_extensions import override
 
-from active_adaptation.envs.robots.adaptation import RobotAdaptation
+from active_adaptation.envs.behaviors.behavior import EntityBehavior
 from active_adaptation.envs.utils import find_joints
 
 if TYPE_CHECKING:
@@ -47,7 +47,7 @@ def _parse_open_direction(direction: OpenDirection | int | str) -> int:
     raise ValueError(f"open_direction must be 'push' or 'pull', got {direction!r}")
 
 
-class DoorAdaptation(RobotAdaptation):
+class DoorBehavior(EntityBehavior):
     """Control door lock, open direction, and handle-based unlock."""
 
     name = "door"
@@ -100,13 +100,13 @@ class DoorAdaptation(RobotAdaptation):
         door_ids, door_names = find_joints(self.asset, self.door_joint_name_cfg)
         if len(door_ids) != 1:
             raise ValueError(
-                f"DoorAdaptation: expected one door joint "
+                f"DoorBehavior: expected one door joint "
                 f"{self.door_joint_name_cfg!r}, got {door_names}"
             )
         handle_ids, handle_names = find_joints(self.asset, self.handle_joint_name_cfg)
         if len(handle_ids) != 1:
             raise ValueError(
-                f"DoorAdaptation: expected one handle joint "
+                f"DoorBehavior: expected one handle joint "
                 f"{self.handle_joint_name_cfg!r}, got {handle_names}"
             )
         self.door_joint_id = int(door_ids[0])
@@ -340,4 +340,4 @@ class DoorAdaptation(RobotAdaptation):
         model.actuator_gainprm[env_cpu, vel_i, 0] = kd_cpu
 
 
-__all__ = ["DoorAdaptation", "DIR_PULL", "DIR_PUSH", "OpenDirection"]
+__all__ = ["DoorBehavior", "DIR_PULL", "DIR_PUSH", "OpenDirection"]

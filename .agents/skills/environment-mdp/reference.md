@@ -115,7 +115,7 @@ _step(tensordict)
 | each `input_manager` | Explicit `startup` / `reset`; `pre_step` / `post_step` / `debug_draw` via `_add_mdp_component` when overridden |
 | Observation / Reward | Explicit via `ObsGroup` / `RewardGroup` (`startup` / `reset` / `update`) |
 | term / randomization | Explicit `startup` / `reset`; overridden `pre_step` / `post_step` / `debug_draw` via `_add_mdp_component` |
-| robot adaptations | Explicit lifecycle from `_EnvBase` |
+| robot behaviors | Explicit lifecycle from `_EnvBase` |
 
 Command / Reward `update` are sealed; subclasses implement `_update`. See `check_update_signature`.
 
@@ -292,7 +292,7 @@ def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
 
 # env_base._reset (after scene.reset)
 self.episode_origin[env_ids] = self.command_manager.reset(env_ids, tensordict)
-for adapt in self.adaptations.values():
+for adapt in self.behaviors.values():
     adapt.reset(env_ids, tensordict)
 for group in self.observation_groups.values():
     group.reset(env_ids, tensordict)

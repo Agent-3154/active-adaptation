@@ -57,26 +57,24 @@ Thruster commands are converted to forces in three stages:
 Generated thrust is applied along local rotor x-axis as body-frame force for
 each rotor body.
 
-## Adaptation Lifecycle and Integration
+## Behavior Lifecycle and Integration
 
-Robot behavior beyond the articulation is composed via **adaptations**
-(:class:`~active_adaptation.envs.robots.adaptation.RobotAdaptation`):
+Entity-attached logic beyond the articulation is composed via **behaviors**
+(:class:`~active_adaptation.envs.behaviors.behavior.EntityBehavior`):
 
 - Asset declarations return
-  ``AssetSpec(config=..., sensors=..., adaptations=(UnderwaterRobot(...),))``.
-  ``wrapper=`` remains a deprecated single-adaptation alias.
-- Isaac / mjlab backends stash ``asset_spec.iter_adaptations()``, build the
-  scene, then call ``env._bind_robot_adaptations(...)``.
-- Bound instances live on ``env.adaptations`` (keyed by ``adapt.name``) and are
+  ``AssetSpec(config=..., sensors=..., behaviors=(UnderwaterRobot(...),))``.
+- Isaac / mjlab backends stash ``asset_spec.iter_behaviors()``, build the
+  scene, then call ``env._bind_pending_behaviors()``.
+- Bound instances live on ``env.behaviors`` (keyed by ``behavior.name``) and are
   driven **explicitly** from ``_EnvBase`` (``startup`` / ``reset`` / ``pre_step``
   / ``post_step`` / ``update`` / ``debug_draw``) — not via ``_XXX_callbacks``.
-- Lookup: ``env.require_adaptation("underwater")`` /
-  ``env.require_adaptation("gripper")``.
-- ``env.robot_wrapper`` remains a compatibility alias (prefers ``"underwater"``).
+- Lookup: ``env.require_behavior("underwater")`` /
+  ``env.require_behavior("gripper")``.
 
-``UnderwaterRobot.__init__`` / ``GripperAdaptation.__init__`` keep only
+``UnderwaterRobot.__init__`` / ``GripperBehavior.__init__`` keep only
 config that does not depend on the parsed robot. Indexing and tensor allocation
-happen in ``_initialize(env, *, robot=...)``.
+happen in ``_initialize(env, *, asset=...)``.
 
 ## Stepping Logic
 
@@ -93,12 +91,10 @@ happen in ``_initialize(env, *, robot=...)``.
 
 ## Why This Split
 
-- Keeping `AssetSpec.wrapper` as an instance avoids backend-specific constructor
-  signatures in each asset file.
-- Deferring heavy setup to `_initialize(...)` ensures wrapper allocation is
-  consistent with final robot instance/device/num_envs.
-- Callback registration keeps the wrapper backend-agnostic while fitting the
-  environment's existing lifecycle hooks.
+- Declaring behaviors on ``AssetSpec`` keeps asset factories free of env/device.
+- Deferring heavy setup to ``_initialize(...)`` ensures allocation matches the
+  final entity instance / device / ``num_envs``.
+- Explicit lifecycle calls from ``_EnvBase`` keep behaviors backend-agnostic.
 
 ## Real2Sim / System Identification
 

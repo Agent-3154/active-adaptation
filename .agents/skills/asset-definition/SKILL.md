@@ -1,6 +1,6 @@
 ---
 name: asset-definition
-description: Define and register cross-backend robot/object assets in active-adaptation (Isaac Lab ArticulationCfg + mjlab EntityCfg via AssetSpec). Use when adding or editing files under assets/, wiring robot.name in cfg/task/, setting joint_names_simulation / body_names_simulation, contact sensors, actuators, URDF mimic / MJCF equality constraints, symmetry mappings, AssetSpec wrappers, mjlab spec_fn/CollisionCfg/ContactMatch, floating props, composing MJCF with assetx (aa-projects/assetx), publishing to ROBOT_MODEL_DIR, or cleaning up outdated mujoco-backend / in-repo MJCF patterns.
+description: Define and register cross-backend robot/object assets in active-adaptation (Isaac Lab ArticulationCfg + mjlab EntityCfg via AssetSpec). Use when adding or editing files under assets/, wiring robot.name in cfg/task/, setting joint_names_simulation / body_names_simulation, contact sensors, actuators, URDF mimic / MJCF equality constraints, symmetry mappings, AssetSpec behaviors, mjlab spec_fn/CollisionCfg/ContactMatch, floating props, composing MJCF with assetx (aa-projects/assetx), publishing to ROBOT_MODEL_DIR, or cleaning up outdated mujoco-backend / in-repo MJCF patterns.
 ---
 
 # Asset definition (active-adaptation)
@@ -14,7 +14,7 @@ Define robots and scene objects so **Isaac** and **mjlab** share one registry en
 - Canonical robot example: `active_adaptation/assets/quadrupeds/a2.py`
 - Composed robot (assetx → AA): `active_adaptation/assets/quadrupeds/a2_manipulator.py` + `aa-projects/assetx/examples/a2_piper.py`
 - Humanoid (multi-actuator): `active_adaptation/assets/humanoids/g1.py`
-- Wrapper pattern: `active_adaptation/assets/underwater/BlueROV.py` + `envs/robots/TEACHME.md`
+- Wrapper pattern: `active_adaptation/assets/underwater/BlueROV.py` + `envs/behaviors/TEACHME.md`
 - Backend consumers: `envs/backends/isaac/env.py`, `envs/backends/mjlab/env.py`
 - **Model composition (assetx):** `aa-projects/assetx/` — recipes assemble/transform MJCF; see [assetx pipeline](#assetx-model-pipeline)
 - Model cache (runtime): `ROBOT_MODEL_DIR` → `<repo>/.cache/aa-robot-models/` (HF `btx0424/aa-robot-models` for published bundles)
@@ -41,7 +41,7 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 
 ## Hard rules
 
-1. **Return `AssetSpec`** for articulated robots — `config` + optional `sensors` + optional `wrapper`. Do not hand raw Isaac/mjlab cfgs to the robot slot.
+1. **Return `AssetSpec`** for articulated robots — `config` + optional `sensors` + optional `behaviors`. Do not hand raw Isaac/mjlab cfgs to the robot slot.
 2. **Two factories + dispatcher** — `make_isaaclab_cfg()`, `make_mjlab_cfg()`, `make_cfg(backend: Literal["isaaclab", "mjlab"])`. Backends call with `"isaaclab"` or `"mjlab"` (not `"isaac"`).
 3. **Always set simulation order** — `joint_names_simulation` and `body_names_simulation` on both backend cfgs (same lists). MDP terms resolve against these via `find_joints` / `find_bodies`.
 4. **Share cross-backend constants** — `INIT_POS`, `INIT_JOINT_POS`, symmetry maps, effort/stiffness/damping, and the simulation name lists live at module top; only spawn/spec/actuator *types* differ per backend.
@@ -139,7 +139,7 @@ Reference factory: `assets/quadrupeds/a2_manipulator.py` (`robot.name: unitree_a
 |-------|------|
 | `config` | Backend articulation/entity cfg |
 | `sensors` | Isaac: **dict** name→cfg; mjlab: **tuple** of named cfgs |
-| `wrapper` | Optional instance (e.g. `UnderwaterRobot`); backend calls `_initialize` + lifecycle hooks |
+| `behaviors` | Sequence of `EntityBehavior` (e.g. `UnderwaterRobot`, `GripperBehavior`); bound after entities exist |
 
 ---
 
@@ -288,10 +288,10 @@ registry.register("asset", "unitree_a2", make_cfg)
 
 ---
 
-## Variants and adaptations
+## Variants and behaviors
 
 - **Composition:** extend base lists (see `a2_manipulator.py` appending arm joints/bodies onto A2 constants).
-- **`AssetSpec.adaptations`:** list of `RobotAdaptation` instances (config-only `__init__`); backend `_bind_robot_adaptations` after the robot exists; env calls lifecycle methods explicitly. `wrapper=` is a deprecated single-adaptation alias. See `envs/robots/TEACHME.md` and `GripperAdaptation` / `UnderwaterRobot`.
+- **`AssetSpec.behaviors`:** list of `EntityBehavior` instances (config-only `__init__`); bound via `_bind_pending_behaviors` after entities exist; env calls lifecycle methods explicitly. `See `envs/behaviors/TEACHME.md` and `GripperBehavior` / `UnderwaterRobot`.
 - **Isaac-only / mjlab-only:** raise `NotImplementedError` in the unsupported factory (e.g. BlueROV mjlab) rather than registering a broken cfg.
 
 ---

@@ -134,12 +134,14 @@ class body_angvel_penalty(Reward):
         weight: float,
         body_names: str | List[str] = ".*",
         mask: List[float] = [1.0, 1.0, 1.0],
+        square: bool = True,
         enabled: bool = True,
         track_var: bool = False,
     ):
         super().__init__(weight, enabled=enabled, track_var=track_var)
         self.body_names = body_names
         self.mask = mask
+        self.square = square
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -156,5 +158,47 @@ class body_angvel_penalty(Reward):
             body_angvel = self.asset.data.body_link_ang_vel_w[:, self.body_ids]
         else:
             raise ValueError(f"Unsupported backend: {self.env.backend}")
-        rew = -(body_angvel * self.mask).square().sum(dim=-1, keepdim=True)
+        if self.square:
+            rew = -(body_angvel * self.mask).square().sum(dim=-1, keepdim=True)
+        else:
+            rew = -(body_angvel * self.mask).norm(dim=-1, keepdim=True)
+        return rew.sum(1).reshape(self.num_envs, 1)
+
+
+class body_linvel_penalty(Reward):
+    """Penalize the linear velocity of the body."""
+
+    def __init__(
+        self,
+        weight: float,
+        body_names: str | List[str] = ".*",
+        mask: List[float] = [1.0, 1.0, 1.0],
+        square: bool = True,
+        enabled: bool = True,
+        track_var: bool = False,
+    ):
+        super().__init__(weight, enabled=enabled, track_var=track_var)
+        self.body_names = body_names
+        self.mask = mask
+        self.square = square
+
+    @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
+        self.asset = self.env.scene.entities["robot"]
+        self.body_ids = self.asset.find_bodies(self.body_names)[0]
+        self.body_ids = torch.tensor(self.body_ids, device=self.device)
+        self.mask = torch.tensor(self.mask, device=self.device)
+    
+    def _compute(self) -> torch.Tensor:
+        if self.env.backend == "isaaclab":
+            body_linvel = self.asset.data.body_com_lin_vel_w[:, self.body_ids]
+        elif self.env.backend == "mjlab":
+            body_linvel = self.asset.data.body_link_lin_vel_w[:, self.body_ids]
+        else:
+            raise ValueError(f"Unsupported backend: {self.env.backend}")
+        if self.square:
+            rew = -(body_linvel * self.mask).square().sum(dim=-1, keepdim=True)
+        else:
+            rew = -(body_linvel * self.mask).norm(dim=-1, keepdim=True)
         return rew.sum(1).reshape(self.num_envs, 1)

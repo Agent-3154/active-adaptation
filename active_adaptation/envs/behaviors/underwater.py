@@ -11,7 +11,7 @@ import torch
 from tensordict import TensorDictBase
 from typing_extensions import override
 
-from active_adaptation.envs.robots.adaptation import RobotAdaptation
+from active_adaptation.envs.behaviors.behavior import EntityBehavior
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
 from active_adaptation.utils.profiling import ScopedTimer
 import active_adaptation.utils.string as string_utils
@@ -193,8 +193,8 @@ class UnderwaterRobotData:
     hydro_torques_b: torch.Tensor  # (N, 3)
 
 
-class UnderwaterRobot(RobotAdaptation):
-    """Hydrodynamics + thruster adaptation (``env.adaptations["underwater"]``)."""
+class UnderwaterRobot(EntityBehavior):
+    """Hydrodynamics + thruster behavior (``env.behaviors["underwater"]``)."""
 
     name = "underwater"
 
@@ -720,6 +720,3 @@ class UnderwaterRobot(RobotAdaptation):
                 color=(0.2, 0.8, 1.0, 1.0),
             )
 
-
-# Prefer this name in new code; ``UnderwaterRobot`` kept for asset/compat imports.
-UnderwaterAdaptation = UnderwaterRobot

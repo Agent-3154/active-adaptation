@@ -1,16 +1,16 @@
-"""Asset adaptations: composable entity-attached behavior (not Articulation subclasses).
+"""Entity behaviors: composable entity-attached logic (not Articulation subclasses).
 
-An adaptation owns semantic indices / caches and optional physics hooks. Assets
+A behavior owns semantic indices / caches and optional physics hooks. Assets
 (robots **or** scene objects) declare a list on
 :class:`~active_adaptation.assets.asset_cfg.AssetSpec`; the env binds them after
 the entity exists and calls lifecycle methods explicitly.
 
 Examples: underwater hydrodynamics, gripper closedness, object grasp sampling.
 
-Lookup keys on ``env.adaptations``:
+Lookup keys on ``env.behaviors``:
 
-- Robot adaptations: ``adapt.name`` (e.g. ``"gripper"``).
-- Object adaptations: ``{scene_object_name}.{adapt.name}`` (e.g. ``"object.grasp"``).
+- Robot behaviors: ``behavior.name`` (e.g. ``"gripper"``).
+- Object behaviors: ``{scene_object_name}.{behavior.name}`` (e.g. ``"object.grasp"``).
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
 
-class RobotAdaptation:
+class EntityBehavior:
     """Asset-attached behavior (composition over inheritance).
 
     Subclasses must set :attr:`name`. Construct with config only; bind via
@@ -63,7 +63,7 @@ class RobotAdaptation:
 
     @property
     def robot(self) -> Any | None:
-        """Compatibility alias for :attr:`asset` (robot adaptations)."""
+        """Compatibility alias for :attr:`asset` (robot-bound behaviors)."""
         return self.asset
 
     @robot.setter
@@ -114,7 +114,4 @@ class RobotAdaptation:
         pass
 
 
-# Forward-looking alias; keep ``RobotAdaptation`` as the public name for now.
-Adaptation = RobotAdaptation
-
-__all__ = ["RobotAdaptation", "Adaptation"]
+__all__ = ["EntityBehavior"]
