@@ -335,8 +335,10 @@ def build_grasp_board_spec(
     half_a = 0.25 * math.pi  # 45°
     qw = math.cos(0.5 * half_a)
     qy = math.sin(0.5 * half_a)
-    quat_p45 = (qw, 0.0, qy, 0.0)   # +45° about Y → axis (+X,+Z)
-    quat_m45 = (qw, 0.0, -qy, 0.0)  # −45° about Y → axis (+X,−Z)
+    # R_y(θ) maps local +X → (cos θ, 0, −sin θ). Match grasp_board_bar_specs axes
+    # and capsule fromto: m45=(+X,−Z), p45=(+X,+Z).
+    quat_for_m45 = (qw, 0.0, qy, 0.0)    # +45° about Y → (+X, −Z)
+    quat_for_p45 = (qw, 0.0, -qy, 0.0)   # −45° about Y → (+X, +Z)
     half_hl = 0.5 * hl
     diag = half_hl / math.sqrt(2.0)
 
@@ -416,7 +418,7 @@ def build_grasp_board_spec(
                         name=name,
                         size=(hx, hy, hz),
                         pos=(x0, y_center, z0),
-                        quat=quat_m45,
+                        quat=quat_for_m45,
                         rgba=rgba,
                     )
                 else:
@@ -436,7 +438,7 @@ def build_grasp_board_spec(
                         name=name,
                         size=(hx, hy, hz),
                         pos=(x0, y_center, z0),
-                        quat=quat_p45,
+                        quat=quat_for_p45,
                         rgba=rgba,
                     )
                 else:
@@ -894,13 +896,17 @@ def _usd_create_capsule(stage, path: str, radius: float, fromto):
     if length < 1e-9:
         raise ValueError(f"Degenerate capsule fromto: {fromto}")
     direction = direction / length
-    axis = np.cross(direction, [0.0, 0.0, 1.0])
+    # Local +Z → ``direction``: rotvec axis is ``Z × direction`` (not the reverse).
+    # The reverse mapped 45° board bars onto the other diagonal; ±X/±Z fromto
+    # still looked right because a 180° flip along the long axis is the same geom.
+    z_axis = np.array([0.0, 0.0, 1.0])
+    axis = np.cross(z_axis, direction)
     axis_norm = float(np.linalg.norm(axis))
     if axis_norm < 1e-8:
         # Parallel to +Z (or -Z)
         orient = np.array([1.0, 0.0, 0.0, 0.0]) if direction[2] >= 0 else np.array([0.0, 1.0, 0.0, 0.0])
     else:
-        angle = float(np.arccos(np.clip(np.dot(direction, [0.0, 0.0, 1.0]), -1.0, 1.0)))
+        angle = float(np.arccos(np.clip(np.dot(z_axis, direction), -1.0, 1.0)))
         orient = R.from_rotvec(angle * (axis / axis_norm)).as_quat(scalar_first=True)
     translation = (fromto[:3] + fromto[3:]) * 0.5
     capsule.CreateAxisAttr("Z")

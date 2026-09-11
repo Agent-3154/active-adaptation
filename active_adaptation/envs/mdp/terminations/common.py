@@ -1,6 +1,6 @@
 import torch
 
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Sequence, Union
 from typing_extensions import override
 
 if TYPE_CHECKING:
@@ -342,3 +342,67 @@ class segments_cross(Termination):
         q1, q2 = pos2[:, 0], pos2[:, 1]
         d_sq = _segment_segment_dist_sq(p1, p2, q1, q2)
         return (d_sq < self._threshold_sq).reshape(self.num_envs, 1)
+
+
+class error_exceeds(Termination):
+    """Terminate when a tensordict error exceeds ``thres``.
+
+    Class arity is 2: ``(error, active)``. YAML ``in_keys`` may be length 1
+    (error only; always armed) or 2 (error plus a bool/float gate). Key
+    *names* are instance-owned.
+    """
+
+    in_keys = ["error", "active"]
+    out_keys = None
+
+    def __init__(
+        self,
+        thres: float,
+        in_keys: Sequence[str] | str,
+        active_thres: float = 0.0,
+        min_steps: int = 0,
+        is_timeout: bool = False,
+        enabled: bool = True,
+    ):
+        if isinstance(in_keys, str):
+            in_keys = [in_keys]
+        in_keys = list(in_keys)
+        if len(in_keys) == 1:
+            in_keys = [*in_keys, "_error_exceeds_active"]
+        if len(in_keys) != 2:
+            raise ValueError(
+                "error_exceeds in_keys must have length 1 (error) or 2 "
+                f"(error, active), got {in_keys!r}"
+            )
+        super().__init__(
+            is_timeout=is_timeout, enabled=enabled, in_keys=in_keys
+        )
+        self.thres = thres
+        self.active_thres = active_thres
+        self.min_steps = min_steps
+        self._error: torch.Tensor | None = None
+        self._active: torch.Tensor | None = None
+
+    def _update(
+        self, error: torch.Tensor | None, active: torch.Tensor | None
+    ) -> None:
+        self._error = error
+        self._active = active
+
+    def compute(self, termination: torch.Tensor) -> torch.Tensor:
+        if self._error is None:
+            return torch.zeros(
+                self.num_envs, 1, dtype=torch.bool, device=self.device
+            )
+        exceeded = (self._error.reshape(self.num_envs, -1) > self.thres).any(
+            dim=-1, keepdim=True
+        )
+        valid = (self.env.episode_length_buf >= self.min_steps).unsqueeze(-1)
+        if self._active is not None:
+            active = self._active.reshape(self.num_envs, -1)
+            if active.dtype == torch.bool:
+                gate = active.any(dim=-1, keepdim=True)
+            else:
+                gate = (active > self.active_thres).any(dim=-1, keepdim=True)
+            valid = valid & gate
+        return valid & exceeded

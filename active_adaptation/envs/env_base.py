@@ -1013,7 +1013,7 @@ class _EnvBase(EnvBase, RegistryMixin):
         
         with ScopedTimer("termination.update", sync=PROFILE_SYNC_TIMERS):
             for termination_func in self.termination_funcs.values():
-                termination_func.update()
+                termination_func.update(tensordict)
         tensordict = self._compute_termination(tensordict)
         
         with ScopedTimer("command.step", sync=PROFILE_SYNC_TIMERS):
