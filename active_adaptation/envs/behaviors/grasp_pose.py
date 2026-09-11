@@ -268,6 +268,7 @@ class GraspPose(EntityBehavior):
         handle_radius: float = 0.022,
         handle_box_size: Sequence[float] | None = (0.04, 0.03),
         standoff: float = 0.01,
+        grasp_clearance: float = 0.02,
     ) -> "GraspPose":
         """Prescribed mid-bar grasps for ``dummy_grasp_board`` (object frame).
 
@@ -277,13 +278,17 @@ class GraspPose(EntityBehavior):
         - indices ``0..11``: **+Y** box face (approach −Y)
         - indices ``12..23``: **−Y** capsule face (approach +Y)
 
-        Grasp points sit on each bar axis so ±Y jaws can straddle; EEF **+X**
-        = face approach, long bar axis is the up-hint (fingers close across
-        the thin cross-section).
+        Grasp points sit on each bar's face-normal line, shifted
+        ``grasp_clearance`` outward from the bar center so the gripper need
+        not penetrate the bar/panel. EEF **+X** = face approach; long bar
+        axis is the up-hint (fingers close across the thin cross-section).
         """
         thickness = float(panel_size[1])
         hr = float(handle_radius)
         so = float(standoff)
+        clearance = float(grasp_clearance)
+        if clearance < 0.0:
+            raise ValueError(f"grasp_clearance must be >= 0, got {grasp_clearance}")
         half_t = 0.5 * thickness
         del handle_length  # axis grasp at bar centers
 
@@ -295,7 +300,8 @@ class GraspPose(EntityBehavior):
         bars = grasp_board_bar_specs(panel_size)
         rows: list[list[float]] = []
         for y_sign, y_half in ((+1.0, hy), (-1.0, hr)):
-            y = y_sign * (half_t + so + y_half)
+            # Bar center + outward clearance (away from panel).
+            y = y_sign * (half_t + so + y_half + clearance)
             approach = torch.tensor([0.0, -y_sign, 0.0], dtype=torch.float32)
             for _tag, px, pz, axis in bars:
                 pos = torch.tensor([px, y, pz], dtype=torch.float32)

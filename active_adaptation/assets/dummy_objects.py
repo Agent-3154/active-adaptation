@@ -1602,6 +1602,7 @@ def make_grasp_board(
     handle_radius: float = 0.022,
     handle_box_size: Sequence[float] | None = (0.04, 0.03),
     standoff: float = 0.01,
+    grasp_clearance: float = 0.02,
     panel_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA,
     box_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_BOX_RGBA,
     capsule_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_CAPSULE_RGBA,
@@ -1625,7 +1626,8 @@ def make_grasp_board(
       when you want a RigidObject view / contact sensors without dynamics.
 
     Returns ``AssetSpec`` with ``GraspPose`` (``board.grasp``) of mid-bar
-    candidates (disable with ``attach_grasp=False``).
+    candidates (disable with ``attach_grasp=False``). ``grasp_clearance``
+    pulls those poses outward from bar centers so the EEF need not penetrate.
     """
     from active_adaptation.assets.asset_cfg import AssetSpec
     from active_adaptation.envs.behaviors.grasp_pose import GraspPose
@@ -1742,6 +1744,7 @@ def make_grasp_board(
                 handle_radius=float(handle_radius),
                 handle_box_size=box_size_t,
                 standoff=float(standoff),
+                grasp_clearance=float(grasp_clearance),
             )
         )
     return AssetSpec(config=cfg, behaviors=tuple(behaviors))
