@@ -4,6 +4,7 @@ from typing_extensions import override
 from .base import Observation
 from active_adaptation.utils.math import quat_rotate_inverse
 from active_adaptation.utils.symmetry import cartesian_space_symmetry
+from active_adaptation.envs.utils import find_bodies, find_sensor_bodies
 from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
@@ -158,20 +159,15 @@ class contact_forces(Observation):
         super()._initialize(env)
         self.asset: Articulation | RigidObject = self.env.scene.entities[self.entity_name]
         self.contact_sensor: ContactSensor = self.env.scene.sensors[self.sensor_name]
-        self.asset_body_ids, self.body_names = self.asset.find_bodies(self.body_names_pattern)
-        if hasattr(self.contact_sensor, "find_bodies"):
-            self.sensor_body_ids = self.contact_sensor.find_bodies(
-                self.body_names, preserve_order=True
-            )[0]
-        else:
-            names = self.contact_sensor.primary_names
-            self.sensor_body_ids = [names.index(name) for name in self.body_names]
+        self.asset_body_ids, self.body_names = find_bodies(self.asset, self.body_names_pattern)
+        self.sensor_body_ids, _ = find_sensor_bodies(self.asset, self.contact_sensor, self.body_names)
 
     def compute(self):
-        self.body_pos_w = self.asset.data.root_link_pos_w
         if self.env.backend == "isaaclab":
+            self.body_pos_w = self.asset.data.body_com_pos_w[:, self.asset_body_ids]
             self.forces_w = self.contact_sensor.data.net_forces_w[:, self.sensor_body_ids]
         elif self.env.backend == "mjlab":
+            self.body_pos_w = self.asset.data.body_link_pos_w[:, self.asset_body_ids]
             self.forces_w = self.contact_sensor.data.force[:, self.sensor_body_ids]
         else:
             raise ValueError(f"Unsupported backend: {self.env.backend}")
