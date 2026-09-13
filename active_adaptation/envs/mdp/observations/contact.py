@@ -159,18 +159,34 @@ class contact_forces(Observation):
         super()._initialize(env)
         self.asset: Articulation | RigidObject = self.env.scene.entities[self.entity_name]
         self.contact_sensor: ContactSensor = self.env.scene.sensors[self.sensor_name]
-        self.asset_body_ids, self.body_names = find_bodies(self.asset, self.body_names_pattern)
-        self.sensor_body_ids, _ = find_sensor_bodies(self.asset, self.contact_sensor, self.body_names)
+        asset_ids, self.body_names = find_bodies(self.asset, self.body_names_pattern)
+        sensor_ids, _ = find_sensor_bodies(
+            self.asset, self.contact_sensor, self.body_names
+        )
+        self.asset_body_ids = torch.as_tensor(
+            asset_ids, device=self.device, dtype=torch.long
+        )
+        self.sensor_body_ids = torch.as_tensor(
+            sensor_ids, device=self.device, dtype=torch.long
+        )
+        if self.asset_body_ids.numel() != self.sensor_body_ids.numel():
+            raise ValueError(
+                "contact_forces: asset/sensor body counts differ "
+                f"({self.asset_body_ids.numel()} vs {self.sensor_body_ids.numel()}) "
+                f"for {self.body_names_pattern!r} on {self.entity_name!r}"
+            )
+
+    def _forces_w(self) -> torch.Tensor:
+        data = self.contact_sensor.data
+        if self.env.backend == "isaaclab":
+            return data.net_forces_w[:, self.sensor_body_ids]
+        if self.env.backend == "mjlab":
+            return data.force[:, self.sensor_body_ids]
+        raise ValueError(f"Unsupported backend: {self.env.backend}")
 
     def compute(self):
-        if self.env.backend == "isaaclab":
-            self.body_pos_w = self.asset.data.body_com_pos_w[:, self.asset_body_ids]
-            self.forces_w = self.contact_sensor.data.net_forces_w[:, self.sensor_body_ids]
-        elif self.env.backend == "mjlab":
-            self.body_pos_w = self.asset.data.body_link_pos_w[:, self.asset_body_ids]
-            self.forces_w = self.contact_sensor.data.force[:, self.sensor_body_ids]
-        else:
-            raise ValueError(f"Unsupported backend: {self.env.backend}")
+        self.body_pos_w = self.asset.data.body_link_pos_w[:, self.asset_body_ids]
+        self.forces_w = self._forces_w()
         contact_forces = self.forces_w
         if not self.world_frame:
             contact_forces = quat_rotate_inverse(
@@ -187,8 +203,10 @@ class contact_forces(Observation):
         return cartesian_space_symmetry(self.asset, self.body_names)
 
     def debug_draw(self):
+        origins = self.asset.data.body_link_pos_w[:, self.asset_body_ids]
+        forces = self._forces_w() * self.vis_scale
         self.env.scene.draw_vector(
-            self.body_pos_w.reshape(-1, 3),
-            self.forces_w.reshape(-1, 3),
+            origins.reshape(-1, 3),
+            forces.reshape(-1, 3),
             color=(1.0, 0.25, 0.1, 1.0),
         )

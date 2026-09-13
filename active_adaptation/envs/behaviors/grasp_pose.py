@@ -71,6 +71,34 @@ def grasp_board_bar_specs(
     return bars
 
 
+def parse_grasp_board_standoff_range(
+    standoff_range: Sequence[float] | None = None,
+) -> tuple[float, float]:
+    """Normalize ``standoff_range`` to ``(lo, hi)``. Default ``(0.01, 0.05)``."""
+    if standoff_range is None:
+        return (0.01, 0.05)
+    lo, hi = float(standoff_range[0]), float(standoff_range[1])
+    if hi < lo:
+        lo, hi = hi, lo
+    if lo < 0.0:
+        raise ValueError(f"standoff_range lo must be >= 0, got {standoff_range}")
+    return (lo, hi)
+
+
+def sample_grasp_board_bar_standoffs(
+    standoff_range: Sequence[float] | None = None,
+    *,
+    n: int = GRASP_BOARD_BARS_PER_FACE,
+) -> tuple[float, ...]:
+    """Draw one standoff per bar (shared by both faces) from ``standoff_range``."""
+    import random
+
+    lo, hi = parse_grasp_board_standoff_range(standoff_range)
+    if n <= 0:
+        raise ValueError(f"n must be positive, got {n}")
+    return tuple(random.uniform(lo, hi) for _ in range(n))
+
+
 def eef_forward_w(quat_w: torch.Tensor) -> torch.Tensor:
     """World-frame EEF +X (forward / approach) from ``quat_wxyz`` ``[..., 4]``."""
     axis = torch.tensor(
@@ -267,7 +295,8 @@ class GraspPose(EntityBehavior):
         handle_length: float = 0.16,
         handle_radius: float = 0.022,
         handle_box_size: Sequence[float] | None = (0.04, 0.03),
-        standoff: float = 0.01,
+        bar_standoffs: Sequence[float] | None = None,
+        standoff_range: Sequence[float] | None = None,
         grasp_clearance: float = 0.02,
     ) -> "GraspPose":
         """Prescribed mid-bar grasps for ``dummy_grasp_board`` (object frame).
@@ -282,10 +311,13 @@ class GraspPose(EntityBehavior):
         ``grasp_clearance`` outward from the bar center so the gripper need
         not penetrate the bar/panel. EEF **+X** = face approach; long bar
         axis is the up-hint (fingers close across the thin cross-section).
+
+        ``bar_standoffs`` is length-12 (one per bar column); both faces share
+        it so collision and grasp stay aligned. If omitted, samples from
+        ``standoff_range`` (default ``[0.01, 0.05]``).
         """
         thickness = float(panel_size[1])
         hr = float(handle_radius)
-        so = float(standoff)
         clearance = float(grasp_clearance)
         if clearance < 0.0:
             raise ValueError(f"grasp_clearance must be >= 0, got {grasp_clearance}")
@@ -298,12 +330,22 @@ class GraspPose(EntityBehavior):
             hy = 0.5 * float(handle_box_size[0])
 
         bars = grasp_board_bar_specs(panel_size)
+        if bar_standoffs is None:
+            sos = sample_grasp_board_bar_standoffs(standoff_range, n=len(bars))
+        else:
+            sos = tuple(float(x) for x in bar_standoffs)
+            if len(sos) != len(bars):
+                raise ValueError(
+                    f"bar_standoffs length {len(sos)} != bars {len(bars)}"
+                )
+            if any(s < 0.0 for s in sos):
+                raise ValueError(f"bar_standoffs must be >= 0, got {sos}")
+
         rows: list[list[float]] = []
         for y_sign, y_half in ((+1.0, hy), (-1.0, hr)):
-            # Bar center + outward clearance (away from panel).
-            y = y_sign * (half_t + so + y_half + clearance)
             approach = torch.tensor([0.0, -y_sign, 0.0], dtype=torch.float32)
-            for _tag, px, pz, axis in bars:
+            for so, (_tag, px, pz, axis) in zip(sos, bars, strict=True):
+                y = y_sign * (half_t + so + y_half + clearance)
                 pos = torch.tensor([px, y, pz], dtype=torch.float32)
                 axis_t = torch.tensor(list(axis), dtype=torch.float32)
                 rot = _frame_x_approach_z_up(
@@ -375,5 +417,7 @@ __all__ = [
     "GRASP_BOARD_BARS_PER_FACE",
     "eef_forward_w",
     "grasp_board_bar_specs",
+    "parse_grasp_board_standoff_range",
+    "sample_grasp_board_bar_standoffs",
     "GraspPose",
 ]

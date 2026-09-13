@@ -29,6 +29,7 @@ YAML example::
       board:
         _target_: dummy_grasp_board
         panel_size: [0.5, 0.04, 0.6]
+        standoff_range: [0.01, 0.05]
         collision_only: true
 
 Factories return ``AssetSpec`` with a ``GraspPose`` behavior of prescribed
@@ -287,7 +288,8 @@ def build_grasp_board_spec(
     handle_length: float = 0.16,
     handle_radius: float = 0.022,
     handle_box_size: Sequence[float] | None = (0.04, 0.03),
-    standoff: float = 0.01,
+    bar_standoffs: Sequence[float] | None = None,
+    standoff_range: Sequence[float] | None = None,
     panel_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA,
     box_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_BOX_RGBA,
     capsule_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_CAPSULE_RGBA,
@@ -302,22 +304,25 @@ def build_grasp_board_spec(
 
     Each face gets a 3×4 grid (``grasp_board_bar_specs``): bottom / mid / top
     × horizontal, vertical, −45°, +45° (columns spaced in **X**).
+
+    ``bar_standoffs`` (length 12) sets panel→bar gap per column; both faces
+    share the list. If omitted, samples from ``standoff_range``.
     """
     import math
     import mujoco
 
-    from active_adaptation.envs.behaviors.grasp_pose import grasp_board_bar_specs
+    from active_adaptation.envs.behaviors.grasp_pose import (
+        grasp_board_bar_specs,
+        sample_grasp_board_bar_standoffs,
+    )
 
     width, thickness, height = _as_float_tuple(panel_size, 3)
     hl = float(handle_length)
     hr = float(handle_radius)
-    so = float(standoff)
     if width <= 0 or thickness <= 0 or height <= 0:
         raise ValueError(f"panel_size must be positive, got {panel_size}")
     if hl <= 0 or hr <= 0:
         raise ValueError("handle_length and handle_radius must be positive")
-    if so < 0:
-        raise ValueError(f"standoff must be >= 0, got {standoff}")
 
     half_w, half_t, half_h = width * 0.5, thickness * 0.5, height * 0.5
     hx, hy, hz = _handle_box_half_extents(
@@ -343,6 +348,16 @@ def build_grasp_board_spec(
     diag = half_hl / math.sqrt(2.0)
 
     bars = grasp_board_bar_specs((width, thickness, height))
+    if bar_standoffs is None:
+        sos = sample_grasp_board_bar_standoffs(standoff_range, n=len(bars))
+    else:
+        sos = tuple(float(x) for x in bar_standoffs)
+        if len(sos) != len(bars):
+            raise ValueError(
+                f"bar_standoffs length {len(sos)} != bars {len(bars)}"
+            )
+        if any(s < 0.0 for s in sos):
+            raise ValueError(f"bar_standoffs must be >= 0, got {sos}")
 
     spec = mujoco.MjSpec()
     body = spec.worldbody.add_body(name=body_name)
@@ -370,9 +385,10 @@ def build_grasp_board_spec(
 
     def _add_face(*, y_sign: float, shape: HandleShape, rgba) -> None:
         side = "box" if shape == "box" else "capsule"
-        y_center = y_sign * (half_t + so + (hy if shape == "box" else hr))
+        y_half = hy if shape == "box" else hr
 
-        for tag, x0, z0, _axis in bars:
+        for so, (tag, x0, z0, _axis) in zip(sos, bars, strict=True):
+            y_center = y_sign * (half_t + so + y_half)
             name = f"{body_name}_{side}_{tag}_collision"
             if tag.endswith("_h"):
                 if shape == "box":
@@ -1226,7 +1242,7 @@ def _get_furniture_spawner_cls():
                 handle_length=cfg.handle_length,
                 handle_radius=cfg.handle_radius,
                 handle_box_size=cfg.handle_box_size,
-                standoff=cfg.standoff,
+                bar_standoffs=cfg.bar_standoffs,
                 panel_rgba=cfg.panel_rgba,
                 box_rgba=cfg.box_rgba,
                 capsule_rgba=cfg.capsule_rgba,
@@ -1292,7 +1308,7 @@ def _get_furniture_spawner_cls():
         handle_length: float = 0.16
         handle_radius: float = 0.022
         handle_box_size: tuple[float, float] | None = (0.04, 0.03)
-        standoff: float = 0.01
+        bar_standoffs: tuple[float, ...] | None = None
         panel_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA
         box_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_BOX_RGBA
         capsule_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_CAPSULE_RGBA
@@ -1607,7 +1623,7 @@ def make_grasp_board(
     handle_length: float = 0.16,
     handle_radius: float = 0.022,
     handle_box_size: Sequence[float] | None = (0.04, 0.03),
-    standoff: float = 0.01,
+    standoff_range: Sequence[float] | None = None,
     grasp_clearance: float = 0.02,
     panel_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA,
     box_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_BOX_RGBA,
@@ -1634,9 +1650,16 @@ def make_grasp_board(
     Returns ``AssetSpec`` with ``GraspPose`` (``board.grasp``) of mid-bar
     candidates (disable with ``attach_grasp=False``). ``grasp_clearance``
     pulls those poses outward from bar centers so the EEF need not penetrate.
+
+    ``standoff_range``: each of the 12 bar columns draws a panel→bar gap in
+    ``[lo, hi]`` once at construction; collision and grasp poses share those
+    values (default ``[0.01, 0.05]``).
     """
     from active_adaptation.assets.asset_cfg import AssetSpec
-    from active_adaptation.envs.behaviors.grasp_pose import GraspPose
+    from active_adaptation.envs.behaviors.grasp_pose import (
+        GraspPose,
+        sample_grasp_board_bar_standoffs,
+    )
 
     panel_t = _as_float_tuple(panel_size, 3)
     box_size_t = (
@@ -1647,6 +1670,7 @@ def make_grasp_board(
     panel_rgba_t = _rgba(panel_rgba)
     box_rgba_t = _rgba(box_rgba)
     cap_rgba_t = _rgba(capsule_rgba)
+    bar_sos = sample_grasp_board_bar_standoffs(standoff_range)
 
     if backend == "isaaclab":
         import isaaclab.sim as sim_utils
@@ -1687,7 +1711,7 @@ def make_grasp_board(
             handle_length=float(handle_length),
             handle_radius=float(handle_radius),
             handle_box_size=box_size_t,
-            standoff=float(standoff),
+            bar_standoffs=bar_sos,
             panel_rgba=panel_rgba_t,
             box_rgba=box_rgba_t,
             capsule_rgba=cap_rgba_t,
@@ -1714,7 +1738,7 @@ def make_grasp_board(
                 handle_length=handle_length,
                 handle_radius=handle_radius,
                 handle_box_size=box_size_t,
-                standoff=standoff,
+                bar_standoffs=bar_sos,
                 panel_rgba=panel_rgba_t,
                 box_rgba=box_rgba_t,
                 capsule_rgba=cap_rgba_t,
@@ -1749,7 +1773,7 @@ def make_grasp_board(
                 handle_length=float(handle_length),
                 handle_radius=float(handle_radius),
                 handle_box_size=box_size_t,
-                standoff=float(standoff),
+                bar_standoffs=bar_sos,
                 grasp_clearance=float(grasp_clearance),
             )
         )
