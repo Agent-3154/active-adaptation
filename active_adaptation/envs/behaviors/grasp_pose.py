@@ -205,9 +205,10 @@ class GraspPose(EntityBehavior):
     ) -> "GraspPose":
         """One prescribed pose per handle face (**handle body frame**).
 
-        Grasp points sit on the handle axis so ±Y jaws can straddle the bar.
-        Approach is along ±Y toward the handle origin; EEF **+X** = approach,
-        **+Z** = handle up. Callers should transform with the ``handle`` body
+        Bars are horizontal along **±X**. Grasp points sit on the handle axis so
+        ±Y jaws can straddle the thin cross-section. Approach is along ±Y toward
+        the handle origin; EEF **+X** = approach, **+Z** = bar axis (so finger
+        open ±Y is vertical). Callers should transform with the ``handle`` body
         pose (not the articulation root) when the door moves.
 
         ``handle_shape`` / ``handle_box_size`` match ``dummy_door`` /
@@ -223,13 +224,14 @@ class GraspPose(EntityBehavior):
         else:
             y_half = float(handle_radius)
         y_off = 0.5 * float(door_thickness) + y_half
-        up = torch.tensor([0.0, 0.0, 1.0])
+        # Bar long axis = EEF up-hint → fingers close in ±Z (across the bar).
+        bar_axis = torch.tensor([1.0, 0.0, 0.0])
         rows: list[list[float]] = []
         for y_sign, approach_y in ((+1.0, -1.0), (-1.0, +1.0)):
             pos = torch.tensor([0.0, y_sign * y_off, 0.0])
             approach = torch.tensor([0.0, approach_y, 0.0])
             rot = _frame_x_approach_z_up(
-                approach.unsqueeze(0), up.unsqueeze(0)
+                approach.unsqueeze(0), bar_axis.unsqueeze(0)
             )[0]
             quat = quat_from_matrix(rot.unsqueeze(0))[0]
             rows.append([*pos.tolist(), *quat.tolist()])
@@ -245,19 +247,17 @@ class GraspPose(EntityBehavior):
     ) -> "GraspPose":
         """Front handle grasp in the **handle body frame**.
 
-        Bar lies on ±X at the handle origin (with optional stand-off already in
-        the body pose). Approach is from **+Y** toward −Y; EEF **+X** =
-        approach, **+Z** = up. Transform with the ``handle_{i}`` body pose.
+        Bar lies on ±X at the handle origin (stand-off already in the body
+        pose). Approach from **+Y** toward −Y; EEF **+X** = approach, **+Z** =
+        bar axis so Piper ±Y fingers close vertically across the bar.
+        Transform with the ``handle_{i}`` body pose.
         """
         del handle_radius, handle_shape, handle_box_size  # axis grasp at origin
-        up = torch.tensor([0.0, 0.0, 1.0])
-        pos = torch.tensor([0.0, 0.0, 0.0])
-        approach = torch.tensor([0.0, -1.0, 0.0])
-        rot = _frame_x_approach_z_up(
-            approach.unsqueeze(0), up.unsqueeze(0)
-        )[0]
-        quat = quat_from_matrix(rot.unsqueeze(0))[0]
-        return cls(poses=[[*pos.tolist(), *quat.tolist()]])
+        return cls.for_side_axis(
+            axis=(1.0, 0.0, 0.0),
+            approach_dirs=((0.0, -1.0, 0.0),),
+            pos=(0.0, 0.0, 0.0),
+        )
 
     @classmethod
     def for_side_axis(
