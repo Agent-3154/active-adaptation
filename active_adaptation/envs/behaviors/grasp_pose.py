@@ -28,29 +28,55 @@ if TYPE_CHECKING:
 # EEF body-frame forward / approach axis (default unless otherwise specified).
 EEF_FORWARD_B: tuple[float, float, float] = (1.0, 0.0, 0.0)
 
-# ``dummy_grasp_board``: 3 heights × 4 orientations per face.
-GRASP_BOARD_BARS_PER_FACE: int = 12
+# ``dummy_grasp_board``: ``n_levels`` heights × 4 orientations per face.
+GRASP_BOARD_ORIENTS_PER_LEVEL: int = 4
+GRASP_BOARD_DEFAULT_N_LEVELS: int = 3
+GRASP_BOARD_BARS_PER_FACE: int = (
+    GRASP_BOARD_DEFAULT_N_LEVELS * GRASP_BOARD_ORIENTS_PER_LEVEL
+)  # 12
+# Inner span for equally spaced Z rows (``n_levels=3`` → 0.20 / 0.50 / 0.80).
+_GRASP_BOARD_Z_FRAC_LO: float = 0.20
+_GRASP_BOARD_Z_FRAC_HI: float = 0.80
 _DEFAULT_GRASP_BOARD_PANEL: tuple[float, float, float] = (1.1, 0.04, 1.0)
+
+
+def parse_grasp_board_n_levels(n_levels: int = GRASP_BOARD_DEFAULT_N_LEVELS) -> int:
+    n = int(n_levels)
+    if n < 1:
+        raise ValueError(f"n_levels must be >= 1, got {n_levels}")
+    return n
+
+
+def grasp_board_bars_per_face(
+    n_levels: int = GRASP_BOARD_DEFAULT_N_LEVELS,
+) -> int:
+    return parse_grasp_board_n_levels(n_levels) * GRASP_BOARD_ORIENTS_PER_LEVEL
 
 
 def grasp_board_bar_specs(
     panel_size: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL,
+    n_levels: int = GRASP_BOARD_DEFAULT_N_LEVELS,
 ) -> list[tuple[str, float, float, tuple[float, float, float]]]:
     """Shared board layout: ``(tag, x, z, axis_xyz)`` per bar (one face).
 
-    Height-major order at bottom / mid / top: horizontal, vertical, −45°, +45°.
-    Four X columns keep bars from overlapping. Keep in sync with
+    Height-major order: ``n_levels`` equally spaced Z rows (default 3, at
+    20% / 50% / 80% of panel height), each with horizontal, vertical, −45°,
+    +45°. Four X columns keep bars from overlapping. Keep in sync with
     ``build_grasp_board_spec`` / :meth:`GraspPose.for_grasp_board`.
     """
     import math
 
+    n = parse_grasp_board_n_levels(n_levels)
     width, _thickness, height = (float(x) for x in panel_size)
     inv_sqrt2 = 1.0 / math.sqrt(2.0)
-    z_levels = (
-        ("bot", 0.20 * height),
-        ("mid", 0.50 * height),
-        ("top", 0.80 * height),
-    )
+    lo = _GRASP_BOARD_Z_FRAC_LO * height
+    hi = _GRASP_BOARD_Z_FRAC_HI * height
+    if n == 1:
+        z_levels = (("z0", 0.5 * height),)
+    else:
+        z_levels = tuple(
+            (f"z{i}", lo + (hi - lo) * i / (n - 1)) for i in range(n)
+        )
     # Columns: h, v, m45 (−45°), p45 (+45°)
     x_cols = (
         -0.34 * width,
@@ -298,22 +324,23 @@ class GraspPose(EntityBehavior):
         bar_standoffs: Sequence[float] | None = None,
         standoff_range: Sequence[float] | None = None,
         grasp_clearance: float = 0.02,
+        n_levels: int = GRASP_BOARD_DEFAULT_N_LEVELS,
     ) -> "GraspPose":
         """Prescribed mid-bar grasps for ``dummy_grasp_board`` (object frame).
 
         Layout matches ``build_grasp_board_spec`` via :func:`grasp_board_bar_specs`
-        (3 heights × hori / vert / −45° / +45° = 12 bars per face). Pose order:
+        (``n_levels`` heights × hori / vert / −45° / +45° per face). Pose order:
 
-        - indices ``0..11``: **+Y** box face (approach −Y)
-        - indices ``12..23``: **−Y** capsule face (approach +Y)
+        - first ``n_levels * 4``: **+Y** box face (approach −Y)
+        - next ``n_levels * 4``: **−Y** capsule face (approach +Y)
 
         Grasp points sit on each bar's face-normal line, shifted
         ``grasp_clearance`` outward from the bar center so the gripper need
         not penetrate the bar/panel. EEF **+X** = face approach; long bar
         axis is the up-hint (fingers close across the thin cross-section).
 
-        ``bar_standoffs`` is length-12 (one per bar column); both faces share
-        it so collision and grasp stay aligned. If omitted, samples from
+        ``bar_standoffs`` is one per bar column; both faces share it so
+        collision and grasp stay aligned. If omitted, samples from
         ``standoff_range`` (default ``[0.01, 0.05]``).
         """
         thickness = float(panel_size[1])
@@ -329,7 +356,7 @@ class GraspPose(EntityBehavior):
         else:
             hy = 0.5 * float(handle_box_size[0])
 
-        bars = grasp_board_bar_specs(panel_size)
+        bars = grasp_board_bar_specs(panel_size, n_levels=n_levels)
         if bar_standoffs is None:
             sos = sample_grasp_board_bar_standoffs(standoff_range, n=len(bars))
         else:
@@ -415,8 +442,12 @@ class GraspPose(EntityBehavior):
 __all__ = [
     "EEF_FORWARD_B",
     "GRASP_BOARD_BARS_PER_FACE",
+    "GRASP_BOARD_DEFAULT_N_LEVELS",
+    "GRASP_BOARD_ORIENTS_PER_LEVEL",
     "eef_forward_w",
     "grasp_board_bar_specs",
+    "grasp_board_bars_per_face",
+    "parse_grasp_board_n_levels",
     "parse_grasp_board_standoff_range",
     "sample_grasp_board_bar_standoffs",
     "GraspPose",

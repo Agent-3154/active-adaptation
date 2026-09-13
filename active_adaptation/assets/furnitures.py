@@ -153,7 +153,7 @@ def build_door_spec(
     **+Y** through the door, **+X** along the width. ``door_dimensions`` is full
     ``(width, thickness, height)``. ``handle_position`` is ``(x, z)`` in the
     **frame** frame (same as the closed panel face). No freejoint — fixed-base
-    fixture (mjlab auto-mocap / Isaac fixed root).
+    fixture (mjlab auto-mocap / Isaac ``fix_root_link`` on ``frame``).
 
     ``handle_shape`` is ``"capsule"`` (default) or ``"box"`` (thin bar). For
     boxes, ``handle_box_size`` is full ``(depth_y, height_z)``; omitted → derived
@@ -932,6 +932,11 @@ def _get_door_spawner_cls():
         from pxr import Gf, UsdPhysics
         from isaaclab.sim.utils import bind_physics_material
 
+        try:
+            from pxr import PhysxSchema
+        except ImportError:
+            PhysxSchema = None
+
         if translation is not None:
             root.GetAttribute("xformOp:translate").Set(Gf.Vec3f(*translation))
         if orientation is not None:
@@ -965,8 +970,23 @@ def _get_door_spawner_cls():
                         continue
                     bind_physics_material(str(child.GetPath()), material_path, stage=stage)
 
+        # Isaac ``fix_root_link`` needs ArticulationRootAPI on a RigidBody.
+        # ``_usd_from_mjspec_articulated`` puts it on the outer Xform; move it
+        # onto ``frame`` so the jamb is welded to world.
+        frame_path = f"{prim_path}/frame"
+        frame_prim = stage.GetPrimAtPath(frame_path)
+        if not frame_prim.IsValid():
+            raise RuntimeError(f"Expected frame body at {frame_path}")
+        if root.HasAPI(UsdPhysics.ArticulationRootAPI):
+            root.RemoveAPI(UsdPhysics.ArticulationRootAPI)
+        if PhysxSchema is not None and root.HasAPI(PhysxSchema.PhysxArticulationAPI):
+            root.RemoveAPI(PhysxSchema.PhysxArticulationAPI)
+        UsdPhysics.ArticulationRootAPI.Apply(frame_prim)
+
         if cfg.articulation_props is not None:
-            schemas.modify_articulation_root_properties(prim_path, cfg.articulation_props)
+            schemas.modify_articulation_root_properties(
+                frame_path, cfg.articulation_props
+            )
         if cfg.activate_contact_sensors:
             schemas.activate_contact_sensors(prim_path, stage=stage)
         return root
@@ -1022,9 +1042,10 @@ def make_door(
 ):
     """Articulated door: ``frame`` —``door_joint``→ ``panel`` —``handle_joint``→ ``handle``.
 
-    Fixed-base fixture (no freejoint). ``door_dimensions`` is full
-    ``(width, thickness, height)``. ``handle_position`` is ``(x, z)`` in the
-    frame frame. ``rgba`` is panel/handle; ``frame_rgba`` is jambs/lintel.
+    Fixed-base fixture (no freejoint). Isaac welds ``frame`` with
+    ``fix_root_link=True``; mjlab auto-wraps a mocap root. ``door_dimensions``
+    is full ``(width, thickness, height)``. ``handle_position`` is ``(x, z)``
+    in the frame frame. ``rgba`` is panel/handle; ``frame_rgba`` is jambs/lintel.
     ``door_joint`` defaults to **zero stiffness** (free hinge + light damping).
 
     Behaviors (disable with flags):
@@ -1079,6 +1100,7 @@ def make_door(
                 enabled_self_collisions=False,
                 solver_position_iteration_count=4,
                 solver_velocity_iteration_count=0,
+                fix_root_link=True,
             ),
             activate_contact_sensors=activate_contact_sensors,
             copy_from_source=False,
@@ -1119,6 +1141,8 @@ def make_door(
         from mjlab.utils.spec_config import CollisionCfg
 
         def spec_fn():
+            # No freejoint ⇒ fixed base. mjlab auto-wraps a mocap root so
+            # per-env placement via init_state still works.
             return build_door_spec(
                 door_dimensions=door_dimensions_t,
                 handle_position=handle_position_t,

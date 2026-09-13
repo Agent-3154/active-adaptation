@@ -529,6 +529,7 @@ def _get_furniture_spawner_cls():
                 handle_radius=cfg.handle_radius,
                 handle_box_size=cfg.handle_box_size,
                 bar_standoffs=cfg.bar_standoffs,
+                n_levels=getattr(cfg, "n_levels", 3),
                 panel_rgba=cfg.panel_rgba,
                 box_rgba=cfg.box_rgba,
                 capsule_rgba=cfg.capsule_rgba,
@@ -595,6 +596,7 @@ def _get_furniture_spawner_cls():
         handle_radius: float = 0.022
         handle_box_size: tuple[float, float] | None = (0.04, 0.03)
         bar_standoffs: tuple[float, ...] | None = None
+        n_levels: int = 3
         panel_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA
         box_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_BOX_RGBA
         capsule_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_CAPSULE_RGBA

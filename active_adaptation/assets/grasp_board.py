@@ -48,6 +48,7 @@ def build_grasp_board_spec(
     handle_box_size: Sequence[float] | None = (0.04, 0.03),
     bar_standoffs: Sequence[float] | None = None,
     standoff_range: Sequence[float] | None = None,
+    n_levels: int = 3,
     panel_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA,
     box_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_BOX_RGBA,
     capsule_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_CAPSULE_RGBA,
@@ -62,11 +63,13 @@ def build_grasp_board_spec(
     **+X** along width, **+Y** through the panel (box face).
     ``panel_size`` is full ``(width, thickness, height)``.
 
-    Each face gets a 3×4 grid (``grasp_board_bar_specs``): bottom / mid / top
-    × horizontal, vertical, −45°, +45° (columns spaced in **X**).
+    Each face gets an ``n_levels`` × 4 grid (``grasp_board_bar_specs``):
+    equally spaced Z rows (default 3 at 20% / 50% / 80% of height) ×
+    horizontal, vertical, −45°, +45° (columns spaced in **X**).
 
-    ``bar_standoffs`` (length 12) sets panel→bar gap per column; both faces
-    share the list. If omitted, samples from ``standoff_range``.
+    ``bar_standoffs`` (length ``n_levels * 4``) sets panel→bar gap per
+    column; both faces share the list. If omitted, samples from
+    ``standoff_range``.
 
     If ``slidable``, builds a fixed-base chain (one joint per body for Isaac USD)::
 
@@ -79,6 +82,7 @@ def build_grasp_board_spec(
 
     from active_adaptation.envs.behaviors.grasp_pose import (
         grasp_board_bar_specs,
+        parse_grasp_board_n_levels,
         sample_grasp_board_bar_standoffs,
     )
 
@@ -113,7 +117,10 @@ def build_grasp_board_spec(
     half_hl = 0.5 * hl
     diag = half_hl / math.sqrt(2.0)
 
-    bars = grasp_board_bar_specs((width, thickness, height))
+    bars = grasp_board_bar_specs(
+        (width, thickness, height),
+        n_levels=parse_grasp_board_n_levels(n_levels),
+    )
     if bar_standoffs is None:
         sos = sample_grasp_board_bar_standoffs(standoff_range, n=len(bars))
     else:
@@ -284,6 +291,7 @@ def make_grasp_board(
     handle_length: float = 0.16,
     handle_radius: float = 0.022,
     handle_box_size: Sequence[float] | None = (0.04, 0.03),
+    n_levels: int = 3,
     standoff_range: Sequence[float] | None = None,
     grasp_clearance: float = 0.02,
     panel_rgba: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA,
@@ -314,10 +322,13 @@ def make_grasp_board(
 
     Returns ``AssetSpec`` with ``GraspPose`` (``board.grasp``). Grasps are in
     the ``board`` body frame (follow the slide when articulated).
+    ``n_levels`` is the number of equally spaced Z rows (default 3).
     """
     from active_adaptation.assets.asset_cfg import AssetSpec
     from active_adaptation.envs.behaviors.grasp_pose import (
         GraspPose,
+        grasp_board_bars_per_face,
+        parse_grasp_board_n_levels,
         sample_grasp_board_bar_standoffs,
     )
 
@@ -330,7 +341,10 @@ def make_grasp_board(
     panel_rgba_t = _rgba(panel_rgba)
     box_rgba_t = _rgba(box_rgba)
     cap_rgba_t = _rgba(capsule_rgba)
-    bar_sos = sample_grasp_board_bar_standoffs(standoff_range)
+    n_levels_i = parse_grasp_board_n_levels(n_levels)
+    bar_sos = sample_grasp_board_bar_standoffs(
+        standoff_range, n=grasp_board_bars_per_face(n_levels_i)
+    )
     slide_range_t = _as_float_tuple(slide_range, 2)
     slidable = bool(slidable)
     if slidable and name != "board":
@@ -353,6 +367,7 @@ def make_grasp_board(
             handle_radius=float(handle_radius),
             handle_box_size=box_size_t,
             bar_standoffs=bar_sos,
+            n_levels=n_levels_i,
             slide_range=slide_range_t,
             panel_rgba=panel_rgba_t,
             box_rgba=box_rgba_t,
@@ -410,6 +425,7 @@ def make_grasp_board(
                 handle_radius=handle_radius,
                 handle_box_size=box_size_t,
                 bar_standoffs=bar_sos,
+                n_levels=n_levels_i,
                 panel_rgba=panel_rgba_t,
                 box_rgba=box_rgba_t,
                 capsule_rgba=cap_rgba_t,
@@ -491,6 +507,7 @@ def make_grasp_board(
             handle_radius=float(handle_radius),
             handle_box_size=box_size_t,
             bar_standoffs=bar_sos,
+            n_levels=n_levels_i,
             panel_rgba=panel_rgba_t,
             box_rgba=box_rgba_t,
             capsule_rgba=cap_rgba_t,
@@ -517,6 +534,7 @@ def make_grasp_board(
                 handle_radius=handle_radius,
                 handle_box_size=box_size_t,
                 bar_standoffs=bar_sos,
+                n_levels=n_levels_i,
                 panel_rgba=panel_rgba_t,
                 box_rgba=box_rgba_t,
                 capsule_rgba=cap_rgba_t,
@@ -554,6 +572,7 @@ def make_grasp_board(
                 handle_box_size=box_size_t,
                 bar_standoffs=bar_sos,
                 grasp_clearance=float(grasp_clearance),
+                n_levels=n_levels_i,
             )
         )
     return AssetSpec(config=cfg, behaviors=tuple(behaviors))
@@ -596,6 +615,7 @@ def _get_grasp_board_rigid_spawner_cls():
             handle_radius=cfg.handle_radius,
             handle_box_size=cfg.handle_box_size,
             bar_standoffs=cfg.bar_standoffs,
+            n_levels=cfg.n_levels,
             panel_rgba=cfg.panel_rgba,
             box_rgba=cfg.box_rgba,
             capsule_rgba=cfg.capsule_rgba,
@@ -648,6 +668,7 @@ def _get_grasp_board_rigid_spawner_cls():
         handle_radius: float = 0.022
         handle_box_size: tuple[float, float] | None = (0.04, 0.03)
         bar_standoffs: tuple[float, ...] | None = None
+        n_levels: int = 3
         panel_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA
         box_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_BOX_RGBA
         capsule_rgba: tuple[float, float, float, float] = (
@@ -697,6 +718,7 @@ def _get_grasp_board_spawner_cls():
             handle_radius=cfg.handle_radius,
             handle_box_size=cfg.handle_box_size,
             bar_standoffs=cfg.bar_standoffs,
+            n_levels=cfg.n_levels,
             panel_rgba=cfg.panel_rgba,
             box_rgba=cfg.box_rgba,
             capsule_rgba=cfg.capsule_rgba,
@@ -779,6 +801,7 @@ def _get_grasp_board_spawner_cls():
         handle_radius: float = 0.022
         handle_box_size: tuple[float, float] | None = (0.04, 0.03)
         bar_standoffs: tuple[float, ...] | None = None
+        n_levels: int = 3
         slide_range: tuple[float, float] = _DEFAULT_GRASP_BOARD_SLIDE_RANGE
         panel_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA
         box_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_BOX_RGBA
