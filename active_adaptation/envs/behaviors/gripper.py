@@ -97,6 +97,10 @@ class GripperBehavior(EntityBehavior):
     @property
     def eef_quat_w(self) -> torch.Tensor:
         return self.robot.data.body_quat_w[:, self.eef_body_id]
+    
+    @property
+    def finger_pos_w(self) -> torch.Tensor:
+        return self.robot.data.body_pos_w[:, self.body_ids]
 
     def joint_pos(self) -> torch.Tensor:
         return self.robot.data.joint_pos[:, self.joint_ids]
