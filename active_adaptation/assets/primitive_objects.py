@@ -7,7 +7,9 @@ height) and are converted to MuJoCo half-sizes internally.
 
 By default shapes are floating rigid bodies. Pass ``collision_only=True`` for a
 static collider (Isaac: CollisionAPI only via ``AssetBaseCfg``; mjlab: fixed-base
-body, no freejoint — auto-wrapped as mocap).
+body, no freejoint — auto-wrapped as mocap). Pass ``kinematic_enabled=True``
+(Isaac only) for a kinematic ``RigidObject`` that still reports contacts.
+``collision_only`` and ``kinematic_enabled`` are mutually exclusive.
 
 YAML example::
 
@@ -21,6 +23,10 @@ YAML example::
         size: [0.1, 0.1, 0.1]
         pos: [0.0, 0.0, 0.05]
         collision_only: true
+      wall:
+        _target_: box
+        size: [0.1, 1.0, 1.0]
+        kinematic_enabled: true
 """
 
 from __future__ import annotations
@@ -88,6 +94,7 @@ def _isaac_spawn_kwargs(
     disable_gravity: bool,
     activate_contact_sensors: bool,
     collision_only: bool,
+    kinematic_enabled: bool,
 ) -> dict:
     import isaaclab.sim as sim_utils
 
@@ -112,6 +119,7 @@ def _isaac_spawn_kwargs(
     kw.update(
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             rigid_body_enabled=True,
+            kinematic_enabled=kinematic_enabled,
             disable_gravity=disable_gravity,
             retain_accelerations=False,
             linear_damping=0.001,
@@ -161,6 +169,7 @@ def _make_isaaclab_cfg(
     disable_gravity: bool,
     activate_contact_sensors: bool,
     collision_only: bool,
+    kinematic_enabled: bool,
 ):
     from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 
@@ -170,6 +179,7 @@ def _make_isaaclab_cfg(
         disable_gravity=disable_gravity,
         activate_contact_sensors=activate_contact_sensors,
         collision_only=collision_only,
+        kinematic_enabled=kinematic_enabled,
     )
     spawn = _isaac_shape_cfg(kind, axis, size, radius, height, spawn_kw)
 
@@ -275,7 +285,14 @@ def _make_primitive(
     disable_gravity: bool = False,
     activate_contact_sensors: bool = True,
     collision_only: bool = False,
+    kinematic_enabled: bool = False,
 ):
+    if collision_only and kinematic_enabled:
+        raise ValueError(
+            "collision_only and kinematic_enabled cannot both be True: "
+            "collision_only uses AssetBaseCfg (no RigidBodyAPI), while "
+            "kinematic_enabled requires a RigidObject."
+        )
     rgba_t = _rgba(rgba)
     pos_t = _as_float_tuple(pos, 3)
     rot_t = _as_float_tuple(rot, 4)
@@ -293,9 +310,10 @@ def _make_primitive(
             disable_gravity=disable_gravity,
             activate_contact_sensors=activate_contact_sensors,
             collision_only=collision_only,
+            kinematic_enabled=kinematic_enabled,
         )
     if backend == "mjlab":
-        del activate_contact_sensors
+        del activate_contact_sensors, kinematic_enabled
         return _make_mjlab_cfg(
             kind,
             body_name=body_name,
@@ -324,10 +342,13 @@ def make_box(
     disable_gravity: bool = False,
     activate_contact_sensors: bool = True,
     collision_only: bool = False,
+    kinematic_enabled: bool = False,
 ):
     """Cuboid. ``size`` is full (x, y, z) extents in meters.
 
     ``collision_only=True`` → static collider (no rigid body / no freejoint).
+    ``kinematic_enabled=True`` → Isaac kinematic RigidObject (not with
+    ``collision_only``).
     """
     return _make_primitive(
         backend,
@@ -341,6 +362,7 @@ def make_box(
         disable_gravity=disable_gravity,
         activate_contact_sensors=activate_contact_sensors,
         collision_only=collision_only,
+        kinematic_enabled=kinematic_enabled,
     )
 
 
@@ -354,8 +376,13 @@ def make_sphere(
     disable_gravity: bool = False,
     activate_contact_sensors: bool = True,
     collision_only: bool = False,
+    kinematic_enabled: bool = False,
 ):
-    """Sphere. ``collision_only=True`` → static collider."""
+    """Sphere. ``collision_only=True`` → static collider.
+
+    ``kinematic_enabled=True`` → Isaac kinematic RigidObject (not with
+    ``collision_only``).
+    """
     return _make_primitive(
         backend,
         "sphere",
@@ -367,6 +394,7 @@ def make_sphere(
         disable_gravity=disable_gravity,
         activate_contact_sensors=activate_contact_sensors,
         collision_only=collision_only,
+        kinematic_enabled=kinematic_enabled,
     )
 
 
@@ -382,10 +410,13 @@ def make_cylinder(
     disable_gravity: bool = False,
     activate_contact_sensors: bool = True,
     collision_only: bool = False,
+    kinematic_enabled: bool = False,
 ):
     """Cylinder. ``height`` is the full length along ``axis``.
 
     ``collision_only=True`` → static collider.
+    ``kinematic_enabled=True`` → Isaac kinematic RigidObject (not with
+    ``collision_only``).
     """
     return _make_primitive(
         backend,
@@ -400,6 +431,7 @@ def make_cylinder(
         disable_gravity=disable_gravity,
         activate_contact_sensors=activate_contact_sensors,
         collision_only=collision_only,
+        kinematic_enabled=kinematic_enabled,
     )
 
 
@@ -415,10 +447,13 @@ def make_capsule(
     disable_gravity: bool = False,
     activate_contact_sensors: bool = True,
     collision_only: bool = False,
+    kinematic_enabled: bool = False,
 ):
     """Capsule. ``height`` is the cylindrical section (USD convention).
 
     ``collision_only=True`` → static collider.
+    ``kinematic_enabled=True`` → Isaac kinematic RigidObject (not with
+    ``collision_only``).
     """
     return _make_primitive(
         backend,
@@ -433,6 +468,7 @@ def make_capsule(
         disable_gravity=disable_gravity,
         activate_contact_sensors=activate_contact_sensors,
         collision_only=collision_only,
+        kinematic_enabled=kinematic_enabled,
     )
 
 
