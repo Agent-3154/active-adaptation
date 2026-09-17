@@ -1,6 +1,6 @@
 ---
 name: asset-definition
-description: Define and register cross-backend robot/object assets in active-adaptation (Isaac Lab ArticulationCfg + mjlab EntityCfg via AssetSpec). Use when adding or editing files under assets/, wiring robot.name in cfg/task/, setting joint_names_simulation / body_names_simulation, contact sensors, actuators, URDF mimic / MJCF equality constraints, symmetry mappings, AssetSpec behaviors, mjlab spec_fn/CollisionCfg/ContactMatch, floating props, composing MJCF with assetx (aa-projects/assetx), publishing to ROBOT_MODEL_DIR, or cleaning up outdated mujoco-backend / in-repo MJCF patterns.
+description: Define and register cross-backend robot/object assets in active-adaptation (Isaac Lab ArticulationCfg + mjlab EntityCfg via AssetSpec). Use when adding or editing files under assets/, wiring robot.name in cfg/task/, setting joint_names_simulation / body_names_simulation, contact sensors, actuators, URDF mimic / MJCF equality constraints, symmetry mappings, AssetSpec behaviors, GripperBehavior (INIT gripper joints open for finger_seg / openness), mjlab spec_fn/CollisionCfg/ContactMatch, floating props, composing MJCF with assetx (aa-projects/assetx), publishing to ROBOT_MODEL_DIR, or cleaning up outdated mujoco-backend / in-repo MJCF patterns.
 ---
 
 # Asset definition (active-adaptation)
@@ -35,6 +35,7 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 - Fixing policy transfer bugs caused by joint/body order mismatch
 - Wiring `robot.name` in `cfg/task/**/*.yaml`
 - Configuring coupled / mimic joints (URDF `<mimic>` ↔ MJCF `<equality>`)
+- Adding a gripper: `INIT_JOINT_POS` at **open**, `GripperBehavior`, openness vs closed rest
 - Cleaning outdated paths (`assets/Go2/`, `assets/G1/` vendored MJCF, `spawn.py`, mujoco backend branch)
 
 ---
@@ -52,6 +53,7 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 9. **mjlab actuators: `BuiltinPdActuatorCfg` by default** — AA joint actions often call both `set_joint_position_target` and `set_joint_velocity_target` (`envs/mdp/actions/joint.py`). Use `BuiltinPositionActuatorCfg` only when explicitly specified.
 10. **Mimic / coupled joints: physics constraints, drivers only** — Isaac: URDF `<mimic>`; mjlab: MJCF `<equality><joint …/></equality>` (no URDF-style mimic tag). Actuate **driver** joints only; leave mimics unactuated (or Isaac zero-gain / passive). Prefer physics coupling over software target-copy (`MimicJointPosition`) for mjlab. Details: [reference.md](reference.md#mimic--coupled-joints).
 11. **Never smoke-test with the shared root venv** — it is by design incomplete. Use `uv run --project venv/isaac51` and `uv run --project venv/mjlab`. See [.agents/skills/README.md](../README.md#smoke-tests--running-code).
+12. **Gripper `INIT_JOINT_POS` is open** — finger joints spawn at a clearly open pose so `GripperBehavior` can cache a well-defined `finger_seg` (left→right in the EEF frame). Do not init at closed / coincident fingertips. **Openness** is `1` at that open/init (near the soft-limit `|q|`), `0` at closed rest (`q ≈ 0`). Example: `a2_manipulator.py` `arm_joint7/8` at `±0.035`. Details: [Gripper init](#gripper-init--openness).
 
 ---
 
@@ -71,6 +73,7 @@ Task Progress:
 - [ ] make_cfg(backend) dispatcher; register under a stable name
 - [ ] Import module from assets/<family>/__init__.py
 - [ ] Set robot.name in cfg/task YAML
+- [ ] If gripper: INIT finger joints **open**; `GripperBehavior` on AssetSpec; openness 1 at init, 0 at closed rest
 - [ ] Smoke via backend venvs (`venv/isaac51` + `venv/mjlab`): joint/body counts and contact sensor
 ```
 
@@ -149,7 +152,7 @@ Define once at module scope (see `quadrupeds/a2.py`):
 
 | Constant | Purpose |
 |----------|---------|
-| `INIT_POS` / `INIT_JOINT_POS` | Spawn pose; joint_pos may use regex keys |
+| `INIT_POS` / `INIT_JOINT_POS` | Spawn pose; joint_pos may use regex keys. **Gripper DOFs must be open**, not rest-closed (see [Gripper init](#gripper-init--openness)) |
 | `JOINT_NAMES_SIMULATION` | Canonical joint order for obs/actions |
 | `BODY_NAMES_SIMULATION` | Canonical body order for rewards/contacts |
 | `JOINT_SYMMETRY_MAPPING` | Left/right joint pairs for symaug (`mirrored({...})`) |
@@ -291,8 +294,23 @@ registry.register("asset", "unitree_a2", make_cfg)
 ## Variants and behaviors
 
 - **Composition:** extend base lists (see `a2_manipulator.py` appending arm joints/bodies onto A2 constants).
-- **`AssetSpec.behaviors`:** list of `EntityBehavior` instances (config-only `__init__`); bound via `_bind_pending_behaviors` after entities exist; env calls lifecycle methods explicitly. `See `envs/behaviors/TEACHME.md` and `GripperBehavior` / `UnderwaterRobot`.
+- **`AssetSpec.behaviors`:** list of `EntityBehavior` instances (config-only `__init__`); bound via `_bind_pending_behaviors` after entities exist; env calls lifecycle methods explicitly. See `envs/behaviors/TEACHME.md` and `GripperBehavior` / `UnderwaterRobot`.
 - **Isaac-only / mjlab-only:** raise `NotImplementedError` in the unsupported factory (e.g. BlueROV mjlab) rather than registering a broken cfg.
+
+### Gripper init / openness
+
+`GripperBehavior` (`envs/behaviors/gripper.py`) caches the finger opening axis at `_initialize` from live fingertip positions, then rotates that EEF-local unit vector with the EEF (`finger_seg_normalized_w`). That axis is **undefined** if the fingers coincide.
+
+**Rule:** any asset with a gripper sets `INIT_JOINT_POS` to an **open** configuration (Piper: `arm_joint7: 0.035`, `arm_joint8: -0.035`), not the closed rest `q ≈ 0`. `GripperBehavior` raises if the world-frame finger segment is too short at init.
+
+**Openness** matches that convention (A2 Piper / similar prismatic jaws):
+
+| Signal | `0` | `1` |
+|--------|-----|-----|
+| `openness()` | closed rest (`\|q\| ≈ 0`) | open / spawn (`\|q\|` at soft limit, same pose as init) |
+| `closedness()` | open | closed |
+
+`openness = clamp(max\|q_finger\| / max_open, 0, 1)` with `max_open` from soft limits. Do not treat rest as open or init as closed.
 
 ---
 
@@ -325,6 +343,7 @@ Full notes: [reference.md](reference.md#outdated-and-cleanup).
 - Omitting `joint_names_simulation` / `body_names_simulation`
 - Different name lists or different init regex coverage between Isaac and mjlab
 - Using backend-native joint order in MDP (breaks transfer) — see `environment-mdp`
+- Initializing gripper joints **closed** (`q ≈ 0`) so `finger_seg` is degenerate; openness inverted vs spawn-open / rest-closed
 - Committing large USD/MJCF/meshes into `assets/` instead of the HF cache layout
 - Hand-editing composed MJCF in `ROBOT_MODEL_DIR` without an assetx recipe (loses reproducibility)
 - Training against live `assetx/artifacts/` paths (mutable; not shared via HF cache)

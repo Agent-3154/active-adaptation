@@ -12,6 +12,7 @@ from typing_extensions import override
 
 from active_adaptation.envs.behaviors.behavior import EntityBehavior
 from active_adaptation.envs.utils import find_bodies, find_joints
+from active_adaptation.utils.math import normalize, quat_rotate, quat_rotate_inverse
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -24,11 +25,13 @@ class GripperBehavior(EntityBehavior):
     **Frame:** unless an asset documents otherwise, the EEF body ``+X`` is
     **forward / approach** (see ``grasp_pose.EEF_FORWARD_B`` / ``eef_forward_w``).
 
-    Closedness assumes finger soft-limit rest (joint pos ≈ 0) is **closed** and
-    ``|q|`` toward the soft limit is **open** (A2 Piper / similar). Then:
+    Assets must spawn gripper joints **open** (see ``INIT_JOINT_POS`` on
+    ``a2_manipulator``) so ``finger_seg`` is well-defined at ``_initialize``.
+    Closed rest is ``q ≈ 0``; open / init is ``|q|`` toward the soft limit
+    (A2 Piper / similar). Then:
 
-    - ``closedness()`` → ``[N, 1]`` in ``[0, 1]`` with ``0`` = open, ``1`` = closed
-    - ``openness()`` → ``1 - closedness()``
+    - ``openness()`` → ``[N, 1]`` in ``[0, 1]`` with ``0`` = closed rest, ``1`` = open
+    - ``closedness()`` → ``1 - openness()``
     """
 
     name = "gripper"
@@ -89,6 +92,12 @@ class GripperBehavior(EntityBehavior):
             )
         self.body_ids = torch.as_tensor(body_ids, device=self.device, dtype=torch.long)
         self.body_names = list(body_names)
+        
+        finger_left, finger_right = self.finger_pos_w().unbind(dim=1)
+        finger_seg_w = finger_right - finger_left
+        if (finger_seg_w.norm(dim=-1, keepdim=True) < 1e-2).any():
+            raise ValueError(f"GripperBehavior: finger segment is too short")
+        self._finger_seg = quat_rotate_inverse(self.eef_quat_w, normalize(finger_seg_w))
 
     @property
     def eef_pos_w(self) -> torch.Tensor:
@@ -98,9 +107,12 @@ class GripperBehavior(EntityBehavior):
     def eef_quat_w(self) -> torch.Tensor:
         return self.robot.data.body_quat_w[:, self.eef_body_id]
     
-    @property
     def finger_pos_w(self) -> torch.Tensor:
         return self.robot.data.body_pos_w[:, self.body_ids]
+    
+    def finger_seg_normalized_w(self) -> torch.Tensor:
+        """Finger segment in the world frame, normalized."""
+        return quat_rotate(self.eef_quat_w, self._finger_seg)
 
     def joint_pos(self) -> torch.Tensor:
         return self.robot.data.joint_pos[:, self.joint_ids]

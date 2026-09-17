@@ -58,7 +58,9 @@ INIT_JOINT_POS = {
     "arm_joint1": 0.0,
     "arm_joint2": math.pi / 2,
     "arm_joint3": - math.pi / 2,
-    "arm_joint[4-8]": 0.0,
+    "arm_joint[4-6]": 0.0,
+    "arm_joint7": 0.035, # open state
+    "arm_joint8": -0.035, # open state
 }
 
 JOINT_SYMMETRY_MAPPING = {**A2_JOINT_SYMMETRY_MAPPING, **_ARM_JOINT_SYMMETRY}

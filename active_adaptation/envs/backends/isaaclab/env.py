@@ -145,10 +145,14 @@ class IsaacBackendEnv(_EnvBase):
             )
         )
         # --------------------------
-        
+        for e in self.scene.articulations.values():
+            e.set_joint_position_target(e.data.default_joint_pos)
+            e.set_joint_velocity_target(e.data.default_joint_vel)
         # warm up the simulation
         for _ in tqdm(range(10), desc="Warming up the simulation"):
+            self.scene.write_data_to_sim()
             sim.step(render=False)
+            self.scene.update(sim.get_physics_dt())
 
         sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat, camera_prim_path=camera_path)
         try:

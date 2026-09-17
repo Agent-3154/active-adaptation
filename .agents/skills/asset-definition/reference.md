@@ -261,6 +261,8 @@ We always assume the USD joint and body names match those of the MJCF (if provid
 
 Regex init maps (`INIT_JOINT_POS`) are resolved by each backend independently; ensure every actuated joint matches some key on both.
 
+**Gripper joints** must match an **open** init (not closed rest). `GripperBehavior` caches `finger_seg` from fingertip separation at spawn; coincident fingers make that axis undefined. Openness is `1` at that open/init pose and `0` at `q ≈ 0`. See the skill [Gripper init / openness](SKILL.md#gripper-init--openness).
+
 ---
 
 ## Actuators
