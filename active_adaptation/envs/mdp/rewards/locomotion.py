@@ -209,6 +209,48 @@ class linvel_exp(Reward[Twist]):
             )
 
 
+class linvel_tracking(Reward[Twist]):
+    """Reward for tracking the linear velocity of the robot.
+    This term allows dynamic weight adjustment.
+    """
+    in_keys = ["linvel_tracking_weight"]
+    out_keys = None
+
+    def __init__(
+        self,
+        weight: float,
+        exp_sigma: float = 0.25,
+        linear_weight: float = 0.5,
+        axis: str = "xy",
+        track_var: bool = False,
+    ):
+        super().__init__(weight, track_var=track_var)
+        self.exp_sigma = exp_sigma
+        self.linear_weight = linear_weight
+        self.axis_ids = _parse_pos_axes(axis)
+
+    @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
+        self.asset: Articulation = self.env.scene.articulations["robot"]
+        self.axis_ids = torch.tensor(self.axis_ids, device=self.device)
+
+    @override
+    def _update(self, weight: torch.Tensor | None) -> None:
+        if weight is None:
+            self._weight = torch.ones(self.num_envs, 1, device=self.device)
+        else:
+            self._weight = weight.reshape(self.num_envs, 1)
+
+    def _compute(self) -> torch.Tensor:
+        linvel_w = self.asset.data.root_com_lin_vel_w[:, self.axis_ids]
+        cmd_linvel_w = self.command_manager.cmd_linvel_w[:, self.axis_ids]
+        linvel_error_squared = (linvel_w - cmd_linvel_w).square().sum(-1, True)
+        linvel_error = linvel_error_squared.sqrt()
+        rew = torch.exp(-linvel_error / self.exp_sigma) - self.linear_weight * linvel_error
+        return (rew * self._weight).reshape(self.num_envs, 1), self._weight > 0.0
+
+
 class root_pos_exp(Reward):
     """Tracking-style root position reward (exp of positional error).
 
