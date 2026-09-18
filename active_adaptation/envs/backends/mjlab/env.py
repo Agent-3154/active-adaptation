@@ -133,6 +133,12 @@ class MjlabBackendEnv(_EnvBase):
         self._edit_scene_spec(scene_cfg)
 
         scene = Scene(scene_cfg, device=str(self.device))
+        simulation_kwargs = {}
+        variant_info = scene.collect_variant_info()
+        if variant_info:
+            simulation_kwargs.update(spec=scene.spec, variant_info=variant_info)
+        else:
+            simulation_kwargs["model"] = scene.compile()
         sim = Simulation(
             num_envs=scene.num_envs,
             cfg=SimulationCfg(
@@ -146,8 +152,8 @@ class MjlabBackendEnv(_EnvBase):
                 ),
                 broadphase=self.cfg.sim.get("broadphase", None), # nxn, sap_tile, sap_segmented
             ),
-            model=scene.compile(),
             device=str(self.device),
+            **simulation_kwargs,
         )
 
         scene.initialize(sim.mj_model, sim.model, sim.data)
