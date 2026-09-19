@@ -6,12 +6,15 @@ Isaac USD only allows one joint per body, so the D6 is a serial chain::
           ─d6_rx→ link_rx ─d6_ry→ link_ry ─d6_rz→ handle
 
 ``dummy`` is a fixed / mocap root (Isaac ``fix_root_link``, mjlab no freejoint).
-The handle is a capsule along **+X**; GraspPose is the bar midpoint.
+The handle is a capsule along ``handle_axis`` (default **+X**); GraspPose is
+the bar midpoint with approach perpendicular to that axis.
 """
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
+
+Axis = Literal["X", "Y", "Z"]
 
 from active_adaptation.assets._procedural import (
     Backend,
@@ -53,6 +56,28 @@ _HINGE_AXES = (
     ("d6_ry", "link_ry", (0.0, 1.0, 0.0)),
     ("d6_rz", "handle", (0.0, 0.0, 1.0)),
 )
+_HANDLE_AXIS_VEC: dict[str, tuple[float, float, float]] = {
+    "X": (1.0, 0.0, 0.0),
+    "Y": (0.0, 1.0, 0.0),
+    "Z": (0.0, 0.0, 1.0),
+}
+_HANDLE_APPROACH_DIRS: dict[str, tuple[tuple[float, float, float], ...]] = {
+    "X": ((0.0, 1.0, 0.0), (0.0, -1.0, 0.0)),
+    "Y": ((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)),
+    "Z": ((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)),
+}
+
+
+def _parse_handle_axis(axis: str | Axis) -> str:
+    key = str(axis).upper()
+    if key not in _HANDLE_AXIS_VEC:
+        raise ValueError(f"handle_axis must be 'X', 'Y', or 'Z', got {axis!r}")
+    return key
+
+
+def _handle_fromto(axis: str, half: float) -> list[float]:
+    vec = _HANDLE_AXIS_VEC[axis]
+    return [-half * vec[0], -half * vec[1], -half * vec[2], half * vec[0], half * vec[1], half * vec[2]]
 
 
 def build_dummy_d6_spec(
@@ -60,16 +85,22 @@ def build_dummy_d6_spec(
     handle_length: float = 0.16,
     handle_radius: float = 0.022,
     handle_mass: float = 0.15,
+    handle_axis: str | Axis = "X",
     slide_range: Sequence[float] = (-0.12, 0.12),
     hinge_range: Sequence[float] = (-3.1416, 3.1416),
     rgba: Sequence[float] = (0.42, 0.55, 0.48, 1.0),
 ):
-    """Fixed ``dummy`` + serial D6 + X-axis capsule ``handle`` at the origin."""
+    """Fixed ``dummy`` + serial D6 + capsule ``handle`` at the origin.
+
+    ``handle_axis`` is the capsule long axis in the handle body frame
+    (``X`` / ``Y`` / ``Z``).
+    """
     import mujoco
 
     slide_lo, slide_hi = _as_float_tuple(slide_range, 2)
     hinge_lo, hinge_hi = _as_float_tuple(hinge_range, 2)
     rgba_t = _rgba(rgba)
+    handle_key = _parse_handle_axis(handle_axis)
     half = 0.5 * float(handle_length)
 
     spec = mujoco.MjSpec()
@@ -78,19 +109,19 @@ def build_dummy_d6_spec(
     dummy.inertia = [0.05, 0.05, 0.05]
 
     parent = dummy
-    for joint_name, body_name, axis in _SLIDE_AXES:
+    for joint_name, body_name, joint_axis in _SLIDE_AXES:
         child = parent.add_body(name=body_name, pos=(0.0, 0.0, 0.0))
         child.mass = 0.02
         child.inertia = [1e-4, 1e-4, 1e-4]
         joint = child.add_joint(
             name=joint_name,
             type=mujoco.mjtJoint.mjJNT_SLIDE,
-            axis=list(axis),
+            axis=list(joint_axis),
         )
         joint.range = [slide_lo, slide_hi]
         parent = child
 
-    for joint_name, body_name, axis in _HINGE_AXES:
+    for joint_name, body_name, joint_axis in _HINGE_AXES:
         child = parent.add_body(name=body_name, pos=(0.0, 0.0, 0.0))
         if body_name == "handle":
             child.mass = float(handle_mass)
@@ -101,7 +132,7 @@ def build_dummy_d6_spec(
         joint = child.add_joint(
             name=joint_name,
             type=mujoco.mjtJoint.mjJNT_HINGE,
-            axis=list(axis),
+            axis=list(joint_axis),
         )
         joint.range = [hinge_lo, hinge_hi]
         parent = child
@@ -110,7 +141,7 @@ def build_dummy_d6_spec(
         parent,
         name="handle_collision",
         radius=float(handle_radius),
-        fromto=[-half, 0.0, 0.0, half, 0.0, 0.0],
+        fromto=_handle_fromto(handle_key, half),
         rgba=rgba_t,
     )
     return spec
@@ -149,6 +180,7 @@ def _get_dummy_d6_spawner_cls():
             handle_length=cfg.handle_length,
             handle_radius=cfg.handle_radius,
             handle_mass=cfg.handle_mass,
+            handle_axis=cfg.handle_axis,
             slide_range=cfg.slide_range,
             hinge_range=cfg.hinge_range,
             rgba=cfg.rgba,
@@ -221,6 +253,7 @@ def _get_dummy_d6_spawner_cls():
         handle_length: float = 0.16
         handle_radius: float = 0.022
         handle_mass: float = 0.15
+        handle_axis: str = "X"
         slide_range: tuple[float, float] = (-0.12, 0.12)
         hinge_range: tuple[float, float] = (-3.1416, 3.1416)
         rgba: tuple[float, float, float, float] = (0.42, 0.55, 0.48, 1.0)
@@ -240,6 +273,7 @@ def make_dummy_d6(
     handle_length: float = 0.16,
     handle_radius: float = 0.022,
     handle_mass: float = 0.15,
+    handle_axis: str | Axis = "X",
     slide_range: Sequence[float] = (-0.12, 0.12),
     hinge_range: Sequence[float] = (-3.1416, 3.1416),
     stiffness: float = 40.0,
@@ -250,7 +284,11 @@ def make_dummy_d6(
     activate_contact_sensors: bool = True,
     attach_grasp: bool = True,
 ):
-    """Compliant D6 handle on a dummy base. Returns ``AssetSpec``."""
+    """Compliant D6 handle on a dummy base. Returns ``AssetSpec``.
+
+    ``handle_axis`` (``X`` / ``Y`` / ``Z``) is the capsule long axis in the
+    handle body frame. Default ``X`` matches the historical dummy_d6 bar.
+    """
     from active_adaptation.assets.asset_cfg import AssetSpec
     from active_adaptation.envs.behaviors.grasp_pose import GraspPose
 
@@ -259,6 +297,7 @@ def make_dummy_d6(
     rgba_t = _rgba(rgba)
     slide_t = _as_float_tuple(slide_range, 2)
     hinge_t = _as_float_tuple(hinge_range, 2)
+    axis = _parse_handle_axis(handle_axis)
     init_joint = dict(D6_INIT_JOINT_POS)
 
     if backend == "isaaclab":
@@ -273,6 +312,7 @@ def make_dummy_d6(
             handle_length=float(handle_length),
             handle_radius=float(handle_radius),
             handle_mass=float(handle_mass),
+            handle_axis=axis,
             slide_range=slide_t,
             hinge_range=hinge_t,
             rgba=rgba_t,
@@ -287,7 +327,7 @@ def make_dummy_d6(
             ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
-                solver_position_iteration_count=8,
+                solver_position_iteration_count=4,
                 solver_velocity_iteration_count=0,
                 fix_root_link=True,
             ),
@@ -326,6 +366,7 @@ def make_dummy_d6(
                 handle_length=handle_length,
                 handle_radius=handle_radius,
                 handle_mass=handle_mass,
+                handle_axis=axis,
                 slide_range=slide_t,
                 hinge_range=hinge_t,
                 rgba=rgba_t,
@@ -372,8 +413,8 @@ def make_dummy_d6(
     if attach_grasp:
         behaviors = (
             GraspPose.for_side_axis(
-                axis=(1.0, 0.0, 0.0),
-                approach_dirs=((0.0, 1.0, 0.0), (0.0, -1.0, 0.0)),
+                axis=_HANDLE_AXIS_VEC[axis],
+                approach_dirs=_HANDLE_APPROACH_DIRS[axis],
                 pos=(0.0, 0.0, 0.0),
             ),
         )

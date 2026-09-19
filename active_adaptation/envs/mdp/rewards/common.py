@@ -173,6 +173,7 @@ class body_linvel_penalty(Reward):
         weight: float,
         body_names: str | List[str] = ".*",
         mask: List[float] = [1.0, 1.0, 1.0],
+        frame: str = "world",
         square: bool = True,
         enabled: bool = True,
         track_var: bool = False,
@@ -181,6 +182,9 @@ class body_linvel_penalty(Reward):
         self.body_names = body_names
         self.mask = mask
         self.square = square
+        self.frame = frame
+        if self.frame not in ["world", "base"]:
+            raise ValueError(f"Unsupported frame: {self.frame}. Must be 'world' or 'base'.")
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -193,12 +197,16 @@ class body_linvel_penalty(Reward):
     def _compute(self) -> torch.Tensor:
         if self.env.backend == "isaaclab":
             body_linvel = self.asset.data.body_com_lin_vel_w[:, self.body_ids]
+            base_linvel = self.asset.data.root_com_lin_vel_w
         elif self.env.backend == "mjlab":
             body_linvel = self.asset.data.body_link_lin_vel_w[:, self.body_ids]
+            base_linvel = self.asset.data.root_lin_vel_w
         else:
             raise ValueError(f"Unsupported backend: {self.env.backend}")
+        if self.frame == "base":
+            body_linvel = (body_linvel - base_linvel) * self.mask
         if self.square:
-            rew = -(body_linvel * self.mask).square().sum(dim=-1, keepdim=True)
+            rew = -body_linvel.square().sum(dim=-1, keepdim=True)
         else:
-            rew = -(body_linvel * self.mask).norm(dim=-1, keepdim=True)
+            rew = -body_linvel.norm(dim=-1, keepdim=True)
         return rew.sum(1).reshape(self.num_envs, 1)
