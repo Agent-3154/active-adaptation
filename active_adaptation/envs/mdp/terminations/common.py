@@ -359,7 +359,6 @@ class error_exceeds(Termination):
         self,
         thres: float,
         in_keys: Sequence[str] | str,
-        active_thres: float = 0.0,
         min_steps: int = 0,
         is_timeout: bool = False,
         enabled: bool = True,
@@ -378,7 +377,6 @@ class error_exceeds(Termination):
             is_timeout=is_timeout, enabled=enabled, in_keys=in_keys
         )
         self.thres = thres
-        self.active_thres = active_thres
         self.min_steps = min_steps
         self._error: torch.Tensor | None = None
         self._active: torch.Tensor | None = None
@@ -386,8 +384,10 @@ class error_exceeds(Termination):
     def _update(
         self, error: torch.Tensor | None, active: torch.Tensor | None
     ) -> None:
-        self._error = error
-        self._active = active
+        if active is None:
+            active = torch.ones(self.num_envs, 1, device=self.device, dtype=bool)
+        self._error = error.reshape(self.num_envs, 1)
+        self._active = active.reshape(self.num_envs, 1)
 
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
         if self._error is None:
@@ -398,11 +398,4 @@ class error_exceeds(Termination):
             dim=-1, keepdim=True
         )
         valid = (self.env.episode_length_buf >= self.min_steps).unsqueeze(-1)
-        if self._active is not None:
-            active = self._active.reshape(self.num_envs, -1)
-            if active.dtype == torch.bool:
-                gate = active.any(dim=-1, keepdim=True)
-            else:
-                gate = (active > self.active_thres).any(dim=-1, keepdim=True)
-            valid = valid & gate
-        return valid & exceeded
+        return self._active & valid & exceeded

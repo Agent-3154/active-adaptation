@@ -270,20 +270,40 @@ class GraspPose(EntityBehavior):
         *,
         handle_shape: str = "capsule",
         handle_box_size: Sequence[float] | None = None,
+        handle_standoff: float = 0.008,
     ) -> "GraspPose":
         """Front handle grasp in the **handle body frame**.
 
-        Bar lies on ±X at the handle origin (stand-off already in the body
-        pose). Approach from **+Y** toward −Y; EEF **+X** = approach, **+Z** =
-        bar axis so Piper ±Y fingers close vertically across the bar.
-        Transform with the ``handle_{i}`` body pose.
+        Bar lies on ±X at the handle origin (body pose already includes
+        ``handle_standoff`` from the drawer front). Approach from **+Y**
+        toward −Y; EEF **+X** = approach, **+Z** = bar axis. Transform with
+        the ``handle_{i}`` body pose.
         """
-        del handle_radius, handle_shape, handle_box_size  # axis grasp at origin
-        return cls.for_side_axis(
+        from active_adaptation.assets._procedural import (
+            _handle_box_half_extents,
+            _parse_handle_shape,
+        )
+
+        standoff = float(handle_standoff)
+        if standoff < 0.0:
+            raise ValueError(f"handle_standoff must be >= 0, got {handle_standoff}")
+        shape = _parse_handle_shape(handle_shape)
+        if shape == "capsule":
+            y_half = float(handle_radius)
+        else:
+            _, y_half, _ = _handle_box_half_extents(
+                handle_length=1.0,
+                handle_radius=float(handle_radius),
+                handle_box_size=handle_box_size,
+            )
+        gp = cls.for_side_axis(
             axis=(1.0, 0.0, 0.0),
             approach_dirs=((0.0, -1.0, 0.0),),
             pos=(0.0, 0.0, 0.0),
         )
+        gp.handle_standoff = standoff
+        gp.handle_y_half = float(y_half)
+        return gp
 
     @classmethod
     def for_side_axis(

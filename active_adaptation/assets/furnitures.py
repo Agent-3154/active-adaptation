@@ -295,6 +295,7 @@ def build_drawer_spec(
     handle_length: float = 0.18,
     handle_shape: HandleShape = "capsule",
     handle_box_size: Sequence[float] | None = None,
+    handle_standoff: float = 0.008,
     drawer_joint_range: tuple[float, float] | None = None,
     rgba: Sequence[float] = _DEFAULT_RGBA,
     frame_rgba: Sequence[float] = _DEFAULT_DOOR_FRAME_RGBA,
@@ -309,6 +310,8 @@ def build_drawer_spec(
 
     No handle joints / locks — handles are fixed bars on the drawer front.
     ``handle_shape`` is ``"capsule"`` or ``"box"`` (see ``build_door_spec``).
+    ``handle_standoff`` is the gap along **+Y** between the drawer front
+    face and the inner face of the handle bar.
     """
     import mujoco
 
@@ -334,6 +337,9 @@ def build_drawer_spec(
         raise ValueError(f"wall_thickness must be positive, got {wall_thickness}")
     if gap < 0:
         raise ValueError(f"drawer_gap must be >= 0, got {drawer_gap}")
+    standoff = float(handle_standoff)
+    if standoff < 0.0:
+        raise ValueError(f"handle_standoff must be >= 0, got {handle_standoff}")
 
     half_w, half_d, half_h = width * 0.5, depth * 0.5, height * 0.5
     half_wt = wt * 0.5
@@ -469,8 +475,6 @@ def build_drawer_spec(
             )
 
         # Fixed (welded) pull-bar on the front face — no lock / no handle joint.
-        # Small stand-off so fingers can wrap behind the bar.
-        standoff = 0.008
         handle_y = half_dd + standoff + y_half
         handle = drawer.add_body(name=f"handle_{i}", pos=(0.0, handle_y, 0.0))
         handle.mass = 0.25
@@ -1263,6 +1267,7 @@ def _get_drawer_spawner_cls():
             handle_length=cfg.handle_length,
             handle_shape=cfg.handle_shape,
             handle_box_size=cfg.handle_box_size,
+            handle_standoff=cfg.handle_standoff,
             drawer_joint_range=cfg.drawer_joint_range,
             rgba=cfg.rgba,
             frame_rgba=cfg.frame_rgba,
@@ -1327,6 +1332,7 @@ def _get_drawer_spawner_cls():
         handle_length: float = 0.18
         handle_shape: str = "capsule"
         handle_box_size: tuple[float, float] | None = None
+        handle_standoff: float = 0.008
         drawer_joint_range: tuple[float, float] | None = None
         rgba: tuple[float, float, float, float] = _DEFAULT_RGBA
         frame_rgba: tuple[float, float, float, float] = _DEFAULT_DOOR_FRAME_RGBA
@@ -1352,6 +1358,7 @@ def make_drawer(
     handle_length: float = 0.18,
     handle_shape: HandleShape = "capsule",
     handle_box_size: Sequence[float] | None = None,
+    handle_standoff: float = 0.008,
     drawer_joint_range: Sequence[float] | None = None,
     rgba: Sequence[float] = _DEFAULT_RGBA,
     frame_rgba: Sequence[float] = _DEFAULT_DOOR_FRAME_RGBA,
@@ -1369,7 +1376,8 @@ def make_drawer(
     slide joints default to **zero stiffness**.
 
     ``handle_shape``: ``"capsule"`` or ``"box"``; optional ``handle_box_size``
-    as full ``(depth_y, height_z)``.
+    as full ``(depth_y, height_z)``. ``handle_standoff`` is the gap between
+    the drawer front and the inner face of the bar (default 8 mm).
 
     Behaviors (disable with flags):
     - ``DrawerBehavior`` (``drawer.drawer``): slide joint accessors
@@ -1398,6 +1406,9 @@ def make_drawer(
         None if handle_box_size is None else _as_float_tuple(handle_box_size, 2)
     )
     travel = None if drawer_travel is None else float(drawer_travel)
+    standoff = float(handle_standoff)
+    if standoff < 0.0:
+        raise ValueError(f"handle_standoff must be >= 0, got {handle_standoff}")
     joint_names = _drawer_joint_names(n_drawers)
     body_names = _drawer_body_names(n_drawers)
     init_joint_pos = _drawer_init_joint_pos(n_drawers)
@@ -1421,6 +1432,7 @@ def make_drawer(
             handle_length=float(handle_length),
             handle_shape=shape,
             handle_box_size=box_size_t,
+            handle_standoff=standoff,
             drawer_joint_range=drawer_range_t,
             rgba=rgba_t,
             frame_rgba=frame_rgba_t,
@@ -1479,6 +1491,7 @@ def make_drawer(
                 handle_length=handle_length,
                 handle_shape=shape,
                 handle_box_size=box_size_t,
+                handle_standoff=standoff,
                 drawer_joint_range=drawer_range_t,
                 rgba=rgba_t,
                 frame_rgba=frame_rgba_t,
@@ -1530,6 +1543,7 @@ def make_drawer(
                 handle_radius=float(handle_radius),
                 handle_shape=shape,
                 handle_box_size=box_size_t,
+                handle_standoff=standoff,
             )
         )
     return AssetSpec(config=cfg, behaviors=tuple(behaviors))
