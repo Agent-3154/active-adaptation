@@ -373,6 +373,29 @@ def sample_quat_yaw(size, yaw_range=(0, torch.pi * 2), device: torch.device = "c
     return quat
 
 
+def sample_quat_angle_axis(
+    size,
+    axis: torch.Tensor,
+    angle_range: tuple[float, float],
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Sample a quaternion rotating about ``axis`` by a uniform angle.
+
+    Args:
+        size: Batch size passed to ``torch.empty`` (int or ``torch.Size``).
+        axis: Rotation axis. Shape ``(..., 3)``; broadcast against ``size``.
+        angle_range: Inclusive ``(min, max)`` radians for the sampled angle.
+        device: Device for the angle draw. Defaults to ``axis.device``.
+
+    Returns:
+        Quaternion in ``(w, x, y, z)``. Shape ``(..., 4)``.
+    """
+    if device is None:
+        device = axis.device
+    angle = torch.empty(size, device=device, dtype=axis.dtype).uniform_(*angle_range)
+    return quat_from_angle_axis(angle, axis)
+
+
 def matrix_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
     """Convert rotations given as quaternions to rotation matrices.
 
