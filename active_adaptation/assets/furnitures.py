@@ -73,6 +73,65 @@ def build_table_spec(
     return spec
 
 
+def _chair_inertial(
+    *,
+    mass: float,
+    leg_length: float,
+    seat_size: Sequence[float],
+    back_height: float,
+    back_thickness: float,
+    leg_inset: float,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Hollow-frame chair inertial: one rigid body, CoM not from solid slabs.
+
+    Mass split is legs / seat / back ``(0.70, 0.22, 0.08)`` so most of the
+    weight is in the posts. Returns ``(com_xyz, diag_inertia)`` in the body
+    frame (origin on the floor at the seat center).
+    """
+    m = float(mass)
+    if m <= 0.0:
+        raise ValueError(f"chair mass must be positive, got {mass}")
+    sx, sy, sz = _as_float_tuple(seat_size, 3)
+    L = float(leg_length)
+    bh = float(back_height)
+    bt = float(back_thickness)
+    hx, hy = 0.5 * sx, 0.5 * sy
+    m_legs, m_seat, m_back = 0.70 * m, 0.22 * m, 0.08 * m
+    z_legs = 0.5 * L
+    z_seat = L + 0.5 * sz
+    z_back = L + sz + 0.5 * bh
+    y_back = -(hy - 0.5 * bt)
+    com_y = (m_back * y_back) / m
+    com_z = (m_legs * z_legs + m_seat * z_seat + m_back * z_back) / m
+    com = (0.0, com_y, com_z)
+
+    ixx = iyy = izz = 0.0
+    cy, cz = com[1], com[2]
+    lx = max(hx - float(leg_inset), 0.0)
+    ly = max(hy - float(leg_inset), 0.0)
+    for x, y in ((lx, ly), (lx, -ly), (-lx, ly), (-lx, -ly)):
+        mm = m_legs / 4.0
+        dx, dy, dz = x, y - cy, z_legs - cz
+        ixx += mm * (dy * dy + dz * dz)
+        iyy += mm * (dx * dx + dz * dz)
+        izz += mm * (dx * dx + dy * dy)
+    dx, dy, dz = 0.0, -cy, z_seat - cz
+    ixx += m_seat * ((sy * sy + sz * sz) / 12.0 + dy * dy + dz * dz)
+    iyy += m_seat * ((sx * sx + sz * sz) / 12.0 + dx * dx + dz * dz)
+    izz += m_seat * ((sx * sx + sy * sy) / 12.0 + dx * dx + dy * dy)
+    dx, dy, dz = 0.0, y_back - cy, z_back - cz
+    ixx += m_back * ((bt * bt + bh * bh) / 12.0 + dy * dy + dz * dz)
+    iyy += m_back * ((sx * sx + bh * bh) / 12.0 + dx * dx + dz * dz)
+    izz += m_back * ((sx * sx + bt * bt) / 12.0 + dx * dx + dy * dy)
+    return com, (ixx, iyy, izz)
+
+
+def _apply_chair_body_inertial(body, *, mass: float, com, inertia) -> None:
+    body.mass = float(mass)
+    body.ipos = [float(com[0]), float(com[1]), float(com[2])]
+    body.inertia = [float(inertia[0]), float(inertia[1]), float(inertia[2])]
+
+
 def build_chair_spec(
     *,
     leg_length: float = 0.45,
@@ -95,7 +154,15 @@ def build_chair_spec(
     spec = mujoco.MjSpec()
     body = spec.worldbody.add_body(name=body_name)
     if mass is not None:
-        body.mass = float(mass)
+        com, inertia = _chair_inertial(
+            mass=mass,
+            leg_length=leg_length,
+            seat_size=seat_size,
+            back_height=back_height,
+            back_thickness=back_thickness,
+            leg_inset=leg_inset,
+        )
+        _apply_chair_body_inertial(body, mass=mass, com=com, inertia=inertia)
 
     seat_z = leg_length + sz * 0.5
     body.add_geom(
@@ -136,6 +203,7 @@ def build_door_spec(
     handle_length: float = 0.16,
     handle_shape: HandleShape = "capsule",
     handle_box_size: Sequence[float] | None = None,
+    handle_standoff: float = 0.0,
     door_joint_range: tuple[float, float] = (-1.8, 1.8),
     handle_joint_range: tuple[float, float] = (-1.2, 1.2),
     rgba: Sequence[float] = _DEFAULT_RGBA,
@@ -157,7 +225,8 @@ def build_door_spec(
 
     ``handle_shape`` is ``"capsule"`` (default) or ``"box"`` (thin bar). For
     boxes, ``handle_box_size`` is full ``(depth_y, height_z)``; omitted → derived
-    from ``handle_radius``.
+    from ``handle_radius``. ``handle_standoff`` is the gap along **±Y** between
+    each panel face and the inner face of that side's handle bar.
     """
     import mujoco
 
@@ -181,6 +250,9 @@ def build_door_spec(
         )
     if not (0.0 < hz < height):
         raise ValueError(f"handle_position z={hz} must be in (0, height={height})")
+    standoff = float(handle_standoff)
+    if standoff < 0.0:
+        raise ValueError(f"handle_standoff must be >= 0, got {handle_standoff}")
 
     half_w, half_d, half_h = width * 0.5, thickness * 0.5, height * 0.5
     half_ft = ft * 0.5
@@ -249,7 +321,7 @@ def build_door_spec(
     handle_joint.range = list(handle_joint_range)
 
     for side, y_sign in (("front", +1.0), ("back", -1.0)):
-        y = y_sign * (half_d + y_half)
+        y = y_sign * (half_d + standoff + y_half)
         _add_bar_handle(
             handle,
             name=f"handle_{side}_collision",
@@ -598,6 +670,25 @@ def _get_furniture_spawner_cls():
                 bind_physics_material(str(child.GetPath()), material_path, stage=stage)
         if cfg.mass_props is not None:
             schemas.define_mass_properties(prim_path, cfg.mass_props, stage=stage)
+        if (
+            cfg.kind == "chair"
+            and cfg.mass_props is not None
+            and cfg.mass_props.mass is not None
+        ):
+            from pxr import Gf, UsdPhysics
+
+            com, inertia = _chair_inertial(
+                mass=cfg.mass_props.mass,
+                leg_length=cfg.leg_length,
+                seat_size=cfg.seat_size,
+                back_height=cfg.back_height,
+                back_thickness=cfg.back_thickness,
+                leg_inset=cfg.leg_inset,
+            )
+            mass_api = UsdPhysics.MassAPI.Apply(root)
+            mass_api.CreateMassAttr(float(cfg.mass_props.mass))
+            mass_api.CreateCenterOfMassAttr(Gf.Vec3f(*com))
+            mass_api.CreateDiagonalInertiaAttr(Gf.Vec3f(*inertia))
         if cfg.rigid_props is not None:
             schemas.define_rigid_body_properties(prim_path, cfg.rigid_props, stage=stage)
         if cfg.activate_contact_sensors:
@@ -864,6 +955,8 @@ def make_chair(
 ):
     """Procedural chair (box seat/back + capsule legs). Non-articulated rigid body.
 
+    Collision stays a single rigid body. Mass is a hollow-frame split (mostly
+    legs) so the CoM sits low instead of at the solid seat/back centroid.
     Returns ``AssetSpec`` with prescribed leg-midpoint ``GraspPose`` behaviors
     (disable with ``attach_grasp=False``).
     """
@@ -926,6 +1019,7 @@ def _get_door_spawner_cls():
             handle_length=cfg.handle_length,
             handle_shape=cfg.handle_shape,
             handle_box_size=cfg.handle_box_size,
+            handle_standoff=cfg.handle_standoff,
             door_joint_range=cfg.door_joint_range,
             handle_joint_range=cfg.handle_joint_range,
             rgba=cfg.rgba,
@@ -1005,6 +1099,7 @@ def _get_door_spawner_cls():
         handle_length: float = 0.16
         handle_shape: str = "capsule"
         handle_box_size: tuple[float, float] | None = None
+        handle_standoff: float = 0.0
         door_joint_range: tuple[float, float] = (-1.8, 1.8)
         handle_joint_range: tuple[float, float] = (-1.2, 1.2)
         rgba: tuple[float, float, float, float] = _DEFAULT_RGBA
@@ -1030,6 +1125,7 @@ def make_door(
     handle_length: float = 0.16,
     handle_shape: HandleShape = "capsule",
     handle_box_size: Sequence[float] | None = None,
+    handle_standoff: float = 0.0,
     door_joint_range: Sequence[float] = (-1.8, 1.8),
     handle_joint_range: Sequence[float] = (-1.2, 1.2),
     rgba: Sequence[float] = _DEFAULT_RGBA,
@@ -1049,7 +1145,8 @@ def make_door(
     Fixed-base fixture (no freejoint). Isaac welds ``frame`` with
     ``fix_root_link=True``; mjlab auto-wraps a mocap root. ``door_dimensions``
     is full ``(width, thickness, height)``. ``handle_position`` is ``(x, z)``
-    in the frame frame. ``rgba`` is panel/handle; ``frame_rgba`` is jambs/lintel.
+    in the frame frame. ``handle_standoff`` is the panel-face to handle-bar
+    gap (both sides). ``rgba`` is panel/handle; ``frame_rgba`` is jambs/lintel.
     ``door_joint`` defaults to **zero stiffness** (free hinge + light damping).
 
     Behaviors (disable with flags):
@@ -1072,6 +1169,9 @@ def make_door(
     box_size_t = (
         None if handle_box_size is None else _as_float_tuple(handle_box_size, 2)
     )
+    standoff = float(handle_standoff)
+    if standoff < 0.0:
+        raise ValueError(f"handle_standoff must be >= 0, got {handle_standoff}")
     del name  # link names are fixed: frame / panel / handle
 
     if backend == "isaaclab":
@@ -1087,6 +1187,7 @@ def make_door(
             handle_length=float(handle_length),
             handle_shape=shape,
             handle_box_size=box_size_t,
+            handle_standoff=standoff,
             door_joint_range=door_range_t,
             handle_joint_range=handle_range_t,
             rgba=rgba_t,
@@ -1155,6 +1256,7 @@ def make_door(
                 handle_length=handle_length,
                 handle_shape=shape,
                 handle_box_size=box_size_t,
+                handle_standoff=standoff,
                 door_joint_range=door_range_t,
                 handle_joint_range=handle_range_t,
                 rgba=rgba_t,
@@ -1222,6 +1324,7 @@ def make_door(
                 handle_radius=float(handle_radius),
                 handle_shape=shape,
                 handle_box_size=box_size_t,
+                handle_standoff=standoff,
             )
         )
     return AssetSpec(config=cfg, behaviors=tuple(behaviors))

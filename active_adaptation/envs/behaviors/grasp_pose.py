@@ -228,6 +228,7 @@ class GraspPose(EntityBehavior):
         *,
         handle_shape: str = "capsule",
         handle_box_size: Sequence[float] | None = None,
+        handle_standoff: float = 0.0,
     ) -> "GraspPose":
         """One prescribed pose per handle face (**handle body frame**).
 
@@ -239,7 +240,12 @@ class GraspPose(EntityBehavior):
 
         ``handle_shape`` / ``handle_box_size`` match ``dummy_door`` /
         ``dummy_drawer`` (capsule radius vs box half-depth along Y).
+        ``handle_standoff`` is the gap from the panel face to the bar inner
+        face (same as ``dummy_door``).
         """
+        standoff = float(handle_standoff)
+        if standoff < 0.0:
+            raise ValueError(f"handle_standoff must be >= 0, got {handle_standoff}")
         shape = str(handle_shape).lower()
         if shape == "box":
             if handle_box_size is None:
@@ -249,7 +255,7 @@ class GraspPose(EntityBehavior):
                 y_half = 0.5 * float(depth)
         else:
             y_half = float(handle_radius)
-        y_off = 0.5 * float(door_thickness) + y_half
+        y_off = 0.5 * float(door_thickness) + standoff + y_half
         # Bar long axis = EEF up-hint → fingers close in ±Z (across the bar).
         bar_axis = torch.tensor([1.0, 0.0, 0.0])
         rows: list[list[float]] = []
