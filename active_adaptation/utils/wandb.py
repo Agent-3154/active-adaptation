@@ -236,13 +236,6 @@ def _find_local_checkpoint(download_dir: Path, iteration: int | None) -> Path | 
         path = download_dir / f"checkpoint_{iteration}.pt"
         return path if path.is_file() else None
 
-    last_ckpt_file = download_dir / "last_checkpoint.txt"
-    if last_ckpt_file.is_file():
-        name = last_ckpt_file.read_text().strip()
-        path = download_dir / name
-        if path.is_file():
-            return path
-
     checkpoints = sorted(
         (p for p in download_dir.glob("checkpoint_*.pt") if p.is_file()),
         key=lambda p: _checkpoint_sort_key(p.name),

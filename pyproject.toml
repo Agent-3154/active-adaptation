@@ -35,6 +35,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+h2 = ["mjhub @ git+https://github.com/EGalahad/mjhub.git@f118fae0e54aeb3484a9f576658217528427042b"]
 render = [
     "fvdb-core[viewer]==0.5.1+pt211.cu130",
     # Robot mesh rasterization for GS composite (needs torch already installed).
@@ -89,5 +90,4 @@ torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 fvdb-core = { index = "fvdb" }
 nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", rev = "253ac4fcea7de5f396371124af597e6cc957bfae" }
-# Monorepo default: sibling checkout under lab51/. Standalone installs: use git tag v0.3.0 instead.
-simple-raycaster = { path = "../simple-raycaster", editable = true }
+simple-raycaster = { git = "https://github.com/btx0424/simple-raycaster.git", rev = "fde9e817472817471fae3030f4175f7465db622b" }

@@ -46,6 +46,8 @@ class MjLabViewer:
             self._server,
             self.sim.mj_model,
             self.env.num_envs,
+            sim_model=self.sim.model,
+            expanded_fields=self.sim.expanded_fields,
         )
         self._scene.debug_visualization_enabled = True
         self._scene.camera_tracking_enabled = False

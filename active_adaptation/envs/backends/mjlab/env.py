@@ -1,13 +1,13 @@
 import math
-import mujoco
-from typing import cast
 
+import mujoco
+
+from active_adaptation.assets.asset_cfg import AssetSpec, coerce_asset_spec
 from active_adaptation.envs.backends.mjlab.adapter import (
     MjlabSceneAdapter,
     MjlabSimAdapter,
 )
 from active_adaptation.envs.env_base import _EnvBase
-from active_adaptation.assets.asset_cfg import AssetSpec, coerce_asset_spec
 from active_adaptation.registry import Registry
 
 
@@ -42,16 +42,15 @@ class MjlabBackendEnv(_EnvBase):
             self.sim.viewer.update()
 
     def setup_scene(self):
-        from mjlab.sim import MujocoCfg, Simulation, SimulationCfg
         from mjlab.scene import Scene, SceneCfg
-        import mjlab.terrains as terrain_gen
+        from mjlab.sim import MujocoCfg, Simulation, SimulationCfg
         from mjlab.terrains import TerrainEntityCfg
-        from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
-        from mjlab.viewer import ViewerConfig
+
         # mjlab 1.6+ still silently zeros all collisions when geom_names_expr
         # matches nothing and disable_other_geoms=True. Keep a thin fail-fast.
         from mjlab.utils.spec_config import CollisionCfg
         from mjlab.utils.string import filter_exp
+        from mjlab.viewer import ViewerConfig
 
         if not getattr(CollisionCfg.edit_spec, "_aa_empty_match_guard", False):
             _collision_edit_spec = CollisionCfg.edit_spec
@@ -133,12 +132,18 @@ class MjlabBackendEnv(_EnvBase):
         self._edit_scene_spec(scene_cfg)
 
         scene = Scene(scene_cfg, device=str(self.device))
+        simulation_kwargs = {}
+        variant_info = scene.collect_variant_info()
+        if variant_info:
+            simulation_kwargs.update(spec=scene.spec, variant_info=variant_info)
+        else:
+            simulation_kwargs["model"] = scene.compile()
         sim = Simulation(
             num_envs=scene.num_envs,
             cfg=SimulationCfg(
                 nconmax=self.cfg.sim.get("nconmax", 200),
                 njmax=self.cfg.sim.get("njmax", 500),
-                contact_sensor_maxmatch=80,
+                contact_sensor_maxmatch=self.cfg.sim.get("contact_sensor_maxmatch", 80),
                 mujoco=MujocoCfg(
                     timestep=self.cfg.sim.get("mujoco_physics_dt", 0.005),
                     iterations=self.cfg.sim.get("mujoco_iterations", 10),
@@ -146,8 +151,8 @@ class MjlabBackendEnv(_EnvBase):
                 ),
                 broadphase=self.cfg.sim.get("broadphase", None), # nxn, sap_tile, sap_segmented
             ),
-            model=scene.compile(),
             device=str(self.device),
+            **simulation_kwargs,
         )
 
         scene.initialize(sim.mj_model, sim.model, sim.data)

@@ -298,6 +298,8 @@ class MjlabSimAdapter(SimAdapter):
                 model=self._sim.mj_model,
                 cfg=self._viewer_cfg,
                 scene=self._scene,
+                sim_model=self._sim.model,
+                expanded_fields=self._sim.expanded_fields,
             )
             renderer.initialize()
             self._offscreen_renderer = renderer

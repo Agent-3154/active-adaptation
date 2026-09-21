@@ -201,6 +201,16 @@ uv run --project venv/mjlab python scripts/train_ppo.py task=Go2/Go2Flat algo=pp
 uv run --project venv/mjlab python scripts/play.py task=Go2/Go2Flat algo=ppo backend=mjlab checkpoint_path=/path/to/checkpoint.pt
 ```
 
+The `unitree_h2` asset is available on MJLab. Install the `h2` extra in the
+backend environment to enable its asset resolver:
+
+```bash
+uv pip install --python venv/mjlab/.venv/bin/python -e '.[h2]'
+```
+
+Its pinned Hugging Face model is resolved only when the H2 config is created.
+Mimic-Lite registers its own H2 asset separately as `mlite-h2`.
+
 ### Optional VSCode setup
 
 Edit `.vscode/settings.json` on demand:
