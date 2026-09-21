@@ -219,6 +219,42 @@ def _usd_create_capsule(stage, path: str, radius: float, fromto):
     return capsule
 
 
+def _mjspec_mesh_tris(spec, geom):
+    """Triangle verts/faces for an MjSpec mesh geom (``uservert`` / ``userface``)."""
+    import numpy as np
+
+    name = geom.meshname
+    for mesh in spec.meshes:
+        if mesh.name != name:
+            continue
+        verts = np.asarray(mesh.uservert, dtype=float).reshape(-1, 3)
+        faces = np.asarray(mesh.userface, dtype=int).reshape(-1, 3)
+        if verts.size == 0 or faces.size == 0:
+            raise ValueError(f"Mesh {name!r} has empty uservert/userface")
+        return verts, faces
+    raise ValueError(f"No MjSpec mesh named {name!r} for geom {geom.name!r}")
+
+
+def _usd_create_convex_mesh(stage, path: str, verts, faces, pos, quat) -> None:
+    """UsdGeom.Mesh with PhysX convex-hull collision (regular polyhedra, etc.)."""
+    from pxr import UsdGeom, UsdPhysics, Gf
+
+    mesh = UsdGeom.Mesh.Define(stage, path)
+    prim = mesh.GetPrim()
+    _usd_add_default_transform_(prim)
+    mesh.CreatePointsAttr(
+        [Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in verts]
+    )
+    mesh.CreateFaceVertexCountsAttr([3] * len(faces))
+    mesh.CreateFaceVertexIndicesAttr([int(i) for tri in faces for i in tri])
+    prim.GetAttribute("xformOp:translate").Set(
+        Gf.Vec3f(float(pos[0]), float(pos[1]), float(pos[2]))
+    )
+    qw, qx, qy, qz = (float(v) for v in quat)
+    prim.GetAttribute("xformOp:orient").Set(Gf.Quatf(qw, qx, qy, qz))
+    UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr("convexHull")
+
+
 def _usd_from_mjspec_rigid(stage, prim_path: str, spec) -> object:
     """Build a non-articulated rigid USD prim from an MjSpec (single body + geoms).
 
@@ -276,6 +312,16 @@ def _usd_from_mjspec_rigid(stage, prim_path: str, spec) -> object:
                         dtype=float,
                     )
                 _usd_create_capsule(stage, geom_path, float(geom.size[0]), fromto)
+            case mujoco.mjtGeom.mjGEOM_MESH:
+                verts, faces = _mjspec_mesh_tris(spec, geom)
+                _usd_create_convex_mesh(
+                    stage,
+                    geom_path,
+                    verts,
+                    faces,
+                    pos=geom.pos,
+                    quat=geom.quat,
+                )
             case _:
                 raise ValueError(f"Unsupported furniture geom type: {geom.type}")
         UsdPhysics.CollisionAPI.Apply(stage.GetPrimAtPath(geom_path))
@@ -361,8 +407,8 @@ def _usd_create_prismatic_joint(stage, path: str, body_0, body_1, axis: str = "Y
     return joint
 
 
-def _usd_add_body_geoms(stage, xform, mjbody) -> None:
-    """Attach box/capsule collision geoms under a body xform (named from MJCF)."""
+def _usd_add_body_geoms(stage, xform, mjbody, spec) -> None:
+    """Attach box/capsule/mesh collision geoms under a body xform (named from MJCF)."""
     import mujoco
     import numpy as np
     from pxr import UsdGeom, Gf, UsdPhysics
@@ -395,6 +441,16 @@ def _usd_add_body_geoms(stage, xform, mjbody) -> None:
                         dtype=float,
                     )
                 _usd_create_capsule(stage, geom_path, float(geom.size[0]), fromto)
+            case mujoco.mjtGeom.mjGEOM_MESH:
+                verts, faces = _mjspec_mesh_tris(spec, geom)
+                _usd_create_convex_mesh(
+                    stage,
+                    geom_path,
+                    verts,
+                    faces,
+                    pos=geom.pos,
+                    quat=geom.quat,
+                )
             case _:
                 raise ValueError(f"Unsupported door geom type: {geom.type}")
         UsdPhysics.CollisionAPI.Apply(stage.GetPrimAtPath(geom_path))
@@ -423,7 +479,7 @@ def _usd_from_mjspec_articulated(stage, prim_path: str, spec) -> object:
     for mjbody in spec.worldbody.find_all("body"):
         xform = UsdGeom.Xform.Define(stage, f"{prim_path}/{mjbody.name}")
         xform_prim = xform.GetPrim()
-        _usd_add_body_geoms(stage, xform, mjbody)
+        _usd_add_body_geoms(stage, xform, mjbody, spec)
         _usd_add_default_transform_(xform_prim)
         xform_prim.GetAttribute("xformOp:translate").Set(
             Gf.Vec3f(*mjdata.xpos[mjbody.id])

@@ -126,24 +126,26 @@ class IsaacBackendEnv(_EnvBase):
         with use_stage(sim.get_initial_stage()):
             sim.reset()
         
-        # Try to fix headless record
-        # --------------------------
-        from pxr import UsdGeom, Gf
+        # # Try to fix headless record
+        # # --------------------------
+        # from pxr import UsdGeom, Gf
 
-        stage = sim.get_initial_stage()
+        # stage = sim.get_initial_stage()
 
-        camera_path = "/World/RecordCamera"
+        # camera_path = "/World/RecordCamera"
 
-        camera = UsdGeom.Camera.Define(stage, camera_path)
+        # camera = UsdGeom.Camera.Define(stage, camera_path)
 
-        xform = UsdGeom.Xformable(camera)
-        xform.AddTranslateOp().Set(
-            Gf.Vec3d(
-                self.cfg.viewer.eye[0],
-                self.cfg.viewer.eye[1],
-                self.cfg.viewer.eye[2],
-            )
-        )
+        # xform = UsdGeom.Xformable(camera)
+        # xform.AddTranslateOp().Set(
+        #     Gf.Vec3d(
+        #         self.cfg.viewer.eye[0],
+        #         self.cfg.viewer.eye[1],
+        #         self.cfg.viewer.eye[2],
+        #     )
+        # )
+        camera_path = "/OmniverseKit_Persp"
+
         # --------------------------
         for e in self.scene.articulations.values():
             e.set_joint_position_target(e.data.default_joint_pos)

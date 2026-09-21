@@ -138,8 +138,8 @@ def make_isaaclab_cfg(self_collisions: bool = False):
             ),
             "gripper": ImplicitActuatorCfg(
                 joint_names_expr=["arm_joint[7]"],
-                stiffness=100.0,
-                damping=1.0,
+                stiffness=400.0,
+                damping=10.0,
                 friction=0.01,
                 armature=0.01,
             ),

@@ -1,13 +1,14 @@
-"""Procedural furniture assets (table, chair, door, drawer).
+"""Procedural furniture assets (table, chair, stand, door, drawer).
 
-Non-articulated (``table``, ``chair``): single rigid body with multiple collision
-geoms. Articulated (``door``, ``drawer``): fixed-base multi-body MJCF → Isaac
-articulated USD / mjlab ``EntityCfg.spec_fn``.
+Non-articulated (``table``, ``chair``, ``stand``): single rigid body with
+multiple collision geoms. Articulated (``door``, ``drawer``): fixed-base
+multi-body MJCF → Isaac articulated USD / mjlab ``EntityCfg.spec_fn``.
 
 Shared USD / MjSpec helpers live in ``_procedural``.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Sequence
 
 from active_adaptation.assets._procedural import (
@@ -189,6 +190,70 @@ def build_chair_spec(
             name=f"{body_name}_leg{i}_collision",
             radius=leg_radius,
             fromto=[x, y, 0.0, x, y, float(leg_length)],
+            rgba=rgba_t,
+        )
+    return spec
+
+
+def _stand_dims(height: float, radius: float) -> tuple[float, float, float, float, float]:
+    """Pole height/radius plus derived tripod hub, leg radius, and foot span."""
+    h = float(height)
+    r = float(radius)
+    if h <= 0.0 or r <= 0.0:
+        raise ValueError(
+            f"stand height and radius must be positive, got {height}, {radius}"
+        )
+    leg_r = max(0.65 * r, min(r, 0.012))
+    hub_z = min(max(8.0 * r, 0.06), 0.22 * h)
+    if h - r <= hub_z + r:
+        raise ValueError(
+            f"stand height ({h}) is too small relative to radius ({r}); "
+            "need room for the pole above the tripod hub"
+        )
+    span = max(6.0 * r, 0.20 * h, 0.08)
+    return h, r, leg_r, hub_z, span
+
+
+def build_stand_spec(
+    *,
+    height: float = 1.0,
+    radius: float = 0.015,
+    rgba: Sequence[float] = _DEFAULT_RGBA,
+    mass: float | None = 0.5,
+    body_name: str = "stand",
+):
+    """Tripod stand: vertical capsule pole + three splayed capsule legs.
+
+    Origin at floor center. ``height`` is the top of the pole (including the
+    upper hemisphere). ``radius`` is the pole radius. Legs are slightly thinner
+    and rest their lower hemispheres on ``z=0``. Capsules only — Isaac cylinders
+    are too expensive.
+    """
+    import mujoco
+
+    h, r, leg_r, hub_z, span = _stand_dims(height, radius)
+    rgba_t = _rgba(rgba)
+
+    spec = mujoco.MjSpec()
+    body = spec.worldbody.add_body(name=body_name)
+    if mass is not None:
+        body.mass = float(mass)
+
+    _add_capsule_leg(
+        body,
+        name=f"{body_name}_body_collision",
+        radius=r,
+        fromto=[0.0, 0.0, hub_z, 0.0, 0.0, h - r],
+        rgba=rgba_t,
+    )
+    for i in range(3):
+        ang = math.radians(90.0 + 120.0 * i)
+        c, s = math.cos(ang), math.sin(ang)
+        _add_capsule_leg(
+            body,
+            name=f"{body_name}_leg{i}_collision",
+            radius=leg_r,
+            fromto=[r * c, r * s, hub_z, span * c, span * s, leg_r],
             rgba=rgba_t,
         )
     return spec
@@ -634,6 +699,14 @@ def _get_furniture_spawner_cls():
                 mass=None,
                 body_name=cfg.body_name,
             )
+        elif cfg.kind == "stand":
+            spec = build_stand_spec(
+                height=cfg.height,
+                radius=cfg.radius,
+                rgba=cfg.rgba,
+                mass=None,
+                body_name=cfg.body_name,
+            )
         else:
             raise ValueError(f"Unknown furniture kind: {cfg.kind}")
 
@@ -707,6 +780,8 @@ def _get_furniture_spawner_cls():
         seat_size: tuple[float, float, float] = (0.42, 0.42, 0.04)
         back_height: float = 0.42
         back_thickness: float = 0.04
+        height: float = 1.0
+        radius: float = 0.015
         rgba: tuple[float, float, float, float] = _DEFAULT_RGBA
         physics_material_path: str = "material"
         physics_material: Any = None
@@ -934,6 +1009,113 @@ def make_table(
         activate_contact_sensors=activate_contact_sensors,
         attach_grasp=attach_grasp,
     )
+
+
+def make_dummy_stand(
+    backend: Backend,
+    height: float = 1.0,
+    radius: float = 0.015,
+    mass: float = 0.5,
+    rgba: Sequence[float] = _DEFAULT_RGBA,
+    pos: Sequence[float] = _DEFAULT_POS,
+    rot: Sequence[float] = _DEFAULT_ROT,
+    collision_only: bool = False,
+    activate_contact_sensors: bool = True,
+    attach_grasp: bool = True,
+    name: str = "stand",
+):
+    """Procedural tripod stand (capsule pole + three splayed capsule legs).
+
+    Replaces the USD ``dummy_stand`` (capsule on a cube base). ``height`` is the
+    top of the pole; ``radius`` is the pole radius. Returns ``AssetSpec`` with a
+    side-grasp on the pole (disable with ``attach_grasp=False``).
+    """
+    from active_adaptation.assets.asset_cfg import AssetSpec
+    from active_adaptation.envs.behaviors.grasp_pose import GraspPose
+
+    pos_t = _as_float_tuple(pos, 3)
+    rot_t = _as_float_tuple(rot, 4)
+    rgba_t = _rgba(rgba)
+    h, r, _, hub_z, _ = _stand_dims(height, radius)
+    grasp_z = 0.5 * (hub_z + (h - r))
+
+    if backend == "isaaclab":
+        from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
+
+        ProceduralFurnitureCfg = _get_furniture_spawner_cls()
+        spawn = ProceduralFurnitureCfg(
+            kind="stand",
+            body_name=name,
+            height=h,
+            radius=r,
+            rgba=rgba_t,
+            **_isaac_spawn_kwargs(
+                mass=mass,
+                collision_only=collision_only,
+                activate_contact_sensors=activate_contact_sensors,
+            ),
+        )
+        if collision_only:
+            cfg = AssetBaseCfg(
+                spawn=spawn,
+                init_state=AssetBaseCfg.InitialStateCfg(pos=pos_t, rot=rot_t),
+            )
+        else:
+            cfg = RigidObjectCfg(
+                spawn=spawn,
+                init_state=RigidObjectCfg.InitialStateCfg(pos=pos_t, rot=rot_t),
+            )
+    elif backend == "mjlab":
+        from active_adaptation.assets.asset_cfg import EntityCfg
+        from mjlab.utils.spec_config import CollisionCfg
+
+        def spec_fn():
+            spec = build_stand_spec(
+                height=h,
+                radius=r,
+                rgba=rgba_t,
+                mass=None if collision_only else mass,
+                body_name=name,
+            )
+            if not collision_only:
+                body = next(iter(spec.worldbody.find_all("body")))
+                body.add_freejoint(name=f"{name}_joint")
+            return spec
+
+        cfg = EntityCfg(
+            init_state=EntityCfg.InitialStateCfg(pos=pos_t, rot=rot_t),
+            spec_fn=spec_fn,
+            articulation=None,
+            collisions=(
+                CollisionCfg(
+                    geom_names_expr=(".*_collision",),
+                    contype=1,
+                    conaffinity=1,
+                    condim=3,
+                    priority=0,
+                    solref=(0.02, 1),
+                    friction=(1.0, 5e-3, 5e-4),
+                ),
+            ),
+        )
+    else:
+        raise ValueError(f"Invalid backend: {backend}")
+
+    behaviors = ()
+    if attach_grasp:
+        behaviors = (
+            GraspPose.for_side_axis(
+                axis=(0.0, 0.0, 1.0),
+                approach_dirs=(
+                    (1.0, 0.0, 0.0),
+                    (-1.0, 0.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                    (0.0, -1.0, 0.0),
+                ),
+                pos=(0.0, 0.0, grasp_z),
+            ),
+        )
+    return AssetSpec(config=cfg, behaviors=behaviors)
 
 
 def make_chair(
@@ -1652,13 +1834,8 @@ def make_drawer(
     return AssetSpec(config=cfg, behaviors=tuple(behaviors))
 
 
-# ---------------------------------------------------------------------------
-# Legacy USD-file dummy props (Isaac-only for now)
-# ---------------------------------------------------------------------------
-
-
-
 registry.register("asset", "dummy_table", make_table)
 registry.register("asset", "dummy_chair", make_chair)
+registry.register("asset", "dummy_stand", make_dummy_stand)
 registry.register("asset", "dummy_door", make_door)
 registry.register("asset", "dummy_drawer", make_drawer)

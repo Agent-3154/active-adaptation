@@ -1172,7 +1172,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             raise ValueError(f"Unknown backend: {self.backend}")
 
     def render(self, mode: str = "human"):
-        self.sim.render_gui()
         if mode == "human":
             return None
         if mode == "rgb_array":
