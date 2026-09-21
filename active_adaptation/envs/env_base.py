@@ -27,6 +27,12 @@ from active_adaptation.utils.video_recorder import (
 )
 from active_adaptation.envs.utils import GroundQuery
 from active_adaptation.registry import RegistryMixin
+from active_adaptation.utils.rollout_compile import (
+    compile_rollout_function,
+    rollout_compile_enabled,
+    finite_row_masks,
+    sanitize_rows,
+)
 
 if active_adaptation.get_backend() == "isaaclab":
     import isaacsim.core.utils.torch as torch_utils
@@ -73,6 +79,7 @@ def _parse_nan_guard(cfg: Any) -> NanGuardMode:
 
 def _nonfinite_env_mask(
     tensordict: TensorDictBase,
+    mask_function=None,
 ) -> tuple[torch.Tensor, list[tuple[Any, torch.Tensor]], list[tuple[Any, torch.Tensor]]]:
     """Return invalid env mask, floating leaves, and keys that had non-finite values."""
     num_envs = tensordict.batch_size[0]
@@ -87,6 +94,14 @@ def _nonfinite_env_mask(
             and value.shape[0] == num_envs
         ):
             floating_leaves.append((key, value))
+    if mask_function is not None and floating_leaves:
+        invalid, masks = mask_function(tuple(value for _, value in floating_leaves))
+        if invalid.any():
+            offender_keys = [
+                (key, bad) for (key, _), bad in zip(floating_leaves, masks) if bad.any()
+            ]
+    else:
+        for key, value in floating_leaves:
             bad = ~torch.isfinite(value).reshape(num_envs, -1).all(dim=1)
             if bad.any():
                 offender_keys.append((key, bad))
@@ -98,6 +113,8 @@ def _apply_nan_guard(
     tensordict: TensorDictBase,
     *,
     mode: NanGuardMode,
+    mask_function=None,
+    sanitize_function=None,
 ) -> torch.Tensor:
     """Handle non-finite transition rows according to ``mode``."""
     if mode == "off":
@@ -107,7 +124,7 @@ def _apply_nan_guard(
             device=tensordict.device,
         )
 
-    invalid, floating_leaves, offender_keys = _nonfinite_env_mask(tensordict)
+    invalid, floating_leaves, offender_keys = _nonfinite_env_mask(tensordict, mask_function)
     if not invalid.any():
         return invalid
 
@@ -118,10 +135,15 @@ def _apply_nan_guard(
             keys=[key for key, _ in offender_keys],
         )
 
-    num_envs = tensordict.batch_size[0]
-    for key, value in floating_leaves:
-        row_mask = invalid.reshape(num_envs, *((1,) * (value.ndim - 1)))
-        tensordict.set(key, torch.where(row_mask, torch.zeros_like(value), value))
+    if sanitize_function is not None:
+        values = sanitize_function(tuple(value for _, value in floating_leaves), invalid)
+        for (key, _), value in zip(floating_leaves, values):
+            tensordict.set(key, value)
+    else:
+        num_envs = tensordict.batch_size[0]
+        for key, value in floating_leaves:
+            row_mask = invalid.reshape(num_envs, *((1,) * (value.ndim - 1)))
+            tensordict.set(key, torch.where(row_mask, torch.zeros_like(value), value))
     tensordict["terminated"][invalid] = True
     tensordict["truncated"][invalid] = False
     tensordict["done"][invalid] = True
@@ -161,6 +183,7 @@ class ObsGroup:
         self.timestamp = -1
         self._keys = list(funcs.keys())
         self._is_functional: bool | None = None
+        self.compiled_dense = None
 
     def _initialize(self, env: "_EnvBase"):
         self.env = env
@@ -225,6 +248,14 @@ class ObsGroup:
             raise RuntimeError(f"ObsGroup '{self.name}' is not initialized")
         return self._is_functional
 
+    def compute_dense_eager(self) -> torch.Tensor:
+        return torch.cat([func.compute() for func in self.funcs.values()], dim=-1)
+
+    def compute_dense(self) -> torch.Tensor:
+        if self.compiled_dense is None:
+            return self.compute_dense_eager()
+        return self.compiled_dense()
+
     def compute(self, tensordict: TensorDictBase, timestamp: int) -> TensorDictBase:
         if self._is_functional:
             compact = OrderedDict()
@@ -242,10 +273,7 @@ class ObsGroup:
                 device=tensordict.device,
             )
         else:
-            outputs = OrderedDict(
-                (key, func.compute()) for key, func in self.funcs.items()
-            )
-            tensordict[self.name] = torch.cat(list(outputs.values()), dim=-1)
+            tensordict[self.name] = self.compute_dense()
         return tensordict
 
     def materialize(self, tensordict: TensorDictBase) -> torch.Tensor:
@@ -304,6 +332,7 @@ class RewardGroup:
         self.enabled = enabled
         self.compile = compile
         self.enabled_rewards = sum(func.enabled for func in funcs.values())
+        self.compiled_values = None
     
     def _initialize(self, env: "_EnvBase"):
         self.env = env
@@ -315,7 +344,19 @@ class RewardGroup:
     def __getitem__(self, key: str) -> mdp.Reward:
         return self.funcs[key]
 
+    def compute_values(self):
+        values = tuple(func.compute() for func in self.funcs.values())
+        enabled = [value for value, func in zip(values, self.funcs.values()) if func.enabled]
+        total = (torch.cat(enabled, 1).sum(dim=1, keepdim=True) if enabled
+                 else torch.zeros(self.env.num_envs, 1, device=self.env.device))
+        return total, values
+
     def compute(self) -> torch.Tensor:
+        if self.compiled_values is not None:
+            total, values = self.compiled_values()
+            for key, value in zip(self.funcs, values):
+                self.env.stats[self.name, key].add_(value)
+            return total
         rewards = []
         for key, func in self.funcs.items():
             with ScopedTimer(f"{self.name}.{key}", sync=PROFILE_SYNC_TIMERS):
@@ -439,6 +480,18 @@ class _EnvBase(EnvBase, RegistryMixin):
         self._nonfinite_rows_total = 0
         [callback() for callback in self._startup_callbacks]
         self._startup_done = True
+        self._finite_row_masks = None
+        self._sanitize_rows = None
+        if rollout_compile_enabled(cfg, "nan_guard"):
+            self._finite_row_masks = compile_rollout_function(finite_row_masks)
+            self._sanitize_rows = compile_rollout_function(sanitize_rows)
+        if rollout_compile_enabled(cfg, "observations"):
+            for group in self.observation_groups.values():
+                if not group.is_functional:
+                    group.compiled_dense = compile_rollout_function(group.compute_dense_eager)
+        if rollout_compile_enabled(cfg, "rewards"):
+            for group in self.reward_groups.values():
+                group.compiled_values = compile_rollout_function(group.compute_values)
 
     @property
     def max_episode_length(self) -> torch.Tensor:
@@ -869,7 +922,10 @@ class _EnvBase(EnvBase, RegistryMixin):
         tensordict.set("episode_id", self.episode_id.clone())
         tensordict["stats"] = self.stats.clone()
 
-        invalid = _apply_nan_guard(tensordict, mode=self.nan_guard)
+        invalid = _apply_nan_guard(
+            tensordict, mode=self.nan_guard,
+            mask_function=self._finite_row_masks, sanitize_function=self._sanitize_rows,
+        )
         invalid_count = int(invalid.sum().item())
         self._nonfinite_rows_total += invalid_count
         self.extra["env/nonfinite_rows"] = invalid_count
