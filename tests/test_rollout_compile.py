@@ -66,3 +66,20 @@ def test_compiled_reward_values_preserve_ema_and_modifiers():
     torch.testing.assert_close(actual, expected, equal_nan=True)
     for name in names:
         torch.testing.assert_close(getattr(reward, name), expected_state[name])
+
+
+def test_quat_from_matrix_keeps_fixed_shape_in_compiled_observation():
+    from active_adaptation.utils.math import matrix_from_quat, quat_from_matrix
+
+    device = os.environ.get('ROLLOUT_TEST_DEVICE', 'cpu')
+    generator = torch.Generator().manual_seed(20260922)
+    quats = torch.randn(128, 11, 4, generator=generator).to(device)
+    quats = quats / quats.norm(dim=-1, keepdim=True)
+    matrices = matrix_from_quat(quats)
+
+    recovered = compile_rollout_function(quat_from_matrix)(matrices)
+
+    assert recovered.shape == quats.shape
+    # q and -q represent the same rotation.
+    agreement = (recovered * quats).sum(dim=-1).abs()
+    torch.testing.assert_close(agreement, torch.ones_like(agreement), atol=1e-5, rtol=0)

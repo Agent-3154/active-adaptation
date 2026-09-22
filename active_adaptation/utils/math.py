@@ -424,9 +424,15 @@ def quat_from_matrix(matrix: torch.Tensor) -> torch.Tensor:
     )
     flr = torch.tensor(0.1, dtype=q_abs.dtype, device=q_abs.device)
     quat_candidates = quat_by_rijk / (2.0 * q_abs[..., None].max(flr))
-    return quat_candidates[
-        torch.nn.functional.one_hot(q_abs.argmax(dim=-1), num_classes=4) > 0.5, :
-    ].reshape(batch_dim + (4,))
+    # Boolean indexing calls nonzero() to determine a dynamic output length,
+    # synchronizing GPU observations with the host on every policy frame.
+    best = q_abs.argmax(dim=-1)
+    selected = torch.gather(
+        quat_candidates,
+        dim=-2,
+        index=best[..., None, None].expand(batch_dim + (1, 4)),
+    )
+    return selected.squeeze(-2)
 
 
 def quat_from_view_z_up(eye: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
