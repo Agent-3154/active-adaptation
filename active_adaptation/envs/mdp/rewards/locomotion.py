@@ -222,12 +222,14 @@ class linvel_tracking(Reward[Twist]):
         exp_sigma: float = 0.25,
         linear_weight: float = 0.5,
         axis: str = "xy",
+        square: bool = True,
         track_var: bool = False,
     ):
         super().__init__(weight, track_var=track_var)
         self.exp_sigma = exp_sigma
         self.linear_weight = linear_weight
         self.axis_ids = _parse_pos_axes(axis)
+        self.square = square
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -247,7 +249,11 @@ class linvel_tracking(Reward[Twist]):
         cmd_linvel_w = self.command_manager.cmd_linvel_w[:, self.axis_ids]
         linvel_error_squared = (linvel_w - cmd_linvel_w).square().sum(-1, True)
         linvel_error = linvel_error_squared.sqrt()
-        rew = torch.exp(-linvel_error / self.exp_sigma) - self.linear_weight * linvel_error
+        if self.square:
+            exp_term = torch.exp(-linvel_error_squared / self.exp_sigma)
+        else:
+            exp_term = torch.exp(-linvel_error / self.exp_sigma)
+        rew = exp_term - self.linear_weight * linvel_error
         return (rew * self._weight).reshape(self.num_envs, 1), self._weight > 0.0
 
 
