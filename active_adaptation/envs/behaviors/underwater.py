@@ -12,6 +12,11 @@ from tensordict import TensorDictBase
 from typing_extensions import override
 
 from active_adaptation.envs.behaviors.behavior import EntityBehavior
+from active_adaptation.envs.behaviors.thruster import (
+    T200_THRUSTER_MODEL,
+    ThrusterForceModel,
+    VirtualThrusterCfg,
+)
 from active_adaptation.utils.math import quat_rotate, quat_rotate_inverse
 from active_adaptation.utils.profiling import ScopedTimer
 import active_adaptation.utils.string as string_utils
@@ -68,10 +73,14 @@ def _compute_root_flow(
 def _compute_buoyancy(
     body_quat_w: torch.Tensor,
     buoyancy_force: torch.Tensor,
-    coBM: torch.Tensor,
+    cob_offset_b: torch.Tensor,
     base_body_id: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute body-local buoyancy directly from WXYZ quaternions."""
+    """Compute body-local buoyancy directly from WXYZ quaternions.
+
+    ``cob_offset_b`` is CB − CM in the base body frame. ``(0, 0, coBM)``
+    recovers the original restoring moment ``r × F``.
+    """
     w, x, y, z = body_quat_w.unbind(-1)
     buoyancy_forces_b = torch.stack(
         [
@@ -82,11 +91,8 @@ def _compute_buoyancy(
         dim=-1,
     )
     buoyancy_torques_b = torch.zeros_like(buoyancy_forces_b)
-    buoyancy_torques_b[:, base_body_id, 0] = (
-        -coBM * buoyancy_forces_b[:, base_body_id, 1]
-    )
-    buoyancy_torques_b[:, base_body_id, 1] = (
-        coBM * buoyancy_forces_b[:, base_body_id, 0]
+    buoyancy_torques_b[:, base_body_id] = torch.cross(
+        cob_offset_b, buoyancy_forces_b[:, base_body_id], dim=-1
     )
     return buoyancy_forces_b, buoyancy_torques_b
 
@@ -134,6 +140,10 @@ class HydrodynamicsCfg:
     ``{name_regex: value}`` mapping. Every body must be specified.
 
     ``added_mass`` remains the vehicle-level 6-DoF term on the **base** twist.
+
+    ``coBM`` is the +Z CB−CM lever (m). Set ``cob_offset_b`` to a 3-vector
+    when the buoyancy center is offset in x/y as well; that replaces
+    ``(0, 0, coBM)``.
     """
     volume: BodyFloatSpec
     coBM: float
@@ -143,6 +153,7 @@ class HydrodynamicsCfg:
     water_density: float = 997.0
     gravity: float = 9.8
     acc_filter_alpha: float = 0.3
+    cob_offset_b: tuple[float, float, float] | None = None
 
 
 @dataclass
@@ -192,6 +203,14 @@ class UnderwaterRobotData:
     hydro_forces_b: torch.Tensor  # (N, 3)
     hydro_torques_b: torch.Tensor  # (N, 3)
 
+    # Optional extra base-link disturbance (wave / vortex / spatial current).
+    # Separate from fitted hydro so ID parameters stay untouched.
+    external_forces_b: torch.Tensor  # (N, 3)
+    external_torques_b: torch.Tensor  # (N, 3)
+
+    # CB − CM in the base body frame; used by buoyancy restoring moment.
+    cob_offset_b: torch.Tensor  # (N, 3)
+
 
 class UnderwaterRobot(EntityBehavior):
     """Hydrodynamics + thruster behavior (``env.behaviors["underwater"]``)."""
@@ -203,6 +222,9 @@ class UnderwaterRobot(EntityBehavior):
         cfg: HydrodynamicsCfg,
         rotor_time_constants: Dict[str, float],
         rotor_force_constants: Dict[str, float],
+        thruster_model: ThrusterForceModel | None = None,
+        rotor_propeller_hands: Dict[str, float] | None = None,
+        virtual_thrusters: VirtualThrusterCfg | None = None,
         robot: "Articulation | None" = None,
         env: "_EnvBase | None" = None,
     ):
@@ -210,10 +232,18 @@ class UnderwaterRobot(EntityBehavior):
         self.cfg = cfg
         self._rotor_time_constants = dict(rotor_time_constants)
         self._rotor_force_constants = dict(rotor_force_constants)
+        self.thruster_model: ThrusterForceModel = (
+            T200_THRUSTER_MODEL if thruster_model is None else thruster_model
+        )
+        self._rotor_propeller_hands = dict(rotor_propeller_hands or {})
+        self._virtual_thrusters = virtual_thrusters
         self.dt = None
         self.rotor_names = []
         self.body_names = []
         self.rotor_indices = None
+        self.propeller_hands = None
+        self._virtual_pos_b = None
+        self._virtual_dir_b = None
         self.data = None
         self._hydro_axis_sign = None
         self._flow_noise_enabled = False
@@ -379,29 +409,71 @@ class UnderwaterRobot(EntityBehavior):
             self.cfg.quadratic_damping, self.body_names, "quadratic_damping"
         ).to(self.device)
 
-        # Find the rotor bodies once and keep this order as canonical rotor order.
+        # Prefer named rotor bodies; otherwise apply virtual layout as a base wrench.
         rotor_indices, rotor_names = self.robot.find_bodies("rotor_.*")
-        self.rotor_names = rotor_names
-        self.rotor_indices = torch.tensor(rotor_indices, device=self.device, dtype=torch.long)
+        if rotor_names:
+            if self._virtual_thrusters is not None:
+                raise ValueError(
+                    "UnderwaterRobot: rotor_* bodies and virtual_thrusters cannot both be set"
+                )
+            self.rotor_names = list(rotor_names)
+            self.rotor_indices = torch.tensor(
+                rotor_indices, device=self.device, dtype=torch.long
+            )
+        elif self._virtual_thrusters is not None:
+            layout = self._virtual_thrusters
+            n = len(layout.positions_b)
+            self.rotor_names = list(
+                layout.names
+                if layout.names is not None
+                else [f"rotor_{i}" for i in range(n)]
+            )
+            self.rotor_indices = torch.zeros(0, device=self.device, dtype=torch.long)
+            pos = torch.tensor(layout.positions_b, device=self.device, dtype=torch.float32)
+            dirs = torch.tensor(layout.directions_b, device=self.device, dtype=torch.float32)
+            dirs = dirs / dirs.norm(dim=-1, keepdim=True).clamp_min(1.0e-12)
+            self._virtual_pos_b = pos
+            self._virtual_dir_b = dirs
+        else:
+            self.rotor_names = []
+            self.rotor_indices = torch.zeros(0, device=self.device, dtype=torch.long)
 
-        time_ids, _, time_values = string_utils.resolve_matching_names_values(
-            self._rotor_time_constants, self.rotor_names
-        )
-        force_ids, _, force_values = string_utils.resolve_matching_names_values(
-            self._rotor_force_constants, self.rotor_names
-        )
         rotor_time_constants_tensor = torch.zeros(
             self.num_rotors, device=self.device, dtype=torch.float32
         )
         rotor_force_constants_tensor = torch.zeros(
             self.num_rotors, device=self.device, dtype=torch.float32
         )
-        rotor_time_constants_tensor[time_ids] = torch.tensor(
-            time_values, device=self.device, dtype=torch.float32
+        if self.rotor_names:
+            time_ids, _, time_values = string_utils.resolve_matching_names_values(
+                self._rotor_time_constants, self.rotor_names
+            )
+            force_ids, _, force_values = string_utils.resolve_matching_names_values(
+                self._rotor_force_constants, self.rotor_names
+            )
+            rotor_time_constants_tensor[time_ids] = torch.tensor(
+                time_values, device=self.device, dtype=torch.float32
+            )
+            rotor_force_constants_tensor[force_ids] = torch.tensor(
+                force_values, device=self.device, dtype=torch.float32
+            )
+        propeller_hands = torch.ones(
+            self.num_rotors, device=self.device, dtype=torch.float32
         )
-        rotor_force_constants_tensor[force_ids] = torch.tensor(
-            force_values, device=self.device, dtype=torch.float32
-        )
+        if self._rotor_propeller_hands:
+            if not self.rotor_names:
+                raise ValueError("rotor_propeller_hands requires named rotors")
+            hand_ids, _, hand_values = string_utils.resolve_matching_names_values(
+                self._rotor_propeller_hands, self.rotor_names
+            )
+            propeller_hands[hand_ids] = torch.tensor(
+                hand_values, device=self.device, dtype=torch.float32
+            )
+        if self.num_rotors > 0 and not torch.allclose(
+            propeller_hands.abs(), torch.ones_like(propeller_hands)
+        ):
+            raise ValueError("rotor propeller hands must be either +1 or -1")
+        self.propeller_hands = propeller_hands
 
         added_mass_matrix = torch.diag(
             torch.tensor(self.cfg.added_mass, device=self.device)
@@ -432,6 +504,9 @@ class UnderwaterRobot(EntityBehavior):
             hydro=torch.zeros(self.num_envs, 6, device=self.device),
             hydro_forces_b=torch.zeros(self.num_envs, 3, device=self.device),
             hydro_torques_b=torch.zeros(self.num_envs, 3, device=self.device),
+            external_forces_b=torch.zeros(self.num_envs, 3, device=self.device),
+            external_torques_b=torch.zeros(self.num_envs, 3, device=self.device),
+            cob_offset_b=self._resolve_cob_offset(),
         )
         self._hydro_axis_sign = torch.tensor(
             [1.0, -1.0, -1.0, 1.0, -1.0, -1.0], device=self.device
@@ -448,6 +523,17 @@ class UnderwaterRobot(EntityBehavior):
         if self.num_rotors > 0:
             self._build_allocation_matrix()
 
+    def _resolve_cob_offset(self) -> torch.Tensor:
+        if self.cfg.cob_offset_b is not None:
+            offset = torch.tensor(
+                self.cfg.cob_offset_b, device=self.device, dtype=torch.float32
+            )
+        else:
+            offset = torch.tensor(
+                [0.0, 0.0, self.cfg.coBM], device=self.device, dtype=torch.float32
+            )
+        return offset.unsqueeze(0).expand(self.num_envs, -1).clone()
+
     @property
     def num_rotors(self) -> int:
         return len(self.rotor_names)
@@ -455,43 +541,49 @@ class UnderwaterRobot(EntityBehavior):
     def _build_allocation_matrix(self) -> None:
         """Map unit rotor +X thrust to a base-body wrench, scaled to throttle ≈ 1.
 
-        Column ``i`` is the wrench at the base from rotor ``i`` at throttle 1,
-        using the T200 force curve already used in :meth:`write_data_to_sim`.
-        Geometry is taken from env 0 (cloned assets share the same layout).
+        Column ``i`` is the wrench at the base from rotor ``i`` at throttle 1.
+        Geometry comes from rotor bodies, or from ``virtual_thrusters``.
         """
-        data = self.robot.data
         n = self.num_rotors
-        base_id = self._base_body_id
-        rotor_ids = self.rotor_indices
-        base_pos = data.body_link_pos_w[0, base_id]
-        base_quat = data.body_link_quat_w[0, base_id]
-        rotor_pos = data.body_link_pos_w[0, rotor_ids]
-        rotor_quat = data.body_link_quat_w[0, rotor_ids]
-        r_b = quat_rotate_inverse(
-            base_quat.expand_as(rotor_quat),
-            rotor_pos - base_pos,
-        )
-        axis_w = quat_rotate(
-            rotor_quat,
-            torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(n, 3),
-        )
-        axis_b = quat_rotate_inverse(base_quat.expand_as(rotor_quat), axis_w)
+        ones = torch.ones(1, n, device=self.device)
+        force_at_one = self._axial_thrust(ones)[1][0]
+        if self._virtual_dir_b is not None:
+            axis_b = self._virtual_dir_b
+            r_b = self._virtual_pos_b
+        else:
+            data = self.robot.data
+            base_id = self._base_body_id
+            rotor_ids = self.rotor_indices
+            base_pos = data.body_link_pos_w[0, base_id]
+            base_quat = data.body_link_quat_w[0, base_id]
+            rotor_pos = data.body_link_pos_w[0, rotor_ids]
+            rotor_quat = data.body_link_quat_w[0, rotor_ids]
+            r_b = quat_rotate_inverse(
+                base_quat.expand_as(rotor_quat),
+                rotor_pos - base_pos,
+            )
+            axis_w = quat_rotate(
+                rotor_quat,
+                torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(n, 3),
+            )
+            axis_b = quat_rotate_inverse(base_quat.expand_as(rotor_quat), axis_w)
         torque_b = torch.cross(r_b, axis_b, dim=-1)
         alloc = torch.cat([axis_b.T, torque_b.T], dim=0)
-        rpm_at_one = min(3.6599e3 * 1.0 + 3.4521e2, 3900.0)
-        force_at_one = (
-            self.data.force_constants[0]
-            / 4.4e-7
-            * 9.81
-            * (
-                4.7368e-7 * rpm_at_one**2
-                - 1.9275e-4 * rpm_at_one
-                + 8.4452e-2
-            )
-        )
         alloc = alloc * force_at_one.unsqueeze(0)
         self.allocation_matrix = alloc
         self.allocation_pinv = torch.linalg.pinv(alloc)
+
+    def _axial_thrust(self, throttle: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(rpm, axial_force_n)`` for filtered throttle ``(N, n)``."""
+        rpm = self.thruster_model.throttle_to_rpm(throttle)
+        thrust = (
+            self.data.force_constants
+            / self.thruster_model.nominal_force_constant
+            * self.thruster_model.rpm_to_thrust(rpm)
+        )
+        if self.propeller_hands is not None and self.propeller_hands.numel() > 0:
+            thrust = thrust * self.propeller_hands.unsqueeze(0)
+        return rpm, thrust
 
     def allocate_wrench(self, wrench_b: torch.Tensor) -> torch.Tensor:
         """Map a base-body wrench ``(N, 6)`` to clipped throttle ``(N, n)``.
@@ -527,9 +619,33 @@ class UnderwaterRobot(EntityBehavior):
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> None:
         self.data.prev_body_vels[env_ids] = 0.0
         self.data.prev_body_acc[env_ids] = 0.0
+        self.data.external_forces_b[env_ids] = 0.0
+        self.data.external_torques_b[env_ids] = 0.0
         self.data.flow_vels[env_ids] = (
             torch.rand_like(self.data.flow_vels[env_ids]) * self.data.max_flow_vel[env_ids]
         )
+
+    def set_external_wrench_b(
+        self,
+        forces_b: torch.Tensor,
+        torques_b: torch.Tensor,
+    ) -> None:
+        """Set an extra base-link wrench expressed in the robot body frame.
+
+        Values persist until replaced or :meth:`clear_external_wrench`.
+        """
+        expected = (self.num_envs, 3)
+        if tuple(forces_b.shape) != expected or tuple(torques_b.shape) != expected:
+            raise ValueError(
+                "external wrench tensors must have shape "
+                f"(num_envs, 3), got {tuple(forces_b.shape)} and {tuple(torques_b.shape)}"
+            )
+        self.data.external_forces_b.copy_(forces_b.to(self.device))
+        self.data.external_torques_b.copy_(torques_b.to(self.device))
+
+    def clear_external_wrench(self) -> None:
+        self.data.external_forces_b.zero_()
+        self.data.external_torques_b.zero_()
 
     def pre_step(self, substep: int):
         self.write_data_to_sim()
@@ -598,7 +714,7 @@ class UnderwaterRobot(EntityBehavior):
             buoyancy_forces_b, buoyancy_torques_b = self._compute_buoyancy(
                 body_quat_w,
                 buoyancy_force,
-                self.data.coBM,
+                self.data.cob_offset_b,
                 self._base_body_id,
             )
 
@@ -641,45 +757,44 @@ class UnderwaterRobot(EntityBehavior):
 
         with ScopedTimer("underwater.propulsion"):
             target_throttle = torch.clamp(self.data.throttle_cmd, -1.0, 1.0)
-            alpha_rotor = torch.exp(-self.dt / self.data.time_constants)
+            tau = self.data.time_constants
+            alpha_rotor = torch.where(
+                tau <= 0.0,
+                torch.zeros_like(tau),
+                torch.exp(-self.dt / tau.clamp_min(self.dt)),
+            )
             self.data.throttle.copy_(
                 alpha_rotor * self.data.throttle
                 + (1.0 - alpha_rotor) * target_throttle
             )
-            target_rpm = torch.where(
-                self.data.throttle > 0.075,
-                3.6599e3 * self.data.throttle + 3.4521e2,
-                torch.where(
-                    self.data.throttle < -0.075,
-                    3.4944e3 * self.data.throttle - 4.3350e2,
-                    0.0,
-                ),
-            )
-            self.data.rpm.copy_(torch.clamp(target_rpm, -3900.0, 3900.0))
-            rotor_thrust_force_x = (
-                self.data.force_constants
-                / 4.4e-7
-                * 9.81
-                * torch.where(
-                    self.data.rpm > 0,
-                    4.7368e-7 * torch.square(self.data.rpm)
-                    - 1.9275e-4 * self.data.rpm
-                    + 8.4452e-2,
-                    -3.8442e-7 * torch.square(self.data.rpm)
-                    - 1.6186e-4 * self.data.rpm
-                    - 3.9139e-2,
-                )
-            )
+            rpm, rotor_thrust_force_x = self._axial_thrust(self.data.throttle)
+            self.data.rpm.copy_(rpm)
             self.data.thrusts_b.zero_()
-            # Thrust is along local +X axis of each rotor body.
+            # Body-attached rotors: thrust along local +X. Virtual: base-frame dirs.
             self.data.thrusts_b[..., 0] = rotor_thrust_force_x
+            if self._virtual_dir_b is not None:
+                self.data.thrusts_b = (
+                    rotor_thrust_force_x.unsqueeze(-1) * self._virtual_dir_b.unsqueeze(0)
+                )
 
         with ScopedTimer("underwater.assemble_wrench"):
             forces_b = buoyancy_forces_b - damping_wrench_b[..., 0:3]
             torques_b = buoyancy_torques_b - damping_wrench_b[..., 3:6]
             forces_b[:, self._base_body_id] += hydro_wrench_b[..., 0:3]
             torques_b[:, self._base_body_id] += hydro_wrench_b[..., 3:6]
-            forces_b[:, self.rotor_indices] += self.data.thrusts_b
+            forces_b[:, self._base_body_id] += self.data.external_forces_b
+            torques_b[:, self._base_body_id] += self.data.external_torques_b
+            if self._virtual_dir_b is not None:
+                virtual_force = self.data.thrusts_b.sum(dim=1)
+                virtual_torque = torch.cross(
+                    self._virtual_pos_b.unsqueeze(0).expand_as(self.data.thrusts_b),
+                    self.data.thrusts_b,
+                    dim=-1,
+                ).sum(dim=1)
+                forces_b[:, self._base_body_id] += virtual_force
+                torques_b[:, self._base_body_id] += virtual_torque
+            elif self.rotor_indices is not None and self.rotor_indices.numel() > 0:
+                forces_b[:, self.rotor_indices] += self.data.thrusts_b
 
             self.data.body_acc.copy_(hydro_acc_b)
             self.data.damping.copy_(damping_wrench_b)
@@ -709,7 +824,9 @@ class UnderwaterRobot(EntityBehavior):
                 raise ValueError(f"Unsupported backend for underwater wrench: {self.env.backend}")
 
     def debug_draw(self):
-        if self.env.backend == "isaaclab":
+        if self.env.backend != "isaaclab":
+            return
+        if self.rotor_indices is not None and self.rotor_indices.numel() > 0:
             rotor_pos_w = self.robot.data.body_link_pos_w[:, self.rotor_indices]
             rotor_quat_w = self.robot.data.body_link_quat_w[:, self.rotor_indices]
             v = torch.tensor([[[1.0, 0.0, 0.0]]], device=self.device)
@@ -719,4 +836,23 @@ class UnderwaterRobot(EntityBehavior):
                 thrust_w.reshape(-1, 3),
                 color=(0.2, 0.8, 1.0, 1.0),
             )
+            return
+        if self._virtual_pos_b is None:
+            return
+        base_pos = self.robot.data.body_link_pos_w[:, self._base_body_id]
+        base_quat = self.robot.data.body_link_quat_w[:, self._base_body_id]
+        n = self.num_rotors
+        pos_w = base_pos.unsqueeze(1) + quat_rotate(
+            base_quat.unsqueeze(1).expand(-1, n, -1),
+            self._virtual_pos_b.unsqueeze(0).expand(self.num_envs, -1, -1),
+        )
+        dir_w = quat_rotate(
+            base_quat.unsqueeze(1).expand(-1, n, -1),
+            self._virtual_dir_b.unsqueeze(0).expand(self.num_envs, -1, -1),
+        )
+        self.env.scene.draw_vector(
+            pos_w.reshape(-1, 3),
+            dir_w.reshape(-1, 3),
+            color=(0.2, 0.8, 1.0, 1.0),
+        )
 

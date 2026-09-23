@@ -219,17 +219,13 @@ class linvel_tracking(Reward[Twist]):
     def __init__(
         self,
         weight: float,
-        exp_sigma: float = 0.25,
-        linear_weight: float = 0.5,
+        error_scale: float = 2.0,
         axis: str = "xy",
-        square: bool = True,
         track_var: bool = False,
     ):
         super().__init__(weight, track_var=track_var)
-        self.exp_sigma = exp_sigma
-        self.linear_weight = linear_weight
+        self.error_scale = error_scale
         self.axis_ids = _parse_pos_axes(axis)
-        self.square = square
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -243,17 +239,12 @@ class linvel_tracking(Reward[Twist]):
             self._weight = torch.ones(self.num_envs, 1, device=self.device)
         else:
             self._weight = weight.reshape(self.num_envs, 1)
+        self.cmd_linvel_w = self.command_manager.cmd_linvel_w[:, self.axis_ids]
 
     def _compute(self) -> torch.Tensor:
         linvel_w = self.asset.data.root_com_lin_vel_w[:, self.axis_ids]
-        cmd_linvel_w = self.command_manager.cmd_linvel_w[:, self.axis_ids]
-        linvel_error_squared = (linvel_w - cmd_linvel_w).square().sum(-1, True)
-        linvel_error = linvel_error_squared.sqrt()
-        if self.square:
-            exp_term = torch.exp(-linvel_error_squared / self.exp_sigma)
-        else:
-            exp_term = torch.exp(-linvel_error / self.exp_sigma)
-        rew = exp_term - self.linear_weight * linvel_error
+        error = (linvel_w - self.cmd_linvel_w).norm(dim=-1, keepdim=True) * self.error_scale
+        rew = torch.where(error < 0.5, 1.0 - error**2, 1.25 - error)
         return (rew * self._weight).reshape(self.num_envs, 1), self._weight > 0.0
 
 

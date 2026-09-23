@@ -41,15 +41,15 @@ class max_swing_height(Reward):
     def _update(self):
         feet_height = self.asset.data.body_link_pos_w[:, self.body_ids, 2]
         self.max_height = torch.maximum(self.max_height, feet_height).clamp_max(self.target_height)
-        first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[
+        self.first_contact = self.contact_sensor.compute_first_contact(self.env.step_dt)[
             :, self.body_contact_ids
         ]
-        self.rew = (first_contact * self.max_height).sum(1, keepdim=True)
-        self.max_height = torch.where(first_contact, 0.0, self.max_height)
+        self.rew = (self.first_contact * self.max_height).sum(1, keepdim=True)
+        self.max_height = torch.where(self.first_contact, 0.0, self.max_height)
 
     @override
     def _compute(self) -> torch.Tensor:
-        active = ~self.command_manager.is_standing_env
+        active = (~self.command_manager.is_standing_env) & self.first_contact.any(dim=1, keepdim=True)
         return self.rew.reshape(self.num_envs, 1), active.reshape(self.num_envs, 1)
 
 

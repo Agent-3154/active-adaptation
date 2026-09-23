@@ -18,6 +18,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **`UnderwaterRobot` plant extras** — optional `thruster_model` (default T200),
+  `rotor_propeller_hands`, `virtual_thrusters` (base-wrench layout when the
+  asset has no `rotor_*` bodies), `set_external_wrench_b`, and 3D
+  `HydrodynamicsCfg.cob_offset_b`. See `envs/behaviors/thruster.py`.
 - **Robot adaptations** (`envs/robots/adaptation.py`) — composable
   asset-attached plugins (`RobotAdaptation`) bound via
   `AssetSpec.adaptations` / deprecated `wrapper=`. Env exposes

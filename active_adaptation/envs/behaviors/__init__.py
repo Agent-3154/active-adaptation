@@ -12,6 +12,13 @@ from .grasp_pose import (
 from .door import DoorBehavior, DIR_PULL, DIR_PUSH
 from .drawer import DrawerBehavior
 from .underwater import HydrodynamicsCfg, UnderwaterRobot
+from .thruster import (
+    AffineThrottleThrustModel,
+    PolynomialThrusterCfg,
+    PolynomialThrusterModel,
+    T200ThrusterModel,
+    VirtualThrusterCfg,
+)
 
 __all__ = [
     "EntityBehavior",
@@ -29,4 +36,9 @@ __all__ = [
     "DrawerBehavior",
     "HydrodynamicsCfg",
     "UnderwaterRobot",
+    "AffineThrottleThrustModel",
+    "PolynomialThrusterCfg",
+    "PolynomialThrusterModel",
+    "T200ThrusterModel",
+    "VirtualThrusterCfg",
 ]
