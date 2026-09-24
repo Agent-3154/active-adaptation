@@ -122,7 +122,7 @@ class SymmetryTransform(nn.Module):
         Return a SymmetryTransform that transforms a 3D rotation into its 
         left-right symmetric counterpart.
         """
-        return cls(perm=[0, 1, 2], signs=[1, 1, -1])
+        return cls(perm=[0, 1, 2], signs=[-1, 1, -1])
     
     @classmethod
     def identity(cls, dim: int):

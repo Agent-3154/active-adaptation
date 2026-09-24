@@ -4,8 +4,8 @@ Attach via ``AssetSpec(behaviors=(GraspPose(...),))``. Lookup with
 ``env.require_behavior("chair.grasp")`` when the YAML object key is ``chair``.
 
 Holds a fixed list of **prescribed** object-frame poses ``(pos[3], quat_wxyz[4])``.
-No procedural part sampling — callers (or :meth:`for_legs` /
-:meth:`for_grasp_board`) decide feasible poses for the whole object.
+No procedural part sampling — callers (or :meth:`for_legs`) decide feasible
+poses for the whole object.
 
 **Approach convention:** unless an asset or call site says otherwise, the EEF
 approaches along its body **+X** (forward). Prescribed grasp quats must align
@@ -27,102 +27,6 @@ if TYPE_CHECKING:
 
 # EEF body-frame forward / approach axis (default unless otherwise specified).
 EEF_FORWARD_B: tuple[float, float, float] = (1.0, 0.0, 0.0)
-
-# ``dummy_grasp_board``: ``n_levels`` heights × 4 orientations per face.
-GRASP_BOARD_ORIENTS_PER_LEVEL: int = 4
-GRASP_BOARD_DEFAULT_N_LEVELS: int = 3
-GRASP_BOARD_BARS_PER_FACE: int = (
-    GRASP_BOARD_DEFAULT_N_LEVELS * GRASP_BOARD_ORIENTS_PER_LEVEL
-)  # 12
-# Inner span for equally spaced Z rows (``n_levels=3`` → 0.20 / 0.50 / 0.80).
-_GRASP_BOARD_Z_FRAC_LO: float = 0.20
-_GRASP_BOARD_Z_FRAC_HI: float = 0.80
-_DEFAULT_GRASP_BOARD_PANEL: tuple[float, float, float] = (1.1, 0.04, 1.0)
-
-
-def parse_grasp_board_n_levels(n_levels: int = GRASP_BOARD_DEFAULT_N_LEVELS) -> int:
-    n = int(n_levels)
-    if n < 1:
-        raise ValueError(f"n_levels must be >= 1, got {n_levels}")
-    return n
-
-
-def grasp_board_bars_per_face(
-    n_levels: int = GRASP_BOARD_DEFAULT_N_LEVELS,
-) -> int:
-    return parse_grasp_board_n_levels(n_levels) * GRASP_BOARD_ORIENTS_PER_LEVEL
-
-
-def grasp_board_bar_specs(
-    panel_size: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL,
-    n_levels: int = GRASP_BOARD_DEFAULT_N_LEVELS,
-) -> list[tuple[str, float, float, tuple[float, float, float]]]:
-    """Shared board layout: ``(tag, x, z, axis_xyz)`` per bar (one face).
-
-    Height-major order: ``n_levels`` equally spaced Z rows (default 3, at
-    20% / 50% / 80% of panel height), each with horizontal, vertical, −45°,
-    +45°. Four X columns keep bars from overlapping. Keep in sync with
-    ``build_grasp_board_spec`` / :meth:`GraspPose.for_grasp_board`.
-    """
-    import math
-
-    n = parse_grasp_board_n_levels(n_levels)
-    width, _thickness, height = (float(x) for x in panel_size)
-    inv_sqrt2 = 1.0 / math.sqrt(2.0)
-    lo = _GRASP_BOARD_Z_FRAC_LO * height
-    hi = _GRASP_BOARD_Z_FRAC_HI * height
-    if n == 1:
-        z_levels = (("z0", 0.5 * height),)
-    else:
-        z_levels = tuple(
-            (f"z{i}", lo + (hi - lo) * i / (n - 1)) for i in range(n)
-        )
-    # Columns: h, v, m45 (−45°), p45 (+45°)
-    x_cols = (
-        -0.34 * width,
-        -0.12 * width,
-        0.12 * width,
-        0.34 * width,
-    )
-    orients: tuple[tuple[str, tuple[float, float, float]], ...] = (
-        ("h", (1.0, 0.0, 0.0)),
-        ("v", (0.0, 0.0, 1.0)),
-        ("m45", (inv_sqrt2, 0.0, -inv_sqrt2)),
-        ("p45", (inv_sqrt2, 0.0, inv_sqrt2)),
-    )
-    bars: list[tuple[str, float, float, tuple[float, float, float]]] = []
-    for level, z in z_levels:
-        for (tag_o, axis), x in zip(orients, x_cols, strict=True):
-            bars.append((f"{level}_{tag_o}", float(x), float(z), axis))
-    return bars
-
-
-def parse_grasp_board_standoff_range(
-    standoff_range: Sequence[float] | None = None,
-) -> tuple[float, float]:
-    """Normalize ``standoff_range`` to ``(lo, hi)``. Default ``(0.01, 0.05)``."""
-    if standoff_range is None:
-        return (0.01, 0.05)
-    lo, hi = float(standoff_range[0]), float(standoff_range[1])
-    if hi < lo:
-        lo, hi = hi, lo
-    if lo < 0.0:
-        raise ValueError(f"standoff_range lo must be >= 0, got {standoff_range}")
-    return (lo, hi)
-
-
-def sample_grasp_board_bar_standoffs(
-    standoff_range: Sequence[float] | None = None,
-    *,
-    n: int = GRASP_BOARD_BARS_PER_FACE,
-) -> tuple[float, ...]:
-    """Draw one standoff per bar (shared by both faces) from ``standoff_range``."""
-    import random
-
-    lo, hi = parse_grasp_board_standoff_range(standoff_range)
-    if n <= 0:
-        raise ValueError(f"n must be positive, got {n}")
-    return tuple(random.uniform(lo, hi) for _ in range(n))
 
 
 def eef_forward_w(quat_w: torch.Tensor) -> torch.Tensor:
@@ -340,74 +244,6 @@ class GraspPose(EntityBehavior):
             rows.append([*pos_t.tolist(), *quat.tolist()])
         return cls(poses=rows)
 
-    @classmethod
-    def for_grasp_board(
-        cls,
-        panel_size: Sequence[float] = _DEFAULT_GRASP_BOARD_PANEL,
-        handle_length: float = 0.16,
-        handle_radius: float = 0.022,
-        handle_box_size: Sequence[float] | None = (0.04, 0.03),
-        bar_standoffs: Sequence[float] | None = None,
-        standoff_range: Sequence[float] | None = None,
-        grasp_clearance: float = 0.02,
-        n_levels: int = GRASP_BOARD_DEFAULT_N_LEVELS,
-    ) -> "GraspPose":
-        """Prescribed mid-bar grasps for ``dummy_grasp_board`` (object frame).
-
-        Layout matches ``build_grasp_board_spec`` via :func:`grasp_board_bar_specs`
-        (``n_levels`` heights × hori / vert / −45° / +45° per face). Pose order:
-
-        - first ``n_levels * 4``: **+Y** box face (approach −Y)
-        - next ``n_levels * 4``: **−Y** capsule face (approach +Y)
-
-        Grasp points sit on each bar's face-normal line, shifted
-        ``grasp_clearance`` outward from the bar center so the gripper need
-        not penetrate the bar/panel. EEF **+X** = face approach; long bar
-        axis is the up-hint (fingers close across the thin cross-section).
-
-        ``bar_standoffs`` is one per bar column; both faces share it so
-        collision and grasp stay aligned. If omitted, samples from
-        ``standoff_range`` (default ``[0.01, 0.05]``).
-        """
-        thickness = float(panel_size[1])
-        hr = float(handle_radius)
-        clearance = float(grasp_clearance)
-        if clearance < 0.0:
-            raise ValueError(f"grasp_clearance must be >= 0, got {grasp_clearance}")
-        half_t = 0.5 * thickness
-        del handle_length  # axis grasp at bar centers
-
-        if handle_box_size is None:
-            hy = max(hr, 0.018)
-        else:
-            hy = 0.5 * float(handle_box_size[0])
-
-        bars = grasp_board_bar_specs(panel_size, n_levels=n_levels)
-        if bar_standoffs is None:
-            sos = sample_grasp_board_bar_standoffs(standoff_range, n=len(bars))
-        else:
-            sos = tuple(float(x) for x in bar_standoffs)
-            if len(sos) != len(bars):
-                raise ValueError(
-                    f"bar_standoffs length {len(sos)} != bars {len(bars)}"
-                )
-            if any(s < 0.0 for s in sos):
-                raise ValueError(f"bar_standoffs must be >= 0, got {sos}")
-
-        rows: list[list[float]] = []
-        for y_sign, y_half in ((+1.0, hy), (-1.0, hr)):
-            approach = torch.tensor([0.0, -y_sign, 0.0], dtype=torch.float32)
-            for so, (_tag, px, pz, axis) in zip(sos, bars, strict=True):
-                y = y_sign * (half_t + so + y_half + clearance)
-                pos = torch.tensor([px, y, pz], dtype=torch.float32)
-                axis_t = torch.tensor(list(axis), dtype=torch.float32)
-                rot = _frame_x_approach_z_up(
-                    approach.unsqueeze(0), axis_t.unsqueeze(0)
-                )[0]
-                quat = quat_from_matrix(rot.unsqueeze(0))[0]
-                rows.append([*pos.tolist(), *quat.tolist()])
-        return cls(poses=rows)
-
     @property
     def num_poses(self) -> int:
         if self.poses is not None:
@@ -467,14 +303,6 @@ class GraspPose(EntityBehavior):
 
 __all__ = [
     "EEF_FORWARD_B",
-    "GRASP_BOARD_BARS_PER_FACE",
-    "GRASP_BOARD_DEFAULT_N_LEVELS",
-    "GRASP_BOARD_ORIENTS_PER_LEVEL",
     "eef_forward_w",
-    "grasp_board_bar_specs",
-    "grasp_board_bars_per_face",
-    "parse_grasp_board_n_levels",
-    "parse_grasp_board_standoff_range",
-    "sample_grasp_board_bar_standoffs",
     "GraspPose",
 ]

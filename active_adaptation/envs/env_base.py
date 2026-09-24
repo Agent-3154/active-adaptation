@@ -1015,6 +1015,12 @@ class _EnvBase(EnvBase, RegistryMixin):
             for termination_func in self.termination_funcs.values():
                 termination_func.update(tensordict)
         tensordict = self._compute_termination(tensordict)
+
+        success = tensordict.get("success", None)
+        if success is None:
+            success = (self.episode_length_buf.reshape(self.num_envs, 1) >= self.max_episode_length * 0.9)
+        self.stats["episode_len"][:] = self.episode_length_buf.reshape(self.num_envs, 1)
+        self.stats["success"] = success.float().clone()
         
         with ScopedTimer("command.step", sync=PROFILE_SYNC_TIMERS):
             self.command_manager.step()
@@ -1056,11 +1062,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             if reward_group.enabled:
                 tensordict["reward", group] = reward
 
-        success = tensordict.get("success", None)
-        if success is None:
-            success = (self.episode_length_buf.reshape(self.num_envs, 1) >= self.max_episode_length * 0.9)
-        self.stats["episode_len"][:] = self.episode_length_buf.reshape(self.num_envs, 1)
-        self.stats["success"] = success.float().clone()
         return tensordict
 
     @ScopedTimer("termination.compute", sync=PROFILE_SYNC_TIMERS)

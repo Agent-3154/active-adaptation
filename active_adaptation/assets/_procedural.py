@@ -578,20 +578,6 @@ def _get_furniture_spawner_cls():
                 mass=None,
                 body_name=cfg.body_name,
             )
-        elif cfg.kind == "grasp_board":
-            spec = build_grasp_board_spec(
-                panel_size=cfg.panel_size,
-                handle_length=cfg.handle_length,
-                handle_radius=cfg.handle_radius,
-                handle_box_size=cfg.handle_box_size,
-                bar_standoffs=cfg.bar_standoffs,
-                n_levels=getattr(cfg, "n_levels", 3),
-                panel_rgba=cfg.panel_rgba,
-                box_rgba=cfg.box_rgba,
-                capsule_rgba=cfg.capsule_rgba,
-                mass=None,
-                body_name=cfg.body_name,
-            )
         else:
             raise ValueError(f"Unknown furniture kind: {cfg.kind}")
 
@@ -646,16 +632,6 @@ def _get_furniture_spawner_cls():
         seat_size: tuple[float, float, float] = (0.42, 0.42, 0.04)
         back_height: float = 0.42
         back_thickness: float = 0.04
-        # grasp_board fields
-        panel_size: tuple[float, float, float] = (1.1, 0.04, 1.0)
-        handle_length: float = 0.16
-        handle_radius: float = 0.022
-        handle_box_size: tuple[float, float] | None = (0.04, 0.03)
-        bar_standoffs: tuple[float, ...] | None = None
-        n_levels: int = 3
-        panel_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_PANEL_RGBA
-        box_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_BOX_RGBA
-        capsule_rgba: tuple[float, float, float, float] = _DEFAULT_GRASP_BOARD_CAPSULE_RGBA
         rgba: tuple[float, float, float, float] = _DEFAULT_RGBA
         physics_material_path: str = "material"
         physics_material: Any = None

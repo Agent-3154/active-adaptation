@@ -353,7 +353,7 @@ aa-project create -n myproject -d /path/to/parent
 - **`--no-deps` / `--deps`**: editable-install without (default) or with dependency resolution.
 - **`--skip-discover`**: scaffold + install only; do not refresh `.cache/projects.json`.
 
-The scaffold writes `pyproject.toml` with both entry-point groups, `cfg/task`, `cfg/exp`, README, and `.gitignore` (existing README/`.gitignore` are kept). New projects still start as **disabled** in `projects.json` until you `aa-project enable <name>`.
+The scaffold writes `pyproject.toml` with both entry-point groups, `cfg/task`, `cfg/exp`, README, and a Python `.gitignore` (existing README/`.gitignore` are kept), then runs `git init -b main`. New projects still start as **disabled** in `projects.json` until you `aa-project enable <name>`.
 
 Declare any project-specific third-party packages in that project’s `[project.dependencies]` (in addition to `active_adaptation`).
 

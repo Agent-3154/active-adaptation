@@ -270,7 +270,8 @@ def build_door_spec(
     handle_box_size: Sequence[float] | None = None,
     handle_standoff: float = 0.0,
     door_joint_range: tuple[float, float] = (-1.8, 1.8),
-    handle_joint_range: tuple[float, float] = (-1.2, 1.2),
+    door_slide_range: tuple[float, float] | None = None,
+    handle_joint_range: tuple[float, float] = (-1.6, 1.6),
     rgba: Sequence[float] = _DEFAULT_RGBA,
     frame_rgba: Sequence[float] = _DEFAULT_DOOR_FRAME_RGBA,
     body_name: str = "door",
@@ -279,8 +280,11 @@ def build_door_spec(
 
     Joints
     ------
+    - ``door_slide_joint``: prismatic along **+X** (panel translates in its plane).
+      Positive travel opens toward the latch, away from the left hinge.
     - ``door_joint``: revolute about **+Z** at the left (-X) edge of the panel.
     - ``handle_joint``: revolute about **+Y** (through the door) at the handle.
+      ``q = 0`` is a horizontal bar; ``q = +π/2`` stands the bar vertical.
 
     Object / frame frame: origin at floor under the opening center; **+Z** up,
     **+Y** through the door, **+X** along the width. ``door_dimensions`` is full
@@ -322,6 +326,14 @@ def build_door_spec(
     half_w, half_d, half_h = width * 0.5, thickness * 0.5, height * 0.5
     half_ft = ft * 0.5
     hinge_x = -half_w
+    if door_slide_range is None:
+        slide_lo, slide_hi = 0.0, width
+    else:
+        slide_lo, slide_hi = (float(door_slide_range[0]), float(door_slide_range[1]))
+    if slide_hi <= slide_lo:
+        raise ValueError(
+            f"door_slide_range must have hi > lo, got {(slide_lo, slide_hi)}"
+        )
 
     # Protrusion of handle geom along ±Y from the panel face.
     if shape == "capsule":
@@ -354,8 +366,19 @@ def build_door_spec(
         rgba=frame_rgba_t,
     )
 
-    # Panel hinged at the left edge; geom centered to fill the opening when q=0.
-    panel = frame.add_body(name="panel", pos=(hinge_x, 0.0, 0.0))
+    # Carriage slides in the door plane; the panel hinges on that carriage.
+    # Pull/push lock the slide at 0. Slide mode locks the hinge at 0.
+    carriage = frame.add_body(name="carriage", pos=(hinge_x, 0.0, 0.0))
+    carriage.mass = 0.2
+    carriage.inertia = [0.01, 0.01, 0.01]
+    slide_joint = carriage.add_joint(
+        name="door_slide_joint",
+        type=mujoco.mjtJoint.mjJNT_SLIDE,
+        axis=[1.0, 0.0, 0.0],
+    )
+    slide_joint.range = [slide_lo, slide_hi]
+
+    panel = carriage.add_body(name="panel", pos=(0.0, 0.0, 0.0))
     panel.mass = 15.0
     panel.inertia = [1.0, 1.0, 1.0]
     door_joint = panel.add_joint(
@@ -400,9 +423,13 @@ def build_door_spec(
     return spec
 
 
-DOOR_JOINT_NAMES_SIMULATION = ["door_joint", "handle_joint"]
-DOOR_BODY_NAMES_SIMULATION = ["frame", "panel", "handle"]
-DOOR_INIT_JOINT_POS = {"door_joint": 0.0, "handle_joint": 0.0}
+DOOR_JOINT_NAMES_SIMULATION = ["door_slide_joint", "door_joint", "handle_joint"]
+DOOR_BODY_NAMES_SIMULATION = ["frame", "carriage", "panel", "handle"]
+DOOR_INIT_JOINT_POS = {
+    "door_slide_joint": 0.0,
+    "door_joint": 0.0,
+    "handle_joint": 0.0,
+}
 
 
 def _drawer_joint_names(num_drawers: int) -> list[str]:
@@ -1203,6 +1230,7 @@ def _get_door_spawner_cls():
             handle_box_size=cfg.handle_box_size,
             handle_standoff=cfg.handle_standoff,
             door_joint_range=cfg.door_joint_range,
+            door_slide_range=cfg.door_slide_range,
             handle_joint_range=cfg.handle_joint_range,
             rgba=cfg.rgba,
             frame_rgba=cfg.frame_rgba,
@@ -1283,7 +1311,8 @@ def _get_door_spawner_cls():
         handle_box_size: tuple[float, float] | None = None
         handle_standoff: float = 0.0
         door_joint_range: tuple[float, float] = (-1.8, 1.8)
-        handle_joint_range: tuple[float, float] = (-1.2, 1.2)
+        door_slide_range: tuple[float, float] | None = None
+        handle_joint_range: tuple[float, float] = (-1.6, 1.6)
         rgba: tuple[float, float, float, float] = _DEFAULT_RGBA
         frame_rgba: tuple[float, float, float, float] = _DEFAULT_DOOR_FRAME_RGBA
         collision_props: Any = None
@@ -1309,7 +1338,8 @@ def make_door(
     handle_box_size: Sequence[float] | None = None,
     handle_standoff: float = 0.0,
     door_joint_range: Sequence[float] = (-1.8, 1.8),
-    handle_joint_range: Sequence[float] = (-1.2, 1.2),
+    door_slide_range: Sequence[float] | None = None,
+    handle_joint_range: Sequence[float] = (-1.6, 1.6),
     rgba: Sequence[float] = _DEFAULT_RGBA,
     frame_rgba: Sequence[float] = _DEFAULT_DOOR_FRAME_RGBA,
     pos: Sequence[float] = _DEFAULT_POS,
@@ -1322,17 +1352,25 @@ def make_door(
     initially_locked: bool = True,
     name: str = "door",
 ):
-    """Articulated door: ``frame`` —``door_joint``→ ``panel`` —``handle_joint``→ ``handle``.
+    """Articulated door: ``frame`` —slide→ ``carriage`` —hinge→ ``panel`` —handle→ ``handle``.
 
     Fixed-base fixture (no freejoint). Isaac welds ``frame`` with
     ``fix_root_link=True``; mjlab auto-wraps a mocap root. ``door_dimensions``
     is full ``(width, thickness, height)``. ``handle_position`` is ``(x, z)``
     in the frame frame. ``handle_standoff`` is the panel-face to handle-bar
     gap (both sides). ``rgba`` is panel/handle; ``frame_rgba`` is jambs/lintel.
-    ``door_joint`` defaults to **zero stiffness** (free hinge + light damping).
+
+    ``door_slide_joint`` translates the panel along **+X** (positive opens
+    toward the latch). ``door_joint`` is the hinge. Both default to **zero
+    stiffness**. ``handle_joint`` spans at least ``±π/2`` so slide mode can
+    stand the bar vertical.
+
+    ``open_direction`` is ``"pull"`` (hinge toward +Y), ``"push"`` (hinge
+    toward −Y), or ``"slide"`` (translate along +X; handle held vertical and
+    the slide is never locked). A task can set this per env.
 
     Behaviors (disable with flags):
-    - ``DoorBehavior`` (``door.door``): lock / push-pull / handle unlock
+    - ``DoorBehavior`` (``door.door``): lock / pull / push / slide
     - ``GraspPose`` (``door.grasp``): prescribed handle-face grasps
     """
     from active_adaptation.assets.asset_cfg import AssetSpec
@@ -1342,6 +1380,9 @@ def make_door(
     door_dimensions_t = _as_float_tuple(door_dimensions, 3)
     handle_position_t = _as_float_tuple(handle_position, 2)
     door_range_t = _as_float_tuple(door_joint_range, 2)
+    slide_range_t = (
+        None if door_slide_range is None else _as_float_tuple(door_slide_range, 2)
+    )
     handle_range_t = _as_float_tuple(handle_joint_range, 2)
     pos_t = _as_float_tuple(pos, 3)
     rot_t = _as_float_tuple(rot, 4)
@@ -1371,6 +1412,7 @@ def make_door(
             handle_box_size=box_size_t,
             handle_standoff=standoff,
             door_joint_range=door_range_t,
+            door_slide_range=slide_range_t,
             handle_joint_range=handle_range_t,
             rgba=rgba_t,
             frame_rgba=frame_rgba_t,
@@ -1401,6 +1443,14 @@ def make_door(
                 joint_vel={".*": 0.0},
             ),
             actuators={
+                "slide": ImplicitActuatorCfg(
+                    joint_names_expr=["door_slide_joint"],
+                    effort_limit_sim=80.0,
+                    stiffness=0.0,
+                    damping=4.0,
+                    armature=0.01,
+                    friction=0.01,
+                ),
                 "door": ImplicitActuatorCfg(
                     joint_names_expr=["door_joint"],
                     effort_limit_sim=80.0,
@@ -1440,6 +1490,7 @@ def make_door(
                 handle_box_size=box_size_t,
                 handle_standoff=standoff,
                 door_joint_range=door_range_t,
+                door_slide_range=slide_range_t,
                 handle_joint_range=handle_range_t,
                 rgba=rgba_t,
                 frame_rgba=frame_rgba_t,
@@ -1455,6 +1506,14 @@ def make_door(
             spec_fn=spec_fn,
             articulation=EntityArticulationInfoCfg(
                 actuators=(
+                    BuiltinPdActuatorCfg(
+                        target_names_expr=("door_slide_joint",),
+                        effort_limit=80.0,
+                        stiffness=0.0,
+                        damping=4.0,
+                        armature=0.01,
+                        frictionloss=0.01,
+                    ),
                     BuiltinPdActuatorCfg(
                         target_names_expr=("door_joint",),
                         effort_limit=80.0,

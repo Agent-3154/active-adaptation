@@ -1,8 +1,8 @@
 """Legacy USD-file dummy props (basket), a procedural dumbbell, and re-exports.
 
-Procedural furniture lives in ``furnitures``; the grasp board in ``grasp_board``.
-Importing this module still registers those assets (via side-effect imports)
-plus the legacy Isaac-only USD basket below.
+Procedural furniture lives in ``furnitures``. Importing this module still
+registers those assets (via side-effect imports) plus the legacy Isaac-only
+USD basket below.
 
 ``dummy_dumbbell`` is a rigid handle capsule with larger end-caps so the
 gripper cannot slide on along the handle axis. End-caps default to capsules;
@@ -25,7 +25,6 @@ from active_adaptation.assets._procedural import (
 
 # Register procedural assets.
 from active_adaptation.assets import furnitures as _furnitures  # noqa: F401
-from active_adaptation.assets import grasp_board as _grasp_board  # noqa: F401
 
 # Backward-compatible re-exports.
 from active_adaptation.assets.furnitures import (  # noqa: F401
@@ -34,10 +33,6 @@ from active_adaptation.assets.furnitures import (  # noqa: F401
     make_drawer,
     make_dummy_stand,
     make_table,
-)
-from active_adaptation.assets.grasp_board import (  # noqa: F401
-    build_grasp_board_spec,
-    make_grasp_board,
 )
 
 registry = Registry.instance()
