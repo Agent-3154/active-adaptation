@@ -210,3 +210,59 @@ class contact_forces(Observation):
             forces.reshape(-1, 3),
             color=(1.0, 0.25, 0.1, 1.0),
         )
+
+
+class contact_time(Observation):
+    """Seconds each matched body has been in contact, shape ``(num_envs, B)``.
+
+    Reads ``current_contact_time`` and clamps it to ``max_time`` so a long
+    stance stays bounded. ``body_names`` is a regex on ``entity_name``.
+    """
+
+    supported_backends = ("isaaclab", "mujoco", "motrix")
+
+    def __init__(
+        self,
+        body_names: str,
+        max_time: float = 5.0,
+        entity_name: str = "robot",
+        sensor_name: str = "contact_forces",
+    ):
+        super().__init__()
+        self.body_names_pattern = body_names
+        self.max_time = float(max_time)
+        self.entity_name = entity_name
+        self.sensor_name = sensor_name
+        if self.max_time <= 0.0:
+            raise ValueError(f"contact_time max_time must be > 0, got {max_time}")
+
+    @override
+    def _initialize(self, env: "_EnvBase"):
+        super()._initialize(env)
+        self.asset: Articulation | RigidObject = self.env.scene.entities[self.entity_name]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors[self.sensor_name]
+        _, self.body_names = find_bodies(self.asset, self.body_names_pattern)
+        sensor_ids, _ = find_sensor_bodies(
+            self.asset, self.contact_sensor, self.body_names
+        )
+        self.sensor_body_ids = torch.as_tensor(
+            sensor_ids, device=self.device, dtype=torch.long
+        )
+        if self.sensor_body_ids.numel() == 0:
+            raise ValueError(
+                f"contact_time matched no bodies for {self.body_names_pattern!r} "
+                f"on {self.entity_name!r}"
+            )
+
+    def compute(self) -> torch.Tensor:
+        contact_time = self.contact_sensor.data.current_contact_time[
+            :, self.sensor_body_ids
+        ]
+        return contact_time.clamp(0.0, self.max_time)
+
+    def symmetry_transform(self):
+        if getattr(self.asset.cfg, "spatial_symmetry_mapping", None) is None:
+            raise NotImplementedError(
+                f"contact_time symmetry is undefined for entity {self.entity_name!r}"
+            )
+        return cartesian_space_symmetry(self.asset, self.body_names, sign=(1,))
