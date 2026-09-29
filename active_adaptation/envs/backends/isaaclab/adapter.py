@@ -212,18 +212,23 @@ class IsaacSceneAdapter(SceneAdapter):
         """Body-local visual trimeshes for ``entities[name]``.
 
         Tries ``{body}/visuals``, then the body prim itself (covers Isaac shape
-        assets under ``geometry/`` and custom USD meshes). Bodies without mesh
-        geometry are skipped. Returns ``(body_indices, body_names, meshes)``;
-        index poses with ``body_link_pose_w[:, body_indices]``.
+        assets under ``geometry/`` and custom USD meshes). Guide-purpose and
+        invisible prims are skipped. Bodies without mesh geometry are skipped.
+        Returns ``(body_indices, body_names, meshes)``; index poses with
+        ``body_link_pose_w[:, body_indices]``.
         """
         from active_adaptation.envs.backends.isaaclab.meshes import (
             VISUAL_GEOM_SUFFIXES,
+            is_renderable_prim,
             load_entity_body_meshes,
         )
 
         entity = self.entities[name]
         return load_entity_body_meshes(
-            entity, suffixes=VISUAL_GEOM_SUFFIXES, require_all=False
+            entity,
+            suffixes=VISUAL_GEOM_SUFFIXES,
+            require_all=False,
+            predicate=is_renderable_prim,
         )
 
     def get_collision_meshes(

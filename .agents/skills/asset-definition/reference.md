@@ -10,7 +10,7 @@ Companion to [SKILL.md](SKILL.md). File map, backend wiring, templates, and clea
 |------|------|
 | `aa-projects/assetx/` | MJCF compose/transform recipes; `artifacts/` for local builds; `AGENTS.md` / `README.md` |
 | `aa-projects/assetx/examples/*.py` | Canonical recipes (e.g. `a2_piper`, `b2_kinova`, `g1_inspire_hand`) |
-| `aa-projects/assetx/tools/mjcf2usd.py` | MJCF → USD for Isaac (`pip install -e ".[usd]"`) |
+| `aa-projects/assetx/tools/mjcf2usd.py` | MJCF → USD for Isaac (`uv run tools/mjcf2usd.py <model.xml>`); AA contract in assetx README "Using with active-adaptation" |
 | `active_adaptation/assets/asset_cfg.py` | Backend-gated `ArticulationCfg` (Isaac) / `EntityCfg` (mjlab); `AssetSpec`; order helpers |
 | `active_adaptation/assets/__init__.py` | Imports family packages (registration side effects) |
 | `active_adaptation/assets/quadrupeds/*.py` | Unitree A2/B2/Go2 (+ manipulators) |

@@ -111,27 +111,28 @@ IsaacBackendEnv / MjLabBackendEnv  → scene.robot / entities["robot"]
 | Stage | Tool | Output |
 |-------|------|--------|
 | Compose MJCF | assetx recipe (`assemble`, `Compose([...])`, `MujocoAsset.save`) | `artifacts/<name>/model.xml`, `meshes/`, optional `model.urdf` |
-| Isaac USD | assetx `tools/mjcf2usd.py` or `tools/urdf2usd.py` (`pip install -e ".[usd]"`) | `<name>.usd` beside the MJCF |
-| Runtime cache | copy or HF publish | `<repo>/.cache/aa-robot-models/<name>/` |
+| Isaac USD | assetx `tools/mjcf2usd.py` (preferred) or `tools/urdf2usd.py`, via `uv run` | `artifacts/<name>/usd/<model>.usdc` (flat links, `visuals`/`collisions` groups) |
+| Runtime cache | copy or HF publish | `active-adaptation/.cache/aa-robot-models/<name>/` |
 | AA factory | `assets/<family>/<robot>.py` | `registry.register("asset", …)` pointing at `ROBOT_MODEL_DIR` |
 
-**Recipe conventions (match AA expectations):**
+**The full contract** (what assetx guarantees and AA relies on) lives in the assetx README, section "Using with active-adaptation". In short:
 
-- Strip vendor **actuators and sensors** in the assetx load step — AA adds PD actuators and scene sensors via `AssetSpec` (see `examples/a2_piper.py`).
-- Name collision geoms `{body}_collision` / `{body}_collision{N}`; feet `{leg}_foot_collision` so mjlab `CollisionCfg(geom_names_expr=(".*_collision",))` and contact sensors match.
-- Keep body/joint names stable across the saved MJCF and exported USD; set `JOINT_NAMES_SIMULATION` / `BODY_NAMES_SIMULATION` from the **saved** model, not the vendor XML.
-- `save()` copies meshes into the artifact dir — symlink or copy that tree into `ROBOT_MODEL_DIR`; do not point `spec_fn` at mutable `artifacts/` during training.
+- The saved MJCF has no vendor **actuators, sensors, lights or `<option>`** (`RemoveActuators`, `RemoveSensors`, `RemoveSceneSettings`). AA adds PD actuators and contact sensors via `AssetSpec`.
+- Root free joint is `floating_base_joint` (`NormalizeJointNames`).
+- Unnamed collision geoms become `{body}_collision{i}` (`NormalizeGeomNames`), matching mjlab `CollisionCfg(geom_names_expr=(".*_collision.*",))`. Vendor-named colliders keep their names; add a pattern or rename them.
+- Take `JOINT_NAMES_SIMULATION` / `BODY_NAMES_SIMULATION` and symmetry maps from the **saved** model, not the vendor XML.
+- USD links are direct children of the robot prim (`{ENV_REGEX_NS}/Robot/<link>`). Geometry sits in `{link}/visuals` / `{link}/collisions`, which `scene.get_visual_meshes` / `get_collision_meshes` (camera, mesh registry, Viser) read.
+- Never point `spec_fn` / `usd_path` at mutable `assetx/artifacts/`; copy into `ROBOT_MODEL_DIR`.
 
 **Example (A2 + Piper):**
 
 ```bash
-cd aa-projects/assetx && pip install -e .
-python examples/a2_piper.py --no-viewer   # → artifacts/a2_piper/model.xml
-pip install -e ".[usd]"
-python tools/mjcf2usd.py -p artifacts/a2_piper/model.xml   # → USD beside MJCF
-mkdir -p ../active-adaptation/.cache/aa-robot-models/a2_piper
-cp -r artifacts/a2_piper/* ../active-adaptation/.cache/aa-robot-models/a2_piper/
-# rename USD if needed to match factory (a2_manipulator expects a2_piper.usd)
+cd aa-projects/assetx
+uv run examples/a2_piper.py --no-viewer                 # → artifacts/a2_piper/model.xml
+uv run tools/mjcf2usd.py artifacts/a2_piper/model.xml   # → artifacts/a2_piper/usd/<model>.usdc
+mkdir -p ../../active-adaptation/.cache/aa-robot-models/a2_piper
+cp -r artifacts/a2_piper/* ../../active-adaptation/.cache/aa-robot-models/a2_piper/
+# point usd_path at usd/<model>.usdc, or rename it (a2_manipulator expects a2_piper.usd)
 ```
 
 Reference factory: `assets/quadrupeds/a2_manipulator.py` (`robot.name: unitree_a2_piper` or equivalent registry key). Full assetx API: `aa-projects/assetx/AGENTS.md`, `README.md`.

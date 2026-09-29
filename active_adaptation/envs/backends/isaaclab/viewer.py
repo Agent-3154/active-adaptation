@@ -108,6 +108,7 @@ class IsaacViserViewer:
 
         from active_adaptation.envs.backends.isaaclab.meshes import (
             VISUAL_GEOM_SUFFIXES,
+            is_renderable_prim,
             load_entity_body_geom_parts,
             load_prim_geom_parts,
         )
@@ -118,7 +119,10 @@ class IsaacViserViewer:
 
         for entity_name, entity in scene.entities.items():
             body_ids, body_names, parts_per_body = load_entity_body_geom_parts(
-                entity, suffixes=VISUAL_GEOM_SUFFIXES, require_all=False
+                entity,
+                suffixes=VISUAL_GEOM_SUFFIXES,
+                require_all=False,
+                predicate=is_renderable_prim,
             )
             self._upload_body_parts(
                 entity_name,

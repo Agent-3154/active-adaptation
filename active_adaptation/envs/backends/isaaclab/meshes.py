@@ -11,9 +11,25 @@ Paths built here are concrete ``env_0`` templates (no regex), so lookups use
 from __future__ import annotations
 
 import warnings
-from typing import Sequence, Tuple
+from typing import Callable, Sequence, Tuple
 
 import trimesh
+
+
+def is_renderable_prim(prim) -> bool:
+    """False for invisible or ``purpose=guide`` prims (e.g. converter collisions).
+
+    Deliberately ignores ``CollisionAPI``: Isaac shape assets put collision and
+    visuals on the same ``geometry/mesh`` prim.
+    """
+    from pxr import UsdGeom
+
+    imageable = UsdGeom.Imageable(prim)
+    if not imageable:
+        return True
+    if imageable.ComputeVisibility() == UsdGeom.Tokens.invisible:
+        return False
+    return imageable.ComputePurpose() != UsdGeom.Tokens.guide
 
 
 def entity_body_prim_paths(entity, suffix: str) -> list[str]:
@@ -70,10 +86,12 @@ def load_entity_body_meshes(
     *,
     suffixes: Sequence[str],
     require_all: bool = True,
+    predicate: Callable | None = None,
 ) -> Tuple[list[int], list[str], list[trimesh.Trimesh]]:
     """Extract body-local trimeshes for bodies that have geometry.
 
     Tessellates USD Mesh + primitives (Cube/Sphere/Cylinder/Capsule/Cone).
+    ``predicate`` filters individual geom prims (see ``is_renderable_prim``).
     Returns ``(body_indices, body_names, meshes)`` for non-empty bodies.
     """
     try:
@@ -95,7 +113,7 @@ def load_entity_body_meshes(
         last_err: Exception | None = None
         if prim is not None:
             try:
-                mesh = get_trimesh_from_prim(prim)
+                mesh = get_trimesh_from_prim(prim, predicate or (lambda _: True))
             except ValueError as e:
                 last_err = e
                 mesh = None
@@ -125,6 +143,7 @@ def load_entity_body_geom_parts(
     *,
     suffixes: Sequence[str],
     require_all: bool = True,
+    predicate: Callable | None = None,
 ):
     """Extract per-geom parts for Viser (native primitives when possible).
 
@@ -150,7 +169,7 @@ def load_entity_body_geom_parts(
         last_err: Exception | None = None
         if prim is not None:
             try:
-                parts = get_geom_parts_from_prim(prim)
+                parts = get_geom_parts_from_prim(prim, predicate or (lambda _: True))
             except ValueError as e:
                 last_err = e
                 parts = []
