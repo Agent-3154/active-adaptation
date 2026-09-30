@@ -13,7 +13,9 @@ def rot6d(quat: torch.Tensor) -> torch.Tensor:
     Args:
         quat: Quaternions ``(..., 4)`` in ``(w, x, y, z)``.
     Returns:
-        ``(..., 6)`` as ``[c0_x, c0_y, c0_z, c1_x, c1_y, c1_z]``.
+        ``(..., 6)`` row-major of those columns:
+        ``[c0_x, c1_x, c0_y, c1_y, c0_z, c1_z]``.
+        ``c0`` is body +X and ``c1`` is body +Y. Body +Z is ``c0 × c1``.
     """
     mat = matrix_from_quat(quat)
     return mat[..., :, :2].reshape(quat.shape[:-1] + (6,))

@@ -106,7 +106,9 @@ class SymmetryTransform(nn.Module):
         Return a SymmetryTransform that transforms a 6D rotation vector into its 
         left-right symmetric counterpart.
         """
-        return cls(perm=[0, 1, 2, 3, 4, 5], signs=[1, -1, 1, -1, 1, -1])
+        # Layout is [c0_x, c1_x, c0_y, c1_y, c0_z, c1_z]. Mirror y → −y
+        # sends c0 to (x, −y, z) and c1 to (−x, y, −z).
+        return cls(perm=[0, 1, 2, 3, 4, 5], signs=[1, -1, -1, 1, 1, -1])
     
     @classmethod
     def xyz(cls):
