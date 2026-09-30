@@ -1,8 +1,9 @@
 """Boston Dynamics Spot with the arm and gripper.
 
-MJCF/USD: ``<ROBOT_MODEL_DIR>/spot_arm/`` (assetx artifact ``spot_arm``).
-The gripper is one revolute jaw (``arm_f1x``); both finger meshes live on
-``arm_link_fngr``, so ``GripperBehavior`` has no separate fingertip bodies.
+MJCF/USD: ``<ROBOT_MODEL_DIR>/spot_arm/``, cooked from the assetx recipe
+``spot_arm`` (``aa-cook-assets spot_arm``).
+The gripper is one revolute jaw (``arm_f1x``). Both finger meshes live on
+``arm_link_fngr``, which is the contact body. The jaw opens along EEF ``+Z``.
 ``arm_f1x`` spawns open (near the negative soft limit). Closed rest is ``q ≈ 0``.
 """
 
@@ -10,7 +11,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from active_adaptation import ROBOT_MODEL_DIR
+from active_adaptation.assets.cooked import cooked_model_dir
 from active_adaptation.assets.quadrupeds.spot import (
     BODY_NAMES_SIMULATION as SPOT_BODY_NAMES_SIMULATION,
     HIP_EFFORT_LIMIT,
@@ -29,8 +30,6 @@ from active_adaptation.assets.quadrupeds.spot import (
 from active_adaptation.registry import Registry
 
 registry = Registry.instance()
-
-MODEL_DIR = ROBOT_MODEL_DIR / "spot_arm"
 
 _ARM_JOINTS = (
     "arm_sh0",
@@ -103,9 +102,10 @@ def make_isaaclab_cfg(self_collisions: bool = False):
     )
     from active_adaptation.envs.behaviors.gripper import GripperBehavior
 
+    model_dir = cooked_model_dir("spot_arm", usd=True)
     asset_cfg = ArticulationCfg(
         spawn=sim_utils.UsdFileCfg(
-            usd_path=str(MODEL_DIR / "usd" / "spot.usdc"),
+            usd_path=str(model_dir / "usd" / "spot.usdc"),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 retain_accelerations=False,
@@ -191,7 +191,8 @@ def make_isaaclab_cfg(self_collisions: bool = False):
             GripperBehavior(
                 eef_body_name="grasp_point",
                 joint_names="arm_f1x",
-                body_names=None,
+                body_names="arm_link_fngr",
+                open_direction=(0.0, 0.0, 1.0),
             ),
         ),
     )
@@ -204,8 +205,10 @@ def make_mjlab_cfg():
     from mjlab.entity import EntityArticulationInfoCfg
     from mjlab.sensor import ContactMatch, ContactSensorCfg
 
+    model_dir = cooked_model_dir("spot_arm", usd=False)
+
     def spec_fn():
-        return load_mjcf(MODEL_DIR / "model.xml")
+        return load_mjcf(model_dir / "model.xml")
 
     cfg = EntityCfg(
         init_state=EntityCfg.InitialStateCfg(
@@ -283,7 +286,8 @@ def make_mjlab_cfg():
             GripperBehavior(
                 eef_body_name="grasp_point",
                 joint_names="arm_f1x",
-                body_names=None,
+                body_names="arm_link_fngr",
+                open_direction=(0.0, 0.0, 1.0),
             ),
         ),
     )

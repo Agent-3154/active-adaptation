@@ -46,7 +46,7 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 2. **Two factories + dispatcher** — `make_isaaclab_cfg()`, `make_mjlab_cfg()`, `make_cfg(backend: Literal["isaaclab", "mjlab"])`. Backends call with `"isaaclab"` or `"mjlab"` (not `"isaac"`).
 3. **Always set simulation order** — `joint_names_simulation` and `body_names_simulation` on both backend cfgs (same lists). MDP terms resolve against these via `find_joints` / `find_bodies`.
 4. **Share cross-backend constants** — `INIT_POS`, `INIT_JOINT_POS`, symmetry maps, effort/stiffness/damping, and the simulation name lists live at module top; only spawn/spec/actuator *types* differ per backend.
-5. **Runtime models live in `ROBOT_MODEL_DIR`** — USD + MJCF under `.cache/aa-robot-models/<robot>/`. Do not vendor large meshes into `active_adaptation/assets/`. **Compose** new MJCF in **assetx** (`aa-projects/assetx/examples/`, `artifacts/`), then copy or publish the saved bundle into `ROBOT_MODEL_DIR` (see [assetx pipeline](#assetx-model-pipeline)).
+5. **Runtime models live in `ROBOT_MODEL_DIR`** — USD + MJCF under `.cache/aa-robot-models/<robot>/`. Do not vendor large meshes into `active_adaptation/assets/`. **Compose** new MJCF in **assetx**. Robots with a registered assetx recipe are cooked into `ROBOT_MODEL_DIR` by `aa-cook-assets`, and their factories resolve the bundle with `cooked_model_dir()` (fails fast, never auto-cooks). Others are exported from `assetx/examples/` and copied (see [assetx pipeline](#assetx-model-pipeline)).
 6. **Register + import** — `registry.register("asset", "<name>", make_cfg)` and import the module from the package `__init__.py` so registration runs.
 7. **Name parity** — joint/body names used by MDP, init regexes, and sensors must match across USD and MJCF (order may differ; the simulation lists fix layout). We always assume the USD joint and body names match those of the MJCF (if provided). So do not bother checking them.
 8. **No new mujoco-backend assets** — ignore `elif aa.get_backend() == "mujoco"` in `asset_cfg.py` for new work; prefer deleting it when cleaning.
@@ -61,7 +61,7 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 
 ```
 Task Progress:
-- [ ] If composing: write an assetx recipe (examples/) → `robot.save(artifacts/<name>/)` → copy/sync to ROBOT_MODEL_DIR/<name>/ (+ USD for Isaac)
+- [ ] If composing: `@recipe` in `assetx/src/assetx/recipes/` (pinned vendor SHA) → `aa-cook-assets <name>` (no args cooks every recipe); factories use `cooked_model_dir(name, usd=...)`
 - [ ] Else: place USD + MJCF (and meshes) under ROBOT_MODEL_DIR/<robot>/ (HF download or vendor export)
 - [ ] Create assets/<family>/<robot>.py with shared INIT_*, JOINT/BODY_NAMES_SIMULATION, symmetry
 - [ ] make_isaaclab_cfg → ArticulationCfg (UsdFileCfg) + ContactSensorCfg dict
@@ -108,10 +108,25 @@ IsaacBackendEnv / MjLabBackendEnv  → scene.robot / entities["robot"]
 
 **assetx** (`aa-projects/assetx/`) owns **MJCF composition** — assemble base + arm, rename bodies, add `grasp_point`, normalize collision geom names, export URDF. **active-adaptation** owns **simulation registration** — `AssetSpec`, actuators, contact sensors, symmetry, `joint_names_simulation`.
 
+AA depends on assetx (GitHub `btx0424/assetx`, branch `main`, in `pyproject.toml`; install `aa-projects/assetx` editable on top when developing recipes). Registered recipes are the preferred route:
+
+| Stage | Tool | Output |
+|-------|------|--------|
+| Recipe | `@recipe("name", vendor=<GitHub tree URL pinned to a commit SHA>)` in `assetx/src/assetx/recipes/` | returns a `MujocoAsset` |
+| Cook | `aa-cook-assets [name] [--force] [--check]` (wraps `assetx.cook.cook`) | `ROBOT_MODEL_DIR/<name>/{model.xml, model.urdf, meshes/, usd/<model>.usdc, assetx.json}` |
+| AA factory | `model_dir = cooked_model_dir("<name>", usd=True/False)` inside `make_isaaclab_cfg` / `make_mjlab_cfg` | raises `UncookedAssetError` if missing or stale |
+
+- `assetx.json` stores a sha256 over the recipe module + assetx code that shapes output; editing either makes the bundle stale until re-cooked. Never auto-cook from a factory.
+- Call `cooked_model_dir` inside the factory, not at module import, so importing `active_adaptation.assets` works without bundles.
+- USD conversion runs in an isolated `uv` env; the Isaac venvs override `usd-core` away (Kit owns `pxr`). Do not import `pxr` host-side in cook paths.
+- `uv sync --project venv/isaac51` would uninstall Isaac Lab's pip-installed deps; to refresh AA/assetx there use `uv pip install --python venv/isaac51/.venv/bin/python --no-deps -e . "assetx @ git+https://github.com/btx0424/assetx.git@main"` (or `-e ../aa-projects/assetx` for a local checkout).
+
+For robots still built from `assetx/examples/`, the manual route:
+
 | Stage | Tool | Output |
 |-------|------|--------|
 | Compose MJCF | assetx recipe (`assemble`, `Compose([...])`, `MujocoAsset.save`) | `artifacts/<name>/model.xml`, `meshes/`, optional `model.urdf` |
-| Isaac USD | assetx `tools/mjcf2usd.py` (preferred) or `tools/urdf2usd.py`, via `uv run` | `artifacts/<name>/usd/<model>.usdc` (flat links, `visuals`/`collisions` groups) |
+| Isaac USD | `save(..., save_usd=True)` or `tools/mjcf2usd.py`, via `uv run` | `artifacts/<name>/usd/<model>.usdc` (flat links, `visuals`/`collisions` groups) |
 | Runtime cache | copy or HF publish | `active-adaptation/.cache/aa-robot-models/<name>/` |
 | AA factory | `assets/<family>/<robot>.py` | `registry.register("asset", …)` pointing at `ROBOT_MODEL_DIR` |
 
@@ -135,7 +150,7 @@ cp -r artifacts/a2_piper/* ../../active-adaptation/.cache/aa-robot-models/a2_pip
 # point usd_path at usd/<model>.usdc, or rename it (a2_manipulator expects a2_piper.usd)
 ```
 
-Reference factory: `assets/quadrupeds/a2_manipulator.py` (`robot.name: unitree_a2_piper` or equivalent registry key). Full assetx API: `aa-projects/assetx/AGENTS.md`, `README.md`.
+Reference factories: `assets/quadrupeds/spot.py` / `spot_arm.py` (cooked recipes) and `assets/quadrupeds/a2_manipulator.py` (manual copy). Full assetx API: `aa-projects/assetx/AGENTS.md`, `README.md`.
 
 `AssetSpec` fields:
 

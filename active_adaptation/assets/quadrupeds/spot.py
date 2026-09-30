@@ -1,19 +1,17 @@
 """Boston Dynamics Spot (no arm).
 
-MJCF/USD: ``<ROBOT_MODEL_DIR>/spot/`` (assetx artifact ``spot``).
-Feet are fixed child bodies ``*_foot`` of the lower legs, with the origin at
+MJCF/USD: ``<ROBOT_MODEL_DIR>/spot/``, cooked from the assetx recipe ``spot``
+(``aa-cook-assets spot``). Feet are fixed child bodies ``*_foot`` of the lower legs, with the origin at
 the contact sphere center (geom ``*_foot_collision0``, r=0.036).
 """
 
 from typing import Literal
 
-from active_adaptation import ROBOT_MODEL_DIR
+from active_adaptation.assets.cooked import cooked_model_dir
 from active_adaptation.registry import Registry
 from active_adaptation.utils.symmetry import mirrored
 
 registry = Registry.instance()
-
-MODEL_DIR = ROBOT_MODEL_DIR / "spot"
 
 # Menagerie home keyframe stands at z=0.46 with the feet already in contact.
 # Spawn slightly above that so the first physics step is not a penetration spike.
@@ -131,9 +129,10 @@ def make_isaaclab_cfg(self_collisions: bool = False):
         sim_utils,
     )
 
+    model_dir = cooked_model_dir("spot", usd=True)
     asset_cfg = ArticulationCfg(
         spawn=sim_utils.UsdFileCfg(
-            usd_path=str(MODEL_DIR / "usd" / "spot.usdc"),
+            usd_path=str(model_dir / "usd" / "spot.usdc"),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 retain_accelerations=False,
@@ -203,8 +202,10 @@ def make_mjlab_cfg():
     from mjlab.entity import EntityArticulationInfoCfg
     from mjlab.sensor import ContactMatch, ContactSensorCfg
 
+    model_dir = cooked_model_dir("spot", usd=False)
+
     def spec_fn():
-        return load_mjcf(MODEL_DIR / "model.xml")
+        return load_mjcf(model_dir / "model.xml")
 
     cfg = EntityCfg(
         init_state=EntityCfg.InitialStateCfg(

@@ -62,6 +62,9 @@ override-dependencies = [
     "websockets>=13.1,<=16.0",
     # isaacsim-core pins matplotlib==3.10.3
     "matplotlib>=3.10.3",
+    # assetx depends on usd-core, whose pxr would shadow Kit's. Cooking converts
+    # USD in an isolated env, so the host never needs it.
+    "usd-core ; sys_platform == 'never'",
 ]
 required-environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'"

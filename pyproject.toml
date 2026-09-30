@@ -32,6 +32,8 @@ dependencies = [
     "matplotlib>=3.11.1",
     "typer",
     "simple-raycaster>=0.4.0,<0.5",
+    # Cooks robot bundles into ROBOT_MODEL_DIR (aa-cook-assets).
+    "assetx",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +48,7 @@ render = [
 aa-project = "active_adaptation.cli:main"
 aa-discover-projects = "active_adaptation.cli:aa_discover_projects"
 aa-list-tasks = "active_adaptation.cli:aa_list_tasks"
+aa-cook-assets = "active_adaptation.assets.cooked:main"
 
 [project.entry-points."active_adaptation.projects"]
 facet = "projects.facet"
@@ -89,5 +92,5 @@ torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 fvdb-core = { index = "fvdb" }
 nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", rev = "253ac4fcea7de5f396371124af597e6cc957bfae" }
-# Monorepo default: sibling checkout under lab51/. Standalone installs: use git tag v0.4.0 instead.
-simple-raycaster = { path = "../simple-raycaster", editable = true }
+simple-raycaster = { git = "https://github.com/btx0424/simple-raycaster.git", rev = "a217433ea18bd1b897d6cd1137a228c517befa5c" }
+assetx = { git = "https://github.com/btx0424/assetx.git", branch = "main" }

@@ -233,11 +233,31 @@ That path is `ROBOT_MODEL_DIR` in code (`CACHE_DIR` is the repo’s `.cache/` fo
 
 | Layer | Location | Role |
 |-------|----------|------|
-| **Compose** | `aa-projects/assetx/` | Python recipes: assemble base + arm, rename links, add grasp frames, export MJCF/URDF |
-| **Publish** | `.cache/aa-robot-models/<robot>/` | Durable bundle used by training (`model.xml`, `meshes/`, `*.usd`) |
+| **Compose** | `aa-projects/assetx/` | Python recipes: assemble base + arm, rename links, add grasp frames, export MJCF/URDF/USD |
+| **Cook / publish** | `.cache/aa-robot-models/<robot>/` | Durable bundle used by training (`model.xml`, `meshes/`, `usd/`), cooked locally or downloaded |
 | **Register** | `active_adaptation/assets/*.py` | `AssetSpec` factories: actuators, contact sensors, `joint_names_simulation`, symmetry |
 
 Use **assetx** when you need a new composed variant (e.g. quadruped + manipulator). Use the **Hugging Face cache** when a bundle is already published. Factories in `assets/` must point at `ROBOT_MODEL_DIR`, not at mutable `assetx/artifacts/` paths.
+
+### Cook assetx robots
+
+Robots with a registered assetx recipe (`spot`, `spot_arm`) are built locally
+instead of downloaded. assetx is an AA dependency (GitHub `btx0424/assetx`, branch `main`), so the
+command is available in every venv:
+
+```bash
+aa-cook-assets            # cook all of them into .cache/aa-robot-models/; skips fresh bundles
+aa-cook-assets --check    # report only; exit 1 if any bundle is missing or stale
+aa-cook-assets spot_arm --force
+```
+
+Each bundle has an `assetx.json` with a hash of the recipe and the assetx code
+that shapes the output. The Spot factories check it when they build their
+config and raise `UncookedAssetError` naming the command above if the bundle
+is missing or stale (after pulling assetx changes, for example). They never
+cook on their own. USD conversion runs in an isolated `uv` environment, so `uv`
+must be on `PATH`; the Isaac venvs deliberately exclude `usd-core` so that
+Kit's `pxr` is the only one.
 
 ### Download published bundles (Hugging Face)
 
@@ -264,17 +284,21 @@ You can instead **clone or copy** the dataset contents into `.cache/aa-robot-mod
 
 [**assetx**](../aa-projects/assetx/) (`aa-projects/assetx/`) builds reproducible MJCF from vendor bases + Python recipes. See [`assetx/README.md`](../aa-projects/assetx/README.md) and [`assetx/AGENTS.md`](../aa-projects/assetx/AGENTS.md).
 
-Typical workflow for a new robot name (example: A2 + Piper):
+For a robot that AA uses long-term, add a recipe under
+`assetx/src/assetx/recipes/` (`aa-cook-assets` with no arguments cooks every
+registered recipe) and resolve the bundle in its factory with
+`cooked_model_dir("<name>", usd=...)` (see `assets/quadrupeds/spot.py`).
+
+Robots still built from `assetx/examples/` are exported and copied by hand
+(example: A2 + Piper):
 
 ```bash
 # 1. Build MJCF (writes aa-projects/assetx/artifacts/a2_piper/)
 cd ../aa-projects/assetx
-pip install -e .
-python examples/a2_piper.py --no-viewer
+uv run examples/a2_piper.py --no-viewer
 
-# 2. Export USD for Isaac (optional extra; needs pxr)
-pip install -e ".[usd]"
-python tools/mjcf2usd.py -p artifacts/a2_piper/model.xml
+# 2. Export USD for Isaac
+uv run tools/mjcf2usd.py artifacts/a2_piper/model.xml
 # rename/move USD if your AssetSpec expects a specific filename (e.g. a2_piper.usd)
 
 # 3. Publish into active-adaptation’s runtime cache

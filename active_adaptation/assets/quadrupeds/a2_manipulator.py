@@ -159,7 +159,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
     return AssetSpec(
         config=asset_cfg,
         sensors=sensors,
-        behaviors=(GripperBehavior(),),
+        behaviors=(GripperBehavior(open_direction=(0.0, 1.0, 0.0)),),
     )
 
 
@@ -237,7 +237,11 @@ def make_mjlab_cfg():
             history_length=3,
         ),
     )
-    return AssetSpec(config=cfg, sensors=sensors, behaviors=(GripperBehavior(),))
+    return AssetSpec(
+        config=cfg,
+        sensors=sensors,
+        behaviors=(GripperBehavior(open_direction=(0.0, 1.0, 0.0)),),
+    )
 
 
 def make_cfg(backend: Literal["isaaclab", "mjlab"]):

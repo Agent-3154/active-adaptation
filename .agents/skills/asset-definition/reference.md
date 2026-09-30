@@ -9,7 +9,9 @@ Companion to [SKILL.md](SKILL.md). File map, backend wiring, templates, and clea
 | Path | Role |
 |------|------|
 | `aa-projects/assetx/` | MJCF compose/transform recipes; `artifacts/` for local builds; `AGENTS.md` / `README.md` |
-| `aa-projects/assetx/examples/*.py` | Canonical recipes (e.g. `a2_piper`, `b2_kinova`, `g1_inspire_hand`) |
+| `aa-projects/assetx/src/assetx/recipes/` | Registered recipes cooked by `aa-cook-assets` (`spot`, `spot_arm`) |
+| `aa-projects/assetx/examples/*.py` | One-off recipe scripts (e.g. `a2_piper`, `b2_kinova`, `g1_inspire_hand`) |
+| `active_adaptation/assets/cooked.py` | `cooked_model_dir()` freshness check, `aa-cook-assets` CLI (no args = every assetx recipe) |
 | `aa-projects/assetx/tools/mjcf2usd.py` | MJCF → USD for Isaac (`uv run tools/mjcf2usd.py <model.xml>`); AA contract in assetx README "Using with active-adaptation" |
 | `active_adaptation/assets/asset_cfg.py` | Backend-gated `ArticulationCfg` (Isaac) / `EntityCfg` (mjlab); `AssetSpec`; order helpers |
 | `active_adaptation/assets/__init__.py` | Imports family packages (registration side effects) |
