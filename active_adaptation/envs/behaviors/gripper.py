@@ -112,14 +112,14 @@ class GripperBehavior(EntityBehavior):
 
     @property
     def eef_pos_w(self) -> torch.Tensor:
-        return self.robot.data.body_pos_w[:, self.eef_body_id]
+        return self.robot.data.body_com_pos_w[:, self.eef_body_id]
 
     @property
     def eef_quat_w(self) -> torch.Tensor:
-        return self.robot.data.body_quat_w[:, self.eef_body_id]
+        return self.robot.data.body_com_quat_w[:, self.eef_body_id]
 
     def finger_pos_w(self) -> torch.Tensor:
-        return self.robot.data.body_pos_w[:, self.body_ids]
+        return self.robot.data.body_com_pos_w[:, self.body_ids]
 
     def open_direction_w(self) -> torch.Tensor:
         """Unit open axis in the world frame, shape ``[N, 3]``."""

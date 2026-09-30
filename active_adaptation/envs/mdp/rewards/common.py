@@ -195,14 +195,8 @@ class body_linvel_penalty(Reward):
         self.mask = torch.tensor(self.mask, device=self.device)
     
     def _compute(self) -> torch.Tensor:
-        if self.env.backend == "isaaclab":
-            body_linvel = self.asset.data.body_com_lin_vel_w[:, self.body_ids]
-            base_linvel = self.asset.data.root_com_lin_vel_w
-        elif self.env.backend == "mjlab":
-            body_linvel = self.asset.data.body_link_lin_vel_w[:, self.body_ids]
-            base_linvel = self.asset.data.root_lin_vel_w
-        else:
-            raise ValueError(f"Unsupported backend: {self.env.backend}")
+        body_linvel = self.asset.data.body_com_lin_vel_w[:, self.body_ids]
+        base_linvel = self.asset.data.root_com_lin_vel_w
         if self.frame == "base":
             body_linvel = (body_linvel - base_linvel) * self.mask
         if self.square:

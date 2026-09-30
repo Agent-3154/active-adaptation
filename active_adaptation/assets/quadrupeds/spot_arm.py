@@ -67,8 +67,8 @@ _ARM_JOINT_SYMMETRY = {
 INIT_JOINT_POS = {
     **SPOT_INIT_JOINT_POS,
     "arm_sh0": 0.0,
-    "arm_sh1": -3.14,
-    "arm_el0": 3.06,
+    "arm_sh1": -1.57,
+    "arm_el0": 1.57,
     "arm_el1": 0.0,
     "arm_wr0": 0.0,
     "arm_wr1": 0.0,
