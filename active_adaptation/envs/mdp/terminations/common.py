@@ -1,6 +1,6 @@
 import torch
 
-from typing import TYPE_CHECKING, Sequence, Union
+from typing import TYPE_CHECKING, Sequence, Union, Tuple
 from typing_extensions import override
 
 if TYPE_CHECKING:
@@ -262,21 +262,21 @@ class bodies_too_close(Termination):
         return (dist < self.threshold).any(dim=-1, keepdim=True)
 
 
-def _point_segment_dist_sq(p: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Squared distance from points ``p`` to segment ``a``–``b``. All tensors (B, 3)."""
+def _point_segment_dist(p: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Distance from points ``p`` to segment ``a``–``b``. All tensors (B, 3)."""
     ab = b - a
     ap = p - a
     denom = (ab * ab).sum(dim=-1).clamp_min(1e-20)
     t = ((ap * ab).sum(dim=-1) / denom).clamp(0.0, 1.0)
     closest = a + t.unsqueeze(-1) * ab
-    return (p - closest).square().sum(dim=-1)
+    return (p - closest).norm(dim=-1)
 
 
 @torch.compile
-def _segment_segment_dist_sq(
+def _segment_segment_dist(
     p1: torch.Tensor, p2: torch.Tensor, q1: torch.Tensor, q2: torch.Tensor
 ) -> torch.Tensor:
-    """Batched shortest distance squared between segments ``p1``–``p2`` and ``q1``–``q2`` in R^3."""
+    """Batched shortest distance between segments ``p1``–``p2`` and ``q1``–``q2`` in R^3."""
     u = p2 - p1
     v = q2 - q1
     w0 = p1 - q1
@@ -291,12 +291,12 @@ def _segment_segment_dist_sq(
     t = (a * e - b * d) / denom.clamp_min(eps)
     interior = (denom > eps) & (s >= 0.0) & (s <= 1.0) & (t >= 0.0) & (t <= 1.0)
     diff = w0 + s.unsqueeze(-1) * u - t.unsqueeze(-1) * v
-    d_unc_sq = diff.square().sum(dim=-1)
-    d_edge_sq = torch.minimum(
-        torch.minimum(_point_segment_dist_sq(p1, q1, q2), _point_segment_dist_sq(p2, q1, q2)),
-        torch.minimum(_point_segment_dist_sq(q1, p1, p2), _point_segment_dist_sq(q2, p1, p2)),
+    d_unc = diff.norm(dim=-1)
+    d_edge = torch.minimum(
+        torch.minimum(_point_segment_dist(p1, q1, q2), _point_segment_dist(p2, q1, q2)),
+        torch.minimum(_point_segment_dist(q1, p1, p2), _point_segment_dist(q2, p1, p2)),
     )
-    return torch.where(interior, d_unc_sq, d_edge_sq)
+    return torch.where(interior, d_unc, d_edge)
 
 
 class segments_cross(Termination):
@@ -304,15 +304,14 @@ class segments_cross(Termination):
 
     def __init__(
         self,
-        segment1_names: str,
-        segment2_names: str,
+        segment1_names: Tuple[str, str],
+        segment2_names: Tuple[str, str],
         threshold: float = 0.07,
     ):
         super().__init__()
         self.segment1_names_pattern = segment1_names
         self.segment2_names_pattern = segment2_names
         self.threshold = threshold
-        self._threshold_sq = threshold * threshold
 
     @override
     def _initialize(self, env: "_EnvBase"):
@@ -336,12 +335,30 @@ class segments_cross(Termination):
         )
 
     def compute(self, termination: torch.Tensor):
-        pos1 = self.asset.data.body_pos_w[:, self.segment1_indices]
-        pos2 = self.asset.data.body_pos_w[:, self.segment2_indices]
+        pos1 = self.asset.data.body_link_pos_w[:, self.segment1_indices]
+        pos2 = self.asset.data.body_link_pos_w[:, self.segment2_indices]
         p1, p2 = pos1[:, 0], pos1[:, 1]
         q1, q2 = pos2[:, 0], pos2[:, 1]
-        d_sq = _segment_segment_dist_sq(p1, p2, q1, q2)
-        return (d_sq < self._threshold_sq).reshape(self.num_envs, 1)
+        distance = _segment_segment_dist(p1, p2, q1, q2)
+        # print(f"distance: {distance.squeeze(-1)}")
+        return torch.zeros(self.num_envs, 1, device=self.device, dtype=bool)
+        return (distance < self.threshold).reshape(self.num_envs, 1)
+
+    def debug_draw(self) -> None:
+        pos1 = self.asset.data.body_link_pos_w[:, self.segment1_indices]
+        pos2 = self.asset.data.body_link_pos_w[:, self.segment2_indices]
+        p1, p2 = pos1[:, 0], pos1[:, 1]
+        q1, q2 = pos2[:, 0], pos2[:, 1]
+        seg1 = p2 - p1
+        seg2 = q2 - q1
+        crossed = _segment_segment_dist(p1, p2, q1, q2) < self.threshold
+        clear = ~crossed
+        if bool(clear.any()):
+            self.env.scene.draw_vector(p1[clear], seg1[clear], size=4.0, color=(1.0, 0.45, 0.1, 1.0))
+            self.env.scene.draw_vector(q1[clear], seg2[clear], size=4.0, color=(0.2, 0.55, 1.0, 1.0))
+        if bool(crossed.any()):
+            self.env.scene.draw_vector(p1[crossed], seg1[crossed], size=4.0, color=(1.0, 0.15, 0.15, 1.0))
+            self.env.scene.draw_vector(q1[crossed], seg2[crossed], size=4.0, color=(1.0, 0.15, 0.15, 1.0))
 
 
 class error_exceeds(Termination):
