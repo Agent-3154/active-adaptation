@@ -438,7 +438,8 @@ class ReplayBuffer:
         Only valid for chronologically stored rollouts (e.g. :meth:`from_rollout`):
         episode ends must be visible in the buffer. Writes:
 
-        * ``G`` — discounted Monte Carlo return-to-go
+        * ``G`` — discounted Monte Carlo return-to-go. The last dimension matches
+          the collated reward (``1`` when groups are summed).
         * ``steps_to_go`` — steps until episode end (inclusive)
 
         If ``("next", "discount")`` is present with shape ``[T, N, 1]``, it multiplies
@@ -489,9 +490,15 @@ class ReplayBuffer:
                     f"Expected is_init shape {(T, N)} or {(T, N, 1)}, got {tuple(is_init.shape)}."
                 )
 
+        if rew.ndim != 3 or rew.shape[0] != T or rew.shape[1] != N:
+            raise ValueError(
+                f"Collated reward must have shape {(T, N, 'G')}, got {tuple(rew.shape)}."
+            )
+        g_dim = int(rew.shape[-1])
+
         G = torch.zeros_like(rew)
         steps_to_go = torch.zeros(T, N, 1, device=rew.device, dtype=torch.long)
-        running_g = torch.zeros(N, 1, device=rew.device, dtype=rew.dtype)
+        running_g = torch.zeros(N, g_dim, device=rew.device, dtype=rew.dtype)
         running_h = torch.zeros(N, 1, device=rew.device, dtype=torch.long)
 
         for t in reversed(range(T)):
@@ -506,7 +513,7 @@ class ReplayBuffer:
                 running_h = running_h * keep.long()
 
         out_g = torch.zeros(
-            self.max_size, N, 1, device=rew.device, dtype=rew.dtype
+            self.max_size, N, g_dim, device=rew.device, dtype=rew.dtype
         )
         out_h = torch.zeros(
             self.max_size, N, 1, device=rew.device, dtype=torch.long
