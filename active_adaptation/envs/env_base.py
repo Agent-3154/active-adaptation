@@ -299,6 +299,54 @@ class ObsGroup:
             func.symmetry_transform().to(func.device) for func in self.funcs.values()
         ]
         return symmetry_utils.SymmetryTransform.cat(transforms)
+    
+    def relabel(self, tensordict: TensorDictBase) -> torch.Tensor | TensorDictBase:
+        """Rebuild this group from a stacked rollout.
+
+        Dense groups concatenate each term's ``relabel`` output, in
+        ``self.funcs`` order, matching :meth:`compute`. Functional groups
+        store each term's ``relabel`` result under the term name, matching
+        the compact buffer :meth:`compute` writes for ``fupdate``. A
+        functional term returns that compact :class:`TensorDict`.
+        """
+        flags = [bool(func.functional) for func in self.funcs.values()]
+        if any(flags) and not all(flags):
+            raise ValueError(
+                f"ObsGroup '{self.name}' mixes functional and dense terms; "
+                "use all-functional or all-dense within a group."
+            )
+        functional = bool(flags) and bool(flags[0])
+        if functional:
+            compact = OrderedDict(
+                (key, func.relabel(tensordict)) for key, func in self.funcs.items()
+            )
+            return TensorDict(
+                compact,
+                batch_size=tensordict.batch_size,
+                device=tensordict.device,
+            )
+        parts = [func.relabel(tensordict) for func in self.funcs.values()]
+        return torch.cat(parts, dim=-1)
+
+    @classmethod
+    def create_from(
+        cls,
+        group_name: str,
+        group_cfg: dict,
+        *,
+        make_component: Callable[[type[mdp.Observation], str, dict], mdp.Observation | None],
+        command: mdp.Command | None = None,
+    ) -> "ObsGroup":
+        funcs: OrderedDict[str, mdp.Observation] = OrderedDict()
+        for obs_name, obs_cfg in dict(group_cfg).items():
+            obs_name, cls_name, obs_kwargs = parse_component_spec(obs_name, obs_cfg)
+            obs = make_component(mdp.Observation, cls_name, obs_kwargs)
+            if not obs:
+                continue
+            if command is not None:
+                obs.command_manager = command
+            funcs[obs_name] = obs
+        return cls(group_name, funcs)
 
 
 class RewardGroup:
@@ -415,6 +463,10 @@ class EnvConfig:
     """How to handle non-finite transition rows: ``sanitize``, ``error``, or ``off``."""
 
 class _EnvBase(EnvBase, RegistryMixin):
+    # ``reset(td, set_state=True)`` may carry ``command_state`` for commands
+    # that implement ``command_state_spec``.
+    _supports_set_state = True
+
     def __init__(self, cfg: EnvConfig, device: str, headless: bool = True):
         super().__init__(
             device=device,
@@ -849,6 +901,19 @@ class _EnvBase(EnvBase, RegistryMixin):
         reward_spec["stats", "success"] = scalar.clone()
         reward_spec["stats", "episode_len"] = scalar.clone()
         self.reward_spec = reward_spec.expand(self.num_envs).to(self.device)
+
+        shapes = self.command_manager.command_state_spec()
+        if shapes:
+            self.state_spec["command_state"] = Composite(
+                {
+                    key: Unbounded(
+                        [self.num_envs, *shape], device=self.device
+                    )
+                    for key, shape in shapes.items()
+                },
+                shape=[self.num_envs],
+                device=self.device,
+            )
 
     def _add_mdp_component(self, component: mdp.MDPComponent):
         if component not in self._scene_components:

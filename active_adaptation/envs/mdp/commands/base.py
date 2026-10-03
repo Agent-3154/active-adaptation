@@ -35,6 +35,7 @@ class Command(MDPComponent, RegistryMixin):
         self.init_root_state = self.asset.data.default_root_state.clone()
         self.init_joint_pos = self.asset.data.default_joint_pos.clone()
         self.init_joint_vel = self.asset.data.default_joint_vel.clone()
+        self._state = None
 
     @final
     def update(self, tensordict: TensorDictBase) -> None:
@@ -44,6 +45,11 @@ class Command(MDPComponent, RegistryMixin):
         else:
             tensors_in = ()
         tensors_out = self._update(*tensors_in)
+        # After the physics step, before command.step and before a done-env
+        # reset overwrites the sim buffers. The rollout reads this clone.
+        state = self.get_state()
+        if state is not None:
+            self._state = state.clone()
 
         if tensors_out is None and self.out_keys is None:
             return
@@ -52,6 +58,10 @@ class Command(MDPComponent, RegistryMixin):
         for out_key, tensor_out in zip(self.out_keys, tensors_out, strict=True):
             tensordict.set(out_key, tensor_out)
         return tensordict
+    
+    @property
+    def state(self) -> None | TensorDict:
+        return self._state
 
     @abstractmethod
     def _update(self) -> None:
@@ -109,8 +119,24 @@ class Command(MDPComponent, RegistryMixin):
         """Fill prescribed control inputs before action processing."""
         return None
 
-    def get_state(self) -> TensorDict:
-        raise NotImplementedError(f"Method `get_state` is not implemented for {self.__class__.__name__}")
+    def get_state(self) -> None | TensorDict:
+        return None
+
+    def command_state_spec(self) -> dict[str, tuple[int, ...]] | None:
+        """Feature shapes of a ``command_state`` snapshot accepted by ``reset``.
+
+        The env lists these under ``state_spec`` so ``reset(td, set_state=True)``
+        keeps the snapshot when a ``TransformedEnv`` selects state keys.
+        """
+        return None
+
+    def from_state(
+        self, command_state: TensorDictBase, key: str | None = None
+    ) -> torch.Tensor:
+        """Rebuild the command vector from a logged ``command_state`` snapshot."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement from_state"
+        )
 
     def relabel_command(self, tensordict: TensorDict) -> TensorDict:
         raise NotImplementedError(f"Method `relabel_command` is not implemented for {self.__class__.__name__}")

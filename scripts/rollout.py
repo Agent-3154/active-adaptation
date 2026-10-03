@@ -85,6 +85,18 @@ class RolloutConfig:
     """
     output_dir: Optional[str] = None
     """Optional rollout output directory; defaults to ``scripts/rollout/<task>-<algo>/<timestamp>``."""
+    task_relabel: Optional[str] = None
+    """Task-group config used to relabel the archive after rollout.
+
+    ``task=SpotChairClassic task_relabel=SpotChairTask`` collects with the
+    classic task and relabels with the task-level config. Unset skips relabel.
+    """
+    reward_groups: Optional[List[str]] = None
+    """Reward groups to relabel when ``task_relabel`` is set.
+
+    * ``null`` (default): relabel only groups absent from the archive.
+    * non-empty list: force-relabel these groups.
+    """
     discard_unused_obs: bool = False
     """Drop observation groups not listed in ``algo.in_keys``."""
     app: IsaacAppConfig = field(default_factory=IsaacAppConfig)
@@ -106,6 +118,28 @@ cs.store(
 
 FILE_PATH = Path(__file__).parent
 CONFIG_PATH = FILE_PATH.parent / "cfg"
+
+
+def _load_task_config(name: str):
+    """Load ``task/<name>`` from the active Hydra search path.
+
+    Later search-path entries win, matching ``task=<name>`` on the command line.
+    """
+    from hydra.core.global_hydra import GlobalHydra
+
+    loader = GlobalHydra.instance().config_loader()
+    found = None
+    for source in loader.get_sources():
+        path = f"task/{name}"
+        if source.is_config(path):
+            found = source.load_config(path).config
+    if found is None:
+        options = loader.get_group_options("task")
+        raise FileNotFoundError(
+            f"task_relabel={name!r} is not in the task config group. "
+            f"Available: {', '.join(options)}"
+        )
+    return found
 
 
 class RolloutWriter:
@@ -218,13 +252,14 @@ def run(cfg: RolloutConfig) -> dict[str, str]:
         for _ in tqdm(range(cfg.num_steps)):
             carry = rollout_policy(carry)
             td, carry = env.step_and_maybe_reset(carry)
-            command_state = env.command_manager.get_state()
             episode_stats.add(td)
 
             private_keys = [key for key in td.keys(True, True) if is_private_key(key)]
             td = td.exclude(*private_keys, inplace=True)
             td = td.exclude(*exclude_keys, inplace=True)
-            td["command_state"] = command_state
+            td["command_state"] = env.command_manager.state
+            # note that we have td["command_state"] but no td["next", "command_state"]
+            # td["command_state"] is what produced td["command"]
             writer.add(td)
 
         episode_count = int(len(episode_stats))
@@ -239,6 +274,16 @@ def run(cfg: RolloutConfig) -> dict[str, str]:
     )
     env.close()
 
+    relabeled: dict[str, str] = {}
+    if cfg.task_relabel and out_path is not None:
+        from relabel import relabel_archive
+
+        task_relabel_cfg = _load_task_config(str(cfg.task_relabel))
+        print(f"Relabeling {out_path} with task={cfg.task_relabel}")
+        relabeled = relabel_archive(out_path, task_relabel_cfg, cfg.reward_groups)
+    elif cfg.reward_groups:
+        print("reward_groups is set but task_relabel is unset; skipping relabel.")
+
     run_state: dict[str, str] = {}
     if out_path is not None:
         run_state = {
@@ -248,6 +293,9 @@ def run(cfg: RolloutConfig) -> dict[str, str]:
             "task": str(cfg.task.name),
             "algo": str(cfg.algo.name),
         }
+        if relabeled.get("relabeled_path"):
+            run_state["relabeled_path"] = relabeled["relabeled_path"]
+            run_state["task_relabel"] = str(cfg.task_relabel)
         if cfg.checkpoint_path is not None:
             run_state["checkpoint_path"] = str(cfg.checkpoint_path)
         run_state_path = write_run_state(run_state, writer_path / RUN_STATE_FILENAME)

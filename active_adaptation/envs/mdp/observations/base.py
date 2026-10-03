@@ -50,6 +50,11 @@ class Observation(Generic[CT], MDPComponent, RegistryMixin):
 
     def symmetry_transform(self) -> SymmetryTransform:
         return NotImplementedError
+    
+    def relabel(self, tensordict: TensorDictBase) -> torch.Tensor:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement relabel"
+        )
 
 
 __all__ = ["Observation"]

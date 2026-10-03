@@ -89,15 +89,26 @@ class command(Observation):
 
     @override
     def compute(self):
+        command = self.command_manager.command
+        if not callable(command):
+            return command
         if self.key is not None:
-            return self.command_manager.command(self.key)
-        return self.command_manager.command
+            return command(self.key)
+        return command()
 
     @override
     def symmetry_transform(self):
         if self.key is not None:
             return self.command_manager.symmetry_transform(self.key)
         return self.command_manager.symmetry_transform()
+    
+    @override
+    def relabel(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """
+        Read `command_state` and reconstruct the command here
+        """
+        command_state = tensordict["command_state"]
+        return self.command_manager.from_state(command_state, key=self.key)
 
 
 class root_angvel_b(Observation):
