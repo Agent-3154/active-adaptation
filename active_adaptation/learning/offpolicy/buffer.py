@@ -73,8 +73,40 @@ class ReplayBuffer:
     def keys(self):
         return self._td.keys(True, True)
     
-    def select_(self, *keys: str) -> ReplayBuffer:
-        self._td = self._td.select(*keys, inplace=True, strict=True)
+    def select_(self, *keys, strict: bool = True) -> ReplayBuffer:
+        """Keep ``keys`` in storage so later samples do not gather the rest."""
+        self._td = self._td.select(*keys, inplace=True, strict=strict)
+        self.mem_bytes = self.estimate_memory_nbytes()
+        return self
+
+    def to(self, device) -> ReplayBuffer:
+        """Move storage onto ``device``. A no-op when it is already there."""
+        device = torch.device(device)
+        if self.device != device:
+            self._td = self._td.to(device)
+            self.device = self._td.device
+            self.mem_bytes = self.estimate_memory_nbytes()
+        return self
+
+    def retain_present(self, keys) -> ReplayBuffer:
+        """Keep only ``keys`` that this buffer actually stores.
+
+        Missing names are skipped. Observation keys used to rebuild ``next``
+        observations are narrowed to whatever remains, so a sample no longer
+        indexes rollout-only fields.
+        """
+        available = set(self.keys())
+        keep = [key for key in keys if _key_stored(key, available)]
+        if not keep:
+            raise RuntimeError(
+                "None of the requested keys are present in the replay buffer. "
+                f"Requested {list(keys)[:8]}, stored {list(available)[:8]}."
+            )
+        self.select_(*keep, strict=False)
+        stored_top = set(self._td.keys())
+        self.observation_keys = tuple(
+            key for key in self.observation_keys if key in stored_top
+        )
         return self
     
     def exclude_(self, *keys: str) -> ReplayBuffer:
@@ -107,25 +139,25 @@ class ReplayBuffer:
         *,
         observation_keys: Sequence[str],
         max_size: Optional[int] = None,
-        map_location: Union[str, torch.device] = "cpu",
         fake_bootstrap: bool = False,
     ) -> ReplayBuffer:
-        """Load from a rollout archive produced by :mod:`active_adaptation.scripts.rollout`.
+        """Load a rollout archive on CPU.
 
-        The archive is a ``torch.save`` dict with keys ``format_version``, ``stacked``
-        (TensorDict with batch ``[T, num_envs]``), and optionally ``writer_max_size``.
+        Archives are written from CPU. ``map_location`` is not a parameter:
+        drop unused fields with :meth:`retain_present`, then move the ring
+        with :meth:`to`.
 
-        Args:
-            path: File ``rollout.pt`` or directory containing it.
-            observation_keys: Keys treated as observations (required for bootstrap / term_obs).
-            max_size: Ring capacity. Defaults to ``max(writer_max_size, T)`` from the archive.
+        The file is a ``torch.save`` dict with ``format_version``, ``stacked``
+        (TensorDict batch ``[T, num_envs]``), and optionally ``writer_max_size``.
+        ``path`` may be that file or a directory containing ``rollout.pt``.
+        ``max_size`` defaults to ``max(writer_max_size, T)``.
         """
         root = Path(path)
         file = root if root.suffix == ".pt" else root / ROLLOUT_ARCHIVE_NAME
         if not file.is_file():
             raise FileNotFoundError(f"No rollout archive at {file}")
 
-        payload: Dict[str, Any] = torch.load(file, map_location=map_location, weights_only=False)
+        payload: Dict[str, Any] = torch.load(file, map_location="cpu", weights_only=False)
         version = payload.get("format_version")
         if version != ROLLOUT_FORMAT_VERSION:
             raise ValueError(
@@ -486,6 +518,71 @@ class ReplayBuffer:
 
     def __len__(self):
         return self._current_size
+
+
+def _as_key(key) -> tuple:
+    return key if isinstance(key, tuple) else (key,)
+
+
+def _key_stored(key, available: set) -> bool:
+    """True when ``key`` is stored, or is a parent of a stored leaf."""
+    want = _as_key(key)
+    if key in available or want in available:
+        return True
+    for stored in available:
+        got = _as_key(stored)
+        if len(got) >= len(want) and got[: len(want)] == want:
+            return True
+    return False
+
+
+def replay_mix_sizes(batch_size: int, prior_ratio: float, *, use_prior: bool) -> tuple[int, int]:
+    """Split ``batch_size`` into ``(online_n, prior_n)``.
+
+    The two counts sum to ``batch_size``. Prior rows replace online rows
+    instead of being appended.
+    """
+    batch_size = int(batch_size)
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}.")
+    if not use_prior or prior_ratio <= 0.0:
+        return batch_size, 0
+    prior_n = int(batch_size * float(prior_ratio))
+    prior_n = min(max(prior_n, 0), batch_size)
+    return batch_size - prior_n, prior_n
+
+
+def sample_replay_mix(
+    online: ReplayBuffer,
+    prior: ReplayBuffer | None,
+    batch_size: int,
+    prior_ratio: float,
+    *,
+    steps: int,
+    next_obs: bool,
+    device,
+):
+    """Draw a fixed-size mix of online and prior transitions.
+
+    Returns ``(online_batch, prior_batch)``. ``prior_batch`` is ``None`` when
+    the mix contains no prior rows. Counts sum to ``batch_size``.
+    """
+    online_n, prior_n = replay_mix_sizes(
+        batch_size, prior_ratio, use_prior=prior is not None,
+    )
+    batch = None
+    if online_n > 0:
+        batch = online.sample(
+            batch_size=online_n, steps=steps, next_obs=next_obs,
+        ).to(device)
+    batch_prior = None
+    if prior_n > 0:
+        batch_prior = prior.sample(
+            batch_size=prior_n, steps=steps, next_obs=next_obs,
+        ).to(device)
+    if batch is None:
+        return batch_prior, None
+    return batch, batch_prior
 
 
 def format_nbytes(nbytes: int) -> str:
