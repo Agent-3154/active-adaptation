@@ -30,9 +30,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Union
-from urllib.error import HTTPError
-from urllib.parse import urlparse
-from urllib.request import urlopen, Request
 
 import wandb
 from omegaconf import OmegaConf
@@ -464,98 +461,12 @@ def get_store_dir() -> Path:
     return _get_store_dir()
 
 
-def is_checkpoint_url(path: str | None) -> bool:
-    """Return True if path is an http(s) checkpoint server URL."""
-    if not path:
-        return False
-    return path.startswith("http://") or path.startswith("https://")
-
-
-# Timeout (seconds) for checkpoint URL download to avoid blocking indefinitely.
-CHECKPOINT_URL_TIMEOUT = 120
-
-# Filename under cache dir to store server Last-Modified so we skip re-download when unchanged.
-_CHECKPOINT_VERSION_FILE = "version.txt"
-
-
-def _head_checkpoint_url(url: str, timeout: float = CHECKPOINT_URL_TIMEOUT) -> tuple[int, str | None]:
-    """HEAD request to checkpoint URL. Returns (status_code, Last-Modified or None)."""
-    request = Request(url, headers={"User-Agent": "active-adaptation-checkpoint-client"}, method="HEAD")
-    try:
-        with urlopen(request, timeout=timeout) as resp:
-            last_modified = resp.headers.get("Last-Modified")
-            return (resp.status, last_modified)
-    except HTTPError as e:
-        return (e.code, None)
-
-
-def download_checkpoint_url(url: str, timeout: float = CHECKPOINT_URL_TIMEOUT) -> str:
-    """
-    Download a checkpoint from a URL (e.g. checkpoint server) to the local cache.
-    Skips download if server sends Last-Modified and it matches our cached version.
-
-    URL shape: http(s)://host:port/download/<date>/<run_name> (trailing /latest.pt optional)
-    """
-    parsed = urlparse(url)
-    # Path like /download/2025-02-15/12-30-45-Velocity-ppo (Path accepts "/" on all platforms)
-    path_part = parsed.path.strip("/")
-    cache_dir = _get_store_dir() / path_part
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    local_path = cache_dir / "latest.pt"
-    version_path = cache_dir / _CHECKPOINT_VERSION_FILE
-
-    # HEAD first: if server has Last-Modified and we have same version cached, skip download
-    try:
-        status, server_last_modified = _head_checkpoint_url(url, timeout=timeout)
-        if status != 200:
-            if status == 404:
-                raise FileNotFoundError(
-                    f"Checkpoint not found at {url} (404). "
-                    "Check that the run exists under the server root and has latest.pt."
-                )
-            raise RuntimeError(f"Checkpoint server returned {status} for {url}")
-        if server_last_modified and local_path.exists() and version_path.exists():
-            cached_version = version_path.read_text().strip()
-            if cached_version == server_last_modified:
-                logging.debug("Checkpoint unchanged (Last-Modified %s), using cache", server_last_modified)
-                return str(local_path)
-    except (FileNotFoundError, RuntimeError):
-        raise
-    except Exception as e:
-        logging.debug("HEAD failed, will try full download: %s", e)
-
-    request = Request(url, headers={"User-Agent": "active-adaptation-checkpoint-client"})
-    logging.info("Downloading checkpoint from %s to %s", url, local_path)
-    try:
-        with urlopen(request, timeout=timeout) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"Checkpoint server returned {resp.status} for {url}")
-            last_modified = resp.headers.get("Last-Modified")
-            print("Last-Modified: %s", last_modified)
-            b = resp.read()
-            print("b: %s", b)
-            local_path.write_bytes(b)
-            if last_modified:
-                version_path.write_text(last_modified)
-    except HTTPError as e:
-        if e.code == 404:
-            raise FileNotFoundError(
-                f"Checkpoint not found at {url} (404). "
-                "Check that the run exists under the server root and has latest.pt."
-            ) from e
-        raise RuntimeError(f"Checkpoint server error {e.code} for {url}") from e
-
-    size_mb = local_path.stat().st_size / (1024 * 1024)
-    logging.info("Downloaded checkpoint from %s to %s (%.2f MB)", url, local_path, size_mb)
-    return str(local_path)
-
-
 class CheckpointBase:
     """Abstract checkpoint: can be updated (e.g. re-download) and yields a local path for loading."""
     remote: bool = False
 
     def update(self) -> None:
-        """Refresh from source (no-op for static files, re-download for URL/wandb as needed)."""
+        """Refresh from source (no-op for static files, re-download for wandb as needed)."""
         raise NotImplementedError
 
     def get_path(self) -> str | None:
@@ -711,67 +622,18 @@ class WandbCheckpoint(CheckpointBase):
             self._refresh_thread = None
 
 
-class UrlCheckpoint(CheckpointBase):
-    """Checkpoint from checkpoint server URL. update() re-downloads so callers get the latest."""
-    remote: bool = True
-
-    def __init__(self, url: str) -> None:
-        self._url = url
-        self._path: str | None = None
-        self._lock = threading.Lock()
-        self._refresh_interval_sec: float | None = None
-        self._refresh_stop = threading.Event()
-        self._refresh_thread: threading.Thread | None = None
-
-    def update(self) -> None:
-        path = download_checkpoint_url(self._url)
-        with self._lock:
-            self._path = path
-
-    def get_path(self) -> str | None:
-        with self._lock:
-            return self._path
-
-    def _refresh_loop(self) -> None:
-        while not self._refresh_stop.wait(timeout=self._refresh_interval_sec or 60):
-            try:
-                path = download_checkpoint_url(self._url)
-                with self._lock:
-                    self._path = path
-            except Exception as e:
-                logging.warning("Background checkpoint refresh failed: %s", e)
-
-    def start_background_refresh(self, interval_sec: float) -> None:
-        if self._refresh_thread is not None and self._refresh_thread.is_alive():
-            return
-        self._refresh_interval_sec = interval_sec
-        self._refresh_stop.clear()
-        self._refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
-        self._refresh_thread.start()
-        logging.info("Started background checkpoint refresh every %.0f s", interval_sec)
-
-    def stop_background_refresh(self) -> None:
-        self._refresh_stop.set()
-        if self._refresh_thread is not None:
-            self._refresh_thread.join(timeout=5)
-            self._refresh_thread = None
-
-
 def parse_checkpoint(spec: str | None) -> CheckpointBase | None:
     """
     Build a checkpoint object from a spec. Supports:
 
     1. Local path: path to a .pt file → FileCheckpoint.
     2. Wandb run: run:<entity>/<project>/<run_id>[:<iteration>] → WandbCheckpoint.
-    3. Checkpoint server URL: http(s)://host:port/download/<date>/<run_name> → UrlCheckpoint.
 
     Returns None if spec is None. Call update() then get_path() to load.
     """
     if spec is None or (isinstance(spec, str) and not spec.strip()):
         return None
     spec = str(spec).strip()
-    if is_checkpoint_url(spec):
-        return UrlCheckpoint(spec)
     if spec.startswith("run:"):
         return WandbCheckpoint(spec)
     return FileCheckpoint(spec)

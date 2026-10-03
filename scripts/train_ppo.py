@@ -1,7 +1,6 @@
 import torch
 import hydra
 import numpy as np
-import wandb
 import logging
 import time
 import datetime
@@ -52,6 +51,7 @@ from active_adaptation.utils.memory_profiling import (
     reset_cuda_peak_memory,
 )
 from active_adaptation.utils.torchrl import tensordict_nbytes
+from active_adaptation.utils.run_logger import init_run
 from active_adaptation.learning.ppo.ppo_base import PPOBase
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -79,18 +79,20 @@ class IsaacAppConfig:
 
 @dataclass
 class WandbConfig:
-    """Weights & Biases logging settings."""
+    """Experiment logger settings. W&B is the default; SwanLab is optional."""
 
+    backend: str = "wandb"
+    """``wandb`` (default) or ``swanlab``."""
     name: str = "${..exp_name}/${now:%m-%d}_${now:%H-%M}"
     """Run display name (derived from ``exp_name`` and timestamp)."""
     job_type: str = "train"
-    """WandB job type label."""
+    """Job type label passed through to the logger."""
     project: str = "${oc.select:task.project,active_adaptation}"
-    """WandB project; falls back to ``active_adaptation`` if unset on the task."""
+    """Project; falls back to ``active_adaptation`` if unset on the task."""
     mode: str = "online"
-    """WandB mode: ``online``, ``offline``, or ``disabled``."""
+    """``online``, ``offline``, or ``disabled``. SwanLab also accepts ``local``."""
     tags: List[str] = field(default_factory=list)
-    """Optional tags attached to the WandB run."""
+    """Optional tags attached to the run."""
 
 
 @dataclass
@@ -303,12 +305,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     memory_jsonl_path = None
     run_dir = None
     if aa.is_main_process():
-        wandb_run = wandb.init(
-            job_type=cfg.wandb.job_type,
-            project=cfg.wandb.project,
-            mode=cfg.wandb.mode,
-            tags=cfg.wandb.tags,
-        )
+        wandb_run = init_run(cfg.wandb)
         run_idx = wandb_run.name.split("-")[-1]
 
         wandb_run.config.update(OmegaConf.to_container(cfg))
@@ -625,7 +622,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                 backend=cfg.backend,
                 num_envs=env.num_envs,
             )
-        wandb.finish()
+        wandb_run.finish()
         print(f"Final checkpoint: {uploaded_ckpt_path}")
         run_state = {
             "checkpoint_path": uploaded_ckpt_path or local_ckpt_path,

@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import torch
 import hydra
-import wandb
 import logging
 import datetime
 from pathlib import Path
@@ -60,6 +59,7 @@ from active_adaptation.pipeline_io import (
     write_run_state,
 )
 from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.run_logger import init_run
 from active_adaptation.utils.wandb import parse_checkpoint
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -84,10 +84,15 @@ class IsaacAppConfig:
 
 @dataclass
 class WandbConfig:
+    """Experiment logger settings. W&B is the default; SwanLab is optional."""
+
+    backend: str = "wandb"
+    """``wandb`` (default) or ``swanlab``."""
     name: str = "${..exp_name}/${now:%m-%d}_${now:%H-%M}"
     job_type: str = "train"
     project: str = "${oc.select:task.project,active_adaptation}"
     mode: str = "online"
+    """``online``, ``offline``, or ``disabled``. SwanLab also accepts ``local``."""
     tags: List[str] = field(default_factory=list)
 
 
@@ -283,12 +288,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
     wandb_run = None
     run_dir = None
     if aa.is_main_process():
-        wandb_run = wandb.init(
-            job_type=cfg.wandb.job_type,
-            project=cfg.wandb.project,
-            mode=cfg.wandb.mode,
-            tags=cfg.wandb.tags,
-        )
+        wandb_run = init_run(cfg.wandb)
         wandb_run.config.update(OmegaConf.to_container(cfg))
         wandb_run.config["world_size"] = aa.get_world_size()
 
@@ -509,7 +509,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         )
         info["env_frames"] = env_frames
         wandb_run.log(info)
-        wandb.finish()
+        wandb_run.finish()
         print(f"Final checkpoint: {uploaded_ckpt_path}")
         run_state = {
             "checkpoint_path": uploaded_ckpt_path or local_ckpt_path,

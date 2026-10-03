@@ -745,7 +745,8 @@ def effective_rank(X: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
 import matplotlib
 matplotlib.use("Agg")  # must be before pyplot
 import matplotlib.pyplot as plt
-import wandb
+
+from active_adaptation.utils.run_logger import Image
 
 @ScopedTimer("plot_obs_importance")
 def plot_obs_importance(
@@ -793,6 +794,6 @@ def plot_obs_importance(
     axes[1].set_xticks(np.cumsum([0] + obs_split)[:-1])
     axes[1].set_xticklabels(obs_func_keys, rotation=45, ha="right", fontsize=8)
 
-    image = wandb.Image(fig)
+    image = Image(fig)
     plt.close(fig)
     return image

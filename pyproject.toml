@@ -37,6 +37,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+swanlab = [
+    "swanlab",
+]
 render = [
     "fvdb-core[viewer]==0.5.1+pt211.cu130",
     # Robot mesh rasterization for GS composite (needs torch already installed).
