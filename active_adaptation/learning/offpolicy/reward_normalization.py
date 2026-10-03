@@ -99,10 +99,15 @@ class RewardNormalizer:
         load_rms: bool,
         device: torch.device,
         epsilon: float = 1e-8,
+        reward_dim: int = 1,
     ):
+        if reward_dim < 1:
+            raise ValueError(f"reward_dim must be >= 1, got {reward_dim}")
         self.gamma = gamma
-        self.G_r = torch.zeros(1, dtype=torch.float32, device=device)
-        self.G_rms = RunningMeanStd(shape=(1,), device=device, dtype=torch.float32)
+        self.reward_dim = int(reward_dim)
+        shape = (self.reward_dim,)
+        self.G_r = torch.zeros(shape, dtype=torch.float32, device=device)
+        self.G_rms = RunningMeanStd(shape=shape, device=device, dtype=torch.float32)
         self.load_rms = load_rms
         self.epsilon = epsilon
         self.device = device
@@ -130,7 +135,7 @@ class RewardNormalizer:
         )
 
     def reward_denominator(self) -> torch.Tensor:
-        """Scalar S with ``r_normalized = r_raw / S`` (same S as :meth:`normalize_rewards`)."""
+        """Scalar or per-group S with ``r_normalized = r_raw / S``."""
         return _reward_denominator(self.G_rms.var, self.epsilon)
 
     def denormalize_return_values(self, values: torch.Tensor) -> torch.Tensor:

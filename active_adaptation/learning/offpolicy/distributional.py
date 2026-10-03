@@ -132,24 +132,34 @@ def project_categorical_bellman(
 ) -> torch.Tensor:
     """C51 categorical projection for a one-step (or n-step folded) Bellman backup.
 
+    Leading dimensions are a batch. ``rewards`` ends in the reward-group axis
+    and broadcasts onto ``next_logits`` except the atom axis. A trailing
+    singleton that exactly matches the logit batch (the legacy ``[B, 1]``
+    column) is that group axis of length 1.
+
     Args:
-        next_logits: Target network logits at the bootstrap state, [B, num_atoms].
-        rewards: Return term already folded (n-step sum, entropy in reward, etc.), [B] or [B, 1].
-        discount: Factor on next-atom values; must include bootstrap mask
+        next_logits: Target-network logits at the bootstrap state, ``[..., num_atoms]``.
+        rewards: Folded return (n-step sum, entropy in the reward, etc.),
+            shaped ``[*B, n_reward_groups]`` and broadcastable to
+            ``next_logits.shape[:-1]``.
+        discount: Factor on next-atom values, a scalar or a tensor broadcastable
+            like ``rewards``. Include the bootstrap mask
             (e.g. ``gamma * (1 - term)`` or :class:`MultiStepReturn` output).
-        support: 1-D atom locations, shape [num_atoms], equally spaced.
+        support: 1-D atom locations, shape ``[num_atoms]``, equally spaced.
 
     Returns:
-        Projected target probabilities [B, num_atoms] (non-negative, row-stochastic).
+        Projected target probabilities, same shape as ``next_logits``
+        (non-negative, summing to 1 over atoms).
     """
     num_atoms = support.shape[0]
     if num_atoms < 3:
         raise ValueError("support must contain more than two atoms (num_atoms > 2).")
+    if support.ndim != 1:
+        raise ValueError(f"support must be 1-D, got shape {tuple(support.shape)}")
 
     device = next_logits.device
     dtype = next_logits.dtype
     support = support.to(device=device, dtype=dtype)
-    batch_size = next_logits.shape[0]
     if next_logits.shape[-1] != num_atoms:
         raise ValueError(
             f"next_logits last dim {next_logits.shape[-1]} != len(support) {num_atoms}"
@@ -164,13 +174,22 @@ def project_categorical_bellman(
     )
     delta_z = torch.clamp(delta_raw, min=min_delta)
 
-    rewards = rewards.reshape(batch_size, 1).to(dtype=dtype)
+    batch_shape = next_logits.shape[:-1]
+    rewards_b = _align_bellman_batch(rewards.to(device=device, dtype=dtype), batch_shape)
     if not isinstance(discount, torch.Tensor):
-        discount_t = torch.full((batch_size, 1), float(discount), device=device, dtype=dtype)
+        discount_b = rewards_b.new_empty(()).fill_(float(discount))
     else:
-        discount_t = discount.reshape(batch_size, 1).to(dtype=dtype)
+        discount_b = _align_bellman_batch(discount.to(device=device, dtype=dtype), batch_shape)
 
-    target_z = rewards + discount_t * support.view(1, -1)
+    support_b = support.view(*([1] * (rewards_b.ndim - 1)), -1)
+    try:
+        target_z = (rewards_b + discount_b * support_b).broadcast_to(next_logits.shape)
+    except RuntimeError as e:
+        raise ValueError(
+            f"rewards shape {tuple(rewards.shape)} and discount "
+            f"{tuple(discount.shape) if isinstance(discount, torch.Tensor) else discount} "
+            f"do not broadcast onto next_logits batch {tuple(batch_shape)}."
+        ) from e
     target_z = target_z.clamp(v_lo, v_hi)
 
     # Continuous index on the support grid: b=0 -> v_lo, b=num_atoms-1 -> v_hi.
@@ -190,10 +209,21 @@ def project_categorical_bellman(
     m_l = next_dist * (1.0 - frac)
     m_u = next_dist * frac
 
-    proj_dist = next_dist.new_zeros(batch_size, num_atoms)
-    proj_dist.scatter_add_(1, lower, m_l)
-    proj_dist.scatter_add_(1, upper, m_u)
+    proj_dist = next_dist.new_zeros(next_dist.shape)
+    proj_dist.scatter_add_(-1, lower, m_l)
+    proj_dist.scatter_add_(-1, upper, m_u)
     return proj_dist
+
+
+def _align_bellman_batch(values: torch.Tensor, batch_shape: torch.Size) -> torch.Tensor:
+    """Drop a legacy ``[..., 1]`` column, then append the atom axis."""
+    if (
+        values.ndim == len(batch_shape) + 1
+        and values.shape[-1] == 1
+        and values.shape[:-1] == batch_shape
+    ):
+        values = values.squeeze(-1)
+    return values.unsqueeze(-1)
 
 
 def _huber(x: torch.Tensor, kappa: float) -> torch.Tensor:
