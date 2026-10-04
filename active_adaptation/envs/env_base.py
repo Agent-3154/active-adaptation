@@ -363,8 +363,11 @@ class RewardGroup:
         self.funcs = funcs
         self.enabled = enabled
         self.compile = compile
-        self.enabled_rewards = sum(func.enabled for func in funcs.values())
     
+    @property
+    def n_terms(self) -> int:
+        return len(self.funcs)
+
     def _initialize(self, env: "_EnvBase"):
         self.env = env
         for func in self.funcs.values():
@@ -388,16 +391,27 @@ class RewardGroup:
             func.reset(env_ids, tensordict)
 
     def compute(self) -> torch.Tensor:
-        rewards = []
+        """Terms concatenated on the last dim, shape ``[N, n_terms]``."""
+        cols: list[torch.Tensor] = []
         for key, func in self.funcs.items():
             with ScopedTimer(f"{self.name}.{key}", sync=PROFILE_SYNC_TIMERS):
                 reward = func.compute()
             self.env.stats[self.name, key].add_(reward)
-            if func.enabled:
-                rewards.append(reward)
-        if len(rewards):
-            return torch.cat(rewards, 1).sum(dim=1, keepdim=True)
-        return torch.zeros(self.env.num_envs, 1, device=self.env.device)
+            cols.append(reward.reshape(self.env.num_envs, -1))
+        if not cols:
+            return torch.zeros(self.env.num_envs, 0, device=self.env.device)
+        return torch.cat(cols, dim=-1)
+
+    def relabel(self, tensordict: TensorDictBase) -> torch.Tensor:
+        """Relabeled terms concatenated on the last dim, shape ``[T, N, n_terms]``."""
+        time_steps, num_envs = tensordict.shape[:2]
+        cols: list[torch.Tensor] = []
+        for _name, func in self.funcs.items():
+            term = func.weight * func.relabel(tensordict)
+            cols.append(term.reshape(time_steps, num_envs, -1))
+        if not cols:
+            return torch.zeros(time_steps, num_envs, 0, device=tensordict.device)
+        return torch.cat(cols, dim=-1)
 
     def get_ema_stats(self) -> Dict[str, float]:
         """Flatten per-term EMA metrics (e.g. mean, optional var) for logging."""
@@ -408,15 +422,7 @@ class RewardGroup:
             if var is not None:
                 result[f"{key}_var"] = var.item()
         return result
-    
-    def relabel(self, tensordict: TensorDictBase) -> torch.Tensor:
-        """Relabel the reward group."""
-        T, N = tensordict.shape[:2]
-        rew = torch.zeros(T, N, 1, device=tensordict.device)
-        for name, func in self.funcs.items():
-            rew = rew + func.weight * func.relabel(tensordict)
-        return rew.reshape(T, N, 1)
-    
+
     @classmethod
     def create_from(
         cls,
@@ -887,8 +893,9 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         scalar = Unbounded(1, device=self.device)
         for group_name, reward_group in self.reward_groups.items():
-            if reward_group.enabled:
-                reward_spec["reward", group_name] = scalar.clone()
+            n_terms = len(reward_group.funcs)
+            if reward_group.enabled and n_terms:
+                reward_spec["reward", group_name] = Unbounded(n_terms, device=self.device)
             for rew_name in reward_group.funcs.keys():
                 reward_spec["stats", group_name, rew_name] = scalar.clone()
             reward_spec["stats", group_name, "return"] = scalar.clone()
@@ -1123,8 +1130,8 @@ class _EnvBase(EnvBase, RegistryMixin):
 
         for group, reward_group in self.reward_groups.items():
             reward = reward_group.compute()
-            self.stats[group, "return"].add_(reward)
-            if reward_group.enabled:
+            if reward_group.enabled and reward.shape[-1] > 0:
+                self.stats[group, "return"].add_(reward.sum(dim=-1, keepdim=True))
                 tensordict["reward", group] = reward
 
         return tensordict

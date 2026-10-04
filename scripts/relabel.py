@@ -101,6 +101,8 @@ def _episode_stats(
         for group_name, reward in reward_td.items():
             if not isinstance(reward, torch.Tensor):
                 continue
+            if reward.shape[-1] != 1:
+                reward = reward.sum(dim=-1, keepdim=True)
             mean, _ = mean_episode_return(reward, is_init, done)
             stats[f"stats/{group_name}/return"] = mean
     return dict(sorted(stats.items())), n_episodes
@@ -209,11 +211,10 @@ def relabel_archive(
 
     term_stats: dict[str, torch.Tensor] = {}
     for group_name, group_cfg in reward_cfg.items():
-        if not should_relabel_group(group_name):
-            if reward_groups is not None and group_name not in reward_groups:
-                print(f"Skipping reward group (not in reward_groups): {group_name}")
-            elif tensordict.get(("next", "reward", group_name)) is not None:
-                print(f"Skipping reward group (already present): {group_name}")
+        write_group = should_relabel_group(group_name)
+        present = tensordict.get(("next", "reward", group_name)) is not None
+        if not write_group and not present:
+            print(f"Skipping reward group (not in reward_groups): {group_name}")
             continue
 
         reward_group = RewardGroup.create_from(
@@ -225,17 +226,29 @@ def relabel_archive(
             print(f"Skipping reward group (disabled): {group_name}")
             continue
 
-        key = ("next", "reward", group_name)
-        present = tensordict.get(key) is not None
+        names = list(reward_group.funcs.keys())
+        stored = tensordict.get(("next", "reward", group_name))
+        columns_match = (
+            torch.is_tensor(stored)
+            and len(names) > 0
+            and stored.shape[-1] == len(names)
+        )
+        if columns_match and not write_group:
+            print(f"Episode stats from stored columns: {group_name}")
+            for i, name in enumerate(names):
+                term_stats[f"stats/{group_name}/{name}/return"] = stored[..., i : i + 1]
+            continue
+        if not write_group:
+            print(f"Skipping per-term stats (stored group is summed): {group_name}")
+            continue
+
         action = "Re-relabeling" if present else "Relabeling"
         print(f"{action} reward group: {group_name}")
-        rew = torch.zeros(T, N, 1, device=tensordict.device)
-        for name, func in reward_group.funcs.items():
-            print(f"\tRelabeling reward {name}...")
-            term = (func.weight * func.relabel(tensordict)).reshape(T, N, 1)
-            rew = rew + term
-            term_stats[f"stats/{group_name}/{name}"] = term
-        tensordict[key] = rew
+        rew = reward_group.relabel(tensordict)
+        tensordict[("next", "reward", group_name)] = rew
+        for i, name in enumerate(names):
+            print(f"\t{name}")
+            term_stats[f"stats/{group_name}/{name}/return"] = rew[..., i : i + 1]
 
     episode_stats, n_episodes = _episode_stats(tensordict, is_init, done, term_stats)
     print(f"Relabeled episode stats ({n_episodes} completed episodes):")

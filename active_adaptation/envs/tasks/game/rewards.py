@@ -7,8 +7,8 @@ from .command import Game
 
 
 class chase_distance(Reward[Game]):
-    def __init__(self, weight: float, enabled: bool = True):
-        super().__init__(weight, enabled=enabled)
+    def __init__(self, weight: float):
+        super().__init__(weight)
 
     def _initialize(self, env):
         super()._initialize(env)
@@ -29,8 +29,8 @@ class chase_distance(Reward[Game]):
 
 
 class chase_velocity(Reward[Game]):
-    def __init__(self, weight: float, enabled: bool = True):
-        super().__init__(weight, enabled=enabled)
+    def __init__(self, weight: float):
+        super().__init__(weight)
 
     def _initialize(self, env):
         super()._initialize(env)
@@ -55,8 +55,8 @@ class evade(Reward[Game]):
 
 
 class target_in_sight(Reward[Game]):
-    def __init__(self, weight: float, enabled: bool = True):
-        super().__init__(weight, enabled=enabled)
+    def __init__(self, weight: float):
+        super().__init__(weight)
 
     def _initialize(self, env):
         super()._initialize(env)

@@ -33,12 +33,10 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
     ):
         super().__init__()
         self.weight = weight
-        self.enabled = enabled
         self.track_var = track_var
 
     def _initialize(self, env: "EnvBase") -> None:

@@ -760,8 +760,8 @@ class SingleEEFLocoManip(Command):
 class eef_pos_tracking(Reward[SingleEEFLocoManip]):
     """Exponential position tracking with a small L1 penalty."""
 
-    def __init__(self, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+    def __init__(self, weight: float, track_var: bool = False):
+        super().__init__(weight, track_var=track_var)
         self.sigma = 0.1
 
     @override
@@ -802,11 +802,10 @@ class eef_orient_tracking(Reward[SingleEEFLocoManip]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         sigma: float = 0.4,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.sigma = sigma
 
     @override
@@ -821,11 +820,10 @@ class eef_pos_orient_tracking(Reward[SingleEEFLocoManip]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         base_pos_error_threshold: float = 1.0,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.pos_sigma = 0.1
         self.orient_sigma = 0.4
         self.base_pos_error_threshold = base_pos_error_threshold
@@ -879,11 +877,10 @@ class eef_pos_forward_tracking(Reward[SingleEEFLocoManip]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         base_pos_error_threshold: float = 1.0,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.pos_sigma = 0.1
         self.rot_sigma = 0.4
         self.base_pos_error_threshold = base_pos_error_threshold
@@ -995,8 +992,8 @@ class eef_pos_reached(Reward[SingleEEFLocoManip]):
 class eef_vel_tracking(Reward[SingleEEFLocoManip]):
     """Exponential reward for tracking commanded end-effector velocity."""
 
-    def __init__(self, weight: float, enabled: bool = True, track_var: bool = False):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+    def __init__(self, weight: float, track_var: bool = False):
+        super().__init__(weight, track_var=track_var)
         self.sigma = 0.25
 
     @override
@@ -1013,11 +1010,10 @@ class eef_forward_tracking(Reward[SingleEEFLocoManip]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         pos_error_threshold: float = 0.15,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.pos_error_threshold = pos_error_threshold
 
     @override
@@ -1045,11 +1041,10 @@ class eef_up_tracking(Reward[SingleEEFLocoManip]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         pos_error_threshold: float = 0.15,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.pos_error_threshold = pos_error_threshold
 
     @override

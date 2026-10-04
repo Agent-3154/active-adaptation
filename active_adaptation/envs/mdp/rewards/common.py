@@ -16,10 +16,9 @@ class action_rate_l2(Reward):
         weight: float,
         key: str = "action",
         names: str | List[str] = ".*",
-        enabled: bool = True,
         track_var: bool = False,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.key = key
         self.names = names
 
@@ -45,10 +44,9 @@ class action_rate2_l2(Reward):
         weight: float,
         key: str = "action",
         names: str | List[str] = ".*",
-        enabled: bool = True,
         track_var: bool = False,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.key = key
         self.names = names
 
@@ -79,10 +77,9 @@ class action_saturation(Reward):
         weight: float,
         range: Tuple[float, float] | Dict[str, Tuple[float, float]] = (-1.0, 1.0),
         key: str = "action",
-        enabled: bool = True,
         track_var: bool = False,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.key = key
         self.range = dict(range)
 
@@ -135,10 +132,9 @@ class body_angvel_penalty(Reward):
         body_names: str | List[str] = ".*",
         mask: List[float] = [1.0, 1.0, 1.0],
         square: bool = True,
-        enabled: bool = True,
         track_var: bool = False,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.body_names = body_names
         self.mask = mask
         self.square = square
@@ -175,10 +171,9 @@ class body_linvel_penalty(Reward):
         mask: List[float] = [1.0, 1.0, 1.0],
         frame: str = "world",
         square: bool = True,
-        enabled: bool = True,
         track_var: bool = False,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.body_names = body_names
         self.mask = mask
         self.square = square

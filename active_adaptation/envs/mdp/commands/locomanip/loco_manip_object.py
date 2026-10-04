@@ -820,11 +820,10 @@ class object_pos_tracking(Reward[LocoManipObject]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         pos_sigma: float = 0.25,
     ):
-        super().__init__(weight, enabled, track_var)
+        super().__init__(weight, track_var=track_var)
         self.pos_sigma = pos_sigma
 
     @override
@@ -844,11 +843,10 @@ class object_vel_tracking(Reward[LocoManipObject]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         vel_sigma: float = 0.25,
     ):
-        super().__init__(weight, enabled, track_var)
+        super().__init__(weight, track_var=track_var)
         self.vel_sigma = vel_sigma
 
     @override
@@ -872,11 +870,10 @@ class object_grasp_pos(Reward[LocoManipObject]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         grasp_sigma: float = 0.25,
     ):
-        super().__init__(weight, enabled, track_var)
+        super().__init__(weight, track_var=track_var)
         self.grasp_sigma = grasp_sigma
 
     @override

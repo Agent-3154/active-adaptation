@@ -10,6 +10,16 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Changed
 
+- **Reward groups keep one column per term.** `RewardGroup.compute`
+  returns `[N, n_terms]` and `RewardGroup.relabel` returns `[T, N, n_terms]`,
+  in config order. `reward/<group>` is that tensor, not a summed scalar and
+  not one TensorDict leaf per term. `stats/<group>/return` is still the sum
+  of the columns. A learner that sums the last dimension of each group
+  recovers the previous scalar. Relabel reads those columns for per-term
+  episode stats and does not call `Reward.relabel` when the stored width
+  already matches.
+- **Per-term `Reward.enabled` is removed.** A reward group is switched with
+  `_enabled_` only. Every term in an enabled group is active.
 - **Entity behaviors** — renamed `RobotAdaptation` → `EntityBehavior`;
   package `envs/robots/` → `envs/behaviors/`. API: `AssetSpec.behaviors`,
   `env.behaviors`, `require_behavior`. Subclasses: `GripperBehavior`,

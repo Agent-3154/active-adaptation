@@ -336,11 +336,10 @@ class position_tracking(Reward[TrajTracking]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         sigma: float = 0.25,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.sigma = sigma
 
     @override
@@ -362,11 +361,10 @@ class velocity_tracking(Reward[TrajTracking]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         sigma: float = 0.25,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.sigma = sigma
 
     @override
@@ -388,11 +386,10 @@ class orientation_tracking(Reward[TrajTracking]):
     def __init__(
         self,
         weight: float,
-        enabled: bool = True,
         track_var: bool = False,
         sigma: float = 0.5,
     ):
-        super().__init__(weight, enabled=enabled, track_var=track_var)
+        super().__init__(weight, track_var=track_var)
         self.sigma = sigma
 
     @override
