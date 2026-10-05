@@ -387,12 +387,13 @@ Declare any project-specific third-party packages in that project’s `[project.
 
 ```bash
 # run inside the backend env you train with
-uv run --project venv/isaac51 aa-project install git@github.com:ORG/myproject.git -d ../aa-projects
-uv run --project venv/isaac51 aa-project install https://github.com/ORG/myproject.git -d ../aa-projects --no-deps
+uv run --project venv/isaac51 aa-project install git@github.com:ORG/myproject.git
+# -> clones <workspace>/aa-projects/myproject
+uv run --project venv/isaac51 aa-project install https://github.com/ORG/myproject.git --no-deps
 ```
 
 - **`URL`**: HTTPS or SSH GitHub URL.
-- **`-d`, `--dir`**: parent directory for `git clone` (default: `.`).
+- **`-d`, `--dir`**: parent directory for `git clone` (default: sibling `aa-projects/` next to the `active-adaptation` repo).
 - **`--no-deps`**: install the project package only (avoids re-resolving transitive deps that can disturb a locked Isaac/mjlab env when `active_adaptation` is already present).
 - **`--skip-discover`**: do not refresh `.cache/projects.json` after install.
 
@@ -490,7 +491,7 @@ Available after installing `active-adaptation` (root `uv sync` or `pip install -
 | Command | Description |
 |--------|-------------|
 | `aa-project create -n NAME [-d DIR] [--deps] [--skip-discover]` | Scaffold, editable-install, and discover (default: sibling `aa-projects/<name>`). |
-| `aa-project install URL [-d DIR] [--no-deps] [--skip-discover]` | Clone from GitHub and editable-install into the current env. |
+| `aa-project install URL [-d DIR] [--no-deps] [--skip-discover]` | Clone from GitHub into sibling `aa-projects/` (or `-d DIR`) and editable-install into the current env. |
 | `aa-project discover [--enabled]` | Scan installed entry points; update `.cache/projects.json`. |
 | `aa-project enable [NAME]` | Enable one project, or all if `NAME` is omitted. |
 | `aa-project disable [NAME]` | Disable one project, or all if `NAME` is omitted. |

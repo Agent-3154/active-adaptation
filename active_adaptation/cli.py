@@ -431,13 +431,15 @@ def _init_git_repo(root: Path) -> None:
 def _editable_install(project_root: Path, *, no_deps: bool) -> None:
     if not (project_root / "pyproject.toml").is_file():
         _fail(f"No pyproject.toml in {project_root}; cannot install.")
-    cmd = [sys.executable, "-m", "pip", "install", "-e", str(project_root)]
+    # uv-managed venvs do not include pip, so `python -m pip` fails with
+    # "No module named pip". Install into the current interpreter via uv.
+    cmd = ["uv", "pip", "install", "--python", sys.executable, "-e", str(project_root)]
     if no_deps:
         cmd.append("--no-deps")
     print("Running:", " ".join(cmd))
     result = subprocess.run(cmd)
     if result.returncode != 0:
-        _fail(f"pip install failed with exit code {result.returncode}")
+        _fail(f"uv pip install failed with exit code {result.returncode}")
 
 
 @app.command("create")
@@ -478,8 +480,12 @@ def install_cmd(
     url: Annotated[str, typer.Argument(help="GitHub URL (HTTPS or SSH) of the project repository.")],
     dir: Annotated[
         Path,
-        typer.Option("--dir", "-d", help="Parent directory to clone into."),
-    ] = Path("."),
+        typer.Option(
+            "--dir",
+            "-d",
+            help="Parent directory to clone into (default: sibling aa-projects/).",
+        ),
+    ] = AA_REPO_ROOT.parent / "aa-projects",
     no_deps: Annotated[
         bool,
         typer.Option("--no-deps", help="Editable-install without resolving dependencies (safer for locked backend envs)."),
@@ -489,7 +495,7 @@ def install_cmd(
         typer.Option("--skip-discover", help="Do not run discover after install."),
     ] = False,
 ) -> None:
-    """Clone a project repo and editable-install it into the current Python environment."""
+    """Clone a project into sibling aa-projects/ and editable-install it."""
     parent = dir.resolve()
     parent.mkdir(parents=True, exist_ok=True)
     repo_name = _repo_name_from_url(url)
