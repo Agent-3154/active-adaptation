@@ -29,7 +29,9 @@ The actor is a reversible history-augmented solver. Each step updates
 and the environment executes only the terminal state. The companion map has
 log-determinant ``M * d * log|σ|``, independent of v_θ, so the PPO ratio between
 two policies collapses to the ratio of standard-normal densities of the inverted
-augmented noises. Symmetry augmentation is not implemented.
+augmented noises. Set ``algo.symaug=true`` to mirror observations, the executed
+action, and the solver history in the learner and concatenate them with the
+original batch.
 """
 
 from __future__ import annotations
@@ -38,11 +40,12 @@ import math
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple, Union
 
 import torch
 import torch.distributed as distr
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils._pytree as pytree
 from hydra.core.config_store import ConfigStore
 from tensordict import TensorDict
@@ -75,6 +78,7 @@ from active_adaptation.learning.utils.distributed import (
 from active_adaptation.learning.utils.dormancy import DormancyTracker
 from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 from active_adaptation.utils.profiling import ScopedTimer
+from active_adaptation.utils.symmetry import SymmetryTransform
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
@@ -247,6 +251,7 @@ class GenPOConfig:
     compile: bool = False
     use_ddp: bool = True
     debug: bool = False
+    symaug: bool = False
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY)
 
@@ -285,9 +290,13 @@ class GenPOPolicy(TensorDictModuleBase):
         self,
         cfg: GenPOConfig,
         observation_spec: Composite,
-        action_spec: Composite,
+        action_spec: TensorSpec,
         reward_spec: TensorSpec,
         device,
+        *,
+        materializers: Optional[dict[str, Callable]] = None,
+        obs_transforms: Optional[dict[str, SymmetryTransform]] = None,
+        act_transform: Optional[SymmetryTransform] = None,
     ):
         del reward_spec
         super().__init__()
@@ -304,19 +313,35 @@ class GenPOPolicy(TensorDictModuleBase):
         self.world_size = 1
 
         fake_input = observation_spec.zero().to(self.device)
+        self.materializers = dict(materializers or {})
+        for key, materialize in self.materializers.items():
+            fake_input[key] = materialize(fake_input)
         if CMD_KEY in observation_spec.keys(True, True):
             self.in_keys = (CMD_KEY, OBS_KEY)
         else:
             self.in_keys = (OBS_KEY,)
+        self.obs_transforms = nn.ModuleDict(
+            {
+                key: transform.to(self.device)
+                for key, transform in (obs_transforms or {}).items()
+                if key in self.in_keys
+            }
+        )
+        self.act_transform = (
+            act_transform.to(self.device) if act_transform is not None else None
+        )
         inp_dim = sum(int(fake_input[key].shape[-1]) for key in self.in_keys)
         self.vecnorm = Seq(
             CatTensors(list(self.in_keys), "_input", del_keys=False, sort=False),
             Mod(VecNorm((inp_dim,), decay=1.0), ["_input"], ["_obs_normed"]),
         ).to(self.device)
 
-        if ACTION_KEY not in action_spec.keys(True, True):
-            raise KeyError(f"action spec is missing {ACTION_KEY!r}")
-        self.action_dim = int(action_spec[ACTION_KEY].shape[-1])
+        # ``env.action_spec`` is the leaf tensor spec when there is a single
+        # action key, not the composite stored on ``full_action_spec``.
+        if isinstance(action_spec, Composite):
+            self.action_dim = int(action_spec[ACTION_KEY].shape[-1])
+        else:
+            self.action_dim = int(action_spec.shape[-1])
 
         activation = getattr(nn, self.cfg.activation)
         hidden = tuple(int(size) for size in self.cfg.actor_num_units)
@@ -364,12 +389,33 @@ class GenPOPolicy(TensorDictModuleBase):
 
     @classmethod
     def from_env(cls, cfg: GenPOConfig, env: "_EnvBase", device: str):
+        observation_spec = env.observation_spec
+        if CMD_KEY in observation_spec.keys(True, True):
+            in_keys = (CMD_KEY, OBS_KEY)
+        else:
+            in_keys = (OBS_KEY,)
+        materializers = {
+            key: env.observation_groups[key].materialize
+            for key in in_keys
+            if key in env.observation_groups and env.observation_groups[key].is_functional
+        }
+        obs_transforms = None
+        act_transform = None
+        if cfg.symaug:
+            obs_transforms = {
+                key: env.observation_groups[key].symmetry_transform().to(device)
+                for key in in_keys
+            }
+            act_transform = env.action_manager.symmetry_transform().to(device)
         return cls(
             cfg=cfg,
-            observation_spec=env.observation_spec,
+            observation_spec=observation_spec,
             action_spec=env.action_spec,
             reward_spec=env.reward_spec,
             device=device,
+            materializers=materializers,
+            obs_transforms=obs_transforms,
+            act_transform=act_transform,
         )
 
     def on_stage_start(self, stage: str, env: "_EnvBase"):
@@ -437,6 +483,7 @@ class GenPOPolicy(TensorDictModuleBase):
     def train_op(self, tensordict: TensorDict):
         assert VecNorm.FROZEN, "VecNorm must be frozen before training"
         tensordict = tensordict.exclude("stats").to(self.device, non_blocking=True)
+        self._materialize_(tensordict)
         valid_ratio = (~tensordict["is_init"]).float().mean()
         infos = []
 
@@ -454,8 +501,18 @@ class GenPOPolicy(TensorDictModuleBase):
 
         ret_var = tensordict["ret"][~tensordict["is_init"]].var().clamp_min(1e-7)
 
+        td = tensordict.select(
+            *self.in_keys,
+            ACTION_KEY,
+            FLOW_HIST_KEY,
+            "action_log_prob",
+            "adv",
+            "ret",
+            "is_init",
+        )
         for _ in range(self.cfg.ppo_epochs):
-            for minibatch in make_batch(tensordict, self.cfg.num_minibatches):
+            for minibatch in make_batch(td, self.cfg.num_minibatches):
+                minibatch = self._augment_symmetry(minibatch)
                 infos.append(self.update(minibatch, ret_var))
 
                 if self.cfg.desired_kl is not None:
@@ -547,6 +604,36 @@ class GenPOPolicy(TensorDictModuleBase):
         tensordict.set(ret_key, ret)
         return tensordict
 
+    def _materialize_(self, tensordict: TensorDict) -> None:
+        for key, materialize in self.materializers.items():
+            if key in tensordict.keys(True, True):
+                tensordict[key] = materialize(tensordict)
+
+    def _augment_symmetry(self, tensordict: TensorDict) -> TensorDict:
+        """Concatenate each sample with its mirror. Log-density is unchanged.
+
+        The action symmetry is a signed permutation, so the standard-normal
+        density of the augmented noise is the same for a terminal pair and its
+        mirror. ``flow_hist`` lives in action space and uses the same transform.
+        """
+        if (
+            not self.cfg.symaug
+            or self.act_transform is None
+            or any(key not in self.obs_transforms for key in self.in_keys)
+        ):
+            return tensordict
+        self._materialize_(tensordict)
+        symmetry = tensordict.empty()
+        symmetry[ACTION_KEY] = self.act_transform(tensordict[ACTION_KEY])
+        symmetry[FLOW_HIST_KEY] = self.act_transform(tensordict[FLOW_HIST_KEY])
+        for key, transform in self.obs_transforms.items():
+            symmetry[key] = transform(tensordict[key])
+        symmetry["action_log_prob"] = tensordict["action_log_prob"]
+        symmetry["adv"] = tensordict["adv"]
+        symmetry["ret"] = tensordict["ret"]
+        symmetry["is_init"] = tensordict["is_init"]
+        return torch.cat([tensordict, symmetry])
+
     @ScopedTimer("genpo_update")
     def _update(self, tensordict: TensorDict, ret_var: torch.Tensor):
         self.vecnorm(tensordict)
@@ -598,12 +685,25 @@ class GenPOPolicy(TensorDictModuleBase):
         with torch.no_grad():
             aug_kl = -(log_ratio * valid).sum() / valid_cnt
             approx_kl = (((ratio - 1.0) - log_ratio) * valid).sum() / valid_cnt
+            symmetry_loss = obs.new_zeros(())
+            if (
+                self.cfg.symaug
+                and self.act_transform is not None
+                and obs.shape[0] % 2 == 0
+            ):
+                half = obs.shape[0] // 2
+                actor = unwrap_ddp(self.actor)
+                t0 = obs.new_zeros(half, 1)
+                v_orig = actor.velocity(obs[:half], action[:half], t0)
+                v_mirror = actor.velocity(obs[half:], action[half:], t0)
+                symmetry_loss = F.mse_loss(self.act_transform(v_orig), v_mirror)
             info = {
                 "actor/policy_loss": policy_loss.detach(),
                 "actor/entropy": entropy.detach(),
                 "actor/grad_norm": actor_grad_norm,
                 "actor/approx_kl": approx_kl,
                 "actor/aug_kl": aug_kl,
+                "actor/symmetry_loss": symmetry_loss,
                 "actor/clamp_pos": (ratio > 1.0 + self.clip_param[1]).float().mean(),
                 "actor/clamp_neg": (ratio < 1.0 - self.clip_param[0]).float().mean(),
                 "critic/value_loss": value_loss.detach(),
