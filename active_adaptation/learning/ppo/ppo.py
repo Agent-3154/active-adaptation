@@ -305,7 +305,11 @@ class PPOPolicy(PPOBase):
                 infos.append(self.update(minibatch, ret_var))
 
                 if self.cfg.desired_kl is not None: # adaptive learning rate
-                    kl = infos[-1]["actor/approx_kl"]
+                    # Clone so all_reduce does not overwrite the logged local KL.
+                    kl = infos[-1]["actor/approx_kl"].detach().clone()
+                    if aa.is_distributed():
+                        distr.all_reduce(kl, op=distr.ReduceOp.SUM)
+                        kl = kl / self.world_size
                     actor_lr = self.opt.param_groups[0]["lr"]
                     if kl > self.cfg.desired_kl * 2.0:
                         actor_lr = max(1e-5, actor_lr / 1.5)
