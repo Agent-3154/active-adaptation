@@ -462,24 +462,40 @@ class tracking_yaw(Reward):
 class body_upright(Reward):
     """Reward for keeping the specified body upright."""
 
-    def __init__(self, body_name: str, weight: float, track_var: bool = False):
+    def __init__(
+        self,
+        weight: float,
+        body_name: Optional[str] = None,
+        entity_name: str = "robot",
+        track_var: bool = False,
+    ):
         super().__init__(weight, track_var=track_var)
         self.body_name = body_name
+        self.entity_name = entity_name
 
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
-        self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.body_ids, body_names = self.asset.find_bodies(self.body_name)
-        self.body_ids = torch.tensor(self.body_ids, device=self.device)
+        self.asset: Articulation = self.env.scene.entities[self.entity_name]
+        if self.body_name is not None:
+            self.body_ids, body_names = self.asset.find_bodies(self.body_name)
+            self.body_ids = torch.tensor(self.body_ids, device=self.device)
+        else:
+            self.body_ids = None
 
     @override
     def _compute(self) -> torch.Tensor:
         down = torch.tensor([[0.0, 0.0, -1.0]], device=self.device)
-        g = quat_rotate_inverse(
-            self.asset.data.body_link_quat_w[:, self.body_ids],
-            down.expand(self.num_envs, len(self.body_ids), 3),
-        )
+        if self.body_name is not None:
+            g = quat_rotate_inverse(
+                self.asset.data.body_link_quat_w[:, self.body_ids],
+                down.expand(self.num_envs, len(self.body_ids), 3),
+            )
+        else:
+            g = quat_rotate_inverse(
+                self.asset.data.root_link_quat_w.unsqueeze(1),
+                down.expand(self.num_envs, 1,3),
+            )
         rew = 1.0 - g[:, :, :2].square().sum(-1)
         return rew.mean(1, True)
 
