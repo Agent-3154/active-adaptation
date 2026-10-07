@@ -280,8 +280,8 @@ def build_door_spec(
 
     Joints
     ------
-    - ``door_slide_joint``: prismatic along **+X** (panel translates in its plane).
-      Positive travel opens toward the latch, away from the left hinge.
+    - ``door_slide_joint``: prismatic along **X** (panel translates in its plane).
+      Positive travel opens toward the latch; negative travel opens toward the hinge.
     - ``door_joint``: revolute about **+Z** at the left (-X) edge of the panel.
     - ``handle_joint``: revolute about **+Y** (through the door) at the handle.
       ``q = 0`` is a horizontal bar; ``q = +π/2`` stands the bar vertical.
@@ -326,8 +326,14 @@ def build_door_spec(
     half_w, half_d, half_h = width * 0.5, thickness * 0.5, height * 0.5
     half_ft = ft * 0.5
     hinge_x = -half_w
+    # Jambs and lintel stand 1 cm proud of each panel face.
+    frame_half_d = half_d + 0.01
+    # Panel is a prismatic slide. Its bottom must clear the floor by more than
+    # the summed contact offsets, or friction locks the joint at 0.
+    floor_clearance = 0.05
+    panel_half_h = half_h - 0.5 * floor_clearance
     if door_slide_range is None:
-        slide_lo, slide_hi = 0.0, width
+        slide_lo, slide_hi = -width, width
     else:
         slide_lo, slide_hi = (float(door_slide_range[0]), float(door_slide_range[1]))
     if slide_hi <= slide_lo:
@@ -348,20 +354,20 @@ def build_door_spec(
     frame.mass = 20.0
     frame.inertia = [1.0, 1.0, 1.0]
 
-    # U-frame (left/right jambs + top lintel), same depth as the panel.
+    # U-frame (left/right jambs + top lintel), slightly thicker than the panel.
     jamb_x = half_w + half_ft
     for side, x in (("left", -jamb_x), ("right", jamb_x)):
         frame.add_geom(
             name=f"frame_{side}_collision",
             type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=(half_ft, half_d, half_h),
+            size=(half_ft, frame_half_d, half_h),
             pos=(x, 0.0, half_h),
             rgba=frame_rgba_t,
         )
     frame.add_geom(
         name="frame_top_collision",
         type=mujoco.mjtGeom.mjGEOM_BOX,
-        size=(half_w + ft, half_d, half_ft),
+        size=(half_w + ft, frame_half_d, half_ft),
         pos=(0.0, 0.0, height + half_ft),
         rgba=frame_rgba_t,
     )
@@ -390,8 +396,8 @@ def build_door_spec(
     panel.add_geom(
         name="panel_collision",
         type=mujoco.mjtGeom.mjGEOM_BOX,
-        size=(half_w, half_d, half_h),
-        pos=(half_w, 0.0, half_h),
+        size=(half_w, half_d, panel_half_h),
+        pos=(half_w, 0.0, panel_half_h + floor_clearance),
         rgba=rgba_t,
     )
 
@@ -1350,6 +1356,7 @@ def make_door(
     open_direction: str = "pull",
     handle_unlock_threshold_deg: float = 30.0,
     initially_locked: bool = True,
+    lock_with_limits: bool = False,
     name: str = "door",
 ):
     """Articulated door: ``frame`` —slide→ ``carriage`` —hinge→ ``panel`` —handle→ ``handle``.
@@ -1360,14 +1367,17 @@ def make_door(
     in the frame frame. ``handle_standoff`` is the panel-face to handle-bar
     gap (both sides). ``rgba`` is panel/handle; ``frame_rgba`` is jambs/lintel.
 
-    ``door_slide_joint`` translates the panel along **+X** (positive opens
-    toward the latch). ``door_joint`` is the hinge. Both default to **zero
-    stiffness**. ``handle_joint`` spans at least ``±π/2`` so slide mode can
-    stand the bar vertical.
+    ``door_slide_joint`` translates the panel along **X** (positive toward the
+    latch, negative toward the hinge). ``door_joint`` is the hinge. Both
+    default to **zero stiffness**. ``handle_joint`` spans at least ``±π/2``
+    so slide mode can stand the bar vertical.
 
     ``open_direction`` is ``"pull"`` (hinge toward +Y), ``"push"`` (hinge
-    toward −Y), or ``"slide"`` (translate along +X; handle held vertical and
-    the slide is never locked). A task can set this per env.
+    toward −Y), ``"slide_pos"`` (translate along +X), or ``"slide_neg"``
+    (translate along −X).     ``"slide"`` is ``"slide_pos"``. Slide modes hold
+    the handle vertical and never lock the slide. A task can set this per env.
+    ``lock_with_limits`` also pins held joints by rewriting their limits;
+    the default lock is drive stiffness only.
 
     Behaviors (disable with flags):
     - ``DoorBehavior`` (``door.door``): lock / pull / push / slide
@@ -1556,6 +1566,7 @@ def make_door(
                 open_direction=open_direction,  # type: ignore[arg-type]
                 handle_unlock_threshold_deg=handle_unlock_threshold_deg,
                 initially_locked=initially_locked,
+                lock_with_limits=lock_with_limits,
             )
         )
     if attach_grasp:

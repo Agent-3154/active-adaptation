@@ -4,8 +4,10 @@ Attach via ``AssetSpec(behaviors=(DoorBehavior(), ...))``. Lookup with
 ``env.require_behavior("door.door")`` when the YAML object key is ``door``.
 
 **Locking:** while locked, the hinge (``door_joint``) is held at ``0`` with high
-stiffness (Isaac) and/or near-zero joint limits. Unlock when
-``|handle_joint|`` exceeds the threshold (default 30°).
+stiffness. Unlock when ``|handle_joint|`` exceeds the threshold (default 30°).
+``lock_with_limits`` (default off) also rewrites joint limits: a held hinge is
+clamped to ±eps, an unlocked pull may only swing toward +Y, an unlocked push
+only toward −Y, and a slide joint may travel only along its open direction.
 
 **Open direction** (object frame: hinge +Z, panel +X, through-door +Y):
 
@@ -13,10 +15,13 @@ stiffness (Isaac) and/or near-zero joint limits. Unlock when
   Slide joint stays locked at 0. Handle is a horizontal lever.
 - ``"push"`` (−1): allow ``door_joint <= 0`` (panel swings toward **−Y**).
   Slide joint stays locked at 0. Handle is a horizontal lever.
-- ``"slide"`` (0): allow ``door_slide_joint >= 0`` (panel translates along
-  **+X**, toward the latch). The hinge stays locked at 0. The handle is held
-  at ``+π/2`` (vertical bar) with high stiffness, and the slide is never
-  locked — no handle twist is required.
+- ``"slide_pos"`` (+2): allow ``door_slide_joint >= 0`` (panel translates
+  along **+X**). The hinge stays locked at 0.
+- ``"slide_neg"`` (−2): allow ``door_slide_joint <= 0`` (panel translates
+  along **−X**). The hinge stays locked at 0.
+
+Slide modes hold the handle at ``+π/2`` and do not require a twist.
+``"slide"`` is an alias of ``"slide_pos"``.
 """
 
 from __future__ import annotations
@@ -33,34 +38,62 @@ from active_adaptation.envs.utils import find_joints
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import _EnvBase
 
-OpenDirection = Literal["push", "pull", "slide"]
+OpenDirection = Literal["push", "pull", "slide", "slide_pos", "slide_neg"]
 
-# Signed open direction in the door frame (+ = pull / +Y, − = push / −Y).
-# Slide is unsigned: positive ``door_slide_joint`` opens along +X.
+# Hinge sign in the door frame (+ = pull / +Y, − = push / −Y).
+# Slide modes use ±2 so they do not collide with the hinge signs.
 DIR_PULL = 1
 DIR_PUSH = -1
-DIR_SLIDE = 0
+DIR_SLIDE_POS = 2
+DIR_SLIDE_NEG = -2
+# Alias of +X slide. Prefer ``DIR_SLIDE_POS`` / ``DIR_SLIDE_NEG``.
+DIR_SLIDE = DIR_SLIDE_POS
 # ``handle_joint`` about +Y. +π/2 stands the horizontal bar up along +Z.
 SLIDE_HANDLE_ANGLE = math.pi / 2.0
 
 
+def is_slide_mode(open_dir: torch.Tensor) -> torch.Tensor:
+    """True where ``open_dir`` is a slide (+X or −X)."""
+    return open_dir.abs() == DIR_SLIDE_POS
+
+
+def slide_axis_sign(open_dir: torch.Tensor) -> torch.Tensor:
+    """+1 for slide +X, −1 for slide −X, 0 for a hinge mode."""
+    sign = open_dir.sign()
+    return torch.where(is_slide_mode(open_dir), sign, torch.zeros_like(sign))
+
+
+def sample_open_direction(n: int, device: torch.device | str) -> torch.Tensor:
+    """Equal chance of pull, push, slide +X, and slide −X."""
+    choice = torch.randint(0, 4, (n,), device=device)
+    table = torch.tensor(
+        [DIR_PULL, DIR_PUSH, DIR_SLIDE_POS, DIR_SLIDE_NEG],
+        device=device,
+        dtype=torch.long,
+    )
+    return table[choice]
+
+
 def _parse_open_direction(direction: OpenDirection | int | str) -> int:
     if isinstance(direction, int):
-        if direction not in (DIR_PULL, DIR_PUSH, DIR_SLIDE):
+        if direction not in (DIR_PULL, DIR_PUSH, DIR_SLIDE_POS, DIR_SLIDE_NEG):
             raise ValueError(
-                f"open_direction int must be +1 (pull), -1 (push), or 0 (slide), "
-                f"got {direction}"
+                "open_direction int must be +1 (pull), -1 (push), "
+                f"+2 (slide +X), or -2 (slide -X), got {direction}"
             )
         return direction
-    key = str(direction).lower()
+    key = str(direction).lower().strip()
     if key == "pull":
         return DIR_PULL
     if key == "push":
         return DIR_PUSH
-    if key == "slide":
-        return DIR_SLIDE
+    if key in ("slide", "slide_pos", "slide+x", "+x"):
+        return DIR_SLIDE_POS
+    if key in ("slide_neg", "slide-x", "-x"):
+        return DIR_SLIDE_NEG
     raise ValueError(
-        f"open_direction must be 'push', 'pull', or 'slide', got {direction!r}"
+        "open_direction must be 'push', 'pull', 'slide_pos', or 'slide_neg', "
+        f"got {direction!r}"
     )
 
 
@@ -68,6 +101,8 @@ class DoorBehavior(EntityBehavior):
     """Control door lock, open direction, and handle-based unlock."""
 
     name = "door"
+    # Command.reset writes the sampled mode here. Behavior.reset reads it.
+    OPEN_DIR_KEY = "door_open_dir"
 
     def __init__(
         self,
@@ -75,15 +110,18 @@ class DoorBehavior(EntityBehavior):
         slide_joint_name: str = "door_slide_joint",
         handle_joint_name: str = "handle_joint",
         *,
-        locked_stiffness: float = 500.0,
+        locked_stiffness: float = 1000.0,
         unlocked_stiffness: float = 0.0,
         locked_damping: float = 50.0,
         unlocked_damping: float = 4.0,
         slide_handle_stiffness: float = 400.0,
         slide_handle_damping: float = 20.0,
+        handle_stiffness: float = 8.0,
+        handle_damping: float = 2.0,
         handle_unlock_threshold_deg: float = 30.0,
         open_direction: OpenDirection = "pull",
         initially_locked: bool = True,
+        lock_with_limits: bool = False,
         lock_limit_eps: float = 1e-3,
     ) -> None:
         super().__init__()
@@ -96,11 +134,14 @@ class DoorBehavior(EntityBehavior):
         self.unlocked_damping = float(unlocked_damping)
         self.slide_handle_stiffness = float(slide_handle_stiffness)
         self.slide_handle_damping = float(slide_handle_damping)
+        self.handle_stiffness = float(handle_stiffness)
+        self.handle_damping = float(handle_damping)
         self.handle_unlock_threshold = math.radians(float(handle_unlock_threshold_deg))
         self.default_open_direction = _parse_open_direction(open_direction)
         self.initially_locked = bool(initially_locked)
-        if self.default_open_direction == DIR_SLIDE:
+        if abs(self.default_open_direction) == DIR_SLIDE_POS:
             self.initially_locked = False
+        self.lock_with_limits = bool(lock_with_limits)
         self.lock_limit_eps = float(lock_limit_eps)
 
         self.door_joint_id: int = -1
@@ -228,7 +269,7 @@ class DoorBehavior(EntityBehavior):
                 f"open_direction length {vals.numel()} != env_ids {env_ids.numel()}"
             )
         self.open_dir[env_ids] = vals
-        slide = vals == DIR_SLIDE
+        slide = is_slide_mode(vals)
         if slide.any():
             self.locked[env_ids[slide]] = False
         self._gains_dirty = True
@@ -241,10 +282,21 @@ class DoorBehavior(EntityBehavior):
     @override
     def reset(self, env_ids: torch.Tensor, tensordict: Any = None) -> None:
         assert self.locked is not None and self.open_dir is not None
+        # Re-lock every episode, but keep the mode the command just sampled.
+        # Falling back to the asset default turns a sampled slide into a pull.
         self.locked[env_ids] = self.initially_locked
-        self.open_dir[env_ids] = self.default_open_direction
-        self._gains_dirty = True
-        self._apply_lock_state(env_ids)
+        self.set_open_direction(self._open_dir_from_reset(env_ids, tensordict), env_ids)
+
+    def _open_dir_from_reset(
+        self, env_ids: torch.Tensor, tensordict: Any
+    ) -> torch.Tensor:
+        """Mode published by the command, else the value already on this behavior."""
+        if tensordict is not None and DoorBehavior.OPEN_DIR_KEY in tensordict.keys():
+            stored = tensordict.get(DoorBehavior.OPEN_DIR_KEY)
+            flat = stored.reshape(-1).to(device=self.device, dtype=torch.long)
+            if flat.numel() == self.num_envs:
+                return flat[env_ids]
+        return self.open_dir[env_ids]
 
     @override
     def update(self, tensordict: Any = None) -> None:
@@ -253,7 +305,7 @@ class DoorBehavior(EntityBehavior):
         Slide mode is always unlocked; the vertical handle is a stiff grip.
         """
         assert self.locked is not None and self.open_dir is not None
-        hinged = self.open_dir != DIR_SLIDE
+        hinged = ~is_slide_mode(self.open_dir)
         unlocked_by_handle = (
             self.handle_joint_pos.abs() >= self.handle_unlock_threshold
         )
@@ -270,7 +322,7 @@ class DoorBehavior(EntityBehavior):
         assert self.locked is not None and self.open_dir is not None
         if self._gains_dirty:
             self._apply_lock_state()
-        slide = self.open_dir == DIR_SLIDE
+        slide = is_slide_mode(self.open_dir)
         hold_hinge = self.locked | slide
         if hold_hinge.any():
             ids = hold_hinge.nonzero().squeeze(-1)
@@ -301,15 +353,19 @@ class DoorBehavior(EntityBehavior):
     def _door_limits_for_state(
         self, locked: torch.Tensor, open_dir: torch.Tensor
     ) -> torch.Tensor:
-        """``[M, 1, 2]`` limits for the door joint given per-row state."""
+        """``[M, 1, 2]`` hinge limits for ``lock_with_limits``.
+
+        Unlocked pull keeps ``door_joint >= 0``. Unlocked push keeps
+        ``door_joint <= 0``. ``locked`` (the hinge-hold mask, including slide
+        modes) clamps the joint to ±``lock_limit_eps``.
+        """
         m = locked.shape[0]
         lo = torch.full((m,), self._door_range_lo, device=self.device)
         hi = torch.full((m,), self._door_range_hi, device=self.device)
-        # Unlocked: one-sided swing.
-        pull = open_dir > 0
+        pull = open_dir == DIR_PULL
+        push = open_dir == DIR_PUSH
         lo = torch.where(pull, torch.zeros_like(lo), lo)
-        hi = torch.where(pull, hi, torch.zeros_like(hi))
-        # Locked: clamp near closed.
+        hi = torch.where(push, torch.zeros_like(hi), hi)
         eps = self.lock_limit_eps
         lo = torch.where(locked, torch.full_like(lo, -eps), lo)
         hi = torch.where(locked, torch.full_like(hi, eps), hi)
@@ -324,31 +380,31 @@ class DoorBehavior(EntityBehavior):
 
         locked = self.locked[env_ids]
         open_dir = self.open_dir[env_ids]
-        slide = open_dir == DIR_SLIDE
+        slide = is_slide_mode(open_dir)
         hinge_locked = locked | slide
-        limits = self._door_limits_for_state(hinge_locked, open_dir)
-        slide_limits = self._slide_limits_for_state(slide)
-
-        if hasattr(self.asset, "write_joint_position_limit_to_sim"):
-            self.asset.write_joint_position_limit_to_sim(
-                limits,
-                joint_ids=[self.door_joint_id],
-                env_ids=env_ids,
-                warn_limit_violation=False,
-            )
-            self.asset.write_joint_position_limit_to_sim(
-                slide_limits,
-                joint_ids=[self.slide_joint_id],
-                env_ids=env_ids,
-                warn_limit_violation=False,
-            )
-        elif self.env.backend == "mjlab":
-            self._mjlab_write_jnt_range(
-                env_ids, limits.squeeze(1), self.door_joint_id
-            )
-            self._mjlab_write_jnt_range(
-                env_ids, slide_limits.squeeze(1), self.slide_joint_id
-            )
+        if self.lock_with_limits:
+            limits = self._door_limits_for_state(hinge_locked, open_dir)
+            slide_limits = self._slide_limits_for_state(open_dir)
+            if hasattr(self.asset, "write_joint_position_limit_to_sim"):
+                self.asset.write_joint_position_limit_to_sim(
+                    limits,
+                    joint_ids=[self.door_joint_id],
+                    env_ids=env_ids,
+                    warn_limit_violation=False,
+                )
+                self.asset.write_joint_position_limit_to_sim(
+                    slide_limits,
+                    joint_ids=[self.slide_joint_id],
+                    env_ids=env_ids,
+                    warn_limit_violation=False,
+                )
+            elif self.env.backend == "mjlab":
+                self._mjlab_write_jnt_range(
+                    env_ids, limits.squeeze(1), self.door_joint_id
+                )
+                self._mjlab_write_jnt_range(
+                    env_ids, slide_limits.squeeze(1), self.slide_joint_id
+                )
 
         # Stiffness / damping (Isaac ImplicitActuator; best-effort elsewhere).
         stiff = torch.where(
@@ -371,6 +427,19 @@ class DoorBehavior(EntityBehavior):
             torch.full((env_ids.numel(),), self.unlocked_damping, device=self.device),
             torch.full((env_ids.numel(),), self.locked_damping, device=self.device),
         ).unsqueeze(-1)
+        # Slide holds the bar vertical. Push/pull keep a soft return spring
+        # the gripper can twist past the unlock angle.
+        n = env_ids.numel()
+        handle_kp = torch.where(
+            slide,
+            torch.full((n,), self.slide_handle_stiffness, device=self.device),
+            torch.full((n,), self.handle_stiffness, device=self.device),
+        ).unsqueeze(-1)
+        handle_kd = torch.where(
+            slide,
+            torch.full((n,), self.slide_handle_damping, device=self.device),
+            torch.full((n,), self.handle_damping, device=self.device),
+        ).unsqueeze(-1)
 
         if hasattr(self.asset, "write_joint_stiffness_to_sim"):
             self.asset.write_joint_stiffness_to_sim(
@@ -385,20 +454,12 @@ class DoorBehavior(EntityBehavior):
             self.asset.write_joint_damping_to_sim(
                 slide_damp, joint_ids=[self.slide_joint_id], env_ids=env_ids
             )
-            if slide.any():
-                ids = env_ids[slide]
-                handle_kp = torch.full(
-                    (ids.numel(), 1), self.slide_handle_stiffness, device=self.device
-                )
-                handle_kd = torch.full(
-                    (ids.numel(), 1), self.slide_handle_damping, device=self.device
-                )
-                self.asset.write_joint_stiffness_to_sim(
-                    handle_kp, joint_ids=[self.handle_joint_id], env_ids=ids
-                )
-                self.asset.write_joint_damping_to_sim(
-                    handle_kd, joint_ids=[self.handle_joint_id], env_ids=ids
-                )
+            self.asset.write_joint_stiffness_to_sim(
+                handle_kp, joint_ids=[self.handle_joint_id], env_ids=env_ids
+            )
+            self.asset.write_joint_damping_to_sim(
+                handle_kd, joint_ids=[self.handle_joint_id], env_ids=env_ids
+            )
         elif self.env.backend == "mjlab":
             self._mjlab_write_door_pd_gains(
                 env_ids, stiff.squeeze(-1), damp.squeeze(-1), "door_joint"
@@ -409,16 +470,31 @@ class DoorBehavior(EntityBehavior):
                 slide_damp.squeeze(-1),
                 "door_slide_joint",
             )
+            self._mjlab_write_door_pd_gains(
+                env_ids,
+                handle_kp.squeeze(-1),
+                handle_kd.squeeze(-1),
+                "handle_joint",
+            )
 
         self._gains_dirty = False
 
-    def _slide_limits_for_state(self, slide: torch.Tensor) -> torch.Tensor:
-        """``[M, 1, 2]`` slide limits. Slide mode uses the full +X travel."""
-        m = slide.shape[0]
+    def _slide_limits_for_state(self, open_dir: torch.Tensor) -> torch.Tensor:
+        """``[M, 1, 2]`` slide limits.
+
+        +X slide travels ``[0, hi]``, −X slide travels ``[lo, 0]``. Hinge
+        modes pin the slide joint at 0.
+        """
+        m = open_dir.shape[0]
         eps = self.lock_limit_eps
-        lo = torch.full((m,), max(self._slide_range_lo, 0.0), device=self.device)
-        hi = torch.full((m,), self._slide_range_hi, device=self.device)
-        hi = torch.where(slide, hi, torch.full_like(hi, eps))
+        pos = open_dir == DIR_SLIDE_POS
+        neg = open_dir == DIR_SLIDE_NEG
+        lo = torch.full((m,), -eps, device=self.device)
+        hi = torch.full((m,), eps, device=self.device)
+        lo = torch.where(pos, torch.zeros_like(lo), lo)
+        hi = torch.where(pos, torch.full_like(hi, self._slide_range_hi), hi)
+        lo = torch.where(neg, torch.full_like(lo, self._slide_range_lo), lo)
+        hi = torch.where(neg, torch.zeros_like(hi), hi)
         return torch.stack((lo, hi), dim=-1).unsqueeze(1)
 
     def _mjlab_write_jnt_range(
@@ -474,6 +550,11 @@ __all__ = [
     "DIR_PULL",
     "DIR_PUSH",
     "DIR_SLIDE",
+    "DIR_SLIDE_POS",
+    "DIR_SLIDE_NEG",
     "SLIDE_HANDLE_ANGLE",
     "OpenDirection",
+    "is_slide_mode",
+    "sample_open_direction",
+    "slide_axis_sign",
 ]

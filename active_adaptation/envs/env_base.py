@@ -997,8 +997,8 @@ class _EnvBase(EnvBase, RegistryMixin):
             self.episode_origin[env_ids] = self.command_manager.reset(
                 env_ids, tensordict
             )
-            for adapt in self.behaviors.values():
-                adapt.reset(env_ids, tensordict)
+            for behavior in self.behaviors.values():
+                behavior.reset(env_ids, tensordict)
             for group in self.observation_groups.values():
                 group.reset(env_ids, tensordict)
             for group in self.reward_groups.values():

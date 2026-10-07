@@ -489,6 +489,11 @@ def _usd_from_mjspec_articulated(stage, prim_path: str, spec) -> object:
         )
         UsdPhysics.CollisionAPI.Apply(xform_prim)
         UsdPhysics.RigidBodyAPI.Apply(xform_prim)
+        # MjSpec mass is otherwise dropped and PhysX uses density (~1000 kg/m³).
+        # The door panel is then ~70 kg and floor friction exceeds a 150 N push.
+        mass = float(mjbody.mass)
+        if mass > 0.0:
+            UsdPhysics.MassAPI.Apply(xform_prim).CreateMassAttr(mass)
         prim_dict[mjbody.id] = xform_prim
 
         if mjbody.parent.id <= 0:
