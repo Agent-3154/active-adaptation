@@ -63,14 +63,32 @@ def slide_axis_sign(open_dir: torch.Tensor) -> torch.Tensor:
     return torch.where(is_slide_mode(open_dir), sign, torch.zeros_like(sign))
 
 
-def sample_open_direction(n: int, device: torch.device | str) -> torch.Tensor:
-    """Equal chance of pull, push, slide +X, and slide −X."""
-    choice = torch.randint(0, 4, (n,), device=device)
+def sample_open_direction(
+    n: int,
+    device: torch.device | str,
+    probs: Sequence[float] | torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Sample pull, push, slide +X, slide −X.
+
+    ``probs`` is those four weights, in that order. Omitted weights are equal.
+    """
     table = torch.tensor(
         [DIR_PULL, DIR_PUSH, DIR_SLIDE_POS, DIR_SLIDE_NEG],
         device=device,
         dtype=torch.long,
     )
+    if probs is None:
+        choice = torch.randint(0, table.numel(), (n,), device=device)
+        return table[choice]
+    p = torch.as_tensor(probs, device=device, dtype=torch.float).reshape(-1)
+    if p.numel() != table.numel():
+        raise ValueError(
+            f"mode_probs must have {table.numel()} weights "
+            f"(pull, push, slide +X, slide -X), got {p.numel()}"
+        )
+    if (p < 0).any() or float(p.sum()) <= 0.0:
+        raise ValueError(f"mode_probs must be non-negative and sum to > 0, got {probs}")
+    choice = torch.multinomial(p / p.sum(), n, replacement=True)
     return table[choice]
 
 
@@ -155,6 +173,8 @@ class DoorBehavior(EntityBehavior):
         self.locked: torch.Tensor | None = None  # [N] bool
         self.open_dir: torch.Tensor | None = None  # [N] long ±1
         self._gains_dirty: bool = True
+        # joint name → (global position-actuator id, global velocity-actuator id)
+        self._mjlab_pd_ids: dict[str, tuple[int, int]] = {}
 
     @override
     def _initialize(
@@ -187,6 +207,17 @@ class DoorBehavior(EntityBehavior):
                 f"{self.slide_joint_name_cfg!r}, got {slide_names}"
             )
         self.slide_joint_id = int(slide_ids[0])
+        # A length-1 tensor keeps set_joint_position_target shaped (N, 1) on
+        # both Isaac and mjlab. A Python list collapses to (N,) on mjlab.
+        self._door_joint_ids = torch.tensor(
+            [self.door_joint_id], device=self.device, dtype=torch.long
+        )
+        self._slide_joint_ids = torch.tensor(
+            [self.slide_joint_id], device=self.device, dtype=torch.long
+        )
+        self._handle_joint_ids = torch.tensor(
+            [self.handle_joint_id], device=self.device, dtype=torch.long
+        )
 
         limits = self.asset.data.joint_pos_limits[0, self.door_joint_id]
         self._door_range_lo = float(limits[0].item())
@@ -206,6 +237,8 @@ class DoorBehavior(EntityBehavior):
             dtype=torch.long,
         )
         self._gains_dirty = True
+        self._expand_mjlab_model_fields()
+        self._cache_mjlab_pd_actuators()
         self._apply_lock_state()
 
     # ------------------------------------------------------------------
@@ -317,7 +350,12 @@ class DoorBehavior(EntityBehavior):
 
     @override
     def pre_step(self, substep: int) -> None:
-        """Hold locked hinges and unused slide/hinge DOFs; keep slide handles vertical."""
+        """Hold locked hinges and unused slide/hinge DOFs.
+
+        Slide handles are held vertical. Push/pull handles rest horizontal.
+        The slide target has to be cleared on resample, or the return spring
+        stands a hinge lever back up.
+        """
         del substep
         assert self.locked is not None and self.open_dir is not None
         if self._gains_dirty:
@@ -328,23 +366,23 @@ class DoorBehavior(EntityBehavior):
             ids = hold_hinge.nonzero().squeeze(-1)
             zeros = torch.zeros(ids.numel(), 1, device=self.device)
             self.asset.set_joint_position_target(
-                zeros, joint_ids=[self.door_joint_id], env_ids=ids
+                zeros, joint_ids=self._door_joint_ids, env_ids=ids
             )
         hold_slide = ~slide
         if hold_slide.any():
             ids = hold_slide.nonzero().squeeze(-1)
             zeros = torch.zeros(ids.numel(), 1, device=self.device)
             self.asset.set_joint_position_target(
-                zeros, joint_ids=[self.slide_joint_id], env_ids=ids
+                zeros, joint_ids=self._slide_joint_ids, env_ids=ids
             )
-        if slide.any():
-            ids = slide.nonzero().squeeze(-1)
-            vertical = torch.full(
-                (ids.numel(), 1), SLIDE_HANDLE_ANGLE, device=self.device
-            )
-            self.asset.set_joint_position_target(
-                vertical, joint_ids=[self.handle_joint_id], env_ids=ids
-            )
+        handle_target = torch.where(
+            slide,
+            torch.full((self.num_envs,), SLIDE_HANDLE_ANGLE, device=self.device),
+            torch.zeros(self.num_envs, device=self.device),
+        ).unsqueeze(-1)
+        self.asset.set_joint_position_target(
+            handle_target, joint_ids=self._handle_joint_ids
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -462,19 +500,19 @@ class DoorBehavior(EntityBehavior):
             )
         elif self.env.backend == "mjlab":
             self._mjlab_write_door_pd_gains(
-                env_ids, stiff.squeeze(-1), damp.squeeze(-1), "door_joint"
+                env_ids, stiff.squeeze(-1), damp.squeeze(-1), self.door_joint_name_cfg
             )
             self._mjlab_write_door_pd_gains(
                 env_ids,
                 slide_stiff.squeeze(-1),
                 slide_damp.squeeze(-1),
-                "door_slide_joint",
+                self.slide_joint_name_cfg,
             )
             self._mjlab_write_door_pd_gains(
                 env_ids,
                 handle_kp.squeeze(-1),
                 handle_kd.squeeze(-1),
-                "handle_joint",
+                self.handle_joint_name_cfg,
             )
 
         self._gains_dirty = False
@@ -497,6 +535,46 @@ class DoorBehavior(EntityBehavior):
         hi = torch.where(neg, torch.zeros_like(hi), hi)
         return torch.stack((lo, hi), dim=-1).unsqueeze(1)
 
+    _MJLAB_MODEL_FIELDS = ("jnt_range", "actuator_gainprm", "actuator_biasprm")
+
+    def _expand_mjlab_model_fields(self) -> None:
+        """Expand per-env MuJoCo fields once, before the first lock write.
+
+        ``expand_model_fields`` leaves a 1-world model at leading size 1.
+        A batched sim must come back with one row per environment.
+        """
+        if self.env.backend != "mjlab":
+            return
+        from active_adaptation.envs.mdp.randomizations.common import (
+            _mjlab_expand_model_fields,
+        )
+
+        fields = self._MJLAB_MODEL_FIELDS
+        _mjlab_expand_model_fields(self.env, *fields)
+        sim = self.env.sim
+        expanded = getattr(sim, "expanded_fields", ())
+        missing = [field for field in fields if field not in expanded]
+        if missing:
+            raise RuntimeError(
+                f"DoorBehavior: mjlab did not expand model fields {missing}"
+            )
+        n = self.num_envs
+        for field in fields:
+            arr = getattr(sim.model, field)
+            leading = int(arr.shape[0])
+            if n == 1:
+                if leading != 1:
+                    raise RuntimeError(
+                        f"DoorBehavior: mjlab field {field!r} has leading dim "
+                        f"{leading}, expected 1 for a single environment"
+                    )
+                continue
+            if leading != n:
+                raise RuntimeError(
+                    f"DoorBehavior: mjlab field {field!r} has leading dim "
+                    f"{leading}, expected {n} after expansion"
+                )
+
     def _mjlab_write_jnt_range(
         self,
         env_ids: torch.Tensor,
@@ -504,45 +582,64 @@ class DoorBehavior(EntityBehavior):
         joint_id: int | None = None,
     ) -> None:
         """Write ``jnt_range`` for one door joint (mjlab expanded model)."""
-        from active_adaptation.envs.mdp.randomizations.common import (
-            _mjlab_expand_model_fields,
-        )
-
-        _mjlab_expand_model_fields(self.env, "jnt_range")
         model = self.env.sim.model
         local_id = self.door_joint_id if joint_id is None else joint_id
         jid = local_id
         if hasattr(self.asset, "indexing") and hasattr(self.asset.indexing, "joint_ids"):
             jid = int(self.asset.indexing.joint_ids[local_id].item())
-        model.jnt_range[env_ids.cpu(), jid, :] = limits_m2.detach().cpu()
+        model.jnt_range[env_ids, jid, :] = limits_m2.detach()
+
+    def _cache_mjlab_pd_actuators(self) -> None:
+        """Map each door joint to its global BuiltinPd actuator ids.
+
+        ``actuator_names`` is this entity only. ``gainprm`` indexes the whole
+        sim, with the robot's actuators first, so the local name index is not
+        the write index. Resolved once at init.
+        """
+        self._mjlab_pd_ids = {}
+        if self.env.backend != "mjlab":
+            return
+        names = tuple(self.asset.actuator_names)
+        ctrl_ids = self.asset.indexing.ctrl_ids
+        for joint_name in (
+            self.door_joint_name_cfg,
+            self.slide_joint_name_cfg,
+            self.handle_joint_name_cfg,
+        ):
+            try:
+                pos_i = next(
+                    i for i, n in enumerate(names) if n.endswith(f"{joint_name}_pd_pos")
+                )
+                vel_i = next(
+                    i for i, n in enumerate(names) if n.endswith(f"{joint_name}_pd_vel")
+                )
+            except StopIteration as exc:
+                raise RuntimeError(
+                    f"DoorBehavior: mjlab has no BuiltinPd actuators for {joint_name!r}. "
+                    f"Known actuators: {names}"
+                ) from exc
+            self._mjlab_pd_ids[joint_name] = (
+                int(ctrl_ids[pos_i].item()),
+                int(ctrl_ids[vel_i].item()),
+            )
 
     def _mjlab_write_door_pd_gains(
         self,
         env_ids: torch.Tensor,
         kp: torch.Tensor,
         kd: torch.Tensor,
-        joint_name: str = "door_joint",
+        joint_name: str,
     ) -> None:
-        """Best-effort: set BuiltinPd position/velocity actuator gains."""
-        from active_adaptation.envs.mdp.randomizations.common import (
-            _mjlab_expand_model_fields,
-        )
-
-        names = list(getattr(self.asset, "actuator_names", ()))
-        try:
-            pos_i = next(i for i, n in enumerate(names) if n.endswith(f"{joint_name}_pd_pos"))
-            vel_i = next(i for i, n in enumerate(names) if n.endswith(f"{joint_name}_pd_vel"))
-        except StopIteration:
-            return
-        _mjlab_expand_model_fields(self.env, "actuator_gainprm", "actuator_biasprm")
+        """Set BuiltinPd position/velocity gains for one door joint."""
+        pos_id, vel_id = self._mjlab_pd_ids[joint_name]
         model = self.env.sim.model
-        # MuJoCo position actuator: gainprm[0]=kp, biasprm[1]=-kp.
-        env_cpu = env_ids.detach().cpu()
-        kp_cpu = kp.detach().cpu()
-        kd_cpu = kd.detach().cpu()
-        model.actuator_gainprm[env_cpu, pos_i, 0] = kp_cpu
-        model.actuator_biasprm[env_cpu, pos_i, 1] = -kp_cpu
-        model.actuator_gainprm[env_cpu, vel_i, 0] = kd_cpu
+        # Position: force = kp * ctrl + biasprm[1] * q, with biasprm[1] = -kp.
+        # Velocity: force = kd * ctrl + biasprm[2] * qvel, with biasprm[2] = -kd.
+        # The return torque at ctrl = 0 comes from the bias terms.
+        model.actuator_gainprm[env_ids, pos_id, 0] = kp.detach()
+        model.actuator_biasprm[env_ids, pos_id, 1] = -kp.detach()
+        model.actuator_gainprm[env_ids, vel_id, 0] = kd.detach()
+        model.actuator_biasprm[env_ids, vel_id, 2] = -kd.detach()
 
 
 __all__ = [

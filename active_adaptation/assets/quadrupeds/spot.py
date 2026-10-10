@@ -115,7 +115,13 @@ def _mjlab_collisions():
             solref=(0.004, 1),
             condim={_FOOT_GEOM: 6, ".*": 1},
             priority={_FOOT_GEOM: 1, ".*": 0},
-            friction={_FOOT_GEOM: (0.8, 0.02, 0.01)},
+            friction={_FOOT_GEOM: (1.0, 0.02, 0.01)},
+            # The MJCF ramps impedance over the whole 36 mm radius, so the
+            # shin mesh reaches the ground. A rubber pad stiffens in a few mm.
+            solimp={_FOOT_GEOM: (0.9, 0.95, 0.003)},
+            # Inflate the sphere so force starts 5 mm before geometric contact.
+            # gap stays 0: the margin band is an active contact, not a detection buffer.
+            margin={_FOOT_GEOM: 0.005},
         ),
     )
 

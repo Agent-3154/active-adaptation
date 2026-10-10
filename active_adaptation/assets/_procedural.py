@@ -100,8 +100,9 @@ def _add_bar_handle(
     handle_box_size: Sequence[float] | None,
     y: float,
     rgba,
+    x_center: float = 0.0,
 ) -> float:
-    """Add a horizontal bar handle centered at ``(0, y, 0)``, long axis **+X**.
+    """Add a horizontal bar handle, long axis **+X**, centered at ``(x_center, y, 0)``.
 
     Returns the **Y half-extent** of the geom (capsule radius or box half-depth)
     so callers can place grasp frames.
@@ -110,13 +111,14 @@ def _add_bar_handle(
 
     shape = _parse_handle_shape(shape)
     half_hl = 0.5 * float(handle_length)
+    xc = float(x_center)
     if shape == "capsule":
         r = float(handle_radius)
         _add_capsule_leg(
             body,
             name=name,
             radius=r,
-            fromto=[-half_hl, y, 0.0, half_hl, y, 0.0],
+            fromto=[xc - half_hl, y, 0.0, xc + half_hl, y, 0.0],
             rgba=rgba,
         )
         return r
@@ -130,7 +132,7 @@ def _add_bar_handle(
         name=name,
         type=mujoco.mjtGeom.mjGEOM_BOX,
         size=(hx, hy, hz),
-        pos=(0.0, y, 0.0),
+        pos=(xc, y, 0.0),
         rgba=rgba,
     )
     return hy
@@ -184,7 +186,13 @@ def _usd_apply_geom_rgba(stage, geom_path: str, rgba) -> None:
 
 
 def _usd_create_capsule(stage, path: str, radius: float, fromto):
-    """Mirror ``metamorphosis.utils.usd_utils.create_capsule``."""
+    """USD capsule whose spine follows ``fromto``.
+
+    UsdGeomCapsule defaults to local **+X**, and Isaac draws that axis even
+    when ``axis`` is set to Z. Authoring on +X keeps the lever along the
+    MuJoCo bar. ``height`` is the cylindrical section only (caps are extra),
+    matching a MuJoCo ``fromto`` between sphere centers.
+    """
     import numpy as np
     from pxr import UsdGeom, Gf
     from scipy.spatial.transform import Rotation as R
@@ -198,20 +206,20 @@ def _usd_create_capsule(stage, path: str, radius: float, fromto):
     if length < 1e-9:
         raise ValueError(f"Degenerate capsule fromto: {fromto}")
     direction = direction / length
-    # Local +Z → ``direction``: rotvec axis is ``Z × direction`` (not the reverse).
-    # The reverse mapped 45° board bars onto the other diagonal; ±X/±Z fromto
-    # still looked right because a 180° flip along the long axis is the same geom.
-    z_axis = np.array([0.0, 0.0, 1.0])
-    axis = np.cross(z_axis, direction)
+    x_axis = np.array([1.0, 0.0, 0.0])
+    axis = np.cross(x_axis, direction)
     axis_norm = float(np.linalg.norm(axis))
     if axis_norm < 1e-8:
-        # Parallel to +Z (or -Z)
-        orient = np.array([1.0, 0.0, 0.0, 0.0]) if direction[2] >= 0 else np.array([0.0, 1.0, 0.0, 0.0])
+        orient = (
+            np.array([1.0, 0.0, 0.0, 0.0])
+            if direction[0] >= 0
+            else np.array([0.0, 0.0, 1.0, 0.0])
+        )
     else:
-        angle = float(np.arccos(np.clip(np.dot(z_axis, direction), -1.0, 1.0)))
+        angle = float(np.arccos(np.clip(np.dot(x_axis, direction), -1.0, 1.0)))
         orient = R.from_rotvec(angle * (axis / axis_norm)).as_quat(scalar_first=True)
     translation = (fromto[:3] + fromto[3:]) * 0.5
-    capsule.CreateAxisAttr("Z")
+    capsule.CreateAxisAttr("X")
     capsule.CreateRadiusAttr(float(radius))
     capsule.CreateHeightAttr(length)
     add_prim.GetAttribute("xformOp:translate").Set(Gf.Vec3f(*translation))

@@ -27,8 +27,11 @@ class max_episode_length(Termination):
 
 
 class crash(Termination):
-    """
-    Terminate when a monitored link has been in **contact** long enough, optionally with random gating.
+    """Terminate when a monitored link has been in contact long enough.
+
+    Reads the sensor's ``current_contact_time``. Point ``sensor_name`` at a
+    contact sensor whose secondary is ``terrain`` so only ground contact is
+    timed. Door contact is absent from that sensor.
     """
 
     def __init__(
@@ -36,28 +39,35 @@ class crash(Termination):
         body_names_expr: str,
         t_thres: float = 0.0,
         prob: float = 1.0,
+        sensor_name: str = "contact_forces",
     ):
         super().__init__()
         self.body_names_expr = body_names_expr
         self.t_thres = t_thres
         self.prob = min(max(prob, 0.0), 1.0)
+        self.sensor_name = sensor_name
 
     @override
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.contact_sensor: ContactSensor = self.env.scene.sensors["contact_forces"]
+        self.contact_sensor: ContactSensor = self.env.scene.sensors[self.sensor_name]
         self.body_indices, self.body_names = find_sensor_bodies(
             self.asset, self.contact_sensor, self.body_names_expr
         )
         self.body_indices = torch.tensor(self.body_indices, device=self.device)
         self.data = self.contact_sensor.data
+        if self.data.current_contact_time is None:
+            raise RuntimeError(
+                f"crash sensor {self.sensor_name!r} has no current_contact_time. "
+                "Enable track_air_time on the contact sensor."
+            )
 
     def __repr__(self) -> str:
         return (
             f"crash(expr={self.body_names_expr!r}, t_thres={self.t_thres}, "
-            f"prob={self.prob}, bodies={self.body_names!r}, "
-            f"indices={self.body_indices.tolist()})"
+            f"prob={self.prob}, sensor={self.sensor_name!r}, "
+            f"bodies={self.body_names!r}, indices={self.body_indices.tolist()})"
         )
 
     def compute(self, termination: torch.Tensor):

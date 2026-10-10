@@ -283,8 +283,9 @@ def build_door_spec(
     - ``door_slide_joint``: prismatic along **X** (panel translates in its plane).
       Positive travel opens toward the latch; negative travel opens toward the hinge.
     - ``door_joint``: revolute about **+Z** at the left (-X) edge of the panel.
-    - ``handle_joint``: revolute about **+Y** (through the door) at the handle.
-      ``q = 0`` is a horizontal bar; ``q = +π/2`` stands the bar vertical.
+    - ``handle_joint``: revolute about **+Y** (through the door) at the **latch
+      end** of the lever, not its midpoint. ``q = 0`` leaves the bar horizontal,
+      extending toward the hinge (−X). ``q = +π/2`` stands that free end up.
 
     Object / frame frame: origin at floor under the opening center; **+Z** up,
     **+Y** through the door, **+X** along the width. ``door_dimensions`` is full
@@ -350,6 +351,8 @@ def build_door_spec(
         )
 
     spec = mujoco.MjSpec()
+    # MjSpec defaults to degrees. Hinge and handle ranges below are radians.
+    spec.compiler.degree = False
     frame = spec.worldbody.add_body(name="frame")
     frame.mass = 20.0
     frame.inertia = [1.0, 1.0, 1.0]
@@ -401,9 +404,9 @@ def build_door_spec(
         rgba=rgba_t,
     )
 
-    # Handle body at the latch; joint about +Y (through the door).
-    # Panel-frame handle position: frame (hx, 0, hz) → panel (hx - hinge_x, 0, hz).
-    handle_pos_panel = (hx - hinge_x, 0.0, hz)
+    # Lever pivot at the latch end of the bar. ``handle_position`` is still the
+    # bar center when closed; the joint sits half a length toward +X.
+    handle_pos_panel = (hx - hinge_x + 0.5 * hl, 0.0, hz)
     handle = panel.add_body(name="handle", pos=handle_pos_panel)
     handle.mass = 0.4
     handle.inertia = [0.01, 0.01, 0.01]
@@ -425,6 +428,7 @@ def build_door_spec(
             handle_box_size=handle_box_size,
             y=y,
             rgba=rgba_t,
+            x_center=-0.5 * hl,
         )
     return spec
 
@@ -1545,8 +1549,12 @@ def make_door(
             collisions=(
                 CollisionCfg(
                     geom_names_expr=(".*_collision",),
+                    # contype 1, conaffinity 0: hits the robot and the ground,
+                    # not the door's own frame. The panel sits in the jamb, so
+                    # self-contact holds a released hinge shut. Isaac turns
+                    # articulation self-collisions off for the same reason.
                     contype=1,
-                    conaffinity=1,
+                    conaffinity=0,
                     condim=3,
                     priority=0,
                     solref=(0.02, 1),
@@ -1574,6 +1582,7 @@ def make_door(
             GraspPose.for_door_handles(
                 door_thickness=door_dimensions_t[1],
                 handle_radius=float(handle_radius),
+                handle_length=float(handle_length),
                 handle_shape=shape,
                 handle_box_size=box_size_t,
                 handle_standoff=standoff,

@@ -130,17 +130,18 @@ class GraspPose(EntityBehavior):
         door_thickness: float,
         handle_radius: float,
         *,
+        handle_length: float = 0.16,
         handle_shape: str = "capsule",
         handle_box_size: Sequence[float] | None = None,
         handle_standoff: float = 0.0,
     ) -> "GraspPose":
         """One prescribed pose per handle face (**handle body frame**).
 
-        Bars are horizontal along **±X**. Grasp points sit on the handle axis so
-        ±Y jaws can straddle the thin cross-section. Approach is along ±Y toward
-        the handle origin; EEF **+X** = approach, **+Z** = bar axis (so finger
-        open ±Y is vertical). Callers should transform with the ``handle`` body
-        pose (not the articulation root) when the door moves.
+        The lever pivots at the body origin (its latch end) and the bar extends
+        toward **−X**. Grasp points sit on the bar center so ±Y jaws straddle
+        the thin cross-section. Approach is along ±Y; EEF **+X** = approach,
+        **+Z** = bar axis (so finger open ±Y is vertical). Callers should
+        transform with the ``handle`` body pose when the door moves.
 
         ``handle_shape`` / ``handle_box_size`` match ``dummy_door`` /
         ``dummy_drawer`` (capsule radius vs box half-depth along Y).
@@ -160,11 +161,13 @@ class GraspPose(EntityBehavior):
         else:
             y_half = float(handle_radius)
         y_off = 0.5 * float(door_thickness) + standoff + y_half
+        # Bar center is half a length toward the hinge from the pivot.
+        bar_x = -0.5 * float(handle_length)
         # Bar long axis = EEF up-hint → fingers close in ±Z (across the bar).
         bar_axis = torch.tensor([1.0, 0.0, 0.0])
         rows: list[list[float]] = []
         for y_sign, approach_y in ((+1.0, -1.0), (-1.0, +1.0)):
-            pos = torch.tensor([0.0, y_sign * y_off, 0.0])
+            pos = torch.tensor([bar_x, y_sign * y_off, 0.0])
             approach = torch.tensor([0.0, approach_y, 0.0])
             rot = _frame_x_approach_z_up(
                 approach.unsqueeze(0), bar_axis.unsqueeze(0)

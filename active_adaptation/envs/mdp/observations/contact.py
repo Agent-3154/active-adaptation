@@ -219,7 +219,7 @@ class contact_time(Observation):
     stance stays bounded. ``body_names`` is a regex on ``entity_name``.
     """
 
-    supported_backends = ("isaaclab", "mujoco", "motrix")
+    supported_backends = ("isaaclab", "mjlab", "mujoco", "motrix")
 
     def __init__(
         self,

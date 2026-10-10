@@ -267,11 +267,8 @@ def make_mjlab_cfg():
                 pattern=".*",
                 entity="robot",
             ),
-            secondary=ContactMatch(
-                mode="body",
-                pattern="terrain",
-                entity=None,
-            ),
+            # No secondary: finger–object contacts must show up in ``force``.
+            # Ground-only crash uses the task's ``ground_contact`` sensor.
             fields=("found", "force"),
             reduce="netforce",
             num_slots=1,
