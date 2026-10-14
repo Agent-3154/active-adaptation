@@ -108,6 +108,29 @@ class ReplayBuffer:
             key for key in self.observation_keys if key in stored_top
         )
         return self
+
+    def subsample_envs(self, fraction: float, seed: int = 0) -> ReplayBuffer:
+        """Keep ``fraction`` of the env axis.
+
+        Each column is a trajectory, so n-step segments and :meth:`compute_return`
+        stay valid. ``seed`` draws one permutation; a smaller fraction is a
+        prefix of that permutation, so the kept trajectories nest.
+        ``fraction == 1`` leaves storage unchanged.
+        """
+        if not 0.0 < float(fraction) <= 1.0:
+            raise ValueError(f"fraction must be in (0, 1], got {fraction}.")
+        n = self.num_envs
+        k = min(n, max(1, int(round(float(fraction) * n))))
+        if k == n:
+            return self
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed))
+        index = torch.randperm(n, generator=generator)[:k]
+        index, _ = torch.sort(index)
+        self._td = self._td[:, index].clone()
+        self.num_envs = int(self._td.shape[1])
+        self.mem_bytes = self.estimate_memory_nbytes()
+        return self
     
     def exclude_(self, *keys: str) -> ReplayBuffer:
         self._td = self._td.exclude(*keys, inplace=True, strict=True)
