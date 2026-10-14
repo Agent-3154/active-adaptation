@@ -32,6 +32,29 @@ def _reward_denominator(G_var: torch.Tensor, eps: float) -> torch.Tensor:
     return torch.sqrt(G_var + eps)
 
 
+def _require_group_axis(
+    values: torch.Tensor,
+    reward_dim: int,
+    *,
+    num_critics: int | None = None,
+) -> None:
+    """The trailing axis is the reward groups, not an action-sample axis of the same length."""
+    if values.ndim < 1 or values.shape[-1] != reward_dim:
+        raise ValueError(
+            f"expected the last dimension to be {reward_dim} reward groups, "
+            f"got shape {tuple(values.shape)}. "
+            "Denormalize per-group values, then sum the groups."
+        )
+    if num_critics is None:
+        return
+    if values.ndim < 2 or values.shape[-2] != num_critics:
+        raise ValueError(
+            f"expected shape [..., num_critics={num_critics}, groups={reward_dim}], "
+            f"got {tuple(values.shape)}. "
+            "Do not denormalize after averaging critics or summing groups."
+        )
+
+
 def _scale_reward(
     rewards: torch.Tensor,
     G_var: torch.Tensor,
@@ -128,6 +151,8 @@ class RewardNormalizer:
         self.G_rms.update(self.G_r)
 
     def normalize_rewards(self, rewards: torch.Tensor) -> torch.Tensor:
+        if self.reward_dim > 1:
+            _require_group_axis(rewards, self.reward_dim)
         return _scale_reward(
             rewards=rewards,
             G_var=self.G_rms.var,
@@ -138,15 +163,30 @@ class RewardNormalizer:
         """Scalar or per-group S with ``r_normalized = r_raw / S``."""
         return _reward_denominator(self.G_rms.var, self.epsilon)
 
-    def denormalize_return_values(self, values: torch.Tensor) -> torch.Tensor:
+    def denormalize_return_values(
+        self,
+        values: torch.Tensor,
+        *,
+        num_critics: int | None = None,
+    ) -> torch.Tensor:
         """Map Q trained on normalized rewards to PPO effective-horizon log scale.
 
         Undoes return-std reward scaling (``* S``) then multiplies by ``(1 - gamma)``
         so logged values match on-policy critics trained with
         ``reward * (1 - gamma)``. Without a normalizer, off-policy already uses
         that reward scale and needs no conversion.
+
+        With more than one reward group, the last dimension of ``values`` must
+        be that group axis. Pass ``num_critics`` when a critic axis sits just
+        before it, so a tensor of action samples whose length equals the group
+        count cannot take the scale.
         """
         s = self.reward_denominator().to(device=values.device, dtype=values.dtype)
+        if self.reward_dim == 1:
+            s = s.reshape(())
+        else:
+            _require_group_axis(values, self.reward_dim, num_critics=num_critics)
+            s = s.view(*([1] * (values.ndim - 1)), self.reward_dim)
         return values * s * (1.0 - float(self.gamma))
 
     def state_dict(self) -> dict[str, Any]:
