@@ -4,7 +4,10 @@ Attach via ``AssetSpec(behaviors=(DoorBehavior(), ...))``. Lookup with
 ``env.require_behavior("door.door")`` when the YAML object key is ``door``.
 
 **Locking:** while locked, the hinge (``door_joint``) is held at ``0`` with high
-stiffness. Unlock when ``|handle_joint|`` exceeds the threshold (default 30°).
+stiffness. A push or pull door unlocks when ``|handle_joint|`` exceeds the
+threshold (default 30°). It locks again only when the hinge is within
+``relock_hinge_angle`` of shut (default 0.05 rad) and the handle has fallen
+back below that threshold. Slide modes stay unlocked.
 ``lock_with_limits`` (default off) also rewrites joint limits: a held hinge is
 clamped to ±eps, an unlocked pull may only swing toward +Y, an unlocked push
 only toward −Y, and a slide joint may travel only along its open direction.
@@ -137,6 +140,7 @@ class DoorBehavior(EntityBehavior):
         handle_stiffness: float = 8.0,
         handle_damping: float = 2.0,
         handle_unlock_threshold_deg: float = 30.0,
+        relock_hinge_angle: float = 0.05,
         open_direction: OpenDirection = "pull",
         initially_locked: bool = True,
         lock_with_limits: bool = False,
@@ -155,6 +159,7 @@ class DoorBehavior(EntityBehavior):
         self.handle_stiffness = float(handle_stiffness)
         self.handle_damping = float(handle_damping)
         self.handle_unlock_threshold = math.radians(float(handle_unlock_threshold_deg))
+        self.relock_hinge_angle = float(relock_hinge_angle)
         self.default_open_direction = _parse_open_direction(open_direction)
         self.initially_locked = bool(initially_locked)
         if abs(self.default_open_direction) == DIR_SLIDE_POS:
@@ -333,20 +338,22 @@ class DoorBehavior(EntityBehavior):
 
     @override
     def update(self, tensordict: Any = None) -> None:
-        """Auto-unlock hinged doors when the handle rotates past the threshold.
+        """Unlock and re-lock push/pull doors. Slide modes stay unlocked.
 
-        Slide mode is always unlocked; the vertical handle is a stiff grip.
+        Unlock when the handle passes the threshold. Lock again only when the
+        hinge is nearly shut and the handle has fallen back below it.
         """
         assert self.locked is not None and self.open_dir is not None
         hinged = ~is_slide_mode(self.open_dir)
-        unlocked_by_handle = (
-            self.handle_joint_pos.abs() >= self.handle_unlock_threshold
-        )
-        newly = self.locked & hinged & unlocked_by_handle
-        if newly.any():
-            self.locked = self.locked & ~newly
+        handle_open = self.handle_joint_pos.abs() >= self.handle_unlock_threshold
+        hinge_shut = self.door_joint_pos.abs() <= self.relock_hinge_angle
+        newly_unlock = self.locked & hinged & handle_open
+        newly_lock = ~self.locked & hinged & hinge_shut & ~handle_open
+        changed = newly_unlock | newly_lock
+        if changed.any():
+            self.locked = (self.locked & ~newly_unlock) | newly_lock
             self._gains_dirty = True
-            self._apply_lock_state(newly.nonzero().squeeze(-1))
+            self._apply_lock_state(changed.nonzero().squeeze(-1))
 
     @override
     def pre_step(self, substep: int) -> None:
