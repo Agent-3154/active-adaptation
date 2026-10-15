@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
+import torch
+
 from active_adaptation.registry import Registry
 
 registry = Registry.instance()
@@ -151,6 +153,60 @@ def _isaac_primary_and_filters(
     return _isaac_prim_path(sec_entity, None), [robot_filter]
 
 
+def _isaac_filtered_contact_sensor_cls():
+    """Isaac contact sensor whose air/contact timers follow the filter.
+
+    Isaac Lab times ``current_contact_time`` from ``net_forces_w``, so a
+    terrain filter still counts a door or chair hit. Replay that update from
+    ``force_matrix_w`` when ``filter_prim_paths_expr`` is set.
+    """
+    from isaaclab.sensors.contact_sensor import ContactSensor
+
+    class FilteredContactSensor(ContactSensor):
+        def _update_buffers_impl(self, env_ids):
+            filtered = bool(self.cfg.track_air_time) and len(self.cfg.filter_prim_paths_expr) != 0
+            if filtered:
+                saved_ids = slice(None) if len(env_ids) == self._num_envs else env_ids
+                prev_air = self._data.current_air_time[saved_ids].clone()
+                prev_contact = self._data.current_contact_time[saved_ids].clone()
+                prev_last_air = self._data.last_air_time[saved_ids].clone()
+                prev_last_contact = self._data.last_contact_time[saved_ids].clone()
+            super()._update_buffers_impl(env_ids)
+            if not filtered:
+                return
+            data = self._data
+            data.current_air_time[saved_ids] = prev_air
+            data.current_contact_time[saved_ids] = prev_contact
+            data.last_air_time[saved_ids] = prev_last_air
+            data.last_contact_time[saved_ids] = prev_last_contact
+            # (N, B, M, 3) → a body is in contact if any filtered partner exceeds the threshold.
+            is_contact = (
+                data.force_matrix_w[saved_ids].norm(dim=-1).amax(dim=-1) > self.cfg.force_threshold
+            )
+            elapsed_time = self._timestamp[saved_ids] - self._timestamp_last_update[saved_ids]
+            elapsed = elapsed_time.unsqueeze(-1)
+            is_first_contact = (data.current_air_time[saved_ids] > 0) & is_contact
+            is_first_detached = (data.current_contact_time[saved_ids] > 0) & ~is_contact
+            data.last_air_time[saved_ids] = torch.where(
+                is_first_contact,
+                data.current_air_time[saved_ids] + elapsed,
+                data.last_air_time[saved_ids],
+            )
+            data.current_air_time[saved_ids] = torch.where(
+                ~is_contact, data.current_air_time[saved_ids] + elapsed, 0.0
+            )
+            data.last_contact_time[saved_ids] = torch.where(
+                is_first_detached,
+                data.current_contact_time[saved_ids] + elapsed,
+                data.last_contact_time[saved_ids],
+            )
+            data.current_contact_time[saved_ids] = torch.where(
+                is_contact, data.current_contact_time[saved_ids] + elapsed, 0.0
+            )
+
+    return FilteredContactSensor
+
+
 def contact_sensor(
     backend: str,
     name: str,
@@ -238,6 +294,7 @@ def contact_sensor(
         )
         return ContactSensorCfg(
             prim_path=prim_path,
+            class_type=_isaac_filtered_contact_sensor_cls(),
             track_air_time=track_air_time,
             history_length=history_length,
             filter_prim_paths_expr=filter_paths,

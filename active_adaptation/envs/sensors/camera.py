@@ -16,7 +16,7 @@ import torch
 
 from active_adaptation.envs.mesh_registry import MeshRegistry, target_entity_name
 from active_adaptation.registry import Registry
-from active_adaptation.utils.math import quat_from_euler_xyz, quat_mul, quat_rotate
+from active_adaptation.utils.math import quat_from_euler_xyz, quat_mul, quat_rotate, yaw_quat
 
 registry = Registry.instance()
 
@@ -203,10 +203,20 @@ class LambertRaycastCameraSensor:
         body_id: int,
         offset_pos: torch.Tensor,
         offset_rpy: torch.Tensor,
+        *,
+        yaw_only: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Body mount + FLU offset → OpenCV ``(cam_pos_w, cam_quat_w)``."""
+        """Body mount + FLU offset → OpenCV ``(cam_pos_w, cam_quat_w)``.
+
+        ``yaw_only`` drops the body's pitch and roll. The offset and the
+        camera's look direction then stay level, and only yaw tracks the body.
+        ``offset_rpy`` is still applied, so a fixed look-down pitch is a
+        camera setting, not the robot's tilt.
+        """
         body_pos_w = entity.data.body_link_pos_w[:, body_id]
         body_quat_w = entity.data.body_link_quat_w[:, body_id]
+        if yaw_only:
+            body_quat_w = yaw_quat(body_quat_w)
         offset_pos_t = offset_pos
         mount_quat = quat_mul(quat_from_euler_xyz(offset_rpy), self.mount2opencv)
         offset_w = quat_rotate(body_quat_w, offset_pos_t.unsqueeze(0))

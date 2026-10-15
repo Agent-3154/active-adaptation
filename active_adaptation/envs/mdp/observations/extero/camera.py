@@ -368,6 +368,10 @@ class raycast_camera(Observation):
               body_name: gripper_base
               data_type: depth
               dtype: float16
+
+    ``yaw_only: true`` is a chase camera: the mount position and heading follow
+    the body, but pitch and roll are dropped. ``offset_rpy_deg`` is then a
+    fixed tilt relative to the horizon (negative pitch looks down).
     """
 
     supported_backends = ("isaaclab", "mjlab")
@@ -388,6 +392,7 @@ class raycast_camera(Observation):
         entity: str = "robot",
         offset_pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
         offset_rpy_deg: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        yaw_only: bool = False,
         frequency: float = 50.0,
         data_type: str | Sequence[str] = "depth",
         dtype: str = "float32",
@@ -420,6 +425,7 @@ class raycast_camera(Observation):
         self.entity_name = entity
         self.offset_pos = tuple(float(x) for x in offset_pos)
         self.offset_rpy_deg = tuple(float(x) for x in offset_rpy_deg)
+        self.yaw_only = bool(yaw_only)
         self.data_types = data_types
         self.frequency = frequency
         self._image_dtype = self._DTYPE_ALIASES[dtype_key]
@@ -543,6 +549,7 @@ class raycast_camera(Observation):
             self._body_id,
             self.offset_pos,
             self.offset_rpy,
+            yaw_only=self.yaw_only,
         )
         self._cam_pos_w = torch.where(self._should_render, came_pos_w, self._cam_pos_w)
         self._cam_quat_w = torch.where(self._should_render, came_quat_w, self._cam_quat_w)

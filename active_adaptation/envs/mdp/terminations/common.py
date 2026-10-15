@@ -30,8 +30,9 @@ class crash(Termination):
     """Terminate when a monitored link has been in contact long enough.
 
     Reads the sensor's ``current_contact_time``. Point ``sensor_name`` at a
-    contact sensor whose secondary is ``terrain`` so only ground contact is
-    timed. Door contact is absent from that sensor.
+    contact sensor whose secondary is ``terrain``. On mjlab that timer follows
+    the terrain match. On Isaac a filtered sensor times ``force_matrix_w``
+    rather than ``net_forces_w``, so a door or chair hit does not count.
     """
 
     def __init__(
