@@ -6,6 +6,8 @@ dependencies = [
     # Omit [render] by default: nvdiffrast builds CUDA extensions and needs nvcc.
     # Opt in: uv sync --project venv/isaac51 --extra render
     "active-adaptation",
+    "tensordict",
+    "torchrl",
     # Keep this pinned to the Isaac 5.1-compatible version.
     "isaacsim[all,extscache]==5.1.0",
     "nicegui>=3.2.0",

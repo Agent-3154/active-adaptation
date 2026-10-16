@@ -1209,9 +1209,25 @@ class SACRolloutPolicy(TensorDictModuleBase):
                 sample = transform(sample)
 
         if self.critic and self.Q is not None:
-            qs = self.Q.get_values(obs, sample).mean(dim=-1)
-            if self.reward_normalizer is not None:
-                qs = self.reward_normalizer.denormalize_return_values(qs)
+            q_grouped = self.Q.get_values(obs, sample)
+            num_groups = int(getattr(self.Q, "num_groups", 1))
+            if (
+                self.reward_normalizer is not None
+                and num_groups > 1
+                and q_grouped.shape[-1] == num_groups
+            ):
+                # Denormalize each reward group, then sum groups and average critics.
+                num_critics = q_grouped.shape[-2] if q_grouped.ndim >= 3 else None
+                q_den = self.reward_normalizer.denormalize_return_values(
+                    q_grouped, num_critics=num_critics
+                )
+                qs = q_den.sum(dim=-1)
+                if qs.ndim > 1:
+                    qs = qs.mean(dim=-1)
+            else:
+                qs = q_grouped.mean(dim=-1) if q_grouped.ndim > 1 else q_grouped
+                if self.reward_normalizer is not None:
+                    qs = self.reward_normalizer.denormalize_return_values(qs)
             tensordict["Q_value"] = qs
 
         tensordict[ACTION_KEY] = sample

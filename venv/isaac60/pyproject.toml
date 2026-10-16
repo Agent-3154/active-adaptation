@@ -4,12 +4,22 @@ version = "0.1.0"
 requires-python = "==3.12.*"
 dependencies = [
     "active-adaptation",
+    "tensordict",
+    "torchrl",
     # Keep this pinned to the Isaac 6.0-compatible version.
     "warp-lang",
 ]
 
 [tool.uv.sources]
 active-adaptation = { path = "../..", editable = true }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.uv]
 package = false
@@ -17,4 +27,7 @@ override-dependencies = [
     # assetx depends on usd-core, whose pxr would shadow Kit's. Cooking converts
     # USD in an isolated env, so the host never needs it.
     "usd-core ; sys_platform == 'never'",
+    "torch==2.11",
+    "torchaudio==2.11",
+    "torchvision==0.26.0",
 ]

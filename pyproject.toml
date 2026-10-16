@@ -20,10 +20,6 @@ dependencies = [
     "onnxruntime",
     "onnxscript",
     "jaxtyping",
-    "tensordict",
-    "torchrl",
-    "torch==2.11",
-    "torchvision==0.26.0",
     "imageio",
     "linuxfd",
     "pdbpp",
@@ -75,11 +71,6 @@ find = { where = ["."], include = [
 reportIncompatibleMethodOverride = "error"
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[[tool.uv.index]]
 name = "fvdb"
 url = "https://d36m13axqqhiit.cloudfront.net/simple"
 explicit = true
@@ -87,12 +78,11 @@ explicit = true
 [tool.uv]
 # nvdiffrast compiles CUDA extensions against the env's torch (official install).
 no-build-isolation-package = ["nvdiffrast"]
+# simple-raycaster and the render extra depend on torch. Each backend pins its
+# own build; the root tooling env must not resolve a wheel.
+exclude-dependencies = ["torch", "torchvision", "torchaudio"]
 
 [tool.uv.sources]
-# Force CUDA 12.8-compatible PyTorch wheels instead of default cu13x builds.
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
 fvdb-core = { index = "fvdb" }
 nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", rev = "253ac4fcea7de5f396371124af597e6cc957bfae" }
 simple-raycaster = { git = "https://github.com/btx0424/simple-raycaster.git", rev = "a217433ea18bd1b897d6cd1137a228c517befa5c" }

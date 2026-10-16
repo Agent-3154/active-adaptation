@@ -45,9 +45,9 @@ DEFAULT_EVAL_KEYS = [
 class IsaacAppConfig:
     """Isaac Lab AppLauncher settings (resolved from parent config)."""
 
-    headless: str = "${..headless}"
+    headless: bool = "${..headless}"
     """Mirror ``headless``; passed to Isaac Lab's AppLauncher."""
-    enable_cameras: str = "${..eval_render}"
+    enable_cameras: bool = "${..eval_render}"
     """Mirror ``eval_render``; enables camera sensors when rendering eval video."""
 
 

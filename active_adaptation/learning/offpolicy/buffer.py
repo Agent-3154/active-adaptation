@@ -144,8 +144,16 @@ class ReplayBuffer:
         *,
         observation_keys: Sequence[str],
         fake_bootstrap: bool = False,
+        keys: Sequence | None = None,
     ) -> ReplayBuffer:
-        """Build ring storage ``[max_size, num_envs]`` from a one-step template and construct the buffer."""
+        """Build ring storage ``[max_size, num_envs]`` from a one-step template and construct the buffer.
+
+        ``keys`` is applied before the ring is allocated. Missing names are
+        skipped, matching :meth:`retain_present`.
+        """
+        if keys is not None:
+            fake_tensordict = _select_present(fake_tensordict, keys)
+            observation_keys = _observation_keys_in(fake_tensordict, observation_keys)
         td = fake_tensordict.expand(max_size, *fake_tensordict.shape).clone()
         return cls(
             td,
@@ -163,12 +171,13 @@ class ReplayBuffer:
         observation_keys: Sequence[str],
         max_size: Optional[int] = None,
         fake_bootstrap: bool = False,
+        keys: Sequence | None = None,
     ) -> ReplayBuffer:
         """Load a rollout archive on CPU.
 
-        Archives are written from CPU. ``map_location`` is not a parameter:
-        drop unused fields with :meth:`retain_present`, then move the ring
-        with :meth:`to`.
+        Archives are written from CPU. Pass ``keys`` to drop everything else
+        before the ring is cloned. ``map_location`` is not a parameter: move
+        the ring with :meth:`to` after this returns.
 
         The file is a ``torch.save`` dict with ``format_version``, ``stacked``
         (TensorDict batch ``[T, num_envs]``), and optionally ``writer_max_size``.
@@ -186,7 +195,9 @@ class ReplayBuffer:
             raise ValueError(
                 f"Unsupported rollout format_version={version!r}; expected {ROLLOUT_FORMAT_VERSION}."
             )
-        stacked: TensorDict = payload["stacked"]
+        stacked: TensorDict = payload.pop("stacked")
+        writer_max = int(payload.pop("writer_max_size", stacked.batch_size[0]))
+        del payload
         if len(stacked.batch_size) < 2:
             raise ValueError(
                 f"Expected stacked transitions with batch [T, num_envs], got batch_size={stacked.batch_size}."
@@ -194,8 +205,10 @@ class ReplayBuffer:
         T = int(stacked.batch_size[0])
         if T < 1:
             raise ValueError("Rollout archive contains zero transitions.")
+        if keys is not None:
+            stacked = _select_present(stacked, keys)
+            observation_keys = _observation_keys_in(stacked, observation_keys)
 
-        writer_max = int(payload.get("writer_max_size", T))
         ring_cap = max_size if max_size is not None else max(writer_max, T)
 
         take = min(T, ring_cap)
@@ -205,6 +218,7 @@ class ReplayBuffer:
             row0 = stacked[0]
             td = row0.expand(ring_cap, *row0.shape).clone()
             td[:take] = stacked[:take]
+        del stacked
         ptr = take % ring_cap
 
         return cls(
@@ -217,7 +231,10 @@ class ReplayBuffer:
 
     def push(self, tensordict: TensorDict):
         wrow = self._ptr
-        self._td[wrow] = tensordict.to(self.device)
+        # A step carries every env field. Writing it whole would allocate those
+        # fields across the ring, including cameras this buffer did not keep.
+        row = tensordict.select(*self._td.keys(True, True), strict=False)
+        self._td[wrow] = row.to(self.device)
         self._ptr = (self._ptr + 1) % self._td.shape[0]
         self._current_size = min(self._current_size + 1, self.max_size)
 
@@ -552,6 +569,27 @@ class ReplayBuffer:
 
 def _as_key(key) -> tuple:
     return key if isinstance(key, tuple) else (key,)
+
+
+def _select_present(td: TensorDict, keys) -> TensorDict:
+    """Keep ``keys`` that ``td`` stores. Missing names are skipped."""
+    available = set(td.keys(True, True))
+    keep = [key for key in keys if _key_stored(key, available)]
+    if not keep:
+        raise RuntimeError(
+            "None of the requested keys are present in the replay buffer. "
+            f"Requested {list(keys)[:8]}, stored {list(available)[:8]}."
+        )
+    return td.select(*keep, strict=False)
+
+
+def _observation_keys_in(td: TensorDict, observation_keys: Sequence[str]) -> tuple:
+    """Observation names still stored both at the root and under ``next``."""
+    top = set(td.keys())
+    if "next" not in top:
+        return tuple(key for key in observation_keys if key in top)
+    under_next = set(td.get("next").keys())
+    return tuple(key for key in observation_keys if key in top and key in under_next)
 
 
 def _key_stored(key, available: set) -> bool:

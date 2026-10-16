@@ -35,6 +35,9 @@ class crash(Termination):
     rather than ``net_forces_w``, so a door or chair hit does not count.
     """
 
+    in_keys = ["crash_active"]
+    out_keys = None
+
     def __init__(
         self,
         body_names_expr: str,
@@ -63,6 +66,13 @@ class crash(Termination):
                 f"crash sensor {self.sensor_name!r} has no current_contact_time. "
                 "Enable track_air_time on the contact sensor."
             )
+        self._active: torch.Tensor | None = None
+
+    def _update(self, crash_active: torch.Tensor | None) -> None:
+        if crash_active is None:
+            self._active = None
+            return
+        self._active = crash_active.reshape(self.num_envs, 1).bool()
 
     def __repr__(self) -> str:
         return (
@@ -74,6 +84,8 @@ class crash(Termination):
     def compute(self, termination: torch.Tensor):
         contact_time = self.data.current_contact_time[:, self.body_indices]
         terminated = (contact_time > self.t_thres).any(1, True)
+        if self._active is not None:
+            terminated = terminated & self._active
         if self.prob < 1.0:
             terminated = terminated & (torch.rand(self.num_envs, 1, device=self.device) <= self.prob)
             discount = torch.where(terminated, 1.0 - self.prob, 1.0)
@@ -124,6 +136,10 @@ class undesired_contact(Termination):
 
 
 class fall_over(Termination):
+
+    in_keys = ["fall_over_active"]
+    out_keys = None
+
     def __init__(
         self,
         xy_thres: float = 0.8,
@@ -137,10 +153,19 @@ class fall_over(Termination):
     def _initialize(self, env: "_EnvBase"):
         super()._initialize(env)
         self.asset: IsaacEntity = self.env.scene[self.entity_name]
+        self._active: torch.Tensor | None = None
+
+    def _update(self, fall_over_active: torch.Tensor | None) -> None:
+        if fall_over_active is None:
+            self._active = None
+            return
+        self._active = fall_over_active.reshape(self.num_envs, 1).bool()
 
     def compute(self, termination: torch.Tensor):
         gravity_xy: torch.Tensor = self.asset.data.projected_gravity_b[:, :2]
         fall_over = gravity_xy.norm(dim=1, keepdim=True) >= self.xy_thres
+        if self._active is not None:
+            fall_over = fall_over & self._active
         return fall_over
 
 
