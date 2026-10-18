@@ -1,5 +1,6 @@
 import torch
 from typing import TYPE_CHECKING
+from typing_extensions import override
 from tensordict import TensorDictBase
 
 if TYPE_CHECKING:
@@ -7,6 +8,36 @@ if TYPE_CHECKING:
     from active_adaptation.envs.env_base import EnvBase
 
 from .base import Reward
+from active_adaptation.envs.utils import find_joints
+
+
+class joint_pos_limits(Reward):
+    """Radians spent outside the joint position limits, summed over joints.
+
+    Matches UFO ``limits_dof_pos``: ``(lower - q).clamp(min=0) + (q - upper).clamp(min=0)``.
+    The returned value is the negation, so a positive weight is a penalty.
+    UFO multiplies the positive violation by ``-10``.
+    """
+
+    def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
+        super().__init__(weight, track_var=track_var)
+        self.joint_names_pattern = joint_names
+
+    @override
+    def _initialize(self, env: "EnvBase"):
+        super()._initialize(env)
+        self.asset: Articulation = self.env.scene.articulations["robot"]
+        joint_ids, self.joint_names = find_joints(self.asset, self.joint_names_pattern)
+        self.joint_ids = torch.tensor(joint_ids, device=self.device)
+        limits = self.asset.data.joint_pos_limits[0, self.joint_ids].float()
+        self.lower = limits[:, 0]
+        self.upper = limits[:, 1]
+
+    def _compute(self) -> torch.Tensor:
+        position = self.asset.data.joint_pos[:, self.joint_ids]
+        below = (self.lower - position).clamp(min=0.0)
+        above = (position - self.upper).clamp(min=0.0)
+        return -(below + above).sum(dim=-1, keepdim=True)
 
 
 class joint_acc_l2(Reward):
