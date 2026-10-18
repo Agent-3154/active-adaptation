@@ -12,16 +12,24 @@ from active_adaptation.envs.utils import find_joints
 
 
 class joint_pos_limits(Reward):
-    """Radians spent outside the joint position limits, summed over joints.
+    """Radians spent outside a soft band inside the joint position limits.
 
-    Matches UFO ``limits_dof_pos``: ``(lower - q).clamp(min=0) + (q - upper).clamp(min=0)``.
-    The returned value is the negation, so a positive weight is a penalty.
-    UFO multiplies the positive violation by ``-10``.
+    UFO ``limits_dof_pos`` uses ``soft_dof_pos_limit=0.95``: the band is the
+    hard range shrunk about its midpoint, so the penalty is nonzero while the
+    joint is still inside the constraint. The returned value is the negation
+    of the summed violation. UFO multiplies the positive violation by ``-10``.
     """
 
-    def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
+    def __init__(
+        self,
+        weight: float,
+        joint_names: str = ".*",
+        soft_factor: float = 0.95,
+        track_var: bool = False,
+    ):
         super().__init__(weight, track_var=track_var)
         self.joint_names_pattern = joint_names
+        self.soft_factor = soft_factor
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -30,8 +38,10 @@ class joint_pos_limits(Reward):
         joint_ids, self.joint_names = find_joints(self.asset, self.joint_names_pattern)
         self.joint_ids = torch.tensor(joint_ids, device=self.device)
         limits = self.asset.data.joint_pos_limits[0, self.joint_ids].float()
-        self.lower = limits[:, 0]
-        self.upper = limits[:, 1]
+        center = (limits[:, 0] + limits[:, 1]) * 0.5
+        radius = (limits[:, 1] - limits[:, 0]) * 0.5 * self.soft_factor
+        self.lower = center - radius
+        self.upper = center + radius
 
     def _compute(self) -> torch.Tensor:
         position = self.asset.data.joint_pos[:, self.joint_ids]
