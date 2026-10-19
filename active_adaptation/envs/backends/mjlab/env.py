@@ -126,6 +126,10 @@ class MjlabBackendEnv(_EnvBase):
                     timestep=self.cfg.sim.get("mujoco_physics_dt", 0.005),
                     iterations=self.cfg.sim.get("mujoco_iterations", 10),
                     ls_iterations=self.cfg.sim.get("mujoco_ls_iterations", 20),
+                    # MuJoCo 3.8+ enables MULTICCD unless this disable bit is set.
+                    # Warp 1.18 then allocates a convex multi-contact buffer that
+                    # OOMs the 12 GiB GPU at 4096 envs for mesh-heavy models.
+                    disableflags=("multiccd",),
                 ),
                 broadphase=self.cfg.sim.get("broadphase", None), # nxn, sap_tile, sap_segmented
             ),

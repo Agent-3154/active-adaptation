@@ -1,1 +1,1 @@
-from . import g1
+from . import g1, g1_mjlab

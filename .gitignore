@@ -184,6 +184,7 @@ outputs_play/
 outputs_pipeline/
 wandb/
 artifacts/
+benchmark/runs/
 
 # nohup
 *.out
