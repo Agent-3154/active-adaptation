@@ -10,20 +10,47 @@ dependencies = [
     "motrixsim>=0.8.2",
 ]
 
+[project.optional-dependencies]
+# CUDA 13 Warp from the NVIDIA index. Conflicts with the default cu12 group.
+# uv sync --project venv/mjlab --no-group cu12 --extra cu13
+cu13 = ["warp-lang==1.18.0"]
+
+[dependency-groups]
+# Default, because this env's torch pin is the cu128 index.
+# +cu12 is a GitHub release asset, not a PyPI file:
+# https://github.com/NVIDIA/warp/releases/download/v1.18.0/warp_lang-1.18.0+cu12-py3-none-manylinux_2_28_x86_64.whl
+cu12 = ["warp-lang==1.18.0+cu12"]
+
 [tool.uv.sources]
 active-adaptation = { path = "../..", editable = true }
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
+warp-lang = [
+    { path = "wheels/warp_lang-1.18.0+cu12-py3-none-manylinux_2_28_x86_64.whl", group = "cu12" },
+    { index = "nvidia", extra = "cu13" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com/"
+explicit = true
+
 [tool.uv]
 package = false
 index-strategy = "unsafe-best-match"
+default-groups = ["cu12"]
+conflicts = [
+    [{ group = "cu12" }, { extra = "cu13" }],
+]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 override-dependencies = [
     "torch==2.11",
     "torchaudio==2.11",

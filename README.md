@@ -85,6 +85,8 @@ uv sync
 # backend-specific environments
 uv sync --project venv/isaac51
 # uv sync --project venv/isaac60 # not supported yet
+
+# mjlab: place the CUDA 12 Warp wheel first (see MJLab setup), then:
 uv sync --project venv/mjlab
 ```
 
@@ -139,7 +141,7 @@ Notes:
   - `uv run --project venv/isaac51 scripts/launch_ddp.sh 0,1 venv/isaac51 scripts/train_ppo.py …` (positional project path before Hydra overrides)
 - Do **not** run bare `./scripts/launch_ddp.sh …` without `--project venv/<backend>` — workers will miss backend-only packages such as `isaaclab`.
 - Use `uv run --with <extra> ...` only for temporary one-off tools, not core backend dependencies.
-- Keep backend-specific `warp-lang` pins in each backend env (`venv/isaac51`, `venv/isaac60`, `venv/mjlab`), not in the root project.
+- Keep backend-specific `warp-lang` pins in each backend env (`venv/isaac51`, `venv/isaac60`, `venv/mjlab`), not in the root project. `venv/mjlab` defaults to the CUDA 12 wheel that matches its cu128 torch pin; see [MJLab setup](#mjlab-setup).
 
 ### Conda workflow (supported, legacy recommendation)
 
@@ -166,6 +168,9 @@ conda create -n aa-mjlab python=3.11 -y
 conda activate aa-mjlab
 pip install -e .
 pip install mjlab
+# Warp must match the env's CUDA build. This track's torch pin is cu128,
+# so install the CUDA 12 wheel rather than the PyPI CUDA 13 default:
+# https://github.com/NVIDIA/warp/releases/download/v1.18.0/warp_lang-1.18.0+cu12-py3-none-manylinux_2_28_x86_64.whl
 ```
 
 If you use conda, prefer one env per backend track and document exact backend package pins in your team setup docs.
@@ -186,10 +191,19 @@ Notes:
 
 ### MJLab setup
 
-If you want to use the `mjlab` backend, use the dedicated `venv/mjlab` environment:
+`venv/mjlab` pins torch to the CUDA 12.8 index. Warp's default PyPI wheel is a CUDA 13.4 build, so the env's default group installs `warp-lang==1.18.0+cu12` instead. That wheel is a GitHub release asset and is not committed (`venv/mjlab/wheels/` is gitignored).
 
 ```bash
+mkdir -p venv/mjlab/wheels
+curl -L -o venv/mjlab/wheels/warp_lang-1.18.0+cu12-py3-none-manylinux_2_28_x86_64.whl \
+  https://github.com/NVIDIA/warp/releases/download/v1.18.0/warp_lang-1.18.0+cu12-py3-none-manylinux_2_28_x86_64.whl
 uv sync --project venv/mjlab
+```
+
+`uv sync` and `uv run --project venv/mjlab` keep this CUDA 12 build. For a CUDA 13 Warp (NVIDIA index, R580 driver or newer), drop the default group and select the extra. That extra does not change the torch pin:
+
+```bash
+uv sync --project venv/mjlab --no-group cu12 --extra cu13
 ```
 
 Then run MJLab commands from the repo root:
