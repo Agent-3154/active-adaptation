@@ -3,7 +3,8 @@ from active_adaptation import ROBOT_MODEL_DIR
 from active_adaptation.envs.backends.isaaclab.adapter import (
     IsaacSceneAdapter,
     IsaacSimAdapter,
-    IsaacDebugDraw
+    IsaacDebugDraw,
+    apply_collision_offsets,
 )
 from active_adaptation.envs.env_base import _EnvBase
 from active_adaptation.assets.asset_cfg import AssetSpec, coerce_asset_spec
@@ -134,6 +135,7 @@ class IsaacBackendEnv(_EnvBase):
             attach_stage_to_usd_context()
         with use_stage(sim.get_initial_stage()):
             sim.reset()
+        apply_collision_offsets(self.scene)
         
         # Try to fix headless record
         # --------------------------

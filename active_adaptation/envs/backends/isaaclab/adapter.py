@@ -12,6 +12,27 @@ if TYPE_CHECKING:
     from isaaclab.scene import InteractiveScene
     from isaaclab.sim import SimulationContext
 
+def apply_collision_offsets(scene: "InteractiveScene") -> None:
+    """Apply uniform spawn offsets to PhysX shapes, including USD instance proxies.
+
+    Isaac Lab's USD traversal skips instanced colliders. Tensor writes preserve
+    shared geometry and run once, before warmup and startup randomization.
+    Unspecified offsets retain the asset's authored/default values.
+    """
+    for asset in (*scene.articulations.values(), *scene.rigid_objects.values()):
+        collision = getattr(asset.cfg.spawn, "collision_props", None)
+        if collision is None:
+            continue
+        view = asset.root_physx_view
+        indices = torch.arange(view.count, dtype=torch.int32, device="cpu")
+        for name in ("contact_offset", "rest_offset"):
+            value = getattr(collision, name, None)
+            if value is None:
+                continue
+            offsets = getattr(view, f"get_{name}s")()
+            getattr(view, f"set_{name}s")(torch.full_like(offsets, value), indices)
+
+
 class IsaacDebugDraw:
     def __init__(self):
         from isaacsim.util.debug_draw import _debug_draw
@@ -103,7 +124,9 @@ class IsaacSceneAdapter(SceneAdapter):
 
     @override
     def zero_external_wrenches(self) -> None:
-        for asset in self._scene.articulations.values():
+        # Wrench composers cache link poses used for global-to-local conversion.
+        # Rigid objects need the same per-step invalidation as articulations.
+        for asset in self.entities.values():
             if hasattr(asset, "instantaneous_wrench_composer"):
                 asset.instantaneous_wrench_composer.reset()
             if hasattr(asset, "permanent_wrench_composer"):
