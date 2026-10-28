@@ -148,7 +148,11 @@ class PPOPolicy(PPOBase):
             self.vecnorm = Mod(VecNorm((obs_dim,), decay=1.0), [OBS_KEY], ["_obs_normed"]).to(self.device)
             self.training_keys = [OBS_KEY, ACTION_KEY]
 
-        self.action_dim = env.action_manager.action_dim
+        from .action_routing import ActionRouting
+        self.action_routing = ActionRouting(action_spec)
+        self.action_dim = self.action_routing.action_dim
+        if len(self.action_routing.keys) > 1 and (cfg.symnet or cfg.symaug):
+            raise ValueError("Multi-input PPO requires explicit composite action symmetry; disable symnet/symaug")
         
         activation = getattr(nn, self.cfg.activation)
         actor_mlp = MLP(
@@ -262,6 +266,8 @@ class PPOPolicy(PPOBase):
             policy = Seq(vecnorm, self.critic, self.actor)
         else:
             policy = Seq(vecnorm, self.actor)
+        if self.action_routing.keys != [ACTION_KEY]:
+            policy.append(self.action_routing)
         if self.cfg.compile:
             policy = torch.compile(policy)
         if self.cfg.debug:

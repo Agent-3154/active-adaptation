@@ -132,6 +132,12 @@ class IsaacBackendEnv(_EnvBase):
         with use_stage(sim.get_initial_stage()):
             self.scene = InteractiveScene(scene_cfg)
             attach_stage_to_usd_context()
+            if self.cfg.viewer.get('contact_reports', False):
+                # Playback diagnostics only: Isaac Lab disables CPU contact
+                # reporting by default, while its tensor sensors remain active.
+                sim.carb_settings.set_bool('/physics/disableContactProcessing', False)
+                from .contact_visualization import enable_contact_reports
+                enable_contact_reports(sim.get_initial_stage())
         with use_stage(sim.get_initial_stage()):
             sim.reset()
         

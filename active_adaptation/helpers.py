@@ -233,7 +233,11 @@ def evaluate(
     trajs: TensorDictBase = torch.stack(trajs, dim=1)
     done = trajs.get(("next", "done"))
     episode_cnt = len(done.nonzero())
-    first_done = torch.argmax(done.long(), dim=1).cpu()
+    first_done = torch.argmax(done.long(), dim=1)
+    # A rollout can end before any episode terminates. Report its final recorded
+    # stats in that case; argmax on an all-false mask would select frame zero.
+    first_done = torch.where(done.any(dim=1), first_done,
+                             torch.full_like(first_done, done.shape[1] - 1)).cpu()
 
     def take_first_episode(tensor: torch.Tensor):
         indices = first_done.reshape(first_done.shape+(1,)*(tensor.ndim-2))

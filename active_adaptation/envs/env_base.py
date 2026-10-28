@@ -1090,7 +1090,9 @@ class _EnvBase(EnvBase, RegistryMixin):
 
     def diagnostics(self) -> dict:
         d = dict(self.extra)
-        d.update(self.action_manager.diagnostics())
+        for name, manager in self.input_managers.items():
+            prefix = "" if name == "action" else f"{name}/"
+            d.update({prefix + key: value for key, value in manager.diagnostics().items()})
         return d
 
     def close(self, *, raise_if_closed: bool = True):
