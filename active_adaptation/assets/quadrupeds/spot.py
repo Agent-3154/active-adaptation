@@ -1,17 +1,72 @@
 """Boston Dynamics Spot (no arm).
 
-MJCF/USD: ``<ROBOT_MODEL_DIR>/spot/``, cooked from the assetx recipe ``spot``
-(``aa-cook-assets spot``). Feet are fixed child bodies ``*_foot`` of the lower legs, with the origin at
-the contact sphere center (geom ``*_foot_collision0``, r=0.036).
+MJCF/USD: ``<ROBOT_MODEL_DIR>/spot/`` (``aa-cook-assets spot``).
 """
 
+from __future__ import annotations
+
+from pathlib import Path
 from typing import Literal
 
-from active_adaptation.assets.cooked import cooked_model_dir
 from active_adaptation.registry import Registry
 from active_adaptation.utils.symmetry import mirrored
 
 registry = Registry.instance()
+
+MENAGERIE_SPOT_VENDOR = (
+    "https://github.com/google-deepmind/mujoco_menagerie/tree/"
+    "71f066ad0be9cd271f7ed58c030243ef157af9f4/boston_dynamics_spot"
+)
+
+
+def spot_mjcf_base_transforms():
+    from assetx.core.transforms import (
+        ApproximateWithCapsule,
+        Compose,
+        GeomsToBody,
+        NormalizeGeomNames,
+        NormalizeJointNames,
+        RemoveActuators,
+        RemoveSceneSettings,
+        RemoveSensors,
+        RenameBodies,
+    )
+
+    return [
+        NormalizeGeomNames(),
+        NormalizeJointNames(),
+        RemoveSensors(names=[".*"]),
+        RemoveActuators(names=[".*"]),
+        RemoveSceneSettings(),
+        RenameBodies({"body": "base_link"}),
+        *(
+            GeomsToBody([leg.upper()], f"{leg}_foot", mass=0.05)
+            for leg in ("fl", "fr", "hl", "hr")
+        ),
+        ApproximateWithCapsule(
+            [[f"{leg}_uleg_collision0"] for leg in ("fl", "fr", "hl", "hr")],
+            names=[f"{leg}_uleg_collision0" for leg in ("fl", "fr", "hl", "hr")],
+            replace=True,
+            coverage_quantile=0.95,
+            radius_scale=0.6,
+        ),
+        ApproximateWithCapsule(
+            [[f"{leg}_lleg_collision0"] for leg in ("fl", "fr", "hl", "hr")],
+            names=[f"{leg}_lleg_collision0" for leg in ("fl", "fr", "hl", "hr")],
+            replace=True,
+            coverage_quantile=0.95,
+            radius_scale=0.9,
+        ),
+    ]
+
+
+def build_spot_mjcf(vendor_dir: Path):
+    from assetx.core.asset import MujocoAsset
+    from assetx.core.transforms import Compose
+
+    return Compose(spot_mjcf_base_transforms()).transform(
+        MujocoAsset.from_file(vendor_dir / "spot.xml")
+    )
 
 # Menagerie home keyframe stands at z=0.46 with the feet already in contact.
 # Spawn slightly above that so the first physics step is not a penetration spike.
@@ -134,6 +189,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
         ImplicitActuatorCfg,
         sim_utils,
     )
+    from active_adaptation.assets.cooked import cooked_model_dir
 
     model_dir = cooked_model_dir("spot", usd=True)
     asset_cfg = ArticulationCfg(
@@ -204,6 +260,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
 
 def make_mjlab_cfg():
     from active_adaptation.assets.asset_cfg import AssetSpec, EntityCfg
+    from active_adaptation.assets.cooked import cooked_model_dir
     from mjlab.actuator import BuiltinPdActuatorCfg
     from mjlab.entity import EntityArticulationInfoCfg
     from mjlab.sensor import ContactMatch, ContactSensorCfg

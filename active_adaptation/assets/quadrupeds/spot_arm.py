@@ -1,7 +1,6 @@
 """Boston Dynamics Spot with the arm and gripper.
 
-MJCF/USD: ``<ROBOT_MODEL_DIR>/spot_arm/``, cooked from the assetx recipe
-``spot_arm`` (``aa-cook-assets spot_arm``).
+MJCF/USD: ``<ROBOT_MODEL_DIR>/spot_arm/`` (``aa-cook-assets spot_arm``).
 The gripper is one revolute jaw (``arm_f1x``). Both finger meshes live on
 ``arm_link_fngr``, which is the contact body. The jaw opens along EEF ``+Z``.
 ``arm_f1x`` spawns open (near the negative soft limit). Closed rest is ``q ≈ 0``.
@@ -9,9 +8,9 @@ The gripper is one revolute jaw (``arm_f1x``). Both finger meshes live on
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
-from active_adaptation.assets.cooked import cooked_model_dir
 from active_adaptation.assets.quadrupeds.spot import (
     BODY_NAMES_SIMULATION as SPOT_BODY_NAMES_SIMULATION,
     HIP_EFFORT_LIMIT,
@@ -23,13 +22,40 @@ from active_adaptation.assets.quadrupeds.spot import (
     LEGS_DAMPING,
     LEGS_STIFFNESS,
     LEGS_VELOCITY_LIMIT,
+    MENAGERIE_SPOT_VENDOR,
     SPATIAL_SYMMETRY_MAPPING as SPOT_SPATIAL_SYMMETRY_MAPPING,
     _mjlab_collisions,
     load_mjcf,
+    spot_mjcf_base_transforms,
 )
 from active_adaptation.registry import Registry
 
 registry = Registry.instance()
+
+
+def build_spot_arm_mjcf(vendor_dir: Path):
+    from assetx.core.asset import MujocoAsset
+    from assetx.core.transforms import AddDummyBody, ApproximateWithCapsule, Compose
+
+    return Compose(
+        [
+            *spot_mjcf_base_transforms(),
+            ApproximateWithCapsule(
+                [["arm_link_hr0_collision0"], ["arm_link_el1_collision0"]],
+                names=["arm_link_hr0_collision0", "arm_link_el1_collision0"],
+                replace=True,
+                coverage_quantile=0.95,
+            ),
+            AddDummyBody(
+                parent_path="arm_link_wr1",
+                name="grasp_point",
+                pos=(0.18, 0.0, -0.02),
+                align_to="world",
+                marker_size=0.01,
+                rgba=(1.0, 0.0, 0.0, 0.6),
+            ),
+        ]
+    ).transform(MujocoAsset.from_file(vendor_dir / "spot_arm.xml"))
 
 _ARM_JOINTS = (
     "arm_sh0",
@@ -101,6 +127,7 @@ def make_isaaclab_cfg(self_collisions: bool = False):
         sim_utils,
     )
     from active_adaptation.envs.behaviors.gripper import GripperBehavior
+    from active_adaptation.assets.cooked import cooked_model_dir
 
     model_dir = cooked_model_dir("spot_arm", usd=True)
     asset_cfg = ArticulationCfg(
@@ -204,6 +231,7 @@ def make_mjlab_cfg():
     from mjlab.actuator import BuiltinPdActuatorCfg
     from mjlab.entity import EntityArticulationInfoCfg
     from mjlab.sensor import ContactMatch, ContactSensorCfg
+    from active_adaptation.assets.cooked import cooked_model_dir
 
     model_dir = cooked_model_dir("spot_arm", usd=False)
 
