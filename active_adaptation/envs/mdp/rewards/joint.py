@@ -1,5 +1,6 @@
 import torch
-from typing import TYPE_CHECKING
+import math
+from typing import TYPE_CHECKING, Tuple
 from typing_extensions import override
 from tensordict import TensorDictBase
 
@@ -9,6 +10,9 @@ if TYPE_CHECKING:
 
 from .base import Reward
 from active_adaptation.envs.utils import find_joints
+
+# Unweighted penalty terms return non-positive scalars; upper bound is 0 at rest.
+_PENALTY_RANGE: Tuple[float, float] = (-math.inf, 0.0)
 
 
 class joint_pos_limits(Reward):
@@ -43,6 +47,10 @@ class joint_pos_limits(Reward):
         self.lower = center - radius
         self.upper = center + radius
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     def _compute(self) -> torch.Tensor:
         position = self.asset.data.joint_pos[:, self.joint_ids]
         below = (self.lower - position).clamp(min=0.0)
@@ -54,6 +62,10 @@ class joint_acc_l2(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
+    
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -75,6 +87,10 @@ class energy_l1(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -102,6 +118,10 @@ class energy_l2(Reward):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
@@ -121,6 +141,10 @@ class joint_vel_l2(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -143,6 +167,10 @@ class joint_vel_limits(Reward):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
         self.factor = factor
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -176,6 +204,10 @@ class joint_tau_limits(Reward):
         self.joint_names = joint_names
         self.factor = factor
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
@@ -202,6 +234,10 @@ class joint_torque_disc(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -248,6 +284,10 @@ class joint_deviation_l1(Reward):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
         self.asset: Articulation = self.env.scene.articulations["robot"]
@@ -267,6 +307,10 @@ class joint_deviation_l2(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -290,6 +334,10 @@ class joint_deviation_cum(Reward):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
         self.cum_thres = 0.15
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -319,6 +367,10 @@ class joint_torques_l2(Reward):
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)

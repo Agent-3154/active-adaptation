@@ -1,5 +1,6 @@
+import math
 import torch
-from typing import TYPE_CHECKING, Optional, List, Union
+from typing import TYPE_CHECKING, Optional, List, Union, Tuple
 from typing_extensions import override
 
 from active_adaptation.utils.math import (
@@ -61,7 +62,16 @@ def _parse_rot_axes(axis: str) -> tuple[int, ...]:
     return _ROT_AXIS_IDS[key]
 
 
+_PENALTY_RANGE: Tuple[float, float] = (-math.inf, 0.0)
+_UNIT_RANGE: Tuple[float, float] = (0.0, 1.0)
+_MAX_ONE_RANGE: Tuple[float, float] = (-math.inf, 1.0)
+
+
 class survival(Reward):
+    @property
+    def range(self) -> Tuple[float, float]:
+        return (1.0, 1.0)
+
     @override
     def _compute(self):
         return torch.ones(self.num_envs, 1, device=self.device)
@@ -70,6 +80,10 @@ class survival(Reward):
 class linvel_z_l2(Reward):
     def __init__(self, weight: float, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -107,6 +121,10 @@ class angvel_xy_l2(Reward):
             self.body_ids = None
             self.body_names = [self.asset.body_names[0]]
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     def _compute(self) -> torch.Tensor:
         if self.body_ids is not None:
             angvel = quat_rotate_inverse(
@@ -138,6 +156,10 @@ class undesired_contact(Reward):
         self.body_ids = torch.tensor(self.body_ids, device=self.device)
         self.num_bodies = len(self.body_ids)
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     @override
     def _update(self):
         contact = self.contact_sensor.data.current_contact_time[:, self.body_ids] > 0.0
@@ -167,6 +189,10 @@ class linvel_exp(Reward[Twist]):
         self.sigma = sigma
         self.dim = dim
         self.gamma = gamma
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _UNIT_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -227,6 +253,10 @@ class linvel_tracking(Reward[Twist]):
         self.error_scale = error_scale
         self.axis_ids = _parse_pos_axes(axis)
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _MAX_ONE_RANGE
+
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -270,6 +300,10 @@ class root_pos_exp(Reward):
         self.axis_ids = _parse_pos_axes(axis)
         self.sigma = sigma
         self.square = square
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _UNIT_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -321,6 +355,10 @@ class root_rot_exp(Reward):
         self.sigma = sigma
         self.square = square
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _UNIT_RANGE
+
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -359,6 +397,10 @@ class root_pos_l2(Reward):
         super().__init__(weight, track_var=track_var)
         self.dim = dim
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -382,6 +424,10 @@ class linvel_projection(Reward[Twist]):
     ):
         super().__init__(weight, track_var=track_var)
         self.dim = dim
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return (-math.inf, math.inf)
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -413,6 +459,10 @@ class angvel_z_exp(Reward[Twist]):
         super().__init__(weight, track_var=track_var)
         self.world_frame = world_frame
         self.gamma = gamma
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _UNIT_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -448,6 +498,10 @@ class tracking_yaw(Reward):
     def __init__(self, weight: float, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _UNIT_RANGE
+
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -472,6 +526,10 @@ class body_upright(Reward):
         super().__init__(weight, track_var=track_var)
         self.body_name = body_name
         self.entity_name = entity_name
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _MAX_ONE_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -510,6 +568,10 @@ class base_height_l1(Reward[Twist]):
         super().__init__(weight, track_var=track_var)
         self.target_height = target_height
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -539,6 +601,10 @@ class base_height_exp(Reward[Twist]):
         self.target_height = target_height
         self.sigma = sigma
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _UNIT_RANGE
+
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -561,6 +627,10 @@ class is_standing_env(Reward):
     def __init__(self, weight: float, track_var: bool = False):
         super().__init__(weight, track_var=track_var)
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _UNIT_RANGE
+
     @override
     def _compute(self) -> torch.Tensor:
         return self.command_manager.is_standing_env.reshape(self.num_envs, 1)
@@ -577,6 +647,10 @@ class joint_limits(Reward):
         super().__init__(weight, track_var=track_var)
         self.joint_names = joint_names
         self.offset = offset
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -608,6 +682,10 @@ class oscillator(Reward):
         self.omega_range = omega_range
         self.margin = margin
         self.target_swing_height = 0.08
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return (-math.inf, math.inf)
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -677,6 +755,10 @@ class quadruped_stand(Reward):
         super().__init__(weight, track_var=track_var)
         self.feet_names = feet_names
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -710,6 +792,10 @@ class lateral_swing_height(Reward):
         super().__init__(weight, track_var=track_var)
         self.feet_names = feet_names
         self.target_height = target_height
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _UNIT_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):

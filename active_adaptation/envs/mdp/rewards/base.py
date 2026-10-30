@@ -42,14 +42,14 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
     def _initialize(self, env: "EnvBase") -> None:
         super()._initialize(env)
         self.command_manager: CT = env.command_manager
-        self._modifier = torch.ones(self.num_envs, 1, device=self.device)
         self._ema_sum = torch.zeros(1, device=self.device)
         self._ema_cnt = torch.zeros(1, device=self.device)
         self._ema_sum_sq = torch.zeros(1, device=self.device) if self.track_var else None
-
+    
     @property
-    def modifier(self) -> torch.Tensor:
-        return self._modifier
+    def range(self) -> Tuple[float, float]:
+        """Return the range of the reward. We require all rewards to be upper bounded."""
+        raise NotImplementedError(f"`range` not implemented for {self.__class__.__name__}")
 
     def _update_ema(
         self, rew: torch.Tensor, is_active: torch.Tensor | None = None
@@ -101,8 +101,7 @@ class Reward(Generic[CT], MDPComponent, RegistryMixin):
             rew = rew * is_active.float()
         else:
             raise TypeError(result)
-        rew = self.weight * rew * self.modifier
-        self._modifier = torch.ones(self.num_envs, 1, device=self.device)
+        rew = self.weight * rew
         self._update_ema(rew, is_active)
         return rew
 

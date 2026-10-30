@@ -1,5 +1,6 @@
+import math
 import torch
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Tuple
 from typing_extensions import override
 from tensordict import TensorDictBase
 
@@ -11,6 +12,11 @@ if TYPE_CHECKING:
 
 from .base import Reward
 from active_adaptation.envs.utils import find_bodies, find_sensor_bodies
+
+_PENALTY_RANGE: Tuple[float, float] = (-math.inf, 0.0)
+_UNIT_RANGE: Tuple[float, float] = (0.0, 1.0)
+_NONNEGATIVE_RANGE: Tuple[float, float] = (0.0, math.inf)
+_TRACKING_RANGE: Tuple[float, float] = (-math.inf, 1.0)
 
 
 class max_swing_height(Reward):
@@ -32,6 +38,10 @@ class max_swing_height(Reward):
             self.num_envs, len(self.body_ids), device=self.device
         )
         self.rew = torch.zeros(self.num_envs, 1, device=self.device)
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _NONNEGATIVE_RANGE
 
     @override
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase):
@@ -72,6 +82,10 @@ class feet_sliding(Reward):
             self.asset, self.contact_sensor, self.body_names_pattern
         )[0]
         self.body_contact_ids = torch.tensor(self.body_contact_ids, device=self.device)
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     @override
     def _compute(self) -> torch.Tensor:
@@ -179,18 +193,40 @@ def _phase_overtime(phase: torch.Tensor, max_phase: float) -> torch.Tensor:
     return (phase - max_phase).clamp(min=0).sum(dim=-1, keepdim=True)
 
 
-def _trot_active(reward: Reward) -> torch.Tensor:
-    standing = reward.command_manager.is_standing_env.reshape(reward.num_envs, 1)
-    return (~standing) & (reward._weight > 0.0)
+def _is_standing(reward: Reward) -> torch.Tensor:
+    return reward.command_manager.is_standing_env.reshape(reward.num_envs, 1).bool()
+
+
+def _weight_active(reward: Reward) -> torch.Tensor:
+    return reward._weight > 0.0
+
+
+def _contact_fraction(in_contact: torch.Tensor) -> torch.Tensor:
+    """Share of feet in contact, shape ``(N, 1)``. All four down scores 1."""
+    return in_contact.float().mean(dim=-1, keepdim=True)
+
+
+def _diagonal_stance(
+    current_contact: torch.Tensor,
+    foot_order: torch.Tensor,
+    contact_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Which diagonal is fully in contact. Columns of ``foot_order`` are FL, FR, HL, HR."""
+    ordered = (current_contact > contact_eps)[:, foot_order]
+    fl_hr = ordered[:, 0] & ordered[:, 3]
+    fr_hl = ordered[:, 1] & ordered[:, 2]
+    return fl_hr, fr_hl
 
 
 def _init_quadruped_feet(reward: Reward, body_names_pattern: str) -> None:
     reward.asset = reward.env.scene.articulations["robot"]
     reward.contact_sensor = reward.env.scene.sensors["contact_forces"]
-    contact_ids, body_names = find_sensor_bodies(
+    body_ids, body_names = find_bodies(reward.asset, body_names_pattern)
+    contact_ids, _ = find_sensor_bodies(
         reward.asset, reward.contact_sensor, body_names_pattern
     )
     reward.body_names = body_names
+    reward.body_ids = torch.as_tensor(body_ids, device=reward.device, dtype=torch.long)
     reward.body_contact_ids = torch.as_tensor(
         contact_ids, device=reward.device, dtype=torch.long
     )
@@ -207,9 +243,10 @@ class quadruped_trot_binary(Reward):
     Feet are identified by name (``RL``/``RR`` count as hind left/right), not by
     match order. The bonus stops once any foot has held its current phase longer
     than ``max_phase``, so a frozen diagonal stance does not keep paying.
-    ``quadruped_trot_binary_weight`` on the step tensordict scales the reward
-    per environment; a missing key leaves the scale at 1. Inactive while
-    standing or while that weight is not positive.
+    While ``is_standing_env`` is set, the term instead scores the fraction of
+    feet in contact, so a stand plants all four. ``quadruped_trot_binary_weight``
+    on the step tensordict scales the reward per environment; a missing key
+    leaves the scale at 1. Inactive while that weight is not positive.
     """
 
     in_keys = ["quadruped_trot_binary_weight"]
@@ -221,6 +258,10 @@ class quadruped_trot_binary(Reward):
         self.max_phase = float(max_phase)
         if self.max_phase <= 0.0:
             raise ValueError(f"max_phase must be > 0, got {max_phase}")
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _UNIT_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -236,14 +277,58 @@ class quadruped_trot_binary(Reward):
     def _compute(self) -> torch.Tensor:
         current_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids]
         current_air = self.contact_sensor.data.current_air_time[:, self.body_contact_ids]
-        in_contact = current_contact > self.env.physics_dt
-        ordered = in_contact[:, self.foot_order]
-        fl_hr = ordered[:, 0] & ordered[:, 3]
-        fr_hl = ordered[:, 1] & ordered[:, 2]
+        fl_hr, fr_hl = _diagonal_stance(
+            current_contact, self.foot_order, self.env.physics_dt
+        )
         phase = _current_phase(current_contact, current_air, self.env.physics_dt)
         stepping = (phase <= self.max_phase).all(dim=-1, keepdim=True)
-        rew = torch.logical_xor(fl_hr, fr_hl).reshape(self.num_envs, 1).float()
-        return rew * stepping.float() * self._weight, _trot_active(self)
+        trot = torch.logical_xor(fl_hr, fr_hl).reshape(self.num_envs, 1).float() * stepping.float()
+        in_contact = (current_contact > self.env.physics_dt)[:, self.foot_order]
+        rew = torch.where(_is_standing(self), _contact_fraction(in_contact), trot)
+        return rew * self._weight, _weight_active(self)
+
+    @override
+    def debug_draw(self):
+        """Line between the feet of each diagonal that is fully in stance.
+
+        FL–HR is green, FR–HL is orange. A pair held past ``max_phase`` is red.
+        While standing, feet that are down are drawn blue.
+        """
+        current_contact = self.contact_sensor.data.current_contact_time[:, self.body_contact_ids]
+        current_air = self.contact_sensor.data.current_air_time[:, self.body_contact_ids]
+        fl_hr, fr_hl = _diagonal_stance(
+            current_contact, self.foot_order, self.env.physics_dt
+        )
+        fresh = (
+            _current_phase(current_contact, current_air, self.env.physics_dt) <= self.max_phase
+        ).all(dim=-1)
+        standing = _is_standing(self).reshape(-1)
+        walking = ~standing
+        feet = self.asset.data.body_link_pos_w[:, self.body_ids][:, self.foot_order]
+        feet = feet + feet.new_tensor([0.0, 0.0, 0.06])
+        planted = torch.ones_like(fresh)
+        self._draw_stance_pair(feet, 0, 3, fl_hr & walking, fresh, (0.15, 0.85, 0.35, 1.0))
+        self._draw_stance_pair(feet, 1, 2, fr_hl & walking, fresh, (0.95, 0.55, 0.10, 1.0))
+        self._draw_stance_pair(feet, 0, 3, fl_hr & standing, planted, (0.25, 0.55, 1.0, 1.0))
+        self._draw_stance_pair(feet, 1, 2, fr_hl & standing, planted, (0.25, 0.55, 1.0, 1.0))
+
+    def _draw_stance_pair(
+        self,
+        feet: torch.Tensor,
+        i: int,
+        j: int,
+        stance: torch.Tensor,
+        fresh: torch.Tensor,
+        color: tuple[float, float, float, float],
+    ) -> None:
+        stale = (1.0, 0.15, 0.15, 1.0)
+        for mask, draw_color in ((stance & fresh, color), (stance & ~fresh, stale)):
+            if not bool(mask.any()):
+                continue
+            start = feet[mask, i]
+            self.env.scene.draw_vector(
+                start, feet[mask, j] - start, size=4.0, color=draw_color
+            )
 
 
 class quadruped_trot_timing(Reward):
@@ -254,9 +339,10 @@ class quadruped_trot_timing(Reward):
     its negation so a positive ``weight`` encourages a symmetric trot.
     Time spent in the current phase past ``max_phase`` is added to the cost,
     so a frozen diagonal stance is penalized even when its clocks still match.
-    ``quadruped_trot_timing_weight`` on the step tensordict scales the reward
-    per environment; a missing key leaves the scale at 1. Inactive while
-    standing or while that weight is not positive.
+    While ``is_standing_env`` is set, the term instead scores the fraction of
+    feet in contact. ``quadruped_trot_timing_weight`` on the step tensordict
+    scales the reward per environment; a missing key leaves the scale at 1.
+    Inactive while that weight is not positive.
     """
 
     in_keys = ["quadruped_trot_timing_weight"]
@@ -268,6 +354,10 @@ class quadruped_trot_timing(Reward):
         self.max_phase = float(max_phase)
         if self.max_phase <= 0.0:
             raise ValueError(f"max_phase must be > 0, got {max_phase}")
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _TRACKING_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -296,7 +386,9 @@ class quadruped_trot_timing(Reward):
             contact_eps=0.0,
         )
         cost = cost + _phase_overtime(phase, self.max_phase)
-        return -cost * self._weight, _trot_active(self)
+        in_contact = (data.current_contact_time[:, ids] > 0.0)[:, self.foot_order]
+        rew = torch.where(_is_standing(self), _contact_fraction(in_contact), -cost)
+        return rew * self._weight, _weight_active(self)
 
 
 class feet_clearance(Reward):
@@ -312,6 +404,10 @@ class feet_clearance(Reward):
         super().__init__(weight)
         self.body_names_pattern = body_names
         self.thres = thres
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -345,6 +441,10 @@ class feet_air_time(Reward):
         self.body_names_pattern = body_names
         self.thres = thres
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _NONNEGATIVE_RANGE
+
     @override
     def _initialize(self, env: "EnvBase"):
         super()._initialize(env)
@@ -376,6 +476,10 @@ class feet_contact_count(Reward):
     def __init__(self, body_names: str, weight: float):
         super().__init__(weight)
         self.body_names_pattern = body_names
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _NONNEGATIVE_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -415,6 +519,10 @@ class single_foot_contact(Reward):
         super().__init__(weight, track_var=track_var)
         self.body_names_pattern = body_names
         self.margin = margin
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return (-1.0, 0.0)
 
     @override
     def _initialize(self, env: "EnvBase"):

@@ -1,8 +1,11 @@
+import math
 import torch
 from typing import TYPE_CHECKING, Dict, List, Tuple
 from typing_extensions import override
 
 from active_adaptation.envs.mdp.rewards.base import Reward
+
+_PENALTY_RANGE: Tuple[float, float] = (-math.inf, 0.0)
 
 if TYPE_CHECKING:
     from active_adaptation.envs.env_base import EnvBase
@@ -28,6 +31,10 @@ class action_rate_l2(Reward):
         self.action_manager = self.env.input_managers[self.key]
         self.indices, self.names = self.action_manager.find_names(self.names)
         assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     def _compute(self) -> torch.Tensor:
         action_buf = self.action_manager.action_buf[:, :, self.indices]
@@ -57,6 +64,10 @@ class action_rate2_l2(Reward):
         self.indices, self.names = self.action_manager.find_names(self.names)
         assert self.action_manager.action_buf.shape[-1] == self.action_manager.action_dim
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     def _compute(self) -> torch.Tensor:
         action_buf = self.action_manager.action_buf[:, :, self.indices]
         action_diff = action_buf[:, 0] - 2 * action_buf[:, 1] + action_buf[:, 2]
@@ -81,7 +92,11 @@ class action_saturation(Reward):
     ):
         super().__init__(weight, track_var=track_var)
         self.key = key
-        self.range = dict(range)
+        self.saturation_range = range
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
 
     @override
     def _initialize(self, env: "EnvBase"):
@@ -93,8 +108,8 @@ class action_saturation(Reward):
         low = torch.full((action_dim,), float("-inf"), device=self.device)
         high = torch.full((action_dim,), float("inf"), device=self.device)
 
-        if isinstance(self.range, dict):
-            for pattern, (lo, hi) in self.range.items():
+        if isinstance(self.saturation_range, dict):
+            for pattern, (lo, hi) in self.saturation_range.items():
                 indices, _ = self.action_manager.find_names(pattern)
                 if not indices:
                     raise ValueError(
@@ -104,7 +119,7 @@ class action_saturation(Reward):
                 low[indices] = float(lo)
                 high[indices] = float(hi)
         else:
-            lo, hi = self.range
+            lo, hi = self.saturation_range
             low[:] = float(lo)
             high[:] = float(hi)
 
@@ -147,6 +162,10 @@ class body_angvel_penalty(Reward):
         self.body_ids = torch.tensor(self.body_ids, device=self.device)
         self.mask = torch.tensor(self.mask, device=self.device)
 
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     def _compute(self) -> torch.Tensor:
         if self.env.backend == "isaaclab":
             body_angvel = self.asset.data.body_com_ang_vel_w[:, self.body_ids]
@@ -188,7 +207,11 @@ class body_linvel_penalty(Reward):
         self.body_ids = self.asset.find_bodies(self.body_names)[0]
         self.body_ids = torch.tensor(self.body_ids, device=self.device)
         self.mask = torch.tensor(self.mask, device=self.device)
-    
+
+    @property
+    def range(self) -> Tuple[float, float]:
+        return _PENALTY_RANGE
+
     def _compute(self) -> torch.Tensor:
         body_linvel = self.asset.data.body_com_lin_vel_w[:, self.body_ids]
         base_linvel = self.asset.data.root_com_lin_vel_w
