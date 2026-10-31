@@ -125,7 +125,9 @@ class MjlabBackendEnv(_EnvBase):
                 mujoco=MujocoCfg(
                     timestep=self.cfg.sim.get("mujoco_physics_dt", 0.005),
                     iterations=self.cfg.sim.get("mujoco_iterations", 10),
-                    ls_iterations=self.cfg.sim.get("mujoco_ls_iterations", 20),
+                    ls_iterations=self.cfg.sim.get("mujoco_ls_iterations", 40),
+                    cone=self.cfg.sim.get("mujoco_cone", "pyramidal"), # pyramidal, elliptic
+                    impratio=self.cfg.sim.get("mujoco_impratio", 1.0),
                     # MuJoCo 3.8+ enables MULTICCD unless this disable bit is set.
                     # Warp 1.18 then allocates a convex multi-contact buffer that
                     # OOMs the 12 GiB GPU at 4096 envs for mesh-heavy models.

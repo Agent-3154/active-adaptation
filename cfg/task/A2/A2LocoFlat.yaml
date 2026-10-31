@@ -20,6 +20,9 @@ sim:
   step_dt: 0.02
   isaac_physics_dt: 0.005
   mujoco_physics_dt: 0.005
+  mujoco_iterations: 20
+  mujoco_cone: elliptic
+  mujoco_impratio: 10.0
 
 input:
   action:
