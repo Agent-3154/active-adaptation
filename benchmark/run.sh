@@ -58,7 +58,7 @@ run_one() {
       'algo.in_keys=[policy]' \
       "task.num_envs=${suite}" \
       "total_frames=${frames}" \
-      wandb.mode=disabled \
+      logger.mode=disabled \
       eval=false \
       checkpoint_interval=0 \
       upload_interval=0 \

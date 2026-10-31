@@ -73,8 +73,9 @@ class PlayConfig:
     seed: int = 42
     """Random seed (offset by local rank in distributed runs)."""
     checkpoint_path: Optional[str] = None
-    """Path or WandB URI to a policy checkpoint.
+    """Local ``.pt`` path, or Comet URI to auto-download.
 
+    Forms: ``comet:WS/PROJECT/KEY[:iter]`` or alias ``run:WS/PROJECT/KEY[:iter]``.
     Required when ``algo=from_checkpoint`` (the default): ``algo`` is loaded from
     the run's sidecar ``cfg.yaml``. Pass an explicit ``algo=...`` to override.
     """

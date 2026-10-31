@@ -16,7 +16,7 @@ from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCo
 from tensordict import TensorDictBase
 
 import active_adaptation
-from active_adaptation.utils.wandb import parse_checkpoint
+from active_adaptation.utils.checkpoint import parse_checkpoint
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.string import resolve_matching_names
 from active_adaptation.envs import _EnvBase
@@ -152,7 +152,7 @@ def make_env_policy(
                         )
                     )
         algo_cfg.in_keys = in_keys
-        _algo_cfg.in_keys = in_keys # for wandb config
+        _algo_cfg.in_keys = in_keys  # recorded in logger config
 
         base_env = env_cls(task_cfg, env_device, headless=headless)
         checkpoint = checkpoint_future.result()

@@ -12,7 +12,7 @@ Results land in `benchmark/runs/<hostname>-<date>/`, which is gitignored. `repor
 python3 benchmark/summarize.py --run-dir benchmark/runs/<stamp>
 ```
 
-Each case is 6 PPO iterations (`algo=ppo`, `algo.in_keys=[policy]`, `wandb.mode=disabled`, `seed=0`, headless). The summary uses the median of iterations 1–5. Iteration 0 includes Warp or Kit warmup.
+Each case is 6 PPO iterations (`algo=ppo`, `algo.in_keys=[policy]`, `logger.mode=disabled`, `seed=0`, headless). The summary uses the median of iterations 1–5. Iteration 0 includes Warp or Kit warmup.
 
 | Variable | Default | Meaning |
 |---|---|---|

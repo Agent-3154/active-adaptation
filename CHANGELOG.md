@@ -8,6 +8,22 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Added
+
+- **Comet experiment backend (default)** — `logger.backend=comet` with
+  `comet_ml` as a core dependency. Checkpoints upload via Comet models/assets;
+  resume with `checkpoint_path=comet:<workspace>/<project>/<key>[:iter]`.
+- **Trackio / SwanLab backends** — optional extras; select with
+  `logger.backend=trackio|swanlab`.
+
+### Removed
+
+- **Weights & Biases** — `wandb` package and `logger.backend=wandb` removed.
+  Hydra config key is now `logger` (was `wandb`). Use `logger.mode=disabled`
+  instead of `wandb.mode=disabled`.
+- **`utils/wandb.py` / `wandb_diagnostics.py` / wandb-diagnostics skill** —
+  checkpoint helpers live in `utils/checkpoint.py`; W&B diagnostics skill removed.
+
 ### Changed
 
 - **Reward groups keep one column per term.** `RewardGroup.compute`

@@ -10,6 +10,10 @@ dependencies = [
     "warp-lang",
 ]
 
+[project.optional-dependencies]
+swanlab = ["active-adaptation[swanlab]"]
+trackio = ["active-adaptation[trackio]"]
+
 [tool.uv.sources]
 active-adaptation = { path = "../..", editable = true }
 torch = { index = "pytorch-cu128" }

@@ -14,7 +14,7 @@ dependencies = [
     "setproctitle",
     "hydra-core",
     "omegaconf",
-    "wandb",
+    "comet_ml",
     "einops",
     "termcolor",
     "onnxruntime",
@@ -35,6 +35,11 @@ dependencies = [
 [project.optional-dependencies]
 swanlab = [
     "swanlab",
+]
+# Install into the backend uv env you train with (Python differs per backend).
+# Trackio needs Python >=3.10; AA backends are 3.11 (isaac51) / 3.12 (isaac60) / >=3.11 (mjlab).
+trackio = [
+    "trackio",
 ]
 render = [
     "fvdb-core[viewer]==0.5.1+pt211.cu130",

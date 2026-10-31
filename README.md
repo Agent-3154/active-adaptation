@@ -38,7 +38,8 @@ Note: The main branch is fast-moving and therefore **almost constantly broken so
   - [Discover and enable](#discover-and-enable)
   - [Pull updates](#pull-updates)
   - [How loading works at runtime](#how-loading-works-at-runtime)
-  - [WandB defaults in `projects.json`](#wandb-defaults-in-projectsjson)
+  - [Logger defaults in `projects.json`](#logger-defaults-in-projectsjson)
+  - [Experiment loggers (Comet / Trackio / SwanLab)](#experiment-loggers-comet--trackio--swanlab)
   - [CLI reference](#cli-reference)
 - [Basic Usage](#basic-usage)
   - [Training](#training)
@@ -466,37 +467,73 @@ When you run a script that calls `aa.init(...)`:
 
 Disabled projects are ignored. Only enable projects you need for a run — imports have side effects and can collide on class names.
 
-### WandB defaults in `projects.json`
+### Logger defaults in `projects.json`
 
-You can set default WandB settings in `.cache/projects.json` so training scripts pick them up during `aa.init(...)`.
+Set Comet defaults in `.cache/projects.json` so training picks them up during `aa.init(...)`.
 
-Supported keys: `WANDB_API_KEY`, `WANDB_ENTITY`, `WANDB_PROJECT`.
+Supported keys: `COMET_API_KEY`, `COMET_WORKSPACE`, `COMET_PROJECT` (legacy `WANDB_*` / top-level `wandb` block still accepted as aliases).
 
 Define them either:
 
-1. In a top-level `wandb` block (global defaults), or
-2. Inside enabled `environment` project entries (project-scoped defaults).
+1. In a top-level `logger` (or `comet`) block, or
+2. Inside enabled `environment` project entries.
 
 Example:
 
 ```json
 {
-  "environment": {
-    "hoi1": {
-      "enabled": true,
-      "WANDB_ENTITY": "G1_Hoi",
-      "WANDB_PROJECT": "object-hoi"
-    }
+  "logger": {
+    "COMET_API_KEY": "…",
+    "COMET_WORKSPACE": "my-workspace",
+    "COMET_PROJECT": "active_adaptation"
   }
 }
 ```
 
 Resolution behavior:
 
-- `WANDB_API_KEY` and `WANDB_ENTITY` apply as environment defaults only when those env vars are not already set.
-- `WANDB_PROJECT` overrides `cfg.wandb.project` when configured in `projects.json`.
-- If no manifest defaults are set, WandB initializes normally (entity from env / global settings; project from Hydra).
-- If multiple enabled projects define conflicting values for the same key, that key is ignored and a warning is logged.
+- `COMET_API_KEY` / `COMET_WORKSPACE` apply as env defaults only when those env vars are unset.
+- `COMET_PROJECT` overrides `cfg.logger.project` when set.
+- Conflicting values across enabled projects are ignored with a warning.
+
+### Experiment loggers (Comet / Trackio / SwanLab)
+
+Train scripts share one Hydra `logger` config. Default backend is **Comet**. Pick others with `logger.backend`:
+
+| Backend | Install | Cloud share / checkpoints |
+|---------|---------|---------------------------|
+| `comet` (default) | core dep `comet_ml` | Comet hosted (metrics, assets, models) |
+| `trackio` | `--extra trackio` | Free HF Space + artifacts (Gradio Space may need PRO) |
+| `swanlab` | `--extra swanlab` | SwanLab (upload often paid) |
+
+```bash
+# Comet (default) — set key once
+export COMET_API_KEY=…
+uv run --project venv/mjlab scripts/train_ppo.py task=Go2/Go2Flat algo=ppo backend=mjlab \
+  logger.project=active_adaptation
+
+# Offline / no cloud
+uv run --project venv/mjlab scripts/train_ppo.py … logger.mode=offline
+# or logger.mode=disabled
+
+# Trackio (optional extra; install into the backend env)
+uv sync --project venv/mjlab --extra trackio
+uv run --project venv/mjlab scripts/train_ppo.py … \
+  logger.backend=trackio logger.space_id=YOUR_HF_USER/aa-trackio
+```
+
+Resume a Comet run checkpoint:
+
+```bash
+checkpoint_path=comet:WORKSPACE/PROJECT/EXPERIMENT_KEY
+# optional iteration: comet:ws/proj/key:100
+```
+
+Notes:
+
+- Hydra overrides formerly using `wandb.*` are now `logger.*` (e.g. `logger.mode=disabled`).
+- Trackio `logger.mode=online` needs `logger.space_id` / `TRACKIO_SPACE_ID`; offline forces `HF_HUB_OFFLINE` during init so a blocked Hub does not hang.
+- Trackio/SwanLab resume-from-cloud is not wired; use a local path for those backends.
 
 ### CLI reference
 
@@ -529,7 +566,7 @@ python test_env.py task=Go2/Go2Flat algo=ppo
 python test_env.py task=Go2/Go2Flat algo=ppo algo.entropy_coef=0.002 total_frames=200_000_000 task.terrain=medium
 # finetuning
 python test_env.py task=Go2/Go2Flat algo=ppo checkpoint_path=${local_checkpoint_path}
-python test_env.py task=Go2/Go2Flat algo=ppo checkpoint_path=run:${wandb_run_path}
+python test_env.py task=Go2/Go2Flat algo=ppo checkpoint_path=comet:${comet_workspace}/${comet_project}/${comet_experiment_key}
 # multi-GPU training
 export OMP_NUM_THREADS=4 # a number greater than 1
 python -m torch.distributed --nnodes=1 --nproc-per-node=4 ...
@@ -552,7 +589,7 @@ Create and modify `.vscode/launch.json` to add debug configurations. For example
           "task=Go2/Go2Force",
           "algo=ppo_dic_train",
           "algo.symaug=True",
-          "wandb.mode=disabled",
+          "logger.mode=disabled",
           "task.num_envs=16"
       ]
   }

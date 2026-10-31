@@ -10,7 +10,6 @@ Agent-oriented playbook for **launch → monitor → decide → iterate**. Start
 **Related skills**
 - [simulation-performance](../simulation-performance/SKILL.md) — *how* to optimize hot paths (`ScopedTimer`, `torch.compile`, Isaac lazy-state caveats)
 - [onpolicy-algorithms](../onpolicy-algorithms/SKILL.md) / [offpolicy-algorithms](../offpolicy-algorithms/SKILL.md) — algo config and training loop
-- [wandb-diagnostics](../wandb-diagnostics/SKILL.md) — post-hoc W&B history when cloud/API is acceptable
 
 **References:** [reference.md](reference.md) (schemas, exit codes, manifest template)
 
@@ -108,7 +107,7 @@ cd active-adaptation
 AA_PROFILE_PRINT=0 uv run --project venv/mjlab python scripts/train_ppo.py \
   task=A2/A2LocoFlat algo=ppo_symaug 'algo.in_keys=[policy]' backend=mjlab \
   task.num_envs=64 total_frames=65536 \
-  wandb.mode=disabled eval=false \
+  logger.mode=disabled eval=false \
   checkpoint_interval=0 upload_interval=0
 ```
 
@@ -122,7 +121,7 @@ After algo gate passes at 64 envs, run a short memory smoke at target `num_envs`
 AA_PROFILE_PRINT=0 uv run --project venv/mjlab python scripts/train_ppo.py \
   task=A2/A2LocoFlat algo=ppo_symaug 'algo.in_keys=[policy]' backend=mjlab \
   task.num_envs=2048 total_frames=327680 \
-  wandb.mode=disabled eval=false checkpoint_interval=0 upload_interval=0
+  logger.mode=disabled eval=false checkpoint_interval=0 upload_interval=0
 ```
 
 Then `summarize_memory.py --last 5`. Promote only if `peak_allocated` is comfortably below device capacity (see below).
@@ -202,7 +201,7 @@ python active-adaptation/.agents/skills/run-experiments/scripts/summarize_memory
 
 ## Algorithm tuning
 
-1. Smoke with sidecars (`wandb.mode=disabled` OK).
+1. Smoke with sidecars (`logger.mode=disabled` OK).
 2. `check_run --gate-iter 50` → gate on stability (`actor/approx_kl`, `critic/explained_var`, grad norms).
 3. Use `env_stats.jsonl` EMA for reward trends (episode stats lag `log_interval`).
 4. Full run only after gate `0`. W&B optional for human dashboards.

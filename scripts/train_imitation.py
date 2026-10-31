@@ -60,7 +60,7 @@ from active_adaptation.pipeline_io import (
 )
 from active_adaptation.utils.profiling import ScopedTimer
 from active_adaptation.utils.run_logger import init_run
-from active_adaptation.utils.wandb import parse_checkpoint
+from active_adaptation.utils.checkpoint import parse_checkpoint
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -83,17 +83,25 @@ class IsaacAppConfig:
 
 
 @dataclass
-class WandbConfig:
-    """Experiment logger settings. W&B is the default; SwanLab is optional."""
+class LoggerConfig:
+    """Experiment logger settings. Comet is the default; Trackio/SwanLab optional."""
 
-    backend: str = "wandb"
-    """``wandb`` (default) or ``swanlab``."""
+    backend: str = "comet"
+    """``comet`` (default), ``trackio``, or ``swanlab``."""
     name: str = "${..exp_name}/${now:%m-%d}_${now:%H-%M}"
     job_type: str = "train"
     project: str = "${oc.select:task.project,active_adaptation}"
     mode: str = "online"
     """``online``, ``offline``, or ``disabled``. SwanLab also accepts ``local``."""
     tags: List[str] = field(default_factory=list)
+    space_id: Optional[str] = None
+    """Trackio only: HF Space (``user/space``) for shared cloud dashboards."""
+    bucket_id: Optional[str] = None
+    """Trackio only: optional HF Bucket for metric/artifact persistence."""
+    private: Optional[bool] = None
+    """Trackio only: create a private Space when ``space_id`` is new."""
+    workspace: Optional[str] = None
+    """Comet only: workspace / team (else ``COMET_WORKSPACE`` / account default)."""
 
 
 @dataclass
@@ -127,7 +135,7 @@ class TrainConfig:
     # Optional resume path for the *student* (teacher uses ``teacher_checkpoint_path``).
     checkpoint_path: Optional[str] = None
     discard_unused_obs: bool = True
-    wandb: WandbConfig = field(default_factory=WandbConfig)
+    logger: LoggerConfig = field(default_factory=LoggerConfig)
 
 
 cs = ConfigStore.instance()
@@ -285,26 +293,26 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         f"local_rank: {aa.get_local_rank()}/{aa.get_world_size()}"
     )
 
-    wandb_run = None
+    log_run = None
     run_dir = None
     if aa.is_main_process():
-        wandb_run = init_run(cfg.wandb)
-        wandb_run.config.update(OmegaConf.to_container(cfg))
-        wandb_run.config["world_size"] = aa.get_world_size()
+        log_run = init_run(cfg.logger)
+        log_run.config.update(OmegaConf.to_container(cfg))
+        log_run.config["world_size"] = aa.get_world_size()
 
         default_run_name = (
             f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         )
-        run_idx = wandb_run.name.split("-")[-1]
-        wandb_run.name = f"{run_idx}-{default_run_name}"
-        setproctitle(wandb_run.name)
+        run_idx = log_run.name.split("-")[-1]
+        log_run.name = f"{run_idx}-{default_run_name}"
+        setproctitle(log_run.name)
 
-        run_dir = Path(wandb_run.dir)
+        run_dir = Path(log_run.dir)
         run_dir.mkdir(parents=True, exist_ok=True)
         cfg_save_path = run_dir / "cfg.yaml"
         OmegaConf.save(cfg, cfg_save_path)
-        wandb_run.save(str(cfg_save_path), policy="now")
-        wandb_run.save(str(run_dir / "config.yaml"), policy="now")
+        log_run.save(str(cfg_save_path), policy="now")
+        log_run.save(str(run_dir / "config.yaml"), policy="now")
 
     from active_adaptation.helpers import evaluate
     from active_adaptation.utils.helpers import EpisodeStats
@@ -339,15 +347,15 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         policy,
         *,
         archive_name: str | None = None,
-        upload_to_wandb: bool = False,
+        upload: bool = False,
     ) -> tuple[str, str | None]:
         """Refresh local ``checkpoint_latest.pt``; optionally archive + upload a versioned copy.
 
         Returns ``(latest_path, archived_path_or_None)``.
         """
-        run_dir = Path(wandb_run.dir)
+        run_dir = Path(log_run.dir)
         state_dict = OrderedDict()
-        state_dict["wandb"] = {"name": wandb_run.name, "id": wandb_run.id}
+        state_dict["logger"] = {"name": log_run.name, "id": log_run.id}
         state_dict["policy"] = policy.state_dict()
 
         latest_path = run_dir / "checkpoint_latest.pt"
@@ -360,9 +368,9 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             archived_path = run_dir / f"{archive_name}.pt"
             if archived_path.resolve() != latest_path.resolve():
                 torch.save(state_dict, archived_path)
-            if upload_to_wandb:
-                wandb_run.save(
-                    str(archived_path), policy="now", base_path=wandb_run.dir
+            if upload:
+                log_run.save(
+                    str(archived_path), policy="now", base_path=log_run.dir
                 )
 
         return str(latest_path), (
@@ -458,7 +466,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             local_ckpt_path, archived = save(
                 student,
                 archive_name=f"checkpoint_{i}" if should_upload else None,
-                upload_to_wandb=should_upload,
+                upload=should_upload,
             )
             if archived is not None:
                 uploaded_ckpt_path = archived
@@ -496,20 +504,20 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                 print(f"Last uploaded checkpoint: {uploaded_ckpt_path}")
             info.update(env.extra)
             info.update(env.stats_ema)
-            wandb_run.log(info)
+            log_run.log(info)
 
     run_state: dict[str, str] = {}
     if aa.is_main_process():
         local_ckpt_path, uploaded_ckpt_path = save(
-            student, archive_name="checkpoint_final", upload_to_wandb=True
+            student, archive_name="checkpoint_final", upload=True
         )
         policy_eval = student.get_rollout_policy("eval")
         info, trajs, stats = evaluate(
             env, policy_eval, render=cfg.eval_render, seed=cfg.seed
         )
         info["env_frames"] = env_frames
-        wandb_run.log(info)
-        wandb_run.finish()
+        log_run.log(info)
+        log_run.finish()
         print(f"Final checkpoint: {uploaded_ckpt_path}")
         run_state = {
             "checkpoint_path": uploaded_ckpt_path or local_ckpt_path,

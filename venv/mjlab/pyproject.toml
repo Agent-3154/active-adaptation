@@ -14,6 +14,8 @@ dependencies = [
 # CUDA 13 Warp from the NVIDIA index. Conflicts with the default cu12 group.
 # uv sync --project venv/mjlab --no-group cu12 --extra cu13
 cu13 = ["warp-lang==1.18.0"]
+swanlab = ["active-adaptation[swanlab]"]
+trackio = ["active-adaptation[trackio]"]
 
 [dependency-groups]
 # Default, because this env's torch pin is the cu128 index.

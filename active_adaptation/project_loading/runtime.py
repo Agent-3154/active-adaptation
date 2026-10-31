@@ -37,7 +37,7 @@ def import_environment_projects(
     return projects
 
 
-def _normalize_wandb_value(value: Any) -> Optional[str]:
+def _normalize_logger_value(value: Any) -> Optional[str]:
     if not isinstance(value, str):
         return None
     value = value.strip()
@@ -46,23 +46,32 @@ def _normalize_wandb_value(value: Any) -> Optional[str]:
     return value
 
 
-def resolve_wandb_defaults(
+def resolve_logger_defaults(
     projects: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """Resolve optional (WANDB_API_KEY, WANDB_PROJECT, WANDB_ENTITY)."""
+    """Resolve optional (COMET_API_KEY, COMET_PROJECT, COMET_WORKSPACE).
+
+    Also accepts legacy ``wandb`` / ``WANDB_*`` keys in ``projects.json`` as aliases.
+    """
     if projects is None:
         if not PROJECTS_FILE.exists():
             return None, None, None
         try:
             projects = load_projects()
         except Exception as exc:
-            logging.warning("Failed to load projects manifest for WandB defaults: %s", exc)
+            logging.warning("Failed to load projects manifest for logger defaults: %s", exc)
             return None, None, None
 
-    top_level_wandb = projects.get("wandb", {})
-    top_api_key = _normalize_wandb_value(top_level_wandb.get("WANDB_API_KEY"))
-    top_project = _normalize_wandb_value(top_level_wandb.get("WANDB_PROJECT"))
-    top_entity = _normalize_wandb_value(top_level_wandb.get("WANDB_ENTITY"))
+    top = projects.get("logger") or projects.get("comet") or projects.get("wandb") or {}
+    top_api_key = _normalize_logger_value(
+        top.get("COMET_API_KEY") or top.get("WANDB_API_KEY")
+    )
+    top_project = _normalize_logger_value(
+        top.get("COMET_PROJECT") or top.get("WANDB_PROJECT")
+    )
+    top_workspace = _normalize_logger_value(
+        top.get("COMET_WORKSPACE") or top.get("WANDB_ENTITY")
+    )
 
     enabled_env_projects = [
         (name, info)
@@ -70,12 +79,14 @@ def resolve_wandb_defaults(
         if info.get("enabled", False)
     ]
 
-    def _pick_enabled_project_value(key: str) -> Optional[str]:
+    def _pick_enabled_project_value(*keys: str) -> Optional[str]:
         values = []
         for name, info in enabled_env_projects:
-            value = _normalize_wandb_value(info.get(key))
-            if value is not None:
-                values.append((name, value))
+            for key in keys:
+                value = _normalize_logger_value(info.get(key))
+                if value is not None:
+                    values.append((name, value))
+                    break
 
         if not values:
             return None
@@ -84,29 +95,22 @@ def resolve_wandb_defaults(
         if len(unique_values) > 1:
             owners = ", ".join(f"{name}={value}" for name, value in values)
             logging.warning(
-                "Ignoring %s from projects.json due to conflicting values across enabled projects: %s",
-                key,
+                "Ignoring logger defaults from projects.json due to conflicting values: %s",
                 owners,
             )
             return None
         return unique_values[0]
 
-    api_key = (
-        top_api_key
-        if top_api_key is not None
-        else _pick_enabled_project_value("WANDB_API_KEY")
+    api_key = top_api_key or _pick_enabled_project_value(
+        "COMET_API_KEY", "WANDB_API_KEY"
     )
-    project = (
-        top_project
-        if top_project is not None
-        else _pick_enabled_project_value("WANDB_PROJECT")
+    project = top_project or _pick_enabled_project_value(
+        "COMET_PROJECT", "WANDB_PROJECT"
     )
-    entity = (
-        top_entity
-        if top_entity is not None
-        else _pick_enabled_project_value("WANDB_ENTITY")
+    workspace = top_workspace or _pick_enabled_project_value(
+        "COMET_WORKSPACE", "WANDB_ENTITY"
     )
-    return api_key, project, entity
+    return api_key, project, workspace
 
 
 def import_learning_modules(

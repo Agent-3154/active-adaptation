@@ -289,7 +289,7 @@ Pair with loop skill monitored shell on `^AGENT_WAKE_`.
   "runs": [
     {
       "key": "mem-smoke-2048",
-      "command": "uv run --project venv/mjlab python scripts/train_ppo.py task=A2/A2LocoFlat algo=ppo_symaug 'algo.in_keys=[policy]' backend=mjlab task.num_envs=2048 total_frames=327680 wandb.mode=disabled eval=false",
+      "command": "uv run --project venv/mjlab python scripts/train_ppo.py task=A2/A2LocoFlat algo=ppo_symaug 'algo.in_keys=[policy]' backend=mjlab task.num_envs=2048 total_frames=327680 logger.mode=disabled eval=false",
       "gpu": 0,
       "seed": 42,
       "status": "passed",
@@ -340,9 +340,8 @@ python active-adaptation/.agents/skills/run-experiments/scripts/summarize_traini
 tail -1 /path/to/memory.jsonl | python3 -m json.tool | head -60
 wc -l /path/to/algo_diagnostics.jsonl
 
-# W&B algo diagnostics (optional, post-hoc)
-uv run python -m active_adaptation.utils.wandb_diagnostics \
-  --run <entity>/<project>/<run_id> --samples 500
+# Local sidecars are preferred for live monitoring (no cloud API).
+# Resume / download: checkpoint_path=comet:WS/PROJECT/KEY
 ```
 
 ---
@@ -360,7 +359,7 @@ uv run python -m active_adaptation.utils.wandb_diagnostics \
 | `active_adaptation/learning/ppo/ppo_symaug.py` | Tier-3 `train_op` memory scopes |
 | `.agents/skills/run-experiments/scripts/watch_run.sh` | Local event watcher |
 | `.agents/skills/run-experiments/scripts/summarize_memory.py` | Memory JSONL summarizer |
-| `active_adaptation/utils/wandb_diagnostics.py` | Post-hoc W&B (optional) |
+| `active_adaptation/utils/checkpoint.py` | Local + Comet checkpoint resolve/download |
 | `active_adaptation/pipeline_io.py` | `run_state.yaml` at run end (pipeline handoff) |
 | `AGENTS.md` | GPU/tmux/rsync experiment ops |
 

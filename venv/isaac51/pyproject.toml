@@ -17,6 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 render = ["active-adaptation[render]"]
+swanlab = ["active-adaptation[swanlab]"]
+trackio = ["active-adaptation[trackio]"]
 
 [tool.uv.sources]
 active-adaptation = { path = "../..", editable = true }

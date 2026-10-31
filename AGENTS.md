@@ -22,7 +22,7 @@ Follow existing Python style: 4-space indentation, snake_case for modules/functi
 There is no dedicated `tests/` suite yet. Validate changes with focused runnable checks:
 
 ```bash
-python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo task.num_envs=16 wandb.mode=disabled
+python scripts/train_ppo.py task=Go2/Go2Flat algo=ppo task.num_envs=16 logger.mode=disabled
 python scripts/play.py task=Go2/Go2Flat algo=ppo checkpoint_path=/path/to/checkpoint.pt
 pyright active_adaptation
 ```

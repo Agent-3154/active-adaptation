@@ -61,11 +61,11 @@ class IsaacAppConfig:
 
 
 @dataclass
-class WandbConfig:
-    """Experiment logger settings. W&B is the default; SwanLab is optional."""
+class LoggerConfig:
+    """Experiment logger settings. Comet is the default; Trackio/SwanLab optional."""
 
-    backend: str = "wandb"
-    """``wandb`` (default) or ``swanlab``."""
+    backend: str = "comet"
+    """``comet`` (default), ``trackio``, or ``swanlab``."""
     name: str = "${..exp_name}/${now:%m-%d}_${now:%H-%M}"
     """Run display name (derived from ``exp_name`` and timestamp)."""
     job_type: str = "train"
@@ -76,6 +76,14 @@ class WandbConfig:
     """``online``, ``offline``, or ``disabled``. SwanLab also accepts ``local``."""
     tags: List[str] = field(default_factory=list)
     """Optional tags attached to the run."""
+    space_id: Optional[str] = None
+    """Trackio only: HF Space (``user/space``) for shared cloud dashboards."""
+    bucket_id: Optional[str] = None
+    """Trackio only: optional HF Bucket for metric/artifact persistence."""
+    private: Optional[bool] = None
+    """Trackio only: create a private Space when ``space_id`` is new."""
+    workspace: Optional[str] = None
+    """Comet only: workspace / team (else ``COMET_WORKSPACE`` / account default)."""
 
 
 @dataclass
@@ -90,7 +98,7 @@ class TrainConfig:
     headless: bool = True
     """Run simulation without a rendering window."""
     exp_name: str = "${oc.select:task.name,test}-${oc.select:algo.name,none}"
-    """Experiment label used in run names and WandB metadata."""
+    """Experiment label used in run names and logger metadata."""
     backend: str = "isaaclab"
     """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
     device: str = "cuda"
@@ -113,11 +121,11 @@ class TrainConfig:
     seed: int = 42
     """Random seed (offset by local rank in distributed runs)."""
     checkpoint_path: Optional[str] = None
-    """Path or WandB URI to resume from; ``null`` trains from scratch."""
+    """Path or Comet URI (``comet:ws/proj/key``) to resume from; ``null`` trains from scratch."""
     discard_unused_obs: bool = True
     """Drop observation groups not listed in ``algo.in_keys``."""
-    wandb: WandbConfig = field(default_factory=WandbConfig)
-    """WandB logging configuration."""
+    logger: LoggerConfig = field(default_factory=LoggerConfig)
+    """Experiment logging configuration (Comet / Trackio / SwanLab)."""
 
 
 cs = ConfigStore.instance()
@@ -162,26 +170,26 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         checkpoint_path=cfg.checkpoint_path,
     )
 
-    wandb_run = None
+    log_run = None
     run_dir = None
     if aa.is_main_process():
-        wandb_run = init_run(cfg.wandb)
-        wandb_run.config.update(OmegaConf.to_container(cfg))
-        wandb_run.config["world_size"] = aa.get_world_size()
+        log_run = init_run(cfg.logger)
+        log_run.config.update(OmegaConf.to_container(cfg))
+        log_run.config["world_size"] = aa.get_world_size()
 
         default_run_name = (
             f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         )
-        run_idx = wandb_run.name.split("-")[-1]
-        wandb_run.name = f"{run_idx}-{default_run_name}"
-        setproctitle(wandb_run.name)
+        run_idx = log_run.name.split("-")[-1]
+        log_run.name = f"{run_idx}-{default_run_name}"
+        setproctitle(log_run.name)
 
-        run_dir = Path(wandb_run.dir)
+        run_dir = Path(log_run.dir)
         run_dir.mkdir(parents=True, exist_ok=True)
         cfg_save_path = run_dir / "cfg.yaml"
         OmegaConf.save(cfg, cfg_save_path)
-        wandb_run.save(str(cfg_save_path), policy="now")
-        wandb_run.save(str(run_dir / "config.yaml"), policy="now")
+        log_run.save(str(cfg_save_path), policy="now")
+        log_run.save(str(run_dir / "config.yaml"), policy="now")
 
     total_iters = cfg.total_frames // (aa.get_world_size() * env.num_envs)
     
@@ -203,15 +211,15 @@ def run(cfg: TrainConfig) -> dict[str, str]:
         policy,
         *,
         archive_name: str | None = None,
-        upload_to_wandb: bool = False,
+        upload: bool = False,
     ) -> tuple[str, str | None]:
         """Refresh local ``checkpoint_latest.pt``; optionally archive + upload a versioned copy.
 
         Returns ``(latest_path, archived_path_or_None)``.
         """
-        run_dir = Path(wandb_run.dir)
+        run_dir = Path(log_run.dir)
         state_dict = OrderedDict()
-        state_dict["wandb"] = {"name": wandb_run.name, "id": wandb_run.id}
+        state_dict["logger"] = {"name": log_run.name, "id": log_run.id}
         state_dict["policy"] = policy.state_dict()
 
         latest_path = run_dir / "checkpoint_latest.pt"
@@ -224,9 +232,9 @@ def run(cfg: TrainConfig) -> dict[str, str]:
             archived_path = run_dir / f"{archive_name}.pt"
             if archived_path.resolve() != latest_path.resolve():
                 torch.save(state_dict, archived_path)
-            if upload_to_wandb:
-                wandb_run.save(
-                    str(archived_path), policy="now", base_path=wandb_run.dir
+            if upload:
+                log_run.save(
+                    str(archived_path), policy="now", base_path=log_run.dir
                 )
 
         return str(latest_path), (
@@ -315,7 +323,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                 local_ckpt_path, archived = save(
                     policy,
                     archive_name=f"checkpoint_{i}" if should_upload else None,
-                    upload_to_wandb=should_upload,
+                    upload=should_upload,
                 )
                 if archived is not None:
                     uploaded_ckpt_path = archived
@@ -326,7 +334,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                 info["env_frames"] = env_frames * aa.get_world_size()
                 info["performance/rollout_fps"] = (1 / timer.last_time) * new_frames * aa.get_world_size()
                 remaining = (time.time() - t0) / (i + 1) * (total_iters - i)
-                setproctitle(f"{wandb_run.name} ETA {tqdm.format_interval(remaining)}")
+                setproctitle(f"{log_run.name} ETA {tqdm.format_interval(remaining)}")
 
                 if (i - last_log_episode_stats >= max_episode_length) and len(episode_stats) > 0:
                     for k, v in sorted(episode_stats.pop().items(True, True)):
@@ -365,19 +373,19 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                     )
                 info.update(env_extra)
                 info.update(stats_ema)
-                wandb_run.log(info)
+                log_run.log(info)
 
     run_state: dict[str, str] = {}
     if aa.is_main_process():
         local_ckpt_path, uploaded_ckpt_path = save(
-            policy, archive_name="checkpoint_final", upload_to_wandb=True
+            policy, archive_name="checkpoint_final", upload=True
         )
         policy_eval = policy.get_rollout_policy("eval")
         info, trajs, stats = evaluate(
             env, policy_eval, render=cfg.eval_render, seed=cfg.seed
         )
         info["env_frames"] = env_frames
-        wandb_run.log(info)
+        log_run.log(info)
         if metrics_export_enabled() and run_dir is not None:
             health, health_issues = assess_health(last_algo_metrics)
             write_run_status(
@@ -391,7 +399,7 @@ def run(cfg: TrainConfig) -> dict[str, str]:
                 backend=cfg.backend,
                 num_envs=env.num_envs,
             )
-        wandb_run.finish()
+        log_run.finish()
         print(f"Final checkpoint: {uploaded_ckpt_path}")
         run_state = {
             "checkpoint_path": uploaded_ckpt_path or local_ckpt_path,

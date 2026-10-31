@@ -10,7 +10,7 @@ Optional per-stage ``gpus`` (e.g. ``\"0,1\"``) launches that stage under
 
 To resume from completed stages, comment them out and seed::
 
-    python scripts/pipeline.py run_state=/path/to/wandb/.../files/run_state.yaml
+    python scripts/pipeline.py run_state=/path/to/run/files/run_state.yaml
 
 References use flat keys, e.g. ``${run_state.checkpoint_path}``.
 """

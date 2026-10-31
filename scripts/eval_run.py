@@ -1,7 +1,7 @@
 import os
 import argparse
 import hydra
-from active_adaptation.utils import wandb as aa_wandb_utils
+from active_adaptation.utils import checkpoint as aa_checkpoint
 
 from omegaconf import OmegaConf
 from play import main as play_main
@@ -31,11 +31,11 @@ def main():
         "--refresh",
         action="store_true",
         default=False,
-        help="Force a W&B API refresh even when a finished run is cached locally.",
+        help="Force a Comet API refresh even when a finished run is cached locally.",
     )
     args = parser.parse_args()
 
-    resolved = aa_wandb_utils.resolve_wandb_run(
+    resolved = aa_checkpoint.resolve_comet_run(
         args.run_path,
         args.iterations,
         force=args.refresh,
@@ -46,9 +46,9 @@ def main():
     OmegaConf.set_struct(cfg, False)
 
     if args.iterations is not None:
-        cfg["checkpoint_path"] = f"run:{args.run_path}:{args.iterations}"
+        cfg["checkpoint_path"] = f"comet:{args.run_path}:{args.iterations}"
     else:
-        cfg["checkpoint_path"] = f"run:{args.run_path}"
+        cfg["checkpoint_path"] = f"comet:{args.run_path}"
     cfg["vecnorm"] = "eval"
     # cfg["algo"]["phase"] = "adapt"
     # cfg['algo']["phase"] = "finetune"

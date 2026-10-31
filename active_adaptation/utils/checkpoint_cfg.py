@@ -14,7 +14,7 @@ from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 from termcolor import colored
 
-from active_adaptation.utils.wandb import parse_checkpoint
+from active_adaptation.utils.checkpoint import parse_checkpoint
 
 FROM_CHECKPOINT_ALGO_NAME = "from_checkpoint"
 
