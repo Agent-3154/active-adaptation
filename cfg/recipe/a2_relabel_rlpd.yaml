@@ -17,7 +17,7 @@ stages:
       - algo=ppo_symaug
       # - total_frames=2048 # for debugging
       # - task.num_envs=16
-      # - wandb.mode=disabled
+      # - logger.mode=disabled
 
   - name: rollout
     script: rollout.py

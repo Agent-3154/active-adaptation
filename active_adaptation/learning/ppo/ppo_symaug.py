@@ -104,6 +104,8 @@ class PPOConfig:
     loss_fn: str = "ppo" # "ppo", "spo", "aspo"
     muon: bool = False # use Muon optimizer
     aux_coef: float = 0.0 # loss coefficient for auxiliary prediction loss
+    store_transitions: bool = False
+    rolling_batch: bool = False
     
     compile: bool = False
     use_ddp: bool = True
@@ -114,6 +116,10 @@ class PPOConfig:
     # (see ``resolve_matching_names``). Examples: ``("policy",)``, ``("command", "policy")``,
     # ``(".*",)`` to consume every observation group.
     in_keys: Any = (CMD_KEY, OBS_KEY,)
+
+    def __post_init__(self):
+        if self.rolling_batch and not self.store_transitions:
+            raise ValueError("`store_transitions` must be True when `rolling_batch` is True")
 
     def get_class(self):
         return PPOPolicy
@@ -157,6 +163,13 @@ class PPOPolicy(TensorDictModuleBase):
         self.actor_loss_fn = PPO_LOSS_MAP[self.cfg.loss_fn]
         self.critic_loss_fn = nn.MSELoss(reduction="none")
         self.gae = GAE(0.99, 0.95)
+        # Effective length of the GAE(gamma, lambda) tail: the λ-return of a row
+        # closer than this to the end of the collected window is dominated by the
+        # missing (truncated) future. Derived from ``self.gae`` so it stays in sync
+        # if gamma/lambda change.
+        self.gae_horizon = int(
+            np.ceil(1.0 / (1.0 - float(self.gae.gamma) * float(self.gae.lmbda)))
+        )
 
         fake_input = observation_spec.zero().to(self.device)
         self.materializers = dict(materializers or {})
@@ -317,6 +330,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.update = self._update
         if self.cfg.compile and not aa.is_distributed():
             self.update = torch.compile(self.update)
+        self.prev_batch = None
 
     def get_rollout_policy(self, mode: str="train", critic: bool = False):
         if self._rollout_dormancy_tracker is not None:
@@ -347,23 +361,67 @@ class PPOPolicy(TensorDictModuleBase):
         self.actor.to(self.device)
         self.critic.to(self.device)
 
+        if self.cfg.rolling_batch:
+            if self.prev_batch is None:
+                # Prime the window: the first update has no history to prepend.
+                self.prev_batch = tensordict.clone()
+                return {}
+            if tensordict.shape[1] != self.prev_batch.shape[1]:
+                raise ValueError(
+                    "rolling_batch expects a fixed rollout length; got "
+                    f"{tensordict.shape[1]} vs {self.prev_batch.shape[1]}"
+                )
+            window = self.prev_batch.shape[1] * 2
+            if window <= self.gae_horizon:
+                raise ValueError(
+                    f"rolling_batch window ({window} steps) must exceed the GAE "
+                    f"horizon ({self.gae_horizon} steps) or no row is trainable; "
+                    "increase `algo.train_every`"
+                )
+            # Concatenate along the *time* axis so GAE sees one continuous
+            # sequence per env: the last step of `prev_batch` is followed by the
+            # first step of `tensordict` inside the same episode.
+            # `store_transitions=True` is enforced by `PPOConfig.__post_init__`,
+            # so the stored critic values are not reused here: `compute_advantage`
+            # re-evaluates the whole window with the current critic, keeping GAE
+            # consistent across the seam.
+            batch = torch.cat([self.prev_batch, tensordict], dim=1)
+            self.prev_batch = tensordict.clone()
+        else:
+            batch = tensordict
+
         with ScopedTimer("compute_advantage"), memory_scope("train_op/compute_advantage"):
-            self.compute_advantage(tensordict, self.critic, "adv", "ret", self.cfg.clamp_reward)
-            action = tensordict[ACTION_KEY]
-            adv_unnormalized = tensordict["adv"]
-            log_probs_before = tensordict["action_log_prob"]
-            adv = tensordict["adv"]
-            adv_mean = adv.mean()
-            adv_std = adv.std()
-            adv = (adv - adv_mean) / adv_std.clamp_min(1e-7)
-            tensordict["adv"] = adv
-        
-        # Update EMA of return std from the full rollout before the PPO epoch loop,
-        # so every minibatch update for this rollout uses the same normalization factor.
-        # In distributed training, synchronize the local ret_std across ranks first so
-        # all ranks update their EMA with the same global value — matching the scale of
-        # gradients that DDP will average.
-        ret_std_t = tensordict["ret"].std()
+            self.compute_advantage(batch, self.critic, "adv", "ret", self.cfg.clamp_reward)
+            action = batch[ACTION_KEY]
+            adv_unnormalized = batch["adv"]
+            log_probs_before = batch["action_log_prob"]
+
+        td = batch.select(*self.training_keys)
+        # Only train on rows whose lambda-return tail lies fully inside the
+        # window: the trailing `gae_horizon` steps would otherwise bootstrap off
+        # a future that was never collected.
+        time_slice = slice(None)
+        if self.cfg.rolling_batch:
+            time_slice = slice(0, batch.shape[1] - self.gae_horizon)
+            td = td[:, time_slice]
+        if td.shape[1] == 0:
+            raise ValueError(
+                "rolling_batch left no trainable rows; reduce `algo.train_every` "
+                f"or check the GAE horizon ({self.gae_horizon})"
+            )
+
+        adv = td["adv"]
+        adv_mean = adv.mean()
+        adv_std = adv.std()
+        td["adv"] = (adv - adv_mean) / adv_std.clamp_min(1e-7)
+        ret = td["ret"]
+
+        # Update EMA of return std from the rows actually trained on, before the
+        # PPO epoch loop, so every minibatch update for this rollout uses the same
+        # normalization factor. In distributed training, synchronize the local
+        # ret_std across ranks first so all ranks update their EMA with the same
+        # global value — matching the scale of gradients that DDP will average.
+        ret_std_t = ret.std()
         if aa.is_distributed():
             distr.all_reduce(ret_std_t, op=distr.ReduceOp.SUM)
             ret_std_t = ret_std_t / aa.get_world_size()
@@ -372,17 +430,17 @@ class PPOPolicy(TensorDictModuleBase):
 
         # Full-rollout return variance for explained_var (not per-minibatch).
         # Mask is_init so the denominator matches the masked value_loss numerator.
-        ret_valid = tensordict["ret"][~tensordict["is_init"]]
+        is_valid = ~td["is_init"]
+        ret_valid = ret[is_valid]
         ret_var = ret_valid.var().clamp_min(1e-7)
 
-        td = tensordict.select(*self.training_keys)
         with memory_scope("train_op/ppo_epochs"):
             for epoch in range(self.cfg.ppo_epochs):
                 compute_diagnostics = epoch == self.cfg.ppo_epochs - 1
                 need_kl = self.desired_kl is not None
-                batch = make_batch(td, self.cfg.num_minibatches)
+                minibatches = make_batch(td, self.cfg.num_minibatches)
                 epoch_kls = []
-                for minibatch in batch:
+                for minibatch in minibatches:
                     minibatch = self._augment_symmetry(minibatch)
                     info = self.update(
                         minibatch, compute_diagnostics or need_kl, ret_var
@@ -405,32 +463,53 @@ class PPOPolicy(TensorDictModuleBase):
                     self.opt.param_groups[0]["lr"] = actor_lr
         
         with memory_scope("train_op/post_update"), torch.no_grad():
-            tensordict_ = self.actor(tensordict.copy())
-            dist = IndependentNormal(tensordict_["loc"], tensordict_["scale"])
+            # Run the preproc/actor/critic on an explicit copy so the features used
+            # for post-update diagnostics are those of the *current* parameters.
+            # (With `store_transitions=True`, `compute_advantage` skips the critic
+            # forward entirely, so `_critic_feature` would otherwise be missing
+            # while `_actor_feature` would be left over from the rollout.)
+            post = self.preproc(batch.copy())
+            batch_ = self.actor(post)
+            dist = IndependentNormal(batch_["loc"], batch_["scale"])
             log_probs_after = dist.log_prob(action)
             log_ratio = (log_probs_after - log_probs_before).reshape_as(adv_unnormalized)
             # log π_new/π_old · A: first-order signal of whether the post-update policy
             # shifts log-prob in the direction favored by the (unnormalized) advantage.
-            policy_gain = log_ratio * adv_unnormalized
+            policy_gain = log_ratio[:, time_slice] * adv_unnormalized[:, time_slice]
             # r(θ) · A with r = exp(log_ratio) = π_new/π_old; same weighted term as in
             # the unclipped PPO surrogate, useful to monitor IS-weighted advantage mass.
-            weighted_ratio = log_ratio.exp() * adv_unnormalized
-            actor_effective_rank = effective_rank(tensordict_["_actor_feature"])
-            critic_effective_rank = effective_rank(tensordict_["_critic_feature"])
-                
+            weighted_ratio = log_ratio[:, time_slice].exp() * adv_unnormalized[:, time_slice]
+            self.critic(post)
+            actor_effective_rank = effective_rank(post["_actor_feature"][:, time_slice])
+            critic_effective_rank = effective_rank(post["_critic_feature"][:, time_slice])
+
+        # Report the same rows that `_update` trained on (rolling_batch drops the
+        # truncated tail), so explained_var and value stats match the value loss.
+        reward_aggregated = batch["next", "reward_aggregated"][:, time_slice]
+
         infos = pytree.tree_map(lambda *xs: sum(xs).item() / len(xs), *infos)
         infos["actor/lr"] = self.opt.param_groups[0]["lr"]
         infos["actor/policy_gain"] = policy_gain.mean().item()
         infos["actor/weighted_ratio"] = weighted_ratio.mean().item()
         infos["actor/effective_rank"] = actor_effective_rank.item()
         infos["critic/effective_rank"] = critic_effective_rank.item()
-        infos["critic/value_mean"] = tensordict["ret"].mean().item()
-        infos["critic/value_std"] = tensordict["ret"].std().item()
-        infos["critic/value_max"] = tensordict["ret"].max().item()
-        reward_aggregated = tensordict["next", "reward_aggregated"]
+        infos["critic/value_mean"] = ret.mean().item()
+        infos["critic/value_std"] = ret.std().item()
+        infos["critic/value_max"] = ret.max().item()
         infos["critic/neg_rew_ratio"] = (reward_aggregated <= 0.).float().mean().item()
         infos["critic/adv_mean"] = adv_mean.item()
         infos["critic/adv_std"] = adv_std.item()
+        if self.cfg.rolling_batch:
+            # Rows come in two blocks: the first `split` steps were collected
+            # before the previous update (stale: r(θ) != 1 on entry), the rest are
+            # fresh. Log both to tell data reuse apart from stale-policy drift.
+            split = batch.shape[1] // 2
+            stale = slice(0, split)
+            fresh = slice(split, None)
+            infos["actor/abs_log_ratio_stale"] = log_ratio[:, stale].abs().mean().item()
+            infos["actor/abs_log_ratio_fresh"] = log_ratio[:, fresh].abs().mean().item()
+            infos["critic/adv_mean_stale"] = adv_unnormalized[:, stale].mean().item()
+            infos["critic/adv_mean_fresh"] = adv_unnormalized[:, fresh].mean().item()
 
         if self.cfg.debug and self._rollout_dormancy_tracker is not None:
             dormancy = self._rollout_dormancy_tracker.compute_dormancy()
@@ -452,7 +531,7 @@ class PPOPolicy(TensorDictModuleBase):
             self._obs_importance_step % self._obs_importance_interval == 0 and
             aa.is_main_process()
         ):
-            value_grad, policy_grad = self.compute_grad_diagnostics(tensordict)
+            value_grad, policy_grad = self.compute_grad_diagnostics(td)
             if value_grad is not None:
                 infos["obs_importance"] = plot_obs_importance(
                     value_grad, policy_grad, self.obs_func_keys, self.obs_split,

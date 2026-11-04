@@ -3,5 +3,5 @@
 task:
   num_envs: 64
 
-wandb:
+logger:
   mode: disabled
