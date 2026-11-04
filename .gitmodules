@@ -1,0 +1,4 @@
+[submodule "projects/dex-track"]
+	path = projects/dex-track
+	url = git@github.com:EGalahad/dex-track.git
+	branch = main

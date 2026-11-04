@@ -77,6 +77,14 @@ class SimAdapter(Protocol):
         """Advance physics only (no GUI, no camera/sensor products)."""
         ...
 
+    def refresh_kinematics(self) -> None:
+        """Refresh derived poses/velocities after integration or state writes.
+
+        Backends with automatically fresh state need no additional work.
+        This must not integrate, solve contacts, or overwrite step force results.
+        """
+        return
+
     def render_gui(self) -> None:
         """Update interactive viewers (Omniverse / Viser / MjLabViewer)."""
         ...

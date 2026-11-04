@@ -833,11 +833,19 @@ class _EnvBase(EnvBase, RegistryMixin):
 
             self._reset_idx(env_ids, tensordict)
             self.scene.reset(env_ids)
+            self.sim.refresh_kinematics()
             # MDP terms: reset(env_ids, tensordict) — may read/write tensordict
             [callback(env_ids, tensordict) for callback in self._reset_callbacks]
+            # Reset callbacks can themselves write simulator state.
+            self.sim.refresh_kinematics()
 
         tensordict = TensorDict({}, self.num_envs, device=self.device)
-        tensordict.update(self.observation_spec.zero())
+        if self.cfg.get('observe_on_reset', False):
+            # History terms have already reset selected rows; reading must not
+            # advance them or disturb the non-reset environments' history.
+            tensordict = self._compute_observation(tensordict)
+        else:
+            tensordict.update(self.observation_spec.zero())
         tensordict.set("episode_id", self.episode_id.clone())
         self._last_gui_render_time = time.perf_counter()
         return tensordict
@@ -890,6 +898,11 @@ class _EnvBase(EnvBase, RegistryMixin):
                     self.scene.write_data_to_sim()
                 with ScopedTimer("sim.step", sync=PROFILE_SYNC_TIMERS):
                     self.sim.step()
+                    # Some tasks read all substep controllers directly from
+                    # integrated root state; their derived observations need FK
+                    # only at the policy boundary. Default remains every step.
+                    if self.cfg.sim.get('refresh_kinematics_every_substep', True) or substep == self.decimation - 1:
+                        self.sim.refresh_kinematics()
                     if substep == self.decimation - 1:
                         if self._should_render_sensors():
                             self.sim.render_sensors()

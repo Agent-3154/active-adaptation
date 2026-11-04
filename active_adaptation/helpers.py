@@ -199,6 +199,7 @@ def evaluate(
     exploration_type: ExplorationType=ExplorationType.MODE,
     render=False,
     keys=[("next", "stats")],
+    max_steps: int | None = None,
 ):
     """
     Evaluate the policy on the environment, selecting `keys` from the trajectory.
@@ -216,7 +217,8 @@ def evaluate(
 
     inference_time = []
     torch.compiler.cudagraph_mark_step_begin()
-    max_episode_length = env.cfg.max_episode_length
+    # A diagnostic window must not change the environment's episode timeout.
+    max_episode_length = env.cfg.max_episode_length if max_steps is None else max_steps
     with ScopedTimer("rollout"), set_exploration_type(exploration_type):
         for i in tqdm(range(max_episode_length), miniters=10):
             s = time.perf_counter()

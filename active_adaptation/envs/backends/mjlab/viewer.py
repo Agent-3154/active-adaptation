@@ -1,6 +1,7 @@
 import torch
 import viser
 import numpy as np
+from functools import wraps
 from mjlab.sim import Simulation
 from mjlab.viewer.viser import ViserMujocoScene
 
@@ -56,12 +57,37 @@ class MjLabViewer:
 
         tabs = self._server.gui.add_tab_group()
         with tabs.add_tab("Scene", icon=viser.Icon.SETTINGS):
+            # mjviser installs a model-wide camera callback. Chain ours within
+            # it: separate Viser callbacks run concurrently and would race.
+            callbacks = self._server._client_connect_cb
+            first_callback = len(callbacks)
             self._scene.create_scene_gui()
+            for index in range(first_callback, len(callbacks)):
+                original = callbacks[index]
+
+                @wraps(original)
+                def initialize_camera(client, original=original):
+                    original(client)
+                    self._initialize_camera(client)
+
+                callbacks[index] = initialize_camera
+            for client in self._server.get_clients().values():
+                self._initialize_camera(client)
         with tabs.add_tab("Visualization", icon=viser.Icon.EYE):
             self._scene.create_overlay_gui()
         with tabs.add_tab("Groups", icon=viser.Icon.LAYERS_INTERSECT):
             self._scene.create_groups_gui()
         self._is_setup = True
+
+    def _initialize_camera(self, client):
+        # Task camera coordinates are local to the selected environment.
+        origin = self.env.scene.env_origins[int(self._scene.env_idx)].detach().cpu().numpy()
+        eye = np.asarray(self.env.cfg.viewer.eye, dtype=float) + origin
+        target = np.asarray(self.env.cfg.viewer.lookat, dtype=float) + origin
+        with client.atomic():
+            client.camera.position = tuple(eye)
+            client.camera.look_at = tuple(target)
+            client.camera.up_direction = (0.0, 0.0, 1.0)
 
     @property
     def scene(self) -> ViserMujocoScene | None:

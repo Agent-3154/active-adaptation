@@ -246,6 +246,17 @@ class MjlabSimAdapter(SimAdapter):
     def step(self) -> None:
         self._sim.step()
 
+    def refresh_kinematics(self) -> None:
+        import mujoco_warp as mjwarp
+        import warp as wp
+
+        # step() integrates qpos/qvel after computing body state. Refresh only
+        # the derived state; keep the completed step's contacts/forces intact.
+        with wp.ScopedDevice(self._sim.wp_device):
+            mjwarp.kinematics(self._sim.wp_model, self._sim.wp_data)
+            mjwarp.com_pos(self._sim.wp_model, self._sim.wp_data)
+            mjwarp.com_vel(self._sim.wp_model, self._sim.wp_data)
+
     def render_sensors(self) -> None:
         self._sim.sense()
 
@@ -322,11 +333,11 @@ class MjlabSceneAdapter(SceneAdapter):
 
     @property
     def articulations(self):
-        return self._scene.entities
+        return {**self._scene.entities, **getattr(self, "_entity_overrides", {})}
     
     @property
     def entities(self):
-        return self._scene.entities
+        return {**self._scene.entities, **getattr(self, "_entity_overrides", {})}
 
     @property
     def sensors(self):
@@ -370,7 +381,7 @@ class MjlabSceneAdapter(SceneAdapter):
         return getattr(self._scene, name)
     
     def __getitem__(self, key):
-        return self._scene.entities[key]
+        return self.entities[key]
 
     @property
     def ground_mesh(self):

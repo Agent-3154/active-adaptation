@@ -43,7 +43,8 @@ class MjlabBackendEnv(_EnvBase):
 
     def setup_scene(self):
         from mjlab.scene import Scene, SceneCfg
-        from mjlab.sim import MujocoCfg, Simulation, SimulationCfg
+        from mjlab.sim import MujocoCfg, SimulationCfg
+        from active_adaptation.envs.backends.mjlab.simulation import CapacitySimulation
         from mjlab.terrains import TerrainEntityCfg
 
         # mjlab 1.6+ still silently zeros all collisions when geom_names_expr
@@ -138,7 +139,8 @@ class MjlabBackendEnv(_EnvBase):
             simulation_kwargs.update(spec=scene.spec, variant_info=variant_info)
         else:
             simulation_kwargs["model"] = scene.compile()
-        sim = Simulation(
+        sim = CapacitySimulation(
+            nccdmax=self.cfg.sim.get("nccdmax", None),
             num_envs=scene.num_envs,
             cfg=SimulationCfg(
                 nconmax=self.cfg.sim.get("nconmax", 200),
