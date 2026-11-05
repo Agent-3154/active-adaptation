@@ -143,6 +143,9 @@ class _SummaryView:
 
     def __setitem__(self, key: str, value: Any) -> None:
         raw = self._owner._ensure()
+        if isinstance(raw, _DisabledRun):
+            raw.config.update({key: _json_ready(value)})
+            return
         if self._owner.backend == "comet":
             raw.log_other(key, _json_ready(value))
             return

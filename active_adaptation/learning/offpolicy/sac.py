@@ -140,6 +140,8 @@ class SACConfig:
 
     tau_actor: float = 0.1 # a relatively large value for faster convergence
     tau_Q: float = 0.02  # a relatively large value for faster convergence
+    # Polyak EMA decay β for a separate eval policy (instantTrack ``pi_ema``). None disables.
+    pi_ema: float | None = None
     lr_alpha: float = 5e-4
     max_grad_norm: float = 1.0
 
@@ -434,6 +436,14 @@ class SAC(TensorDictModuleBase):
         self.actor_target.requires_grad_(False)
         self.actor_target.eval()
 
+        pi_ema_tau = self._pi_ema_tau()
+        if pi_ema_tau is not None:
+            self.actor_ema = copy.deepcopy(self.actor).to(device)
+            self.actor_ema.requires_grad_(False)
+            self.actor_ema.eval()
+        else:
+            self.actor_ema = None
+
         # BAC V (quantile soft-V); mixed into the Q target when ``bee_lambda > 0`` (BEE).
         self.V: nn.Module | None = None
         self.opt_V = None
@@ -623,9 +633,12 @@ class SAC(TensorDictModuleBase):
 
     def get_rollout_policy(self, mode: str = "train", critic: bool = False) -> TensorDictModuleBase:
         """Train: optional AR(1) pre-tanh rollout noise; eval/deploy: deterministic squash of the Gaussian mean."""
+        actor = self.actor
+        if mode in ("eval", "deploy") and self.actor_ema is not None:
+            actor = self.actor_ema
         policy = SACRolloutPolicy(
             self.preproc,
-            self.actor,
+            actor,
             self.DistClass,
             use_correlated=self.cfg.use_correlated,
             Q=self.Q if critic else None,
@@ -633,6 +646,14 @@ class SAC(TensorDictModuleBase):
             critic=critic,
         )
         return policy
+
+    def _pi_ema_tau(self) -> float | None:
+        beta = self.cfg.pi_ema
+        if beta is None:
+            return None
+        if not 0.0 < beta < 1.0:
+            raise ValueError(f"pi_ema must be in (0, 1), got {beta!r}")
+        return 1.0 - beta
 
     def on_stage_start(self, stage: str, env: _EnvBase):
         # we will not create buffer when not training
@@ -1079,6 +1100,9 @@ class SAC(TensorDictModuleBase):
             )
             self.opt_actor.step()
         soft_copy_(self.actor, self.actor_target, tau=self.cfg.tau_actor)
+        ema_tau = self._pi_ema_tau()
+        if ema_tau is not None and self.actor_ema is not None:
+            soft_copy_(self.actor, self.actor_ema, ema_tau)
 
         if not diagnostics:
             return 
@@ -1125,6 +1149,8 @@ class SAC(TensorDictModuleBase):
         # distributed and single-process runs.
         state_dict["Q"] = unwrap_ddp(self.Q).state_dict()
         state_dict["actor"] = unwrap_ddp(self.actor).state_dict()
+        if self.actor_ema is not None:
+            state_dict["actor_ema"] = unwrap_ddp(self.actor_ema).state_dict()
         if self.V is not None:
             state_dict["V"] = unwrap_ddp(self.V).state_dict()
         state_dict["alpha"] = unwrap_ddp(self.alpha).state_dict()
@@ -1136,6 +1162,9 @@ class SAC(TensorDictModuleBase):
     def load_state_dict(self, state_dict: dict, strict: bool = True):
         unwrap_ddp(self.Q).load_state_dict(state_dict["Q"], strict=strict)
         unwrap_ddp(self.actor).load_state_dict(state_dict["actor"], strict=strict)
+        if self.actor_ema is not None:
+            ema_sd = state_dict.get("actor_ema", state_dict["actor"])
+            unwrap_ddp(self.actor_ema).load_state_dict(ema_sd, strict=strict)
         if self.V is not None and "V" in state_dict:
             unwrap_ddp(self.V).load_state_dict(state_dict["V"], strict=strict)
         if "opt_alpha" in state_dict:

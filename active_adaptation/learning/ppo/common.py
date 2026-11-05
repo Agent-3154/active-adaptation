@@ -42,6 +42,82 @@ DONE_KEY = ("next", "done")
 CMD_KEY = "command"
 
 
+ACTION_DISTS = ("normal", "split_normal", "sinh_arcsinh")
+
+
+def resolve_action_dist(action_dist: str) -> str:
+    """Validate ``action_dist`` against the supported action distributions."""
+    if action_dist not in ACTION_DISTS:
+        raise ValueError(
+            f"Unknown action_dist {action_dist!r}; expected one of {ACTION_DISTS}."
+        )
+    return action_dist
+
+
+def action_dist_class(action_dist: str):
+    """Distribution class for ``ProbabilisticActor(distribution_class=...)``.
+
+    TorchRL instantiates this with keyword args taken from the actor's output
+    keys (``loc``/``scale``, plus ``skew`` for the split normal), so returning the
+    class itself keeps the rollout path identical to the explicit
+    :func:`make_action_dist` calls in the PPO update.
+    """
+    from active_adaptation.learning.modules.distributions import (
+        IndependentNormal,
+        IndependentSinhArcsinh,
+        IndependentSplitNormal,
+    )
+
+    if action_dist == "normal":
+        return IndependentNormal
+    if action_dist == "split_normal":
+        return IndependentSplitNormal
+    if action_dist == "sinh_arcsinh":
+        return IndependentSinhArcsinh
+    raise ValueError(
+        f"Unknown action_dist {action_dist!r}; expected one of {ACTION_DISTS}."
+    )
+
+
+def make_action_dist(
+    action_dist: str,
+    loc: torch.Tensor,
+    scale: torch.Tensor,
+    skew: torch.Tensor | None = None,
+):
+    """Build the configured action distribution from actor outputs.
+
+    Single source of truth for the distribution used at rollout and in every
+    PPO update, so the Gaussian and split-normal paths can never disagree about
+    which tensors feed them.
+    """
+    cls = action_dist_class(action_dist)
+    if action_dist in ("split_normal", "sinh_arcsinh"):
+        if skew is None:
+            raise ValueError(
+                f"action_dist={action_dist!r} requires a 'skew' tensor from the actor."
+            )
+        return cls(loc=loc, scale=scale, skew=skew)
+    return cls(loc=loc, scale=scale)
+
+
+def dist_entropy(dist, action_dist: str) -> torch.Tensor:
+    """Entropy for the PPO bonus.
+
+    For both skewed families this returns the scale-only (skew-neutral) entropy.
+    The true entropy *increases* with the shape parameter at fixed scale — for
+    split normal and sinh-arcsinh alike — so feeding it an entropy bonus would
+    pay the policy to skew rather than explore.
+
+    For ``sinh_arcsinh`` the true entropy has no closed form and is estimated by
+    Gauss-Hermite quadrature (see ``SinhArcsinh.entropy``); use
+    ``dist.entropy()`` directly if you want it for logging.
+    """
+    if action_dist in ("split_normal", "sinh_arcsinh"):
+        return dist.entropy_scale_only()
+    return dist.entropy()
+
+
 def resolve_clip_param(clip_param: Any) -> Tuple[float, float]:
     """Normalize ``clip_param`` to ``(eps_neg, eps_pos)``.
 
@@ -278,29 +354,175 @@ class Actor(nn.Module):
             the linear output when ``predict_std`` is true).
         predict_std: If true, one linear layer outputs ``2 * action_dim`` and is
             chunked into ``loc`` and ``scale``; if false, only ``loc`` is predicted.
+        predict_skew: If true, the head additionally emits a state-dependent
+            elementwise ``skew`` for :class:`IndependentSplitNormal`, bound to
+            ``max_skew * tanh(.)`` so it is exactly ``0`` at init (Gaussian start)
+            and cannot run away. Ignored by the Gaussian path.
+        max_skew: Bound on ``|skew|`` in log-scale ratio units. ``|skew| = s``
+            means one side's std is ``exp(s)`` times the other's.
     """
 
-    def __init__(self, action_dim: int, predict_std: bool = False) -> None:
+    def __init__(
+        self,
+        action_dim: int,
+        predict_std: bool = False,
+        predict_skew: bool = False,
+        max_skew: float = 1.0,
+    ) -> None:
         super().__init__()
         self.predict_std = predict_std
+        self.predict_skew = predict_skew
+        self.max_skew = max_skew
+        self.action_dim = action_dim
+        n_out = action_dim * 2 if predict_std else action_dim
+        if predict_skew:
+            n_out += action_dim
+        # The scale parameterization depends on predict_std only; predicting skew
+        # adds an output chunk but must not switch how scale is produced.
         if predict_std:
-            self.actor_mean = nn.LazyLinear(action_dim * 2)
+            self.actor_mean = nn.LazyLinear(n_out)
             self.scale_mapping = torch.exp
         else:
-            self.actor_mean = nn.LazyLinear(action_dim)
+            self.actor_mean = nn.LazyLinear(n_out)
             self.actor_std = nn.Parameter(torch.ones(action_dim))
             self.scale_mapping = nn.Identity()
         self.actor_mean.weight._non_muon = True
 
     def forward(self, features: torch.Tensor):
-        """Return ``(loc, scale)`` tensors for ``IndependentNormal`` (or equivalent)."""
+        """Return ``(loc, scale)``, or ``(loc, scale, skew)`` when predicting skew."""
+        out = self.actor_mean(features)
+        if not self.predict_std and not self.predict_skew:
+            loc = out
+            scale = torch.ones_like(loc) * self.actor_std
+            return loc, self.scale_mapping(scale)
+        # Split off the skew chunk last so enabling it leaves loc/scale layout intact.
+        if self.predict_skew:
+            out, skew_raw = out.split(
+                [out.shape[-1] - self.action_dim, self.action_dim], dim=-1
+            )
         if self.predict_std:
-            loc, scale = self.actor_mean(features).chunk(2, dim=-1)
+            loc, scale = out.chunk(2, dim=-1)
         else:
-            loc = self.actor_mean(features)
+            loc = out
             scale = torch.ones_like(loc) * self.actor_std
         scale = self.scale_mapping(scale)
+        if self.predict_skew:
+            return loc, scale, self.max_skew * torch.tanh(skew_raw)
         return loc, scale
+
+    @torch.no_grad()
+    def init_skew_(self, init: float = 0.0, signs: torch.Tensor | None = None) -> None:
+        """Set the skew head so each action starts at ``init * sign``.
+
+        ``init=0`` reproduces :meth:`zero_skew_` (exact Gaussian start). A small
+        nonzero value breaks the symmetric stationary point without biasing the
+        shape toward one side more than the data supports, which is what lets a
+        state-dependent head actually express sustained skew: at ``skew == 0``
+        the only path to skew is a weight direction that must agree across all
+        states.
+
+        A plain ``LazyLinear`` init gives the skew rows a random weight and bias,
+        so this must be called after the lazy parameters are materialized (i.e.
+        after a warm-up forward) and after any general ``apply(init_)`` pass,
+        which would otherwise re-randomize these rows.
+
+        A nonzero initial skew is applied along the symmetry-invariant direction
+        when the action mirror map is known. That is not because the symmetry loss
+        penalizes asymmetry (it is only logged, not optimized), but because under
+        ``symaug`` the mirrored batch reuses the *same* stored ``action_log_prob``;
+        a mirror-inconsistent skew makes the two halves disagree about the target
+        shape, which adds avoidable ratio noise early on.
+
+        Args:
+            init: Target initial skew magnitude per action, in ``tanh`` units
+                before ``max_skew`` scaling. Bias is set to
+                ``atanh(init)`` so that ``max_skew * tanh(bias) == init``.
+            signs: Optional per-action signs (typically the action-space mirror
+                signs). ``None`` means all +1.
+        """
+        if not self.predict_skew:
+            return
+        if type(self.actor_mean).__name__.startswith("Uninitialized") or type(
+            self.actor_mean
+        ).__name__.startswith("Lazy"):
+            raise RuntimeError(
+                "init_skew_() called before the head was materialized; run a "
+                "warm-up forward on the actor first."
+            )
+        # Output layout is [loc | scale | skew] with the scale block present only
+        # when predict_std is set, so the skew block always starts at the end.
+        cols = slice(
+            self.action_dim * 2 if self.predict_std else self.action_dim, None
+        )
+        self.actor_mean.weight[cols].zero_()
+        if init == 0.0:
+            self.actor_mean.bias[cols].zero_()
+            return
+        if abs(init) >= 1.0:
+            raise ValueError(
+                f"init_skew_ init must be in (-1, 1) since tanh is bounded, got {init}."
+            )
+        sign = (
+            torch.ones(self.action_dim, device=self.actor_mean.bias.device)
+            if signs is None
+            else torch.as_tensor(
+                signs, device=self.actor_mean.bias.device, dtype=self.actor_mean.bias.dtype
+            )
+        )
+        if sign.numel() != self.action_dim:
+            raise ValueError(
+                f"signs must have length {self.action_dim}, got {sign.numel()}."
+            )
+        # The sign of `init` is folded into the sign vector, so
+        # max_skew * tanh(bias) == init * sign elementwise. atanh is applied to
+        # |init| because tanh is odd: atanh(-c) == -atanh(c).
+        direction = sign if init > 0 else -sign
+        self.actor_mean.bias[cols] = torch.atanh(torch.as_tensor(abs(init))) * direction
+
+    def zero_skew_(self) -> None:
+        """Zero the skew head so the policy starts as an exact Gaussian."""
+        self.init_skew_(0.0)
+
+
+def symmetry_invariant_skew_signs(act_transform, action_dim: int) -> torch.Tensor | None:
+    """Per-action skew vector left unchanged by the action mirror transform.
+
+    Skew is *signed* (it names the heavy side), so it transforms exactly like
+    ``loc``: ``(M k)_i = signs[i] * k[perm[i]]``. A uniform init is therefore
+    generally **not** symmetry-consistent -- under ``symaug`` the mirror loss
+    would push it back toward zero, cancelling most of the benefit of starting
+    off-centre.
+
+    We find the invariant subspace by orbit averaging,
+    ``k = mean_t M^t 1``, which projects onto ``{k : M k = k}``. ``M`` is a
+    signed permutation, so this converges exactly in at most ``action_dim``
+    steps.
+
+    Returns:
+        A unit-scale vector in the invariant subspace (sign pattern only; the
+        caller rescales), or ``None`` when the invariant subspace is trivial
+        (i.e. no nonzero symmetric skew exists for this action space).
+    """
+    if act_transform is None:
+        return None
+    perm = act_transform.perm
+    signs = act_transform.signs.to(torch.float32)
+    if perm.numel() != action_dim:
+        return None
+
+    def mirror(x: torch.Tensor) -> torch.Tensor:
+        return signs.to(x.device) * x[perm.to(x.device)]
+
+    acc = torch.zeros(action_dim, device=perm.device, dtype=torch.float32)
+    cur = torch.ones_like(acc)
+    for _ in range(action_dim):
+        acc = acc + cur
+        cur = mirror(cur)
+    acc = acc / action_dim
+    if acc.abs().max() < 1e-6:
+        return None
+    # Normalize so the largest component is 1; caller multiplies by `init`.
+    return acc / acc.abs().max()
 
 
 class Critic(nn.Module):
