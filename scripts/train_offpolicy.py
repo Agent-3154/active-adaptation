@@ -100,7 +100,7 @@ class TrainConfig:
     exp_name: str = "${oc.select:task.name,test}-${oc.select:algo.name,none}"
     """Experiment label used in run names and logger metadata."""
     backend: str = "isaaclab"
-    """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
+    """Simulation backend: ``isaac``, ``mjlab``, or ``motrix``."""
     device: str = "cuda"
     """Torch device for training (adjusted per local rank when using CUDA)."""
 

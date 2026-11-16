@@ -12,9 +12,11 @@ if TYPE_CHECKING:
 
 from active_adaptation.utils.math import (
     quat_from_euler_xyz,
+    quat_mul,
     quat_rotate, 
     quat_rotate_inverse,
     clamp_norm,
+    sample_quat_yaw,
     yaw_quat,
     yaw_rotate,
     wrap_to_pi,
@@ -22,6 +24,38 @@ from active_adaptation.utils.math import (
 )
 import active_adaptation.utils.symmetry as symmetry_utils
 from .base import Command
+
+
+def _reset_robot_pose(command: Command, env_ids: torch.Tensor) -> torch.Tensor:
+    """Place the robot and return the episode origins that were used.
+
+    A plane has one layout slot per env. Any other terrain draws a point from
+    ``terrain_origins`` (a generator grid, or a mesh's
+    ``(rows, cols, n_origins, 3)`` spawn list).
+    """
+    terrain = command.env.scene.terrain
+    if command.env.terrain_type == "plane":
+        origins = command.env.scene.env_origins[env_ids]
+    else:
+        cells = terrain.terrain_origins.reshape(-1, 3)
+        cell_ids = torch.randint(
+            0, cells.shape[0], (env_ids.shape[0],), device=env_ids.device
+        )
+        origins = cells[cell_ids]
+    init_root_state = command.init_root_state[env_ids].clone()
+    init_root_state[:, :3] += origins
+    init_root_state[:, 3:7] = quat_mul(
+        init_root_state[:, 3:7],
+        sample_quat_yaw(len(env_ids), device=command.device),
+    )
+    command._write_initial_states({"robot": init_root_state}, env_ids)
+    robot = command.env.scene["robot"]
+    robot.write_joint_state_to_sim(
+        command.init_joint_pos[env_ids],
+        command.init_joint_vel[env_ids],
+        env_ids=env_ids,
+    )
+    return origins
 
 
 @wp.kernel(enable_backward=False)
@@ -237,7 +271,7 @@ class Twist(Command):
         self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
         self.distance_commanded[env_ids] = 0.0
         self.distance_traveled[env_ids] = 0.0
-        origins = super().reset(env_ids, tensordict)
+        origins = _reset_robot_pose(self, env_ids)
         self._reset_command_buffers(env_ids, tensordict)
         return origins
 
@@ -596,7 +630,7 @@ class PositionVelocityTracking(Command):
         self.env.extra["curriculum/distance_traveled"] = self.distance_traveled.mean()
         self.distance_commanded[env_ids] = 0.0
         self.distance_traveled[env_ids] = 0.0
-        origins = super().reset(env_ids, tensordict)
+        origins = _reset_robot_pose(self, env_ids)
 
         self.ref_pos_w[env_ids] = self.asset.data.root_link_pos_w[env_ids]
         self.ref_yaw_w[env_ids] = self.asset.data.heading_w[env_ids, None]

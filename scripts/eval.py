@@ -70,7 +70,7 @@ class EvalConfig:
     headless: bool = True
     """Run simulation without a rendering window."""
     backend: str = "isaaclab"
-    """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
+    """Simulation backend: ``isaac``, ``mjlab``, or ``motrix``."""
     device: str = "cuda"
     """Torch device for policy inference (e.g. ``cuda``, ``cpu``)."""
     app: IsaacAppConfig = field(default_factory=IsaacAppConfig)

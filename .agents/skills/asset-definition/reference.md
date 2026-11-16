@@ -37,7 +37,6 @@ At import time, `aa.get_backend()` selects which cfg class exists:
 |---------|-------------------|--------|
 | `isaac` | `ArticulationCfg` extends Isaac Lab | Also re-exports `ImplicitActuatorCfg`, `sim_utils` |
 | `mjlab` / `motrix` | `EntityCfg` extends mjlab `EntityCfg` | Optional `motrix_mjcf_path_fn` |
-| `mujoco` | imports `MJArticulationCfg` | **Deprecated** — do not extend |
 
 Extra fields on both Isaac/mjlab cfgs:
 
@@ -228,7 +227,7 @@ Order: terrain (no prefix) → entities with `{name}/` prefix → sensors. Keyfr
 - AA `asset_cfg.EntityCfg` subclasses mjlab’s and adds `joint_names_simulation`, `body_names_simulation`, symmetry maps, optional `motrix_mjcf_path_fn`.
 - Robot factories return `AssetSpec(config=EntityCfg, sensors=tuple[ContactSensorCfg, ...])`.
 - Object factories may return bare `EntityCfg` (HOI); env unwraps `AssetSpec` if present.
-- Do not confuse `import mujoco` inside mjlab factories (correct) with the deprecated standalone `backend=="mujoco"` path.
+- `import mujoco` inside an mjlab factory (`MjSpec.from_file`) is the mjlab stack, not a separate env backend.
 
 ---
 
@@ -430,7 +429,7 @@ Use this when refactoring; do not expand these patterns.
 
 ### High priority
 
-1. **`asset_cfg.py` mujoco branch** — remove once the mujoco backend package is deleted; new code must not import `MJArticulationCfg`.
+1. **Standalone `backend=mujoco`** — removed. Do not reintroduce `MJArticulationCfg` or `envs/backends/mujoco`.
 2. **In-repo `assets/Go2/`, `assets/G1/`** — migrate `g1.py` paths to `ROBOT_MODEL_DIR`; delete duplicate MJCF/URDF when unused.
 3. **`go2.py`** — add Isaac `make_isaaclab_cfg` + USD; switch mjlab to `BuiltinPdActuatorCfg`.
 4. **`b2.py` / `g1.py` / manipulators** — replace `BuiltinPositionActuatorCfg` with `BuiltinPdActuatorCfg`; add contact sensors where missing.
@@ -446,8 +445,8 @@ Use this when refactoring; do not expand these patterns.
 
 ### Do not confuse
 
-- Importing `mujoco` **inside** `make_mjlab_cfg` to call `MjSpec.from_file` is correct (mjlab stack).
-- The deprecated path is the **standalone** `backend == "mujoco"` articulation cfg and any `envs/backends/mujoco` factories.
+- Importing `mujoco` **inside** `make_mjlab_cfg` to call `MjSpec.from_file` is the mjlab stack.
+- There is no standalone `backend == "mujoco"` env. Use `backend=mjlab`.
 
 ---
 

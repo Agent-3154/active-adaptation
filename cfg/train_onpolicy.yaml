@@ -1,0 +1,11 @@
+# @package _global_
+# On-policy launcher: algo via Hydra; task via runtime factory (train_onpolicy.py).
+defaults:
+  - algo: ppo_symaug
+  - _self_
+
+headless: true
+backend: mjlab
+device: cuda
+seed: 42
+discard_unused_obs: true

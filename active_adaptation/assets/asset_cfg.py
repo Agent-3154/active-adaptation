@@ -41,10 +41,6 @@ elif aa.get_backend() in ("mjlab", "motrix"):
         body_names_simulation: Optional[List[str]] = None
         motrix_mjcf_path_fn: Callable[["EntityCfg"], str] | None = None
 
-elif aa.get_backend() == "mujoco":
-    import mujoco
-    from active_adaptation.envs.backends.mujoco.mujoco import MJArticulationCfg
-
 
 @dataclass(kw_only=True, frozen=True)
 class InitialStateCfg:
@@ -224,91 +220,6 @@ class AssetCfg:
     joint_symmetry_mapping: Optional[Dict[str, Tuple[int, str]]] = None
     spatial_symmetry_mapping: Optional[Dict[str, str]] = None
 
-    @staticmethod
-    def _as_pattern_dict(
-        expr: str,
-        value: float | Dict[str, float],
-    ) -> Dict[str, float]:
-        if isinstance(value, (float, int)):
-            return {expr: float(value)}
-        return value
-
-    def _merge_actuator_dicts(self):
-        joint_names_exprs = []
-        effort_limit = {}
-        velocity_limit = {}
-        stiffness = {}
-        damping = {}
-        friction = {}
-        armature = {}
-
-        def _checked_update(
-            dst: Dict[str, float],
-            src: Dict[str, float],
-            field_name: str,
-            actuator_name: str,
-        ):
-            overlap = set(dst).intersection(src)
-            if overlap:
-                overlap_str = ", ".join(sorted(overlap))
-                raise ValueError(
-                    f"Duplicate actuator pattern(s) for '{field_name}': {overlap_str}. "
-                    f"Actuator '{actuator_name}' would overwrite existing values."
-                )
-            dst.update(src)
-
-        for actuator_name, actuator in self.actuators.items():
-            expr = actuator.joint_names_expr
-            if isinstance(expr, list):
-                expr = "|".join(expr)
-            joint_names_exprs.append(f"({expr})")
-            _checked_update(
-                effort_limit,
-                self._as_pattern_dict(expr, actuator.effort_limit),
-                "effort_limit",
-                actuator_name,
-            )
-            _checked_update(
-                velocity_limit,
-                self._as_pattern_dict(expr, actuator.velocity_limit),
-                "velocity_limit",
-                actuator_name,
-            )
-            _checked_update(
-                stiffness,
-                self._as_pattern_dict(expr, actuator.stiffness),
-                "stiffness",
-                actuator_name,
-            )
-            _checked_update(
-                damping,
-                self._as_pattern_dict(expr, actuator.damping),
-                "damping",
-                actuator_name,
-            )
-            _checked_update(
-                friction,
-                self._as_pattern_dict(expr, actuator.friction),
-                "friction",
-                actuator_name,
-            )
-            _checked_update(
-                armature,
-                self._as_pattern_dict(expr, actuator.armature),
-                "armature",
-                actuator_name,
-            )
-
-        return {
-            "joint_names_expr": "|".join(joint_names_exprs),
-            "effort_limit": effort_limit,
-            "velocity_limit": velocity_limit,
-            "stiffness": stiffness,
-            "damping": damping,
-            "friction": friction,
-            "armature": armature,
-        }
-
     def isaaclab(self):
         actuators = {
             actuator_name: actuator.isaaclab()
@@ -371,31 +282,6 @@ class AssetCfg:
             body_names_simulation=self.body_names_simulation,
         )
 
-    def mujoco(self):
-        merged = self._merge_actuator_dicts()
-        return MJArticulationCfg(
-            mjcf_path=str(self.mjcf_path),
-            init_state={
-                "pos": self.init_state.pos,
-                "rot": self.init_state.rot,
-                "joint_pos": self.init_state.joint_pos,
-                "joint_vel": self.init_state.joint_vel,
-            },
-            actuators={
-                "all": {
-                    "joint_names_expr": merged["joint_names_expr"],
-                    "stiffness": merged["stiffness"],
-                    "damping": merged["damping"],
-                    "friction": merged["friction"],
-                    "armature": merged["armature"],
-                }
-            },
-            body_names_simulation=self.body_names_simulation,
-            joint_names_simulation=self.joint_names_simulation,
-            joint_symmetry_mapping=self.joint_symmetry_mapping,
-            spatial_symmetry_mapping=self.spatial_symmetry_mapping,
-        )
-
     def mjlab(self):
         collisions = []
         for collision_cfg in self.mjlab_collisions:
@@ -427,8 +313,6 @@ class AssetCfg:
         if backend == "mjlab":
             sensors = tuple(sensor.mjlab() for sensor in self.sensors_mjlab)
             return AssetSpec(config=self.mjlab(), sensors=sensors)
-        if backend == "mujoco":
-            return AssetSpec(config=self.mujoco(), sensors=())
         raise ValueError(f"Unsupported backend for AssetCfg: {backend}")
 
 
@@ -482,12 +366,12 @@ def coerce_asset_spec(asset_entry: Any, *, backend: str, **kwargs: Any) -> Asset
 
 
 def get_input_joint_indexing(
-    input_order: Literal["isaaclab", "mujoco", "mjlab", "simulation"],
+    input_order: Literal["isaaclab", "mjlab", "simulation"],
     asset_cfg: AssetCfg,
     target_joint_names: List[str],
     device: str = "cpu",
 ) -> Tuple[torch.Tensor, List[str]]:
-    if input_order == aa.get_backend() or input_order == "mujoco":
+    if input_order == aa.get_backend():
         return slice(None), target_joint_names
     if input_order not in {"isaaclab", "mjlab", "simulation"}:
         raise ValueError(f"Invalid input_order: {input_order}")
@@ -505,12 +389,12 @@ def get_input_joint_indexing(
 
 
 def get_output_joint_indexing(
-    output_order: Literal["isaaclab", "mujoco", "mjlab", "simulation"],
+    output_order: Literal["isaaclab", "mjlab", "simulation"],
     asset_cfg: AssetCfg,
     source_joint_names: List[str],
     device: str = "cpu",
 ) -> Tuple[torch.Tensor, List[str]]:
-    if output_order == aa.get_backend() or output_order == "mujoco":
+    if output_order == aa.get_backend():
         return slice(None), source_joint_names
     if output_order not in {"isaaclab", "mjlab", "simulation"}:
         raise ValueError(f"Invalid output_order: {output_order}")
@@ -528,12 +412,12 @@ def get_output_joint_indexing(
 
 
 def get_output_body_indexing(
-    output_order: Literal["isaaclab", "mujoco", "mjlab", "simulation"],
+    output_order: Literal["isaaclab", "mjlab", "simulation"],
     asset_cfg: AssetCfg,
     source_body_names: List[str],
     device: str = "cpu",
 ) -> Tuple[torch.Tensor, List[str]]:
-    if output_order == aa.get_backend() or output_order == "mujoco":
+    if output_order == aa.get_backend():
         return slice(None), source_body_names
     if output_order not in {"isaaclab", "mjlab", "simulation"}:
         raise ValueError(f"Invalid output_order: {output_order}")

@@ -1232,9 +1232,6 @@ class _EnvBase(EnvBase, RegistryMixin):
             except ModuleNotFoundError:
                 pass
             return torch_utils.set_seed(seed)
-        elif self.backend == "mujoco":
-            torch.manual_seed(seed)
-            np.random.seed(seed)
         elif self.backend == "mjlab":
             torch.manual_seed(seed)
             np.random.seed(seed)

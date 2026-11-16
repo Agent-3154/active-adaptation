@@ -143,9 +143,9 @@ First consolidated **v0.8** release line. This branch merges months of HDMI / Mi
 - **`env.episode_origin`** — commands set per-episode spawn origins (separate from terrain layout slots) for shared 3DGS and episode-local frames.
 - **`reset(env_ids, tensordict)`** — all MDP `reset` hooks use this signature; terms may read/write the reset tensordict.
 - **Scene-owned sensors** — contact and camera sensors are declared in task YAML (`sensors:`) and built via factories under `envs/sensors/`, with backend-specific contact data handled explicitly (Isaac `net_forces_w` / `force_matrix_w` vs mjlab `force`).
-- **mjlab 1.6** — primary MuJoCo backend for new work; collision/sensor cfg aligned with mjlab ≥1.6 structural fields. Standalone `backend=mujoco` remains in tree but is deprecated.
+- **mjlab 1.6** — primary MuJoCo backend for new work; collision/sensor cfg aligned with mjlab ≥1.6 structural fields. The standalone `backend=mujoco` env has since been removed; use `backend=mjlab`.
 - **Isaac Viser viewer** — optional browser viewer (`viewer.viser: true`) alongside Kit; debug drawing goes through `env.scene.draw_*` / camera frustums, not legacy `env.debug_draw`.
-- **3D Gaussian splatting & mesh composite** — optional `task.visual` stack (`FvdbGaussianWorld`, robot mesh overlay via `simple-raycaster` / nvdiffrast) for appearance-rich tasks.
+- **3D Gaussian splatting & mesh composite** — optional `task.visual` stack (`FvdbGaussianWorld`, robot mesh overlay via `simple-raycaster`) for appearance-rich tasks.
 - **Non-finite rollout guard** — invalid transition rows are zeroed and those envs are terminated so one bad sim instance does not poison PPO updates.
 - **Functional observation groups** — an obs group may be all “functional” (nested TensorDict per term) or all dense (concatenated vector); mixing within a group is rejected.
 
@@ -181,7 +181,7 @@ First consolidated **v0.8** release line. This branch merges months of HDMI / Mi
 
 - **Unified project CLI** — `aa-project` (Typer) replaces scattered entry points (`aa-create-project`, `aa-pull`, `aa-recent-commands`, …). Subcommands: `create`, `install`, `discover`, `enable` / `disable`, `pull`.
 - **Entry-point discovery** — extension projects register via `active_adaptation.projects` and `active_adaptation.learning`; manifest at `.cache/projects.json`.
-- **uv multi-environment workflow** — backend stacks isolated in `venv/isaac51` and `venv/mjlab`; root env is tooling-only. Optional `[render]` extra for 3DGS / nvdiffrast.
+- **uv multi-environment workflow** — backend stacks isolated in `venv/isaac51` and `venv/mjlab`; root env is tooling-only. Optional `[render]` extra for 3DGS.
 - **Torch 2.11** pin and dependency cleanup (removed unused `moviepy`, `av`, `pygame`, root-level `mujoco` pin).
 - **First unit tests** — non-finite transition sanitization and reward EMA finiteness.
 

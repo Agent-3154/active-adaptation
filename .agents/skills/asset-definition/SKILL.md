@@ -7,7 +7,7 @@ description: Define and register cross-backend robot/object assets in active-ada
 
 Define robots and scene objects so **Isaac** and **mjlab** share one registry entry, the same init/symmetry metadata, and a **canonical joint/body order** for MDP tensors.
 
-**Supported backends for new work:** `isaac` / `isaaclab` and `mjlab` only. The standalone `mujoco` backend is deprecated (mjlab replaces it) — do not add `MJArticulationCfg` or mujoco-only factories.
+**Supported backends:** `isaac` / `isaaclab` and `mjlab`. The standalone `mujoco` backend has been removed; mjlab is the MuJoCo stack.
 
 **Primary references**
 - Shared cfg + `AssetSpec`: `active_adaptation/assets/asset_cfg.py`
@@ -49,7 +49,7 @@ Read [reference.md](reference.md) for file map, **mjlab API contracts**, outdate
 5. **Runtime models live in `ROBOT_MODEL_DIR`** — USD + MJCF under `.cache/aa-robot-models/<robot>/`. Do not vendor large meshes into `active_adaptation/assets/`. **Compose** new MJCF in **assetx**. Robots with a registered assetx recipe are cooked into `ROBOT_MODEL_DIR` by `aa-cook-assets`, and their factories resolve the bundle with `cooked_model_dir()` (fails fast, never auto-cooks). Others are exported from `assetx/examples/` and copied (see [assetx pipeline](#assetx-model-pipeline)).
 6. **Register + import** — `registry.register("asset", "<name>", make_cfg)` and import the module from the package `__init__.py` so registration runs.
 7. **Name parity** — joint/body names used by MDP, init regexes, and sensors must match across USD and MJCF (order may differ; the simulation lists fix layout). We always assume the USD joint and body names match those of the MJCF (if provided). So do not bother checking them.
-8. **No new mujoco-backend assets** — ignore `elif aa.get_backend() == "mujoco"` in `asset_cfg.py` for new work; prefer deleting it when cleaning.
+8. **Isaac and mjlab only** — `asset_cfg.py` has no standalone `mujoco` branch. Do not add one.
 9. **mjlab actuators: `BuiltinPdActuatorCfg` by default** — AA joint actions often call both `set_joint_position_target` and `set_joint_velocity_target` (`envs/mdp/actions/joint.py`). Use `BuiltinPositionActuatorCfg` only when explicitly specified.
 10. **Mimic / coupled joints: physics constraints, drivers only** — Isaac: URDF `<mimic>`; mjlab: MJCF `<equality><joint …/></equality>` (no URDF-style mimic tag). Actuate **driver** joints only; leave mimics unactuated (or Isaac zero-gain / passive). Prefer physics coupling over software target-copy (`MimicJointPosition`) for mjlab. Details: [reference.md](reference.md#mimic--coupled-joints).
 11. **Never smoke-test with the shared root venv** — it is by design incomplete. Use `uv run --project venv/isaac51` and `uv run --project venv/mjlab`. See [.agents/skills/README.md](../README.md#smoke-tests--running-code).
@@ -336,7 +336,7 @@ When editing assets, prefer migrating away from:
 
 | Pattern | Prefer |
 |---------|--------|
-| `asset_cfg` `mujoco` / `MJArticulationCfg` branch | Isaac + mjlab only |
+| A new standalone `mujoco` env backend | Isaac + mjlab only |
 | In-repo `assets/Go2/`, `assets/G1/**` MJCF/URDF as source of truth | `ROBOT_MODEL_DIR` (g1 still points at `assets/G1` — migrate when touching) |
 | Hand-editing monolithic MJCF copies per robot variant | assetx recipe + `save()`; publish to `ROBOT_MODEL_DIR` |
 | Pointing `spec_fn` at `aa-projects/assetx/artifacts/` during training | Copy/sync saved bundle into `.cache/aa-robot-models/` |

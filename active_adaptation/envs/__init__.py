@@ -5,10 +5,8 @@ from . import terrain
 
 _BACKEND_ENV_EXPORTS = {
     "IsaacBackendEnv": "active_adaptation.envs.backends.isaaclab",
-    "MujocoBackendEnv": "active_adaptation.envs.backends.mujoco",
     "MjlabBackendEnv": "active_adaptation.envs.backends.mjlab",
     "MotrixBackendEnv": "active_adaptation.envs.backends.motrix",
-    "MJArticulationCfg": "active_adaptation.envs.backends.mujoco.mujoco",
 }
 
 
@@ -23,10 +21,8 @@ def __getattr__(name: str):
     return value
 
 __all__ = [
-    "MJArticulationCfg",
     "_EnvBase",
     "IsaacBackendEnv",
-    "MujocoBackendEnv",
     "MjlabBackendEnv",
     "MotrixBackendEnv",
     "terrain",

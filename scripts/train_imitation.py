@@ -186,11 +186,6 @@ def make_env_teacher_student(
     if backend == "isaaclab":
         env_cls = _EnvBase.registry[task_cfg.get("env_class", "IsaacBackendEnv")]
         env_device = str(device)
-    elif backend == "mujoco":
-        env_cls = _EnvBase.registry[task_cfg.get("env_class", "MujocoBackendEnv")]
-        task_cfg.num_envs = 1
-        task_cfg.reward = {}
-        env_device = "cpu"
     elif backend == "mjlab":
         env_cls = _EnvBase.registry[task_cfg.get("env_class", "MjlabBackendEnv")]
         env_device = str(device)

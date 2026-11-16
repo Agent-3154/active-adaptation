@@ -39,7 +39,6 @@ class Every:
 def _ensure_backend_env_imported(backend: str):
     backend_modules = {
         "isaaclab": "active_adaptation.envs.backends.isaaclab",
-        "mujoco": "active_adaptation.envs.backends.mujoco",
         "mjlab": "active_adaptation.envs.backends.mjlab",
         "motrix": "active_adaptation.envs.backends.motrix",
     }
@@ -112,11 +111,6 @@ def make_env_policy(
         if backend == "isaaclab":
             env_cls = _EnvBase.registry[task_cfg.get("env_class", "IsaacBackendEnv")]
             env_device = str(device)
-        elif backend == "mujoco":
-            env_cls = _EnvBase.registry[task_cfg.get("env_class", "MujocoBackendEnv")]
-            task_cfg.num_envs = 1
-            task_cfg.reward = {}
-            env_device = "cpu"
         elif backend == "mjlab":
             env_cls = _EnvBase.registry[task_cfg.get("env_class", "MjlabBackendEnv")]
             env_device = str(device)

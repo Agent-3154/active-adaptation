@@ -381,10 +381,13 @@ class IsaacSceneAdapter(SceneAdapter):
     def sample_spawn_origin_candidates(
         self, env_ids: torch.Tensor
     ) -> torch.Tensor:
-        if self._scene.terrain.terrain_origins is None:
+        terrain = self._scene.terrain
+        # Generator terrains resample a sub-terrain each reset. Mesh tiles stay
+        # on the env assigned at spawn so robots do not share one copy.
+        if terrain.terrain_origins is None or terrain.cfg.terrain_type != "generator":
             return self.env_origins[env_ids]
 
-        terrain_origins = self._scene.terrain.terrain_origins.reshape(-1, 3)
+        terrain_origins = terrain.terrain_origins.reshape(-1, 3)
         idx = torch.randint(
             0,
             terrain_origins.shape[0],

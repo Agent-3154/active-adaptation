@@ -1,6 +1,6 @@
 """fvdb-core Gaussian splat visual world (+ optional mesh composite).
 
-Mesh RGB-D is rendered by ``simple_raycaster`` (``diffrast`` / ``raycast``);
+Mesh RGB-D is rendered by ``simple_raycaster`` (``raycast``);
 this module only depth-composites that RGB-D over the Gaussian image. None of
 these replace the legacy MDP depth obs ``extero.raycast_camera`` (removed; use
 ``raycast_camera`` + ``lambert_raycast_camera`` sensor).
@@ -75,8 +75,8 @@ class FvdbGaussianWorld:
     """3DGS appearance via ``fvdb.GaussianSplat3d`` (explicit obs → :meth:`render`).
 
     InteriorGS scenes also ship ``{id}_collision.usd`` beside the PLY (shared
-    Z-up frame). That mesh is loaded for cheap Viser debug; physics collision
-    (replacing the ground plane) is not wired yet.
+    Z-up frame). That mesh is loaded for cheap Viser debug. PhysX collision for
+    a scene mesh is a separate ``terrain`` PLY (``MeshTerrain``), not this USD.
 
     When entity visual meshes are attached (:meth:`attach_scene_meshes`), each
     :meth:`render` depth-composites mesh RGB-D from the configured

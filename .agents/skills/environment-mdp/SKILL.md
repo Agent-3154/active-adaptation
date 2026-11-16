@@ -527,7 +527,7 @@ Native camera obs terms set `env.sensor_render_enabled = True` in `_initialize`.
 
 **3DGS / visual world (option A):** appearance is **not** on `sim`. Load via `task.visual` → `env.visual` (`VisualWorld`, e.g. `FvdbGaussianWorld`). Observation `gs_camera` calls `env.visual.render` in `update`/`compute` — no `sensor_render_enabled`. With `origin: env` (default for shared scenes), camera poses are expressed relative to `env.episode_origin` (from `Command.reset`; see [Episode origins](#episode-origins)).
 
-**Robot + GS composite:** `_setup_visual` calls `visual.attach_scene_meshes(scene)` for `task.visual.mesh_entities` (default `[robot]`). Isaac pulls body-local visuals via `scene.get_visual_meshes`; mesh RGB-D is rendered by **`simple_raycaster`** (`mesh_renderer: diffrast|raycast`, optional quadric `face_keep`). AA only depth-composites over GS (`envs/visual/mesh_composite.py`). Pass `origin_w=episode_origin` for episode-local cameras.
+**Robot + GS composite:** `_setup_visual` calls `visual.attach_scene_meshes(scene)` for `task.visual.mesh_entities` (default `[robot]`). Isaac pulls body-local visuals via `scene.get_visual_meshes`; mesh RGB-D is rendered by **`simple_raycaster`** (`mesh_renderer: raycast`, optional quadric `face_keep`). AA only depth-composites over GS (`envs/visual/mesh_composite.py`). Pass `origin_w=episode_origin` for episode-local cameras.
 
 InteriorGS dirs also ship `{id}_collision.usd` (same frame as the PLY); loaded for Isaac Viser (`/visual/collision`, visible; 3DGS stays hidden). Physics use of that mesh (replace ground plane) is not wired yet — still on `scene`. Placeholder PLY: `envs/visual/fvdb_gs.py` → `PLY_PATH_PLACEHOLDER`.
 

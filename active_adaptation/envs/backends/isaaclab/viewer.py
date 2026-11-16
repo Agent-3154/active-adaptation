@@ -342,8 +342,8 @@ class IsaacViserViewer:
     ) -> None:
         """Upload InteriorGS collision trimesh (same frame as the 3DGS PLY).
 
-        Cheap browser stand-in for the Gaussian scene. Not yet used as PhysX
-        collision (ground plane still owns sim contact).
+        Cheap browser stand-in for the Gaussian scene. PhysX collision comes
+        from the terrain importer (plane, generator, or a tiled PLY mesh).
         """
         if not self._is_setup:
             raise RuntimeError("IsaacViserViewer.setup() has not been called.")

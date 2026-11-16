@@ -17,7 +17,7 @@ max_episode_length: 1000
 sim:
   step_dt: 0.02
   isaac_physics_dt: 0.005
-  mujoco_physics_dt: 0.002
+  mujoco_physics_dt: 0.005
 
 input:
   action:
@@ -50,9 +50,9 @@ command:
   curriculum: false
 
 observation:
-  # command:
-  policy:
+  command:
     command: {}
+  policy:
     gravity_multistep: {steps: 4, noise_std: 0.05}
     joint_pos_multistep: {joint_names: "(?!(.*wrist.*)).*", steps: 4, noise_std: 0.05}
     joint_vel_multistep: {joint_names: "(?!(.*wrist.*)).*", steps: 4, noise_std: 0.2}

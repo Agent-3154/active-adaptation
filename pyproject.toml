@@ -43,9 +43,6 @@ trackio = [
 ]
 render = [
     "fvdb-core[viewer]==0.5.1+pt211.cu130",
-    # Robot mesh rasterization for GS composite (needs torch already installed).
-    "nvdiffrast",
-    "ninja",
 ]
 
 [project.scripts]
@@ -81,14 +78,11 @@ url = "https://d36m13axqqhiit.cloudfront.net/simple"
 explicit = true
 
 [tool.uv]
-# nvdiffrast compiles CUDA extensions against the env's torch (official install).
-no-build-isolation-package = ["nvdiffrast"]
 # simple-raycaster and the render extra depend on torch. Each backend pins its
 # own build; the root tooling env must not resolve a wheel.
 exclude-dependencies = ["torch", "torchvision", "torchaudio"]
 
 [tool.uv.sources]
 fvdb-core = { index = "fvdb" }
-nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", rev = "253ac4fcea7de5f396371124af597e6cc957bfae" }
 simple-raycaster = { git = "https://github.com/btx0424/simple-raycaster.git", rev = "a217433ea18bd1b897d6cd1137a228c517befa5c" }
 assetx = { git = "https://github.com/btx0424/assetx.git", branch = "main" }

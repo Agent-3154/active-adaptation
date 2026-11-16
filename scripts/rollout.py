@@ -68,7 +68,7 @@ class RolloutConfig:
     headless: bool = True
     """Run simulation without a rendering window."""
     backend: str = "isaaclab"
-    """Simulation backend: ``isaac``, ``mujoco``, ``mjlab``, or ``motrix``."""
+    """Simulation backend: ``isaac``, ``mjlab``, or ``motrix``."""
     device: str = "cuda"
     """Torch device for policy inference (e.g. ``cuda``, ``cpu``)."""
     seed: int = 42
@@ -254,10 +254,15 @@ def run(cfg: RolloutConfig) -> dict[str, str]:
             td, carry = env.step_and_maybe_reset(carry)
             episode_stats.add(td)
 
+            termination = td.get(("next", "stats", "termination"), None)
             private_keys = [key for key in td.keys(True, True) if is_private_key(key)]
             td = td.exclude(*private_keys, inplace=True)
             td = td.exclude(*exclude_keys, inplace=True)
             td["command_state"] = env.command_manager.state
+            # Kept beside the excluded ``next/stats`` tree so a crash can be
+            # lined up with the critic value after the run.
+            if termination is not None:
+                td["termination"] = termination
             # note that we have td["command_state"] but no td["next", "command_state"]
             # td["command_state"] is what produced td["command"]
             writer.add(td)

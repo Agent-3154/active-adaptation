@@ -17,6 +17,8 @@ _ISAAC_ENTITY_PRIM = {"robot": "Robot"}
 # and generator mesh made ``secondary: [terrain, object]`` allocate M=3 and
 # PhysX warn that ``.../mesh`` matched 0 entries on plane terrains.
 # Override with ``secondary_pattern: /World/ground/terrain/mesh`` for generators.
+# Mesh-PLY terrains spawn that same mesh prim; IsaacBackendEnv fills it in when
+# the task terrain is ``mesh`` and the sensor did not set ``secondary_pattern``.
 _ISAAC_TERRAIN_FILTER_PRIM_PLANE = (
     "/World/ground/terrain/GroundPlane/CollisionPlane"
 )

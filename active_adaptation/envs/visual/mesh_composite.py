@@ -1,7 +1,7 @@
 """GS ↔ mesh depth composition (mesh RGB-D comes from ``simple_raycaster``).
 
 AA owns scene attachment + overlaying mesh RGB-D onto Gaussian images.
-Raster / raycast backends live in ``simple_raycaster.mesh_rgbd``.
+The raycast backend lives in ``simple_raycaster.mesh_rgbd``.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class MeshCompositor:
 
     def __init__(
         self,
-        renderer: str | MeshRGBDRenderer = "diffrast",
+        renderer: str | MeshRGBDRenderer = "raycast",
         *,
         device: torch.device,
         face_keep: float = 0.2,

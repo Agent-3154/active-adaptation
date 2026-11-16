@@ -82,7 +82,7 @@ class joint_acc_l2(Reward):
 
 
 class energy_l1(Reward):
-    supported_backends = ("isaaclab", "mujoco", "mjlab")
+    supported_backends = ("isaaclab", "mjlab")
 
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
@@ -97,7 +97,7 @@ class energy_l1(Reward):
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.joint_ids, self.joint_names = self.asset.find_joints(self.joint_names)
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-        if self.env.backend in ("isaaclab", "mujoco"):
+        if self.env.backend == "isaaclab":
             self.get_torques = lambda: self.asset.data.applied_torque[:, self.joint_ids]
         elif self.env.backend == "mjlab":
             self.get_torques = lambda: self.asset.data.actuator_force[:, self.joint_ids]
@@ -362,7 +362,7 @@ class joint_deviation_cum(Reward):
 
 
 class joint_torques_l2(Reward):
-    supported_backends = ("isaaclab", "mujoco", "mjlab")
+    supported_backends = ("isaaclab", "mjlab")
 
     def __init__(self, weight: float, joint_names: str = ".*", track_var: bool = False):
         super().__init__(weight, track_var=track_var)
@@ -377,7 +377,7 @@ class joint_torques_l2(Reward):
         self.asset: Articulation = self.env.scene.articulations["robot"]
         self.joint_ids = self.asset.find_joints(self.joint_names)[0]
         self.joint_ids = torch.tensor(self.joint_ids, device=self.device)
-        if self.env.backend in ("isaaclab", "mujoco"):
+        if self.env.backend == "isaaclab":
             self.get_torques = lambda: self.asset.data.applied_torque[:, self.joint_ids]
         elif self.env.backend == "mjlab":
             self.get_torques = lambda: self.asset.data.actuator_force[:, self.joint_ids]

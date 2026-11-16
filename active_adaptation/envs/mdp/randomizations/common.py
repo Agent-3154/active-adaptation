@@ -658,7 +658,7 @@ class perturb_root_vel(Randomization):
 
 
 class push_body(Randomization):
-    supported_backends = ("isaaclab", "mujoco")
+    supported_backends = ("isaaclab",)
     def __init__(
         self,
         body_names,

@@ -75,8 +75,13 @@ class IsaacBackendEnv(_EnvBase):
             setattr(scene_cfg, name, sensor_cfg)
 
         scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
-        terrain_name = self.cfg.get("terrain", "plane")
-        scene_cfg.terrain = registry.get("terrain", terrain_name)
+        from active_adaptation.envs.terrain.mesh import (
+            apply_mesh_terrain_contact_spec,
+            resolve_terrain_cfg,
+        )
+
+        scene_cfg.terrain = resolve_terrain_cfg(self.cfg.get("terrain", "plane"), registry)
+        mesh_terrain = getattr(scene_cfg.terrain, "terrain_type", None) == "mesh"
 
         from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 
@@ -103,6 +108,8 @@ class IsaacBackendEnv(_EnvBase):
         extra_sensors: dict[str, Any] = {}
         for sensor_name, sensor_spec in self.cfg.get("sensors", {}).items():
             sensor_spec = dict(sensor_spec)
+            # if mesh_terrain:
+            #     apply_mesh_terrain_contact_spec(sensor_spec)
             fn = registry.get("sensor", sensor_spec.pop("_target_"))
             result = fn(backend="isaaclab", name=sensor_name, **sensor_spec)
             if callable(getattr(result, "initialize", None)):

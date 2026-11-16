@@ -11,10 +11,6 @@ envs/backends/
 │   ├── env.py          # MjlabBackendEnv
 │   ├── adapter.py      # MjlabSimAdapter, MjlabSceneAdapter
 │   └── viewer.py       # MjLabViewer (Viser-based)
-├── mujoco/
-│   ├── env.py          # MujocoBackendEnv
-│   ├── adapter.py      # MujocoSimAdapter, MujocoSceneAdapter
-│   └── mujoco.py       # custom MJScene, MJArticulation, MJSim
 └── motrix/
     ├── env.py          # MotrixBackendEnv (planned)
     ├── adapter.py      # MotrixSimAdapter, MotrixSceneAdapter (stub)
@@ -28,7 +24,7 @@ Key files *outside* `backends/`:
 | `envs/env_base.py` | Shared TorchRL env + MDP loop (`_EnvBase`) |
 | `envs/adapters.py` | `SimAdapter` / `SceneAdapter` Protocol definitions |
 | `envs/utils/api.py` | Backend-agnostic body/joint/sensor lookup helpers |
-| `assets/asset_cfg.py` | Backend-specific asset conversion (`isaaclab()`, `mujoco()`, `mjlab()`) |
+| `assets/asset_cfg.py` | Backend-specific asset conversion (`isaaclab()`, `mjlab()`) |
 | `active_adaptation/__init__.py` | `set_backend` / `get_backend`, `init()` |
 | `helpers.py` | `make_env_policy()` env factory |
 | `cfg/train.yaml` | `backend: isaac` default |
@@ -44,7 +40,6 @@ torchrl.envs.EnvBase
     └── RegistryMixin
             └── _EnvBase                    # shared MDP + step loop
                     ├── IsaacBackendEnv     # Isaac Lab / Isaac Sim
-                    ├── MujocoBackendEnv    # single-env raw MuJoCo
                     ├── MjlabBackendEnv     # parallel MuJoCo via mjlab
                     └── MotrixBackendEnv    # parallel MuJoCo via motrixsim (planned)
 ```
@@ -100,13 +95,13 @@ Episode-local frame for shared worlds (e.g. 3DGS): ``env.episode_origin``, assig
 `active_adaptation/__init__.py` exposes:
 
 ```python
-aa.set_backend("isaac" | "mujoco" | "mjlab" | "motrix")   # call once per process
+aa.set_backend("isaac" | "mjlab" | "motrix")   # call once per process
 aa.get_backend()                                             # read everywhere
 ```
 
 `aa.init(cfg)` (called from training scripts):
 1. Sets backend from Hydra `cfg.backend` (default `"isaac"`)
-2. Forces `cfg.device = "cuda"` for mjlab, `"cpu"` for mujoco *(motrix TBD — likely CPU/numpy batch)*
+2. Forces `cfg.device = "cuda"` for mjlab *(motrix TBD — likely CPU/numpy batch)*
 3. Launches `AppLauncher` (Isaac only) before any Isaac imports
 
 ### 2. Env class selection
@@ -116,10 +111,6 @@ aa.get_backend()                                             # read everywhere
 ```python
 if backend == "isaac":
     env_cls = _EnvBase.registry[cfg.task.get("env_class", "IsaacBackendEnv")]
-elif backend == "mujoco":
-    env_cls = _EnvBase.registry[cfg.task.get("env_class", "MujocoBackendEnv")]
-    cfg.task.num_envs = 1
-    cfg.task.reward = {}   # rewards disabled in mujoco (debug/validation mode)
 elif backend == "mjlab":
     env_cls = _EnvBase.registry[cfg.task.get("env_class", "MjlabBackendEnv")]
 elif backend == "motrix":
@@ -135,7 +126,6 @@ elif backend == "motrix":
 | Backend | Method |
 |---------|--------|
 | Isaac | `AssetCfg.isaaclab()` |
-| MuJoCo | `AssetCfg.mujoco()` → `MJArticulationCfg` |
 | mjlab | `AssetCfg.mjlab()` |
 | motrix | `AssetCfg.motrix()` *(planned)* |
 
@@ -161,12 +151,6 @@ supported_backends = ("isaac", "mjlab")  # only instantiated on these backends
 - **`setup_scene()`**: builds scene from asset registry + terrain + optional objects; wires dome light + optional Replicator RGB annotator
 - **Parallelism**: `cfg.num_envs` via Isaac Lab scene replication
 - **Extras**: `VisualizationMarkers`, `debug_draw`, terrain spawn origins, USD ground mesh
-
-### MuJoCo (`mujoco/`)
-
-- **Native stack**: custom `MJSim` / `MJScene` / `MJArticulation` in `mujoco.py` (Isaac-like API)
-- **Single env only** (`num_envs = 1`); uses passive `mujoco.viewer`
-- **Purpose**: debug/validation; rewards disabled in `make_env_policy`
 
 ### mjlab (`mjlab/`)
 
@@ -538,6 +522,6 @@ for _ in range(100):
 
 - **Not runtime-hot-swappable**: backend is set once per process at `aa.init()` time; asset imports depend on it
 - **Protocol-based (not ABC)**: adapters use structural typing, so native objects can be wrapped without subclassing
-- **Feature parity is intentionally incomplete**: mujoco is debug-only; many MDP terms are Isaac/mjlab only; motrix will start with a minimal subset
+- **Feature parity is intentionally incomplete**: many MDP terms are Isaac or mjlab only; motrix starts with a minimal subset
 - **Registry pattern throughout**: env classes, MDP components, assets, and terrains all use `RegistryMixin` for lazy, backend-filtered registration
 - **MotrixSim batch spacing**: physics instances share origin unless root poses are written explicitly — unlike Isaac/mjlab `env_spacing`

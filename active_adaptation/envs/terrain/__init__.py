@@ -9,14 +9,7 @@ import active_adaptation
 current_dir = Path(__file__).parent
 terrain_files = glob.glob(os.path.join(current_dir, "*.py"))
 
-# Import TERRAINS from each file
-TERRAINS_MUJOCO = {}
-
 if active_adaptation.get_backend() == "isaaclab":
     from . import regular
     from . wrapper import BetterTerrainGenerator, BetterTerrainImporter
-elif active_adaptation.get_backend() == "mujoco":
-    from active_adaptation.envs.backends.mujoco.mujoco import MjTerrainCfg
-    path = Path(active_adaptation.__path__[0]) / "assets_mjcf" / "plane.xml"
-    TERRAINS_MUJOCO["plane"] = MjTerrainCfg(mjcf_path=str(path))
 

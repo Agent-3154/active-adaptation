@@ -39,6 +39,7 @@ def build_as2_mjcf(vendor_dir: Path):
         RemoveActuators,
         RemoveSceneSettings,
         RemoveSensors,
+        ReplaceCylinderWithCapsule,
     )
 
     return Compose([
@@ -51,6 +52,9 @@ def build_as2_mjcf(vendor_dir: Path):
             GeomsToBody([collision, visual], f"{prefix}_foot", mass=0.05)
             for prefix, collision, visual in _COOK_FOOT_GEOMS
         ),
+        # PhysX cylinder-vs-mesh contacts omit the triangle index and spam
+        # getMaterialFromInternalFaceIndex. Capsules keep the same size and axis.
+        ReplaceCylinderWithCapsule(),
     ]).transform(MujocoAsset.from_file(vendor_dir / AS2_MJCF))
 
 # Vendor model spawns the base at z=0.5 with the feet near contact.

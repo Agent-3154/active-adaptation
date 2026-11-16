@@ -150,9 +150,9 @@ def set_backend(backend: str):
         )
     if str(backend).lower() == "isaac": # alias for backward compatibility
         backend = "isaaclab"
-    if not backend in ("isaaclab", "mujoco", "mjlab", "motrix"):
+    if not backend in ("isaaclab", "mjlab", "motrix"):
         raise ValueError(
-            f"backend must be either 'isaaclab' or 'mujoco' or 'mjlab' or 'motrix', got {backend}"
+            f"backend must be either 'isaaclab' or 'mjlab' or 'motrix', got {backend}"
         )
     # Record the call site
     stack = inspect.stack()
@@ -228,8 +228,6 @@ def init(cfg: DictConfig, auto_rank: bool):
     set_backend(cfg.backend)
     if _BACKEND == "mjlab":
         cfg.device = "cuda"  # force to use GPU for mjlab
-    elif _BACKEND == "mujoco":
-        cfg.device = "cpu"  # force to use CPU for mujoco
     elif _BACKEND == "motrix":
         pass # motrixsim env lives on CPU while policy training can be on GPU
 
