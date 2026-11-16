@@ -18,6 +18,8 @@ __all__ = [
     "VecNorm",
     "VecNormRMS",
     "IndependentNormal",
+    "IndependentSplitNormal",
+    "SplitNormal",
     "SymmetryWrapper",
     "GRUCore",
     "FiLM",

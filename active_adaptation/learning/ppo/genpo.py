@@ -229,7 +229,7 @@ class GenPOConfig:
     ppo_epochs: int = 5
     num_minibatches: int = 4
     lr: float = 5e-4
-    desired_kl: Union[float, None] = 0.01
+    desired_kl: Union[float, None] = 0.04
     # Scalar ε → [1-ε, 1+ε]. Length-2 list/tuple [eps_neg, eps_pos] →
     # [1-eps_neg, 1+eps_pos]. Typed as Any: Hydra cannot express that union.
     clip_param: Any = (0.2, 0.2)
@@ -251,7 +251,7 @@ class GenPOConfig:
     compile: bool = False
     use_ddp: bool = True
     debug: bool = False
-    symaug: bool = False
+    symaug: bool = True
 
     in_keys: Tuple[str, ...] = (CMD_KEY, OBS_KEY)
 
