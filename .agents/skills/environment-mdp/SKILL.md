@@ -449,6 +449,25 @@ def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tens
 
 `gs_camera` with `origin: env` renders at `mount_pos_w - env.episode_origin` so all envs share one PLY around the episode frame.
 
+## Mesh terrain metadata
+
+Isaac mesh terrain (`envs/terrain/mesh.py`) loads a PLY. A large spawn list and other asset data live in a JSON sidecar, not in the task YAML.
+
+`room.ply` is paired with `room.json` in the same directory. `meta_path` selects a different file. `meta: false` skips the sibling. A missing sibling is empty metadata.
+
+The JSON may set `origins` (xyz in the PLY frame) and `center`. Any other key is stored on `MeshTerrain.metadata` and does not change spawning. `tiles` and `spacing` are task settings and are not read from the file. The origin list is read from disk inside `MeshTerrain`, not copied into the Hydra config.
+
+A YAML value replaces the JSON value of the same key. The two origin lists are not concatenated. Each kept origin is copied onto every tile. With neither list, each tile has one origin: the copy's translation.
+
+| Key | JSON | YAML | Result |
+|-----|------|------|--------|
+| `center` | omitted | omitted | `false` |
+| `center` | `true` | omitted | center the PLY in XY |
+| `center` | `true` | `false` | leave the PLY as authored |
+| `origins` | a long list | omitted | that list, one copy per tile |
+| `origins` | a long list | a short list | the short list only |
+| `origins` | omitted | omitted | one origin per tile, the copy's translation |
+
 ---
 
 ## Reset API

@@ -15,6 +15,17 @@ frame move with it. Environment ``i`` is assigned tile
 ``i % (rows*cols)``; that translation is ``env_origins`` and therefore
 ``episode_origin`` for a shared 3DGS frame.
 
+Sidecar metadata. ``room.ply`` may have ``room.json`` beside it. ``meta_path``
+selects another file. ``meta: false`` skips the sibling. A missing sibling is
+empty metadata. The JSON is the asset: ``origins`` (xyz in the PLY frame) and
+``center``. Any other key is kept on ``MeshTerrain.metadata`` and does not
+change spawning. Tiles and spacing stay task settings. The list is read from
+disk inside ``MeshTerrain``, not copied into the Hydra config.
+
+YAML replaces the JSON value of the same key. The two origin lists are not
+concatenated. With neither list, each tile has one origin, the copy's
+translation. Each kept origin is copied onto every tile.
+
 ``MeshTerrainCfg`` subclasses Isaac's ``TerrainImporterCfg`` so
 ``InteractiveScene`` stores it as ``scene.terrain`` and reads ``env_origins``
 from it. Plane and generator terrains stay on Isaac's importer.
@@ -22,6 +33,7 @@ from it. Plane and generator terrains stay on Isaac's importer.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -152,6 +164,49 @@ def _as_pair(value: Any, name: str) -> tuple[float, float] | tuple[int, int]:
     return pair[0], pair[1]
 
 
+def load_terrain_metadata(
+    ply_path: str | Path,
+    *,
+    meta: bool = True,
+    meta_path: str | Path | None = None,
+) -> dict:
+    """Load the JSON sidecar for a terrain PLY.
+
+    ``meta: false`` skips the file. ``meta_path`` selects a file other than
+    the sibling ``<ply_stem>.json``. A missing sibling is empty metadata. An
+    explicit path that does not exist is an error. The returned dict is the
+    raw object; only ``origins`` and ``center`` affect spawning.
+    """
+    if not meta:
+        return {}
+    path = Path(meta_path) if meta_path else Path(ply_path).with_suffix(".json")
+    if meta_path is None and not path.is_file():
+        return {}
+    if not path.is_file():
+        raise FileNotFoundError(f"Terrain metadata not found: {path}")
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"Terrain metadata must be a JSON object: {path}")
+    return data
+
+
+def metadata_center(metadata: dict) -> bool:
+    """``center`` from a sidecar. Omitted means false."""
+    if "center" not in metadata:
+        return False
+    value = metadata["center"]
+    if not isinstance(value, bool):
+        raise ValueError(f"metadata center must be a bool, got {value!r}")
+    return value
+
+
+def metadata_spawn_points(metadata: dict) -> np.ndarray | None:
+    """``origins`` from a sidecar, in the PLY frame. Omitted means none."""
+    if "origins" not in metadata:
+        return None
+    return np.asarray(_as_origins(metadata["origins"]), dtype=np.float64)
+
+
 def _as_origins(value: Any) -> tuple[tuple[float, float, float], ...] | None:
     """Parse a user spawn list. ``None`` means one origin per tile translation."""
     if value is None:
@@ -200,8 +255,18 @@ class MeshTerrain:
         self._terrain_flat_patches: dict = {}
 
         source = load_terrain_ply(cfg.ply_path)
-        spawn_points = None if not cfg.origins else np.asarray(cfg.origins, dtype=np.float64)
-        if cfg.center:
+        self.metadata = load_terrain_metadata(
+            cfg.ply_path,
+            meta=cfg.meta,
+            meta_path=cfg.meta_path or None,
+        )
+        # A YAML value replaces the sidecar. An omitted YAML key leaves the file's value.
+        if cfg.origins:
+            spawn_points = np.asarray(cfg.origins, dtype=np.float64)
+        else:
+            spawn_points = metadata_spawn_points(self.metadata)
+        center = cfg.center if cfg.center is not None else metadata_center(self.metadata)
+        if center:
             source, shift = center_terrain_mesh(source)
             if spawn_points is not None:
                 spawn_points = spawn_points + shift
@@ -217,7 +282,7 @@ class MeshTerrain:
             f"{len(source.faces)} faces, tiles={cfg.tiles[0]}x{cfg.tiles[1]}, "
             f"aabb_xy=({extent[0]:.3f}, {extent[1]:.3f}), "
             f"spacing=({cfg.spacing[0]:.3f}, {cfg.spacing[1]:.3f}), "
-            f"center={cfg.center}, "
+            f"center={center}, "
             f"stride=({stride[0]:.3f}, {stride[1]:.3f}), "
             f"spawned {len(combined.faces)} faces at {MESH_TERRAIN_COLLISION_PRIM}, "
             f"terrain_origins {tuple(origins.shape)}"
@@ -269,6 +334,10 @@ def _mesh_terrain_cfg_cls():
               tiles: [2, 2]     # rows along x, cols along y
               spacing: [1.0, 1.0]  # extra gap beyond the mesh AABB; a scalar applies to both
               center: false        # shift the PLY so its XY AABB center is at the origin
+              # room.json beside the PLY supplies origins and center.
+              # A key set here replaces the JSON value. Origin lists are not merged.
+              # meta_path: /path/to/other.json
+              # meta: false
               # Optional spawn points in the PLY frame. Each point is
               # copied onto every tile, so terrain_origins is
               # (rows, cols, n_origins, 3). Omit to spawn at the tile translation.
@@ -282,7 +351,10 @@ def _mesh_terrain_cfg_cls():
         tiles: tuple[int, int] = (1, 1)
         spacing: tuple[float, float] = (1.0, 1.0)
         origins: tuple = ()
-        center: bool = False
+        # None means the YAML omitted center, so the sidecar value applies.
+        center: bool | None = None
+        meta: bool = True
+        meta_path: str = ""
         physics_material: sim_utils.RigidBodyMaterialCfg = sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -338,7 +410,11 @@ def resolve_terrain_cfg(spec: Any, registry) -> Any:
     tiles = _as_pair(cfg.pop("tiles", (1, 1)), "tiles")
     spacing = _as_pair(cfg.pop("spacing", (0.0, 0.0)), "spacing")
     origins = _as_origins(cfg.pop("origins", None))
-    center = bool(cfg.pop("center", False))
+    center = bool(cfg.pop("center")) if "center" in cfg else None
+    meta = cfg.pop("meta", True)
+    if not isinstance(meta, bool):
+        raise ValueError(f"meta must be a bool, got {meta!r}")
+    meta_path = cfg.pop("meta_path", None)
     if cfg:
         unknown = ", ".join(sorted(cfg))
         raise ValueError(f"Unknown mesh terrain keys: {unknown}")
@@ -348,4 +424,6 @@ def resolve_terrain_cfg(spec: Any, registry) -> Any:
         spacing=(float(spacing[0]), float(spacing[1])),
         origins=() if origins is None else origins,
         center=center,
+        meta=meta,
+        meta_path="" if meta_path is None else str(meta_path),
     )
